@@ -1,0 +1,102 @@
+from django.db import migrations, models
+
+
+class Migration(migrations.Migration):
+
+    initial = True
+
+    dependencies = []
+
+    operations = [
+        migrations.CreateModel(
+            name="OrderPayment",
+            fields=[
+                ("sub_order_no", models.CharField(max_length=100, primary_key=True, serialize=False)),
+                ("order_date", models.DateTimeField(blank=True, null=True)),
+                ("dispatch_date", models.DateField(blank=True, null=True)),
+                ("product_name", models.TextField(blank=True, null=True)),
+                ("supplier_sku", models.CharField(blank=True, max_length=200, null=True)),
+                ("catalog_id", models.BigIntegerField(blank=True, null=True)),
+                ("order_source", models.CharField(blank=True, max_length=200, null=True)),
+                ("live_order_status", models.CharField(blank=True, max_length=100, null=True)),
+                ("product_gst_percent", models.DecimalField(blank=True, decimal_places=2, max_digits=6, null=True)),
+                ("listing_price_incl_taxes", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("quantity", models.IntegerField(blank=True, null=True)),
+                ("transaction_id", models.CharField(blank=True, max_length=100, null=True)),
+                ("payment_date", models.DateField(blank=True, null=True)),
+                ("final_settlement_amount", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("price_type", models.CharField(blank=True, max_length=100, null=True)),
+                ("total_sale_amount", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("total_sale_return_amount", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("fixed_fee_revenue", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("warehousing_fee", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("return_premium", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("return_premium_of_return", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("meesho_commission_percentage", models.DecimalField(blank=True, decimal_places=4, max_digits=6, null=True)),
+                ("meesho_commission_incl_gst", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("meesho_gold_platform_fee", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("meesho_mall_platform_fee", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("fixed_fee_deduction", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("warehousing_fee_deduction", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("return_shipping_charge", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("gst_compensation_prp_shipping", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("shipping_charge_incl_gst", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("other_support_service_charges", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("waivers", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("net_other_support_service_charges", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("gst_on_net_other_support_service_charges", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("tcs", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("tds_rate_percent", models.DecimalField(blank=True, decimal_places=4, max_digits=6, null=True)),
+                ("tds", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("compensation", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("claims", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("recovery", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("compensation_reason", models.TextField(blank=True, null=True)),
+                ("claims_reason", models.TextField(blank=True, null=True)),
+                ("recovery_reason", models.TextField(blank=True, null=True)),
+                ("uploaded_at", models.DateTimeField(auto_now_add=True)),
+            ],
+            options={"db_table": "order_payments", "ordering": ["-order_date"]},
+        ),
+        migrations.CreateModel(
+            name="AdsCost",
+            fields=[
+                ("id", models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name="ID")),
+                ("deduction_duration", models.DateField(blank=True, null=True)),
+                ("deduction_date", models.DateField(blank=True, null=True)),
+                ("campaign_id", models.CharField(blank=True, max_length=100, null=True)),
+                ("ad_cost", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("credits_waivers_discounts", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("ad_cost_incl_credits_waivers", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("gst", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("total_ads_cost", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("uploaded_at", models.DateTimeField(auto_now_add=True)),
+            ],
+            options={"db_table": "ads_cost", "ordering": ["-deduction_date"]},
+        ),
+        migrations.CreateModel(
+            name="ReferralPayment",
+            fields=[
+                ("reward_id", models.CharField(max_length=200, primary_key=True, serialize=False)),
+                ("payment_date", models.DateField(blank=True, null=True)),
+                ("store_name", models.CharField(blank=True, max_length=200, null=True)),
+                ("reason", models.TextField(blank=True, null=True)),
+                ("net_referral_amount", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("taxes_gst_tds", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("uploaded_at", models.DateTimeField(auto_now_add=True)),
+            ],
+            options={"db_table": "referral_payments", "ordering": ["-payment_date"]},
+        ),
+        migrations.CreateModel(
+            name="CompensationRecovery",
+            fields=[
+                ("id", models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name="ID")),
+                ("date", models.DateField(blank=True, null=True)),
+                ("program_name", models.CharField(blank=True, max_length=200, null=True)),
+                ("reason", models.TextField(blank=True, null=True)),
+                ("amount_incl_gst", models.DecimalField(blank=True, decimal_places=2, max_digits=12, null=True)),
+                ("uploaded_at", models.DateTimeField(auto_now_add=True)),
+            ],
+            options={"db_table": "compensation_recovery", "ordering": ["-date"]},
+        ),
+    ]

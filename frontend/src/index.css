@@ -1,0 +1,9 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=DM+Mono:wght@400;500&display=swap');
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #f5f6fa; color: #1a1d23; -webkit-font-smoothing: antialiased; }
+button { font-family: inherit; transition: all 0.15s; }
+button:hover { filter: brightness(0.93); }
+input, select { font-family: inherit; }
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: #f0f1f5; }
+::-webkit-scrollbar-thumb { background: #d0d3de; border-radius: 3px; }
