@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice
+from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, ParentItemPrice, Order
 
 
 class OrderPaymentSerializer(serializers.ModelSerializer):
@@ -29,4 +29,20 @@ class FinalPriceSerializer(serializers.ModelSerializer):
     class Meta:
         model = FinalPrice
         fields = "__all__"
-           
+        
+class ParentItemPriceSerializer(serializers.ModelSerializer):
+    sku_ids = serializers.SlugRelatedField(
+        source="sku_prices",
+        many=True,
+        read_only=True,
+        slug_field="sku_id"
+    )
+    class Meta:
+        model = ParentItemPrice
+        fields = "__all__"
+
+
+class OrderSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Order
+        fields = "__all__"

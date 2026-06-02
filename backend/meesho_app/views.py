@@ -8,11 +8,13 @@ from rest_framework.decorators import api_view, parser_classes
 from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
 
-from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice
+from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice
 from .serializers import (
     OrderPaymentSerializer, AdsCostSerializer,
     ReferralPaymentSerializer, CompensationRecoverySerializer,
     FinalPriceSerializer,
+    ParentItemPriceSerializer,
+    OrderSerializer,
 )
 
 
@@ -394,9 +396,20 @@ def order_payments_list(request):
     page = int(request.GET.get("page", 1))
     page_size = int(request.GET.get("page_size", 50))
     status_filter = request.GET.get("status", "")
+    sku_filter = request.GET.get("sku", "")
+    date_from = request.GET.get("date_from", "")
+    date_to = request.GET.get("date_to", "")
+
     qs = OrderPayment.objects.all()
     if status_filter:
         qs = qs.filter(live_order_status__iexact=status_filter)
+    if sku_filter:
+        qs = qs.filter(supplier_sku__icontains=sku_filter)
+    if date_from:
+        qs = qs.filter(order_date__date__gte=date_from)
+    if date_to:
+        qs = qs.filter(order_date__date__lte=date_to)
+
     total = qs.count()
     start = (page - 1) * page_size
     items = qs[start: start + page_size]
@@ -477,6 +490,24 @@ def final_price_list(request):
     serializer.save()
     return Response(serializer.data, status=status.HTTP_201_CREATED)
 
+@api_view(["GET", "POST"])
+def parent_price_list(request):
+    if request.method == "GET":
+        search = request.GET.get("search", "")
+        qs = ParentItemPrice.objects.all()
+        if search:
+            qs = qs.filter(sku_id__icontains=search)
+        items = qs
+        return Response({
+            "results": ParentItemPriceSerializer(items, many=True).data,
+        })
+
+    serializer = ParentItemPriceSerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+    serializer.save()
+    return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
 
 @api_view(["GET", "PUT", "PATCH", "DELETE"])
 def final_price_detail(request, sku_id):
@@ -498,7 +529,68 @@ def final_price_detail(request, sku_id):
     serializer.save()
     return Response(serializer.data)
 
+@api_view(["GET", "PUT", "PATCH", "DELETE"])
+def parent_price_detail(request, item_id):
+    print("is there")
+    try:
+        obj = ParentItemPrice.objects.get(pk=item_id)
+    except ParentItemPrice.DoesNotExist:
+        return Response({"error": "Not found."}, status=status.HTTP_404_NOT_FOUND)
 
+    if request.method == "GET":
+        return Response(ParentItemPriceSerializer(obj).data)
+
+    if request.method == "DELETE":
+        obj.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    partial = request.method == "PATCH"
+    serializer = ParentItemPriceSerializer(obj, data=request.data, partial=partial)
+    serializer.is_valid(raise_exception=True)
+    serializer.save()
+    return Response(serializer.data)
+
+@api_view(["POST"])
+def parent_linking_to_sku(request):
+    try:
+        parent = ParentItemPrice.objects.get(pk=request.data.get("parent_id"))
+    except:
+        return Response(
+        {
+            "message": f"Not Valid Parent",
+            "parent_id": request.data.get("parent_id")
+        },
+        status=status.HTTP_400_BAD_REQUEST,
+    )
+        
+
+    sku_ids = request.data.get("sku_ids", "")
+
+    sku_ids = [
+        sku.strip()
+        for sku in sku_ids.split(",")
+        if sku.strip()
+    ]
+
+    updated_count = FinalPrice.objects.filter(
+        sku_id__in=sku_ids
+    ).update(
+        parent=parent,
+        item_price=parent.item_price,
+        tax_percent=parent.tax_percent,
+        packaging_cost=parent.packaging_cost,
+        final_price=parent.final_price,
+    )
+
+    return Response(
+        {
+            "message": f"{updated_count} SKU(s) linked successfully",
+            "parent_id": parent.item_id,
+            "sku_ids": sku_ids,
+        },
+        status=status.HTTP_200_OK,
+    )
+    
 @api_view(["POST"])
 @parser_classes([MultiPartParser])
 def upload_final_price(request):
@@ -533,9 +625,12 @@ def upload_final_price(request):
                 skipped += 1
                 continue
             defaults = {}
-            for col in ("item_price", "tax_percent", "packaging_cost", "final_price"):
+            for col in ("item_price", "packaging_cost", "final_price", "tax_percent"):
                 if col in df.columns:
-                    defaults[col] = safe_decimal(row.get(col))
+                    if col == "tax_percent" : 
+                        print(row.get(col))
+                        defaults[col] = safe_int(row.get(col))
+                    defaults[col] = safe_decimal(row.get(col))  
             _, was_created = FinalPrice.objects.update_or_create(
                 sku_id=pk, defaults=defaults
             )
@@ -548,3 +643,307 @@ def upload_final_price(request):
         {"success": True, "created": created, "updated": updated, "skipped": skipped},
         status=status.HTTP_201_CREATED,
     )
+
+
+@api_view(["POST"])
+@parser_classes([MultiPartParser])
+def upload_orders_csv(request):
+    """
+    Upload Orders CSV file and create/update Order records.
+    """
+
+    file = request.FILES.get("file")
+
+    if not file:
+        return Response(
+            {"error": "No file provided"},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    try:
+        df = pd.read_csv(file)
+    except Exception as e:
+        return Response(
+            {"error": f"Unable to read CSV: {str(e)}"},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    # Clean column names
+    df.columns = [col.strip() for col in df.columns]
+
+    created = 0
+    updated = 0
+
+    with transaction.atomic():
+        for _, row in df.iterrows():
+
+            sub_order_no = str(row.get("Sub Order No", "")).strip()
+
+            if not sub_order_no:
+                continue
+
+            defaults = {
+                "reason_for_credit_entry": str(
+                    row.get("Reason for Credit Entry", "")
+                ).strip(),
+                "catalog_id": int(row.get("Catalog ID"))
+                if pd.notna(row.get("Catalog ID"))
+                else None,
+                "order_date": pd.to_datetime(
+                    row.get("Order Date")
+                ).date()
+                if pd.notna(row.get("Order Date"))
+                else None,
+                "order_source": str(
+                    row.get("Order source", "")
+                ).strip(),
+                "customer_state": str(
+                    row.get("Customer State", "")
+                ).strip(),
+                "product_name": str(
+                    row.get("Product Name", "")
+                ).strip(),
+                "sku": str(
+                    row.get("SKU", "")
+                ).strip(),
+                "size": str(
+                    row.get("Size", "")
+                ).strip(),
+                "quantity": int(row.get("Quantity", 0))
+                if pd.notna(row.get("Quantity"))
+                else 0,
+                "supplier_listed_price": row.get(
+                    "Supplier Listed Price (Incl. GST + Commission)",
+                    0
+                ),
+                "supplier_discounted_price": row.get(
+                    "Supplier Discounted Price (Incl GST and Commision)",
+                    0
+                ),
+                "packet_id": str(
+                    row.get("Packet Id", "")
+                ).strip(),
+            }
+
+            _, was_created = Order.objects.update_or_create(
+                sub_order_no=sub_order_no,
+                defaults=defaults,
+            )
+
+            if was_created:
+                created += 1
+            else:
+                updated += 1
+
+    return Response(
+        {
+            "success": True,
+            "created": created,
+            "updated": updated,
+            "total_rows": len(df),
+        },
+        status=status.HTTP_201_CREATED,
+    )
+
+
+# ── Full Orders (Order model) ─────────────────────────────────────────────────
+
+@api_view(["GET"])
+def full_orders_list(request):
+    """Paginated list of Order rows with date/status/sku filters."""
+    page = int(request.GET.get("page", 1))
+    page_size = int(request.GET.get("page_size", 50))
+    status_filter = request.GET.get("status", "")
+    sku_filter = request.GET.get("sku", "")
+    date_from = request.GET.get("date_from", "")
+    date_to = request.GET.get("date_to", "")
+
+    qs = Order.objects.all()
+    if status_filter:
+        qs = qs.filter(reason_for_credit_entry__iexact=status_filter)
+    if sku_filter:
+        qs = qs.filter(sku__icontains=sku_filter)
+    if date_from:
+        qs = qs.filter(order_date__gte=date_from)
+    if date_to:
+        qs = qs.filter(order_date__lte=date_to)
+
+    total = qs.count()
+    start = (page - 1) * page_size
+    items = qs[start: start + page_size]
+    return Response({
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "results": OrderSerializer(items, many=True).data,
+    })
+
+
+@api_view(["GET"])
+def full_orders_analytics(request):
+    """Aggregate stats for Order model — drives the Orders tab summary cards."""
+    date_from = request.GET.get("date_from", "")
+    date_to = request.GET.get("date_to", "")
+
+    qs = Order.objects.all()
+    if date_from:
+        qs = qs.filter(order_date__gte=date_from)
+    if date_to:
+        qs = qs.filter(order_date__lte=date_to)
+
+    by_status = list(
+        qs.values("reason_for_credit_entry")
+        .annotate(
+            count=Count("sub_order_no"),
+            total_listed=Sum("supplier_listed_price"),
+            total_discounted=Sum("supplier_discounted_price"),
+        )
+    )
+
+    by_state = list(
+        qs.values("customer_state")
+        .annotate(count=Count("sub_order_no"))
+        .order_by("-count")[:10]
+    )
+
+    by_sku = list(
+        qs.values("sku")
+        .annotate(count=Count("sub_order_no"), total_qty=Sum("quantity"))
+        .order_by("-count")[:20]
+    )
+
+    daily = list(
+        qs.values("order_date")
+        .annotate(count=Count("sub_order_no"))
+        .order_by("order_date")
+    )
+
+    return Response({
+        "total": qs.count(),
+        "by_status": by_status,
+        "by_state": by_state,
+        "by_sku": by_sku,
+        "daily": daily,
+    })
+
+
+@api_view(["GET"])
+def dashboard_analytics(request):
+    """
+    Joins Order (full lifecycle) and OrderPayment (settled) by sub_order_no.
+    Strategy: filter Orders by order_date, then find payments for exactly
+    those orders — regardless of when the payment was received.
+    This correctly answers: "for orders placed in this period, what got settled?"
+    """
+    date_from = request.GET.get("date_from", "")
+    date_to   = request.GET.get("date_to", "")
+
+    # ── Step 1: filter Orders by placement date ───────────────────────────────
+    order_qs = Order.objects.all()
+    if date_from:
+        order_qs = order_qs.filter(order_date__gte=date_from)
+    if date_to:
+        order_qs = order_qs.filter(order_date__lte=date_to)
+
+    order_nos = set(order_qs.values_list("sub_order_no", flat=True))
+
+    # ── Step 2: find payments for ONLY those orders (join on sub_order_no) ────
+    # Do NOT apply a separate date filter on payments — we want to know which
+    # of the date-range orders have been settled, regardless of settlement date.
+    payment_qs = (
+        OrderPayment.objects.filter(sub_order_no__in=order_nos)
+        if order_nos
+        else OrderPayment.objects.none()
+    )
+
+    payment_nos = set(payment_qs.values_list("sub_order_no", flat=True))
+    matched     = order_nos & payment_nos
+    match_rate  = round(len(matched) / len(order_nos) * 100, 1) if order_nos else 0.0
+
+    # ── Order aggregates ──────────────────────────────────────────────────────
+    order_by_status = list(
+        order_qs.values("reason_for_credit_entry")
+        .annotate(
+            count=Count("sub_order_no"),
+            total_value=Sum("supplier_discounted_price"),
+        )
+    )
+
+    order_daily = list(
+        order_qs.values("order_date")
+        .annotate(count=Count("sub_order_no"))
+        .order_by("order_date")
+        .values("order_date", "count")
+    )
+
+    # ── Payment aggregates ────────────────────────────────────────────────────
+    payment_agg = payment_qs.aggregate(
+        total_settlement=Sum("final_settlement_amount"),
+        total_sale=Sum("total_sale_amount"),
+        total_commission=Sum("meesho_commission_incl_gst"),
+        total_tcs=Sum("tcs"),
+        total_tds=Sum("tds"),
+        settled_count=Count("sub_order_no"),
+    )
+
+    payment_by_status = list(
+        payment_qs.values("live_order_status")
+        .annotate(
+            count=Count("sub_order_no"),
+            total_settlement=Sum("final_settlement_amount"),
+            total_sale=Sum("total_sale_amount"),
+        )
+    )
+
+    payment_daily = list(
+        payment_qs.exclude(payment_date=None)
+        .values("payment_date")
+        .annotate(count=Count("sub_order_no"), total=Sum("final_settlement_amount"))
+        .order_by("payment_date")
+        .values("payment_date", "count", "total")
+    )
+
+    # ── Per-status settlement crosswalk ───────────────────────────────────────
+    status_settlement = []
+    for row in order_by_status:
+        status_val = row["reason_for_credit_entry"]
+        sub_nos = list(
+            order_qs.filter(reason_for_credit_entry=status_val)
+            .values_list("sub_order_no", flat=True)
+        )
+        agg = payment_qs.filter(sub_order_no__in=sub_nos).aggregate(
+            total=Sum("final_settlement_amount"),
+            count=Count("sub_order_no"),
+        )
+        status_settlement.append({
+            "status": status_val,
+            "order_count": row["count"],
+            "settled_count": agg["count"] or 0,
+            "settlement_amount": float(agg["total"] or 0),
+            "order_value": float(row["total_value"] or 0),
+        })
+
+    return Response({
+        "order_stats": {
+            "total": len(order_nos),
+            "by_status": order_by_status,
+            "daily": order_daily,
+        },
+        "payment_stats": {
+            "total": len(payment_nos),
+            "by_status": payment_by_status,
+            "daily": payment_daily,
+            "total_settlement": float(payment_agg["total_settlement"] or 0),
+            "total_sale": float(payment_agg["total_sale"] or 0),
+            "total_commission": float(payment_agg["total_commission"] or 0),
+            "total_tcs": float(payment_agg["total_tcs"] or 0),
+            "total_tds": float(payment_agg["total_tds"] or 0),
+            "settled_count": payment_agg["settled_count"] or 0,
+        },
+        "join_stats": {
+            "matched_count": len(matched),
+            "unmatched_count": len(order_nos) - len(matched),
+            "match_rate": match_rate,
+        },
+        "status_settlement": status_settlement,
+    })

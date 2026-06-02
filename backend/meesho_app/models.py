@@ -1,12 +1,29 @@
 from django.db import models
 
+class ParentItemPrice(models.Model):
+    item_id = models.CharField(max_length=200, unique=True, primary_key=True)
+    item_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    tax_percent = models.IntegerField(null=True, blank=True)
+    packaging_cost = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    final_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    class Meta:
+        db_table = "parent_item_price"
+        ordering = ["item_id"]
+    def __str__(self):
+        return self.item_id   
+
 class FinalPrice(models.Model):
     """Purchase price per SKU — used to compute profit vs settlement amount."""
 
     sku_id = models.CharField(max_length=200, unique=True, primary_key=True)
     item_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
-    tax_percent = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    tax_percent = models.IntegerField(null=True, blank=True)
     packaging_cost = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    parent = models.ForeignKey(ParentItemPrice, on_delete=models.SET_NULL, null=True,
+                                    blank=True,
+                                    related_name="sku_prices",
+                                    db_column="parent_id",
+                                )
     final_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
 
     class Meta:
@@ -145,3 +162,63 @@ class CompensationRecovery(models.Model):
 
     def __str__(self):
         return f"{self.program_name} on {self.date}"
+
+
+class Order(models.Model):
+    REASON_CHOICES = [
+        ("DELIVERED", "Delivered"),
+        ("RTO_COMPLETE", "RTO Complete"),
+        ("CANCELLED", "Cancelled"),
+    ]
+
+    reason_for_credit_entry = models.CharField(
+        max_length=20,
+        choices=REASON_CHOICES
+    )
+
+    sub_order_no = models.CharField(max_length=100, unique=True)
+    catalog_id = models.BigIntegerField()
+
+    order_date = models.DateField()
+
+    order_source = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True
+    )
+
+    customer_state = models.CharField(max_length=100)
+
+    product_name = models.TextField()
+
+    sku = models.CharField(max_length=255)
+
+    size = models.CharField(max_length=50)
+
+    quantity = models.PositiveIntegerField(default=1)
+
+    supplier_listed_price = models.DecimalField(
+        max_digits=10,
+        decimal_places=2
+    )
+
+    supplier_discounted_price = models.DecimalField(
+        max_digits=10,
+        decimal_places=2
+    )
+
+    packet_id = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "orders"
+        ordering = ["-order_date"]
+
+    def __str__(self):
+        return self.sub_order_no
