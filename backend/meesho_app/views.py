@@ -2,19 +2,21 @@ import pandas as pd
 import numpy as np
 from decimal import Decimal, InvalidOperation
 from django.db import transaction
-from django.db.models import Sum, Count
+from django.db.models import Sum, Count, Q as DQ
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.decorators import api_view, parser_classes
 from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
 
-from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice
+from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice, LabelOrder
 from .serializers import (
     OrderPaymentSerializer, AdsCostSerializer,
     ReferralPaymentSerializer, CompensationRecoverySerializer,
     FinalPriceSerializer,
     ParentItemPriceSerializer,
     OrderSerializer,
+    LabelOrderSerializer,
 )
 
 
@@ -949,7 +951,152 @@ def dashboard_analytics(request):
     })
 
 
-# ── Meesho Labels PDF parser ──────────────────────────────────────────────────
+# ── Meesho Labels PDF helpers ─────────────────────────────────────────────────
+
+def _parse_label_page(label_text, full_text, tables):
+    """
+    Extract all structured fields from a single label page.
+
+    label_text  – pdfplumber text from label region only (above TAX INVOICE line)
+    full_text   – full page text (needed for order date buried in invoice section)
+    tables      – pdfplumber tables from the full page
+    """
+    import re
+    from datetime import datetime as _dt
+
+    r = {
+        "customer_name": "", "customer_address": "",
+        "customer_city": "", "customer_state": "", "customer_pincode": "",
+        "courier_name": "", "awb_number": "", "payment_type": "", "pickup_date": "",
+        "sku": "", "size": "", "qty": 1, "color": "", "order_id": "", "order_date": None,
+    }
+
+    lines = [l.strip() for l in label_text.split("\n") if l.strip()]
+
+    # ── Customer address section ──────────────────────────────────────────────
+    ca_idx    = next((i for i, l in enumerate(lines) if "Customer Address" in l), -1)
+    undel_idx = next((i for i, l in enumerate(lines) if "If undelivered" in l), -1)
+    if ca_idx >= 0 and undel_idx > ca_idx + 1:
+        addr = lines[ca_idx + 1 : undel_idx]
+        if addr:
+            r["customer_name"] = addr[0]
+            r["customer_address"] = "\n".join(addr[1:])
+            last = addr[-1]
+            m = re.match(r"^(.*),\s*([^,]{3,}),\s*(\d{6})\s*$", last)
+            if m:
+                r["customer_city"]    = m.group(1).strip().rstrip(",")
+                r["customer_state"]   = m.group(2).strip()
+                r["customer_pincode"] = m.group(3)
+
+    # ── Payment type ──────────────────────────────────────────────────────────
+    r["payment_type"] = (
+        "Prepaid" if re.search(r"\bPrepaid\b", label_text, re.I)
+        else "COD" if re.search(r"\bCOD\b", label_text, re.I)
+        else ""
+    )
+
+    # ── Courier name ──────────────────────────────────────────────────────────
+    for c in ("Shadowfax", "Delhivery", "Xpress Bees", "Valmo", "BlueDart", "Ekart", "DTDC"):
+        if re.search(r"\b" + re.escape(c) + r"\b", label_text, re.I):
+            r["courier_name"] = c
+            break
+
+    # ── Pickup date (Valmo prints "Pickup DD/MM" on the label) ───────────────
+    pm = re.search(r"Pickup\s+(\d{2}/\d{2})", label_text)
+    if pm:
+        r["pickup_date"] = pm.group(1)
+
+    # ── AWB number (standalone string just above "Product Details") ───────────
+    # Each courier has a distinctive format:
+    #   Valmo:       VL + 13 digits
+    #   Shadowfax:   SF + digits + optional letters (e.g. SF3451319161FPL)
+    #   Delhivery:   16-digit number
+    #   Xpress Bees: 13-15 digit number
+    for pat in (
+        r"\b(VL\d{10,16})\b",
+        r"\b(SF[0-9A-Z]{8,18})\b",
+        r"\b(\d{16})\b",
+        r"\b(\d{13,15})\b",
+    ):
+        m = re.search(pat, label_text)
+        if m:
+            r["awb_number"] = m.group(1)
+            break
+
+    # ── Pass 1: Product Details via pdfplumber table extraction ──────────────
+    # The table header is: SKU | Size | Qty | Color | Order No.
+    for table in (tables or []):
+        for ri, row in enumerate(table or []):
+            hdr = [str(c or "").strip().upper() for c in row]
+            if "SKU" in hdr and "QTY" in hdr and ri + 1 < len(table):
+                dr   = table[ri + 1]
+                hdr_ = hdr   # capture for closure
+                dr_  = dr
+
+                def _g(name, _h=hdr_, _d=dr_):
+                    try:
+                        return str(_d[_h.index(name)] or "").strip()
+                    except (ValueError, IndexError):
+                        return ""
+
+                r["sku"]      = " ".join(_g("SKU").split())
+                r["size"]     = _g("SIZE")
+                r["color"]    = _g("COLOR")
+                r["order_id"] = _g("ORDER NO.")
+                try:
+                    r["qty"] = max(1, int(_g("QTY")))
+                except ValueError:
+                    pass
+                break
+        if r["sku"]:   # break on sku found, not order_id (order_id may be empty)
+            break
+
+    # ── Pass 2: text fallback when table extraction finds nothing ─────────────
+    # Handles PDFs where Product Details has no border lines (pdfplumber can't
+    # detect borderless text as a table). Looks for the header line then data.
+    if not r["sku"]:
+        # Pattern: after "SKU  Size  Qty  Color  Order No." header, parse data line
+        m = re.search(
+            r"SKU\s+Size\s+Qty\s+Color\s+Order\s*No\.\s*\n(.+?)(?:\n|$)",
+            label_text, re.IGNORECASE,
+        )
+        if m:
+            data_line = m.group(1).strip()
+            # Most Meesho SKUs have no spaces; size field is "Free Size" or "X cm"
+            size_m = re.search(r"\s+(Free\s+Size|\d+\s*[Cc][Mm])\s+", data_line, re.I)
+            if size_m:
+                r["sku"]  = data_line[:size_m.start()].strip()
+                r["size"] = size_m.group(1).strip()
+                after     = data_line[size_m.end():].strip()
+                parts     = after.split()
+                if parts:
+                    try:
+                        r["qty"] = max(1, int(parts[0]))
+                    except ValueError:
+                        pass
+                    if len(parts) >= 2:
+                        r["color"]    = parts[1]
+                    if len(parts) >= 3:
+                        r["order_id"] = parts[-1]
+            else:
+                # Last-resort: treat the last token as the order ID
+                parts = data_line.split()
+                if len(parts) >= 2 and re.match(r"\d+_\d+", parts[-1]):
+                    r["order_id"] = parts[-1]
+                    r["sku"]      = parts[0]
+
+    # ── Order date from invoice section ───────────────────────────────────────
+    dm = re.search(r"Order Date\s+(\d{2}\.\d{2}\.\d{4})", full_text)
+    if dm:
+        try:
+            r["order_date"] = _dt.strptime(dm.group(1), "%d.%m.%Y").date()
+        except ValueError:
+            pass
+
+    return r
+
+
+# ── Meesho Labels PDF upload ──────────────────────────────────────────────────
 
 @api_view(["POST"])
 @parser_classes([MultiPartParser])
@@ -967,17 +1114,13 @@ def upload_labels_pdf(request):
       2. Locate "TAX INVOICE" text to determine crop boundary per page.
       3. Use pypdf to crop each page to the label-only region and return as base64 PDF.
     """
-    import io
-    import re
-    import base64
+    import io, re, base64
 
     try:
         import pdfplumber
     except ImportError:
-        return Response(
-            {"error": "pdfplumber not installed. Run: pip install pdfplumber"},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        )
+        return Response({"error": "pdfplumber not installed. Run: pip install pdfplumber"},
+                        status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     try:
         from pypdf import PdfReader, PdfWriter
@@ -991,174 +1134,239 @@ def upload_labels_pdf(request):
     if not file.name.lower().endswith(".pdf"):
         return Response({"error": "Only PDF files are accepted."}, status=status.HTTP_400_BAD_REQUEST)
 
-    pdf_bytes = file.read()
-
-    # Per-SKU aggregates
-    sku_data: dict[str, dict] = {}
-
-    # Per-page metadata
-    page_details = []
-
-    # Crop boundary per page (pdfplumber top-left y, i.e. distance from page top)
-    crop_y_from_top: list[float] = []
-    pl_page_heights: list[float] = []
-    total_pages = 0
+    pdf_bytes      = file.read()
+    today          = timezone.now().date()
+    sku_data       = {}
+    page_details   = []
+    crop_y_list    = []   # pdfplumber top-y for TAX INVOICE, per page
+    pl_heights     = []   # pdfplumber page heights
+    db_rows        = []   # parsed dicts ready for LabelOrder.update_or_create
+    total_pages    = 0
 
     try:
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
             total_pages = len(pdf.pages)
 
             for page_num, page in enumerate(pdf.pages, 1):
-                pl_page_heights.append(page.height)
-                sku = None
-                qty = 1
+                pl_heights.append(page.height)
 
-                # ── Step 1: find "TAX INVOICE" crop boundary ──────────────────
-                words = page.extract_words()
-                crop_y = page.height * 0.54  # fallback: 54% from top
-                for i in range(len(words) - 1):
-                    if (words[i]["text"].upper() == "TAX"
-                            and words[i + 1]["text"].upper() == "INVOICE"):
-                        # Subtract a small buffer so we don't clip the border line
-                        crop_y = max(0.0, words[i]["top"] - 6)
+                # ── Locate TAX INVOICE separator ─────────────────────────────
+                words  = page.extract_words()
+                crop_y = page.height * 0.54
+                for wi in range(len(words) - 1):
+                    if (words[wi]["text"].upper() == "TAX"
+                            and words[wi + 1]["text"].upper() == "INVOICE"):
+                        crop_y = max(0.0, words[wi]["top"] - 6)
                         break
-                crop_y_from_top.append(crop_y)
+                crop_y_list.append(crop_y)
 
-                # ── Step 2: extract SKU + Qty from Product Details table ───────
-                # The table header row is: SKU | Size | Qty | Color | Order No.
-                # pdfplumber extract_tables() respects cell borders → handles
-                # multi-line / space-containing SKUs correctly.
-                for table in (page.extract_tables() or []):
-                    if not table:
-                        continue
-                    for row_idx, row in enumerate(table):
-                        header_cells = [str(c or "").strip().upper() for c in row]
-                        if "SKU" in header_cells and "QTY" in header_cells:
-                            # Locate column indices
-                            sku_col = header_cells.index("SKU")
-                            qty_col = header_cells.index("QTY")
-                            # Data is on the very next row
-                            if row_idx + 1 < len(table) and table[row_idx + 1]:
-                                data = table[row_idx + 1]
-                                raw_sku = str(data[sku_col] if sku_col < len(data) else "").strip()
-                                raw_qty = str(data[qty_col] if qty_col < len(data) else "1").strip()
-                                # Clean up embedded newlines from wrapped cells
-                                raw_sku = " ".join(raw_sku.split())
-                                if raw_sku:
-                                    sku = raw_sku
-                                try:
-                                    qty = max(1, int(raw_qty))
-                                except ValueError:
-                                    qty = 1
-                            break
-                    if sku:
-                        break
+                # ── Extract text and tables ───────────────────────────────────
+                # IMPORTANT: call extract_tables() and extract_text() on the
+                # original page BEFORE any crop() calls — pdfplumber's internal
+                # PDF object cache can be disrupted by crop() in some versions.
+                tables    = page.extract_tables() or []
+                full_text = page.extract_text() or ""
 
-                # ── Step 3: text-based fallback ───────────────────────────────
-                if not sku:
-                    raw_text = page.extract_text() or ""
-                    # Match the data row immediately after the header row
-                    m = re.search(
-                        r"Product Details\s*[\r\n]+SKU\s+Size\s+Qty\s+Color\s+Order No\.\s*[\r\n]+"
-                        r"(.+?)(?:\s+Free Size|\s+\d+\s*cm\b)",
-                        raw_text,
-                        re.IGNORECASE | re.DOTALL,
-                    )
-                    if m:
-                        sku = " ".join(m.group(1).strip().split())
-                    # Extract qty from the same section
-                    qty_m = re.search(
-                        r"SKU\s+Size\s+Qty\s+Color\s+Order No\.\s*[\r\n]+.+?"
-                        r"(?:Free Size|\d+\s*cm)\s+(\d+)",
-                        raw_text,
-                        re.IGNORECASE | re.DOTALL,
-                    )
-                    if qty_m:
-                        try:
-                            qty = max(1, int(qty_m.group(1)))
-                        except ValueError:
-                            qty = 1
+                # Derive label-only text by splitting at "TAX INVOICE"
+                tax_pos    = full_text.upper().find("TAX INVOICE")
+                label_text = full_text[:tax_pos].strip() if tax_pos > 0 else full_text
 
-                # ── Accumulate ────────────────────────────────────────────────
+                # ── Parse all fields via helper ───────────────────────────────
+                parsed = _parse_label_page(label_text, full_text, tables)
+
+                # ── Accumulate SKU analytics ──────────────────────────────────
+                sku, qty = parsed["sku"], parsed["qty"]
                 if sku:
                     if sku not in sku_data:
-                        sku_data[sku] = {
-                            "count": 0,
-                            "total_qty": 0,
-                            "max_qty": 0,
-                            "high_qty_orders": 0,
-                        }
-                    sku_data[sku]["count"] += 1
+                        sku_data[sku] = {"count": 0, "total_qty": 0, "max_qty": 0, "high_qty_orders": 0}
+                    sku_data[sku]["count"]    += 1
                     sku_data[sku]["total_qty"] += qty
-                    sku_data[sku]["max_qty"] = max(sku_data[sku]["max_qty"], qty)
+                    sku_data[sku]["max_qty"]   = max(sku_data[sku]["max_qty"], qty)
                     if qty > 1:
                         sku_data[sku]["high_qty_orders"] += 1
 
-                page_details.append({
-                    "page": page_num,
-                    "sku": sku or "",
-                    "qty": qty,
-                })
+                page_details.append({"page": page_num, "sku": sku, "qty": qty,
+                                     "courier": parsed["courier_name"], "awb": parsed["awb_number"]})
+
+                # ── Queue DB row (only if we have an order_id) ────────────────
+                if parsed["order_id"]:
+                    db_rows.append({
+                        "order_id":        parsed["order_id"],
+                        "customer_name":   parsed["customer_name"],
+                        "customer_address":parsed["customer_address"],
+                        "customer_city":   parsed["customer_city"],
+                        "customer_state":  parsed["customer_state"],
+                        "customer_pincode":parsed["customer_pincode"],
+                        "courier_name":    parsed["courier_name"],
+                        "awb_number":      parsed["awb_number"],
+                        "payment_type":    parsed["payment_type"],
+                        "pickup_date":     parsed["pickup_date"],
+                        "sku":             parsed["sku"],
+                        "size":            parsed["size"],
+                        "qty":             parsed["qty"],
+                        "color":           parsed["color"],
+                        "order_date":      parsed["order_date"],
+                        "uploaded_date":   today,
+                    })
 
     except Exception as exc:
-        return Response(
-            {"error": f"Could not parse PDF: {exc}"},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
+        return Response({"error": f"Could not parse PDF: {exc}"},
+                        status=status.HTTP_400_BAD_REQUEST)
 
-    # ── Generate cropped PDF (label-only, no invoice) ─────────────────────────
+    # ── Save parsed rows to DB ────────────────────────────────────────────────
+    saved = updated = 0
+    with transaction.atomic():
+        for row in db_rows:
+            oid = row.pop("order_id")
+            _, created = LabelOrder.objects.update_or_create(order_id=oid, defaults=row)
+            if created:
+                saved += 1
+            else:
+                updated += 1
+
+    # ── Generate cropped PDF (label region only) ──────────────────────────────
     cropped_pdf_b64 = None
     if HAS_PYPDF:
         try:
             reader = PdfReader(io.BytesIO(pdf_bytes))
             writer = PdfWriter()
-
-            for i, page in enumerate(reader.pages):
-                py_height = float(page.mediabox.height)
-                py_width  = float(page.mediabox.width)
-
-                # Convert pdfplumber top-left y → pypdf bottom-left y
-                pl_height = pl_page_heights[i] if i < len(pl_page_heights) else py_height
-                scale     = py_height / pl_height if pl_height > 0 else 1.0
-                pl_crop_y = crop_y_from_top[i] if i < len(crop_y_from_top) else py_height * 0.54
-                py_crop_y = py_height - (pl_crop_y * scale)
-                py_crop_y = max(0.0, py_crop_y)
-
-                # Set CropBox to upper (label) region only
-                page.cropbox.lower_left  = (0, py_crop_y)
-                page.cropbox.upper_right = (py_width, py_height)
-                writer.add_page(page)
-
+            for i, pg in enumerate(reader.pages):
+                ph   = float(pg.mediabox.height)
+                pw   = float(pg.mediabox.width)
+                pl_h = pl_heights[i] if i < len(pl_heights) else ph
+                scale = ph / pl_h if pl_h else 1.0
+                crop  = crop_y_list[i] if i < len(crop_y_list) else ph * 0.54
+                y_bot = max(0.0, ph - crop * scale)
+                pg.cropbox.lower_left  = (0, y_bot)
+                pg.cropbox.upper_right = (pw, ph)
+                writer.add_page(pg)
             buf = io.BytesIO()
             writer.write(buf)
             cropped_pdf_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
         except Exception:
-            cropped_pdf_b64 = None  # crop failed — parse results still returned
+            cropped_pdf_b64 = None
 
-    # ── Build response ────────────────────────────────────────────────────────
+    # ── Build analytics response ──────────────────────────────────────────────
     sku_table = sorted(
-        [
-            {
-                "sku": k,
-                "count": v["count"],
-                "total_qty": v["total_qty"],
-                "max_qty": v["max_qty"],
-                "high_qty_orders": v["high_qty_orders"],
-            }
-            for k, v in sku_data.items()
-        ],
+        [{"sku": k, "count": v["count"], "total_qty": v["total_qty"],
+          "max_qty": v["max_qty"], "high_qty_orders": v["high_qty_orders"]}
+         for k, v in sku_data.items()],
         key=lambda x: -x["count"],
     )
     total_labels = sum(v["count"] for v in sku_data.values())
 
     return Response({
         "success": True,
-        "total_pages": total_pages,
-        "total_unique_skus": len(sku_data),
-        "total_labels": total_labels,
-        "has_results": total_labels > 0,
-        "has_high_qty": any(v["high_qty_orders"] > 0 for v in sku_data.values()),
-        "sku_table": sku_table,
-        "page_details": page_details,
-        "cropped_pdf_b64": cropped_pdf_b64,
+        "total_pages":      total_pages,
+        "total_unique_skus":len(sku_data),
+        "total_labels":     total_labels,
+        "has_results":      total_labels > 0,
+        "has_high_qty":     any(v["high_qty_orders"] > 0 for v in sku_data.values()),
+        "sku_table":        sku_table,
+        "page_details":     page_details,
+        "cropped_pdf_b64":  cropped_pdf_b64,
+        "db_saved":         saved,
+        "db_updated":       updated,
+    })
+
+
+# ── Label Orders — read endpoints ─────────────────────────────────────────────
+
+@api_view(["GET"])
+def label_orders_list(request):
+    """
+    Paginated LabelOrder list.
+    Query params: date (YYYY-MM-DD), date_from, date_to, courier, payment_type,
+                  page, page_size
+    """
+    page        = int(request.GET.get("page", 1))
+    page_size   = int(request.GET.get("page_size", 50))
+    date_single = request.GET.get("date", "")
+    date_from   = request.GET.get("date_from", "")
+    date_to     = request.GET.get("date_to", "")
+    courier     = request.GET.get("courier", "")
+    pay_type    = request.GET.get("payment_type", "")
+
+    qs = LabelOrder.objects.all()
+
+    if date_single:
+        qs = qs.filter(uploaded_date=date_single)
+    else:
+        if date_from:
+            qs = qs.filter(uploaded_date__gte=date_from)
+        if date_to:
+            qs = qs.filter(uploaded_date__lte=date_to)
+
+    if courier:
+        qs = qs.filter(courier_name__iexact=courier)
+    if pay_type:
+        qs = qs.filter(payment_type__iexact=pay_type)
+
+    total = qs.count()
+    start = (page - 1) * page_size
+    items = qs[start : start + page_size]
+
+    return Response({
+        "total":     total,
+        "page":      page,
+        "page_size": page_size,
+        "results":   LabelOrderSerializer(items, many=True).data,
+    })
+
+
+@api_view(["GET"])
+def label_couriers_summary(request):
+    """
+    Courier-wise order count for a date.  Defaults to today.
+    Query params: date (single day), date_from, date_to
+    Also returns the list of available uploaded dates for the date-picker.
+    """
+    date_single = request.GET.get("date", "")
+    date_from   = request.GET.get("date_from", "")
+    date_to     = request.GET.get("date_to", "")
+
+    if not date_single and not date_from and not date_to:
+        date_single = timezone.now().date().isoformat()
+
+    qs = LabelOrder.objects.all()
+    if date_single:
+        qs = qs.filter(uploaded_date=date_single)
+        filter_label = date_single
+    else:
+        if date_from:
+            qs = qs.filter(uploaded_date__gte=date_from)
+        if date_to:
+            qs = qs.filter(uploaded_date__lte=date_to)
+        filter_label = f"{date_from or '…'} → {date_to or '…'}"
+
+    courier_rows = list(
+        qs.values("courier_name")
+        .annotate(
+            count       = Count("order_id"),
+            prepaid     = Count("order_id", filter=DQ(payment_type="Prepaid")),
+            cod         = Count("order_id", filter=DQ(payment_type="COD")),
+            total_items = Sum("qty"),
+        )
+        .order_by("-count")
+    )
+
+    sku_rows = list(
+        qs.values("sku")
+        .annotate(count=Count("order_id"), total_items=Sum("qty"))
+        .order_by("-count")
+    )
+
+    available_dates = list(
+        LabelOrder.objects
+        .values_list("uploaded_date", flat=True)
+        .distinct()
+        .order_by("-uploaded_date")
+    )
+
+    return Response({
+        "filter":          filter_label,
+        "total":           qs.count(),
+        "courier_summary": courier_rows,
+        "sku_summary":     sku_rows,
+        "available_dates": [str(d) for d in available_dates],
     })

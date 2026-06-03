@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, ParentItemPrice, Order
+from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, ParentItemPrice, Order, LabelOrder
 
 
 class OrderPaymentSerializer(serializers.ModelSerializer):
@@ -45,4 +45,10 @@ class ParentItemPriceSerializer(serializers.ModelSerializer):
 class OrderSerializer(serializers.ModelSerializer):
     class Meta:
         model = Order
+        fields = "__all__"
+
+
+class LabelOrderSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = LabelOrder
         fields = "__all__"

@@ -222,3 +222,45 @@ class Order(models.Model):
 
     def __str__(self):
         return self.sub_order_no
+
+
+class LabelOrder(models.Model):
+    """
+    One row per label (= one shipping order) parsed from an uploaded Meesho labels PDF.
+    Primary key is the sub_order_no printed in the Product Details table of each label.
+    """
+
+    order_id = models.CharField(max_length=150, primary_key=True)
+
+    # Customer
+    customer_name    = models.CharField(max_length=255, blank=True)
+    customer_address = models.TextField(blank=True)
+    customer_city    = models.CharField(max_length=100, blank=True, db_index=True)
+    customer_state   = models.CharField(max_length=100, blank=True, db_index=True)
+    customer_pincode = models.CharField(max_length=10, blank=True)
+
+    # Logistics
+    courier_name  = models.CharField(max_length=100, blank=True, db_index=True)
+    awb_number    = models.CharField(max_length=100, blank=True)
+    payment_type  = models.CharField(max_length=20, blank=True)   # "Prepaid" | "COD"
+    pickup_date   = models.CharField(max_length=20, blank=True)   # "12/06" as printed on label
+
+    # Product
+    sku   = models.CharField(max_length=300, blank=True)
+    size  = models.CharField(max_length=100, blank=True)
+    qty   = models.PositiveIntegerField(default=1)
+    color = models.CharField(max_length=100, blank=True)
+
+    # Dates
+    order_date    = models.DateField(null=True, blank=True)        # from invoice section
+    uploaded_date = models.DateField(db_index=True)                # date PDF was processed
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "label_orders"
+        ordering = ["-uploaded_date", "courier_name"]
+
+    def __str__(self):
+        return f"{self.order_id} | {self.courier_name} | {self.sku}"
