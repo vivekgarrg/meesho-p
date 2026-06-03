@@ -19,4 +19,5 @@ urlpatterns = [
     path("full-orders/", views.full_orders_list, name="full_orders_list"),
     path("full-orders/analytics/", views.full_orders_analytics, name="full_orders_analytics"),
     path("dashboard/", views.dashboard_analytics, name="dashboard_analytics"),
+    path("labels/parse/", views.upload_labels_pdf, name="upload_labels_pdf"),
 ]

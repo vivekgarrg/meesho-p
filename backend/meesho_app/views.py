@@ -947,3 +947,218 @@ def dashboard_analytics(request):
         },
         "status_settlement": status_settlement,
     })
+
+
+# ── Meesho Labels PDF parser ──────────────────────────────────────────────────
+
+@api_view(["POST"])
+@parser_classes([MultiPartParser])
+def upload_labels_pdf(request):
+    """
+    Upload a Meesho shipping labels PDF (one label per page).
+
+    Each label page has two sections separated by "TAX INVOICE":
+      - Upper half: shipping label with Product Details table (SKU, Size, Qty, Color, Order No.)
+      - Lower half: tax invoice (excluded from cropped output)
+
+    Strategy:
+      1. Use pdfplumber table extraction to find the "Product Details" table and
+         extract SKU + Qty precisely (handles multi-word/wrapped SKUs).
+      2. Locate "TAX INVOICE" text to determine crop boundary per page.
+      3. Use pypdf to crop each page to the label-only region and return as base64 PDF.
+    """
+    import io
+    import re
+    import base64
+
+    try:
+        import pdfplumber
+    except ImportError:
+        return Response(
+            {"error": "pdfplumber not installed. Run: pip install pdfplumber"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+    try:
+        from pypdf import PdfReader, PdfWriter
+        HAS_PYPDF = True
+    except ImportError:
+        HAS_PYPDF = False
+
+    file = request.FILES.get("file")
+    if not file:
+        return Response({"error": "No file provided."}, status=status.HTTP_400_BAD_REQUEST)
+    if not file.name.lower().endswith(".pdf"):
+        return Response({"error": "Only PDF files are accepted."}, status=status.HTTP_400_BAD_REQUEST)
+
+    pdf_bytes = file.read()
+
+    # Per-SKU aggregates
+    sku_data: dict[str, dict] = {}
+
+    # Per-page metadata
+    page_details = []
+
+    # Crop boundary per page (pdfplumber top-left y, i.e. distance from page top)
+    crop_y_from_top: list[float] = []
+    pl_page_heights: list[float] = []
+    total_pages = 0
+
+    try:
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            total_pages = len(pdf.pages)
+
+            for page_num, page in enumerate(pdf.pages, 1):
+                pl_page_heights.append(page.height)
+                sku = None
+                qty = 1
+
+                # ── Step 1: find "TAX INVOICE" crop boundary ──────────────────
+                words = page.extract_words()
+                crop_y = page.height * 0.54  # fallback: 54% from top
+                for i in range(len(words) - 1):
+                    if (words[i]["text"].upper() == "TAX"
+                            and words[i + 1]["text"].upper() == "INVOICE"):
+                        # Subtract a small buffer so we don't clip the border line
+                        crop_y = max(0.0, words[i]["top"] - 6)
+                        break
+                crop_y_from_top.append(crop_y)
+
+                # ── Step 2: extract SKU + Qty from Product Details table ───────
+                # The table header row is: SKU | Size | Qty | Color | Order No.
+                # pdfplumber extract_tables() respects cell borders → handles
+                # multi-line / space-containing SKUs correctly.
+                for table in (page.extract_tables() or []):
+                    if not table:
+                        continue
+                    for row_idx, row in enumerate(table):
+                        header_cells = [str(c or "").strip().upper() for c in row]
+                        if "SKU" in header_cells and "QTY" in header_cells:
+                            # Locate column indices
+                            sku_col = header_cells.index("SKU")
+                            qty_col = header_cells.index("QTY")
+                            # Data is on the very next row
+                            if row_idx + 1 < len(table) and table[row_idx + 1]:
+                                data = table[row_idx + 1]
+                                raw_sku = str(data[sku_col] if sku_col < len(data) else "").strip()
+                                raw_qty = str(data[qty_col] if qty_col < len(data) else "1").strip()
+                                # Clean up embedded newlines from wrapped cells
+                                raw_sku = " ".join(raw_sku.split())
+                                if raw_sku:
+                                    sku = raw_sku
+                                try:
+                                    qty = max(1, int(raw_qty))
+                                except ValueError:
+                                    qty = 1
+                            break
+                    if sku:
+                        break
+
+                # ── Step 3: text-based fallback ───────────────────────────────
+                if not sku:
+                    raw_text = page.extract_text() or ""
+                    # Match the data row immediately after the header row
+                    m = re.search(
+                        r"Product Details\s*[\r\n]+SKU\s+Size\s+Qty\s+Color\s+Order No\.\s*[\r\n]+"
+                        r"(.+?)(?:\s+Free Size|\s+\d+\s*cm\b)",
+                        raw_text,
+                        re.IGNORECASE | re.DOTALL,
+                    )
+                    if m:
+                        sku = " ".join(m.group(1).strip().split())
+                    # Extract qty from the same section
+                    qty_m = re.search(
+                        r"SKU\s+Size\s+Qty\s+Color\s+Order No\.\s*[\r\n]+.+?"
+                        r"(?:Free Size|\d+\s*cm)\s+(\d+)",
+                        raw_text,
+                        re.IGNORECASE | re.DOTALL,
+                    )
+                    if qty_m:
+                        try:
+                            qty = max(1, int(qty_m.group(1)))
+                        except ValueError:
+                            qty = 1
+
+                # ── Accumulate ────────────────────────────────────────────────
+                if sku:
+                    if sku not in sku_data:
+                        sku_data[sku] = {
+                            "count": 0,
+                            "total_qty": 0,
+                            "max_qty": 0,
+                            "high_qty_orders": 0,
+                        }
+                    sku_data[sku]["count"] += 1
+                    sku_data[sku]["total_qty"] += qty
+                    sku_data[sku]["max_qty"] = max(sku_data[sku]["max_qty"], qty)
+                    if qty > 1:
+                        sku_data[sku]["high_qty_orders"] += 1
+
+                page_details.append({
+                    "page": page_num,
+                    "sku": sku or "",
+                    "qty": qty,
+                })
+
+    except Exception as exc:
+        return Response(
+            {"error": f"Could not parse PDF: {exc}"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # ── Generate cropped PDF (label-only, no invoice) ─────────────────────────
+    cropped_pdf_b64 = None
+    if HAS_PYPDF:
+        try:
+            reader = PdfReader(io.BytesIO(pdf_bytes))
+            writer = PdfWriter()
+
+            for i, page in enumerate(reader.pages):
+                py_height = float(page.mediabox.height)
+                py_width  = float(page.mediabox.width)
+
+                # Convert pdfplumber top-left y → pypdf bottom-left y
+                pl_height = pl_page_heights[i] if i < len(pl_page_heights) else py_height
+                scale     = py_height / pl_height if pl_height > 0 else 1.0
+                pl_crop_y = crop_y_from_top[i] if i < len(crop_y_from_top) else py_height * 0.54
+                py_crop_y = py_height - (pl_crop_y * scale)
+                py_crop_y = max(0.0, py_crop_y)
+
+                # Set CropBox to upper (label) region only
+                page.cropbox.lower_left  = (0, py_crop_y)
+                page.cropbox.upper_right = (py_width, py_height)
+                writer.add_page(page)
+
+            buf = io.BytesIO()
+            writer.write(buf)
+            cropped_pdf_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+        except Exception:
+            cropped_pdf_b64 = None  # crop failed — parse results still returned
+
+    # ── Build response ────────────────────────────────────────────────────────
+    sku_table = sorted(
+        [
+            {
+                "sku": k,
+                "count": v["count"],
+                "total_qty": v["total_qty"],
+                "max_qty": v["max_qty"],
+                "high_qty_orders": v["high_qty_orders"],
+            }
+            for k, v in sku_data.items()
+        ],
+        key=lambda x: -x["count"],
+    )
+    total_labels = sum(v["count"] for v in sku_data.values())
+
+    return Response({
+        "success": True,
+        "total_pages": total_pages,
+        "total_unique_skus": len(sku_data),
+        "total_labels": total_labels,
+        "has_results": total_labels > 0,
+        "has_high_qty": any(v["high_qty_orders"] > 0 for v in sku_data.values()),
+        "sku_table": sku_table,
+        "page_details": page_details,
+        "cropped_pdf_b64": cropped_pdf_b64,
+    })

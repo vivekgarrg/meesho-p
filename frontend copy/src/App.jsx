@@ -14,6 +14,7 @@ import { PricingTab }   from "./Components/Tabs/PricingTab";
 import { UploadTab }    from "./Components/Tabs/UploadTab";
 import { SKUProfitTab } from "./Components/Tabs/SKUProfitTab";
 import { SKULossTab }   from "./Components/Tabs/SKULossTab";
+import { LabelsTab }    from "./Components/Tabs/LabelsTab";
 
 // ── API base (re-exported for tabs that import directly from App) ───────────
 export const API = "http://localhost:8000/api";
@@ -288,6 +289,7 @@ const TABS = [
   { path: "/pricing",       label: "SKU Pricing",    icon: "⚙️" },
   { path: "/upload",        label: "Upload",         icon: "⬆️" },
   { path: "/upload-orders", label: "Orders Upload",  icon: "🎁" },
+  { path: "/labels",        label: "Labels",         icon: "🏷" },
 ];
 
 // ── App shell ─────────────────────────────────────────────────────────────────
@@ -347,6 +349,7 @@ export default function App() {
           <Route path="/pricing"       element={<PricingTab />} />
           <Route path="/upload"        element={<UploadTab />} />
           <Route path="/upload-orders" element={<UploadTab orders={true} />} />
+          <Route path="/labels"        element={<LabelsTab />} />
         </Routes>
       </div>
     </div>
