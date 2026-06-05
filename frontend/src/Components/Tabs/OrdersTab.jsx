@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import React,{ useCallback, useEffect, useState } from "react";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell,
 } from "recharts";

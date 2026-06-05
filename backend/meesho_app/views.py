@@ -8,6 +8,7 @@ from rest_framework import status
 from rest_framework.decorators import api_view, parser_classes
 from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
+from datetime import datetime, time
 
 from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice, LabelOrder
 from .serializers import (
@@ -290,9 +291,10 @@ def compute_order_net(payment_rows, sku_final_price, quantity):
     main_rows = [p for p in payment_rows if p.live_order_status]
     adj_rows  = [p for p in payment_rows if not p.live_order_status]
 
-    total_settlement = sum(p.final_settlement_amount or ZERO for p in payment_rows)
-    raw_aff          = sum(p.final_settlement_amount or ZERO for p in adj_rows)
-    affiliate_fees   = -abs(raw_aff) if raw_aff else ZERO   # always ≤ 0
+    total_settlement = sum(p.final_settlement_amount for p in payment_rows)
+    
+    raw_aff          = sum(p.final_settlement_amount for p in adj_rows if p.recovery_reason == 'Affiliate Fee')
+    affiliate_fees   = raw_aff if raw_aff else ZERO
 
     purchase_cost = sku_final_price * Decimal(str(quantity))
 
@@ -312,23 +314,28 @@ def compute_order_net(payment_rows, sku_final_price, quantity):
             "recovery_reason":  None,
         }
 
-    primary         = main_rows[0]
-    status          = primary.live_order_status or ""
-    is_delivered    = status.upper() == "DELIVERED"
-    claims          = primary.claims or ZERO
-    return_shipping = primary.return_shipping_charge or ZERO
-    has_claim       = claims != ZERO
-
-    if is_delivered:
-        # net = total_settlement − (sku_price − affiliate_fees)
-        # affiliate_fees ≤ 0, so (sku_price − affiliate_fees) = sku_price + |aff|
-        # → affiliate fee increases the cost basis, reducing profit ✓
-        net = total_settlement - (purchase_cost - affiliate_fees)
-    else:
-        # net = total_settlement − (sku_price − return_shipping − affiliate_fees)
-        # return_shipping credited by Meesho reduces our cost basis ✓
-        # affiliate_fees ≤ 0 increases cost basis ✓
-        net = total_settlement - (purchase_cost - return_shipping - affiliate_fees)
+    net = 0
+    status = ""
+    is_delivered = False
+    has_claim = False
+    return_shipping = 0
+    claims = 0
+    for primary in main_rows:
+        status          = primary.live_order_status or ""
+        is_delivered    = status.upper() == "DELIVERED"
+        return_shipping = primary.return_shipping_charge or ZERO
+      
+        if is_delivered:
+            net = total_settlement - purchase_cost 
+        else:
+            net = total_settlement
+    
+    for secondary in adj_rows or []:
+        claims          = secondary.claims or ZERO
+        has_claim       = secondary.claims != ZERO 
+        
+        if has_claim:
+             net = total_settlement - purchase_cost
 
     return {
         "net":              net,
@@ -354,47 +361,71 @@ def accumulate_sku_profit(sku_id, obj, result, price_map, packaging_map):
     """
     if sku_id not in obj:
         obj[sku_id] = {
-            "loss": 0, "profit": 0, "order_count": 0,
-            "final_price": price_map[sku_id],
-            "purchase_cost": 0, "total_purchase_cost": 0, "p_cost": 0,
+            "order_count": 0,
+            "one_unit_price": price_map[sku_id],
+            "total_purchase_cost": 0,
             "settled_amount": 0,
             "claims_total": 0,
             "claims_count": 0,
             "return_count": 0,
             "affiliate_adj": 0,
+            "delivered_profit":0,
+            "delivered_purchase_cost":0,
+            "delivered_packaging_cost":0,
+            "delivered_count":0,
+            "claims_purchase_cost":0,
+            "claims_packaging_cost":0,
+            "return_loss":0,
+            "return_purchase_cost":0,
+            "return_packaging_cost":0,
+            "return_count":0,
+            "rto_loss":0,
+            "rto_purchase_cost":0,
+            "rto_packaging_cost":0,
+            "rto_count":0,
         }
 
     sku = obj[sku_id]
     net = result["net"]
-
+    
     _inc(sku, "affiliate_adj", result["affiliate_fees"])
+
 
     if result["is_adjustment_only"]:
         _inc(sku, "loss", net)
         _inc(sku, "order_count")
         return
 
-    # Categorise order
+    #claimed orders only not included in profit or loss
     if result["has_claim"]:
         _inc(sku, "claims_total", result["claims"])
         _inc(sku, "claims_count")
-    elif result["is_return"]:
+        _inc(sku, "claims_purchase_cost", price_map[sku_id])
+        _inc(sku, "claims_packaging_cost", packaging_map.get(sku_id, Decimal("0")))
+    #delivered order profit calculation only
+    elif net > Decimal("0") and result["status"].upper() == "DELIVERED":
+        _inc(sku, "delivered_profit", net)
+        _inc(sku, "delivered_purchase_cost", price_map[sku_id])
+        _inc(sku, "delivered_packaging_cost", packaging_map.get(sku_id, Decimal("0")))
+        _inc(sku, "delivered_count")
+    #orders giving loss mainly Return    
+    elif net < Decimal("0"):
+        _inc(sku, "return_loss", net)
+        _inc(sku, "return_purchase_cost", price_map[sku_id])
+        _inc(sku, "return_packaging_cost", packaging_map.get(sku_id, Decimal("0")))
         _inc(sku, "return_count")
-
-    # Profit / loss buckets
-    if net >= Decimal("0"):
-        _inc(sku, "profit", net)
-        _inc(sku, "purchase_cost", price_map[sku_id])
-        _inc(sku, "p_cost", packaging_map.get(sku_id, Decimal("0")))
+    #rto orders mainly    
     else:
-        _inc(sku, "loss", net)
+        _inc(sku, "rto_loss", net)
+        _inc(sku, "rto_purchase_cost", price_map[sku_id])
+        _inc(sku, "rto_packaging_cost", packaging_map.get(sku_id, Decimal("0")))
+        _inc(sku, "rto_count")
 
-    _inc(sku, "total_purchase_cost", price_map[sku_id])
-    _inc(sku, "total_packaging_cost", packaging_map.get(sku_id, Decimal("0")))
     _inc(sku, "settled_amount", result["total_settlement"])
     _inc(sku, result["status"] or "unknown")
-    _inc(sku, result["recovery_reason"])          # None key is silently skipped
+    _inc(sku, result["recovery_reason"])
     _inc(sku, "order_count")
+    sku["net_profit"] =  Decimal(sku["delivered_profit"]) + Decimal(sku["return_loss"])
 
 @api_view(["GET"])
 def available_months(request):
@@ -520,13 +551,16 @@ def profit_summary(request):
         accumulate_sku_profit(sku, order_wise_profit, result, price_map, packaging_map)
 
     missing_sku          = list(set(missing_sku))
-    total_profit         = sum(v["profit"]        for v in order_wise_profit.values())
-    total_loss           = sum(v["loss"]          for v in order_wise_profit.values())
-    total_purchase_cost  = sum(v["purchase_cost"] for v in order_wise_profit.values())
-    total_packaging_cost = sum(v["p_cost"]        for v in order_wise_profit.values())
+    total_profit         = sum(v["delivered_profit"]        for v in order_wise_profit.values())
+    total_loss           = sum(v["return_loss"]          for v in order_wise_profit.values())
+    total_purchase_cost  = sum(v["delivered_purchase_cost"] for v in order_wise_profit.values())
+    total_packaging_cost = sum(v["delivered_packaging_cost"]        for v in order_wise_profit.values())
 
     # Aggregate affiliate fees — blank-status rows, forced negative (always a cost)
-    adj_qs = qs.filter(DQ(live_order_status__isnull=True) | DQ(live_order_status=""))
+    adj_qs = qs.filter(
+    (DQ(live_order_status__isnull=True) | DQ(live_order_status="")) &
+    DQ(recovery_reason="Affiliate Fee")
+    )
     raw_aff = adj_qs.aggregate(total=Sum("final_settlement_amount"))["total"] or Decimal("0")
     total_affiliate_fee = -abs(raw_aff)
 
@@ -612,11 +646,13 @@ def order_payments_list(request):
     if status_filter:
         qs = qs.filter(live_order_status__iexact=status_filter)
     if sku_filter:
-        qs = qs.filter(supplier_sku__icontains=sku_filter)
+        qs = qs.filter(DQ(supplier_sku__icontains=sku_filter) | DQ(sub_order_no__icontains=sku_filter))
     if date_from:
-        qs = qs.filter(order_date__date__gte=date_from)
+        date_from = datetime.strptime(date_from, "%Y-%m-%d").date()
+        qs = qs.filter(order_date__gte=datetime.combine(date_from, time.min))
     if date_to:
-        qs = qs.filter(order_date__date__lte=date_to)
+        date_to = datetime.strptime(date_to, "%Y-%m-%d").date()
+        qs = qs.filter(order_date__lte=datetime.combine(date_to, time.max))
 
     total = qs.count()
     start = (page - 1) * page_size
@@ -1145,8 +1181,9 @@ def dashboard_analytics(request):
             order_qs.filter(reason_for_credit_entry=status_val)
             .values_list("sub_order_no", flat=True)
         )
-        agg = payment_qs.filter(sub_order_no__in=sub_nos).aggregate(
+        agg = payment_qs.filter(DQ(sub_order_no__in=sub_nos), DQ(claims=0) | DQ(claims__isnull=True)).aggregate(
             total=Sum("final_settlement_amount"),
+            
             count=Count("sub_order_no", distinct=True),
         )
         status_settlement.append({

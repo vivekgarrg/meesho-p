@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import React, { useState } from 'react';
 import { C, S, btn, fmt } from '../../App';
 
 export default function ItemEdit({ item, handleEdit, rowBg = "#fff" }) {
