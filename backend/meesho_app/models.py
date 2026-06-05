@@ -35,10 +35,15 @@ class FinalPrice(models.Model):
         
 
 class OrderPayment(models.Model):
-    """Maps to 'Order Payments' sheet — one row per sub-order"""
+    """
+    Maps to 'Order Payments' sheet.
+    One logical order can have multiple rows (main delivery row + blank-status
+    affiliate-fee / claim-adjustment rows).
+    Composite unique key: (sub_order_no, payment_date, live_order_status).
+    """
 
     # Order Related Details
-    sub_order_no = models.CharField(max_length=100, primary_key=True)
+    sub_order_no = models.CharField(max_length=100, db_index=True)
     order_date = models.DateTimeField(null=True, blank=True)
     dispatch_date = models.DateField(null=True, blank=True)
     product_name = models.TextField(null=True, blank=True)
@@ -99,6 +104,7 @@ class OrderPayment(models.Model):
     class Meta:
         db_table = "order_payments"
         ordering = ["-order_date"]
+        unique_together = [("sub_order_no", "payment_date", "live_order_status")]
 
     def __str__(self):
         return self.sub_order_no
@@ -171,54 +177,42 @@ class Order(models.Model):
         ("CANCELLED", "Cancelled"),
     ]
 
-    reason_for_credit_entry = models.CharField(
-        max_length=20,
-        choices=REASON_CHOICES
-    )
+    reason_for_credit_entry = models.CharField(max_length=50, blank=True, null=True)
+    sub_order_no    = models.CharField(max_length=100, db_index=True)
+    catalog_id      = models.BigIntegerField(null=True, blank=True)
+    order_date      = models.DateField(null=True, blank=True)
+    order_source    = models.CharField(max_length=100, blank=True, null=True)
+    customer_state  = models.CharField(max_length=100, blank=True, null=True)
+    product_name    = models.TextField(blank=True, null=True)
+    sku             = models.CharField(max_length=255, blank=True, null=True)
+    size            = models.CharField(max_length=50, blank=True, null=True)
+    quantity        = models.PositiveIntegerField(default=1)
+    supplier_listed_price      = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    supplier_discounted_price  = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    packet_id       = models.CharField(max_length=100, blank=True, null=True)
+    created_at      = models.DateTimeField(auto_now_add=True)
+    updated_at      = models.DateTimeField(auto_now=True)
 
-    sub_order_no = models.CharField(max_length=100, unique=True)
-    catalog_id = models.BigIntegerField()
-
-    order_date = models.DateField()
-
-    order_source = models.CharField(
-        max_length=100,
-        blank=True,
-        null=True
-    )
-
-    customer_state = models.CharField(max_length=100)
-
-    product_name = models.TextField()
-
-    sku = models.CharField(max_length=255)
-
-    size = models.CharField(max_length=50)
-
-    quantity = models.PositiveIntegerField(default=1)
-
-    supplier_listed_price = models.DecimalField(
-        max_digits=10,
-        decimal_places=2
-    )
-
-    supplier_discounted_price = models.DecimalField(
-        max_digits=10,
-        decimal_places=2
-    )
-
-    packet_id = models.CharField(
-        max_length=100,
-        blank=True,
-        null=True
-    )
-
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    @classmethod
+    def latest_per_order(cls, base_qs=None):
+        """
+        Return one row per sub_order_no — the most recent entry by order_date
+        then created_at. Pass a filtered queryset as base_qs to pre-filter
+        (e.g. by date range) before deduplication.
+        """
+        from django.db.models import OuterRef, Subquery
+        qs = base_qs if base_qs is not None else cls.objects.all()
+        latest_id = (
+            cls.objects.filter(sub_order_no=OuterRef("sub_order_no"))
+            .order_by("-order_date", "-created_at")
+            .values("id")[:1]
+        )
+        return qs.filter(id=Subquery(latest_id))
 
     class Meta:
         db_table = "orders"
         ordering = ["-order_date"]
+        unique_together = [("sub_order_no", "reason_for_credit_entry", "order_date")]
 
     def __str__(self):
         return self.sub_order_no
@@ -233,11 +227,11 @@ class LabelOrder(models.Model):
     order_id = models.CharField(max_length=150, primary_key=True)
 
     # Customer
-    customer_name    = models.CharField(max_length=255, blank=True)
+    customer_name    = models.CharField(max_length=255, blank=True, db_index=True)
     customer_address = models.TextField(blank=True)
     customer_city    = models.CharField(max_length=100, blank=True, db_index=True)
     customer_state   = models.CharField(max_length=100, blank=True, db_index=True)
-    customer_pincode = models.CharField(max_length=10, blank=True)
+    customer_pincode = models.CharField(max_length=10, blank=True, db_index=True)
 
     # Logistics
     courier_name  = models.CharField(max_length=100, blank=True, db_index=True)

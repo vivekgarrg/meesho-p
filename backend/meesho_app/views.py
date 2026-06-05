@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 from decimal import Decimal, InvalidOperation
 from django.db import transaction
-from django.db.models import Sum, Count, Q as DQ
+from django.db.models import Sum, Count, Min, Max, Q as DQ
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.decorators import api_view, parser_classes
@@ -156,8 +156,16 @@ def upload_excel(request):
                     "claims_reason": safe_str(row.get("claims_reason")),
                     "recovery_reason": safe_str(row.get("recovery_reason")),
                 }
+                # Composite lookup: (sub_order_no, payment_date, live_order_status)
+                # allows multiple rows per order (e.g. affiliate-fee adjustments
+                # alongside the main delivery row).
+                lookup_payment_date    = defaults.pop("payment_date")
+                lookup_live_status     = defaults.pop("live_order_status")
                 obj, was_created = OrderPayment.objects.update_or_create(
-                    sub_order_no=pk, defaults=defaults
+                    sub_order_no=pk,
+                    payment_date=lookup_payment_date,
+                    live_order_status=lookup_live_status,
+                    defaults=defaults,
                 )
                 if was_created:
                     created += 1
@@ -246,121 +254,316 @@ def upload_excel(request):
     return Response({"success": True, "results": results}, status=status.HTTP_201_CREATED)
 
 
-def set_increment_fields(object, key, value = None):
-    if not object.get(key):
-        object[key] = 0
-    
-    if value:
-        object[key] += value 
+def _inc(d, key, value=None):
+    """Increment dict[key] by value (default 1). Skips None keys."""
+    if key is None:
+        return
+    if key not in d:
+        d[key] = 0
+    if value is not None:
+        d[key] += value
     else:
-        object[key] += 1    
+        d[key] += 1
 
-def set_normal_fields(object, key, value):
-    object[key] = value  
-    
 
-def set_profit(sku_id, object, order, price_map):
-    packaging_map = {
-        fp.sku_id: fp.packaging_cost or Decimal("0")
-        for fp in FinalPrice.objects.all()
+# ── Per-order profit formula ───────────────────────────────────────────────────
+
+def compute_order_net(payment_rows, sku_final_price, quantity):
+    """
+    Pure helper — no DB access, no side effects.
+
+    Takes ALL OrderPayment rows for a single sub_order_no and returns a result dict.
+
+    Formulas:
+      Delivered : net = total_settlement - (sku_price - affiliate_fees)
+      Return/RTO: net = total_settlement - (sku_price - return_shipping - affiliate_fees)
+
+    Definitions:
+      total_settlement = sum of final_settlement_amount across ALL rows (main + adj)
+      affiliate_fees   = sum of final_settlement_amount for blank-status rows,
+                         forced negative (they are always cost deductions)
+      return_shipping  = return_shipping_charge from the primary status row
+      sku_price        = sku_final_price × quantity  (our purchase cost)
+    """
+    ZERO = Decimal("0")
+
+    main_rows = [p for p in payment_rows if p.live_order_status]
+    adj_rows  = [p for p in payment_rows if not p.live_order_status]
+
+    total_settlement = sum(p.final_settlement_amount or ZERO for p in payment_rows)
+    raw_aff          = sum(p.final_settlement_amount or ZERO for p in adj_rows)
+    affiliate_fees   = -abs(raw_aff) if raw_aff else ZERO   # always ≤ 0
+
+    purchase_cost = sku_final_price * Decimal(str(quantity))
+
+    # Pure adjustment order (no delivery status row at all)
+    if not main_rows:
+        return {
+            "net":              affiliate_fees,
+            "status":           None,
+            "is_delivered":     False,
+            "is_return":        False,
+            "has_claim":        False,
+            "claims":           ZERO,
+            "return_shipping":  ZERO,
+            "affiliate_fees":   affiliate_fees,
+            "total_settlement": total_settlement,
+            "is_adjustment_only": True,
+            "recovery_reason":  None,
+        }
+
+    primary         = main_rows[0]
+    status          = primary.live_order_status or ""
+    is_delivered    = status.upper() == "DELIVERED"
+    claims          = primary.claims or ZERO
+    return_shipping = primary.return_shipping_charge or ZERO
+    has_claim       = claims != ZERO
+
+    if is_delivered:
+        # net = total_settlement − (sku_price − affiliate_fees)
+        # affiliate_fees ≤ 0, so (sku_price − affiliate_fees) = sku_price + |aff|
+        # → affiliate fee increases the cost basis, reducing profit ✓
+        net = total_settlement - (purchase_cost - affiliate_fees)
+    else:
+        # net = total_settlement − (sku_price − return_shipping − affiliate_fees)
+        # return_shipping credited by Meesho reduces our cost basis ✓
+        # affiliate_fees ≤ 0 increases cost basis ✓
+        net = total_settlement - (purchase_cost - return_shipping - affiliate_fees)
+
+    return {
+        "net":              net,
+        "status":           primary.live_order_status,
+        "is_delivered":     is_delivered,
+        "is_return":        not is_delivered,
+        "has_claim":        has_claim,
+        "claims":           claims,
+        "return_shipping":  return_shipping,
+        "affiliate_fees":   affiliate_fees,
+        "total_settlement": total_settlement,
+        "is_adjustment_only": False,
+        "recovery_reason":  primary.recovery_reason,
     }
-    
-    if not object.get(sku_id):
-        object[sku_id] = {"loss": 0, "profit": 0, "order_count": 0, "final_price": price_map[sku_id], 
-                          "purchase_cost": 0, "total_purchase_cost":0,"p_cost":0,
-                          "settled_amount":0}
-    
-    is_profit = order.final_settlement_amount > 0
-    
-    sku = object[sku_id]
-    
-    if is_profit :
-        profit =  order.final_settlement_amount - ( price_map[sku_id] * order.quantity )
-        set_increment_fields(sku, "profit", profit)
-        set_increment_fields(sku, "purchase_cost", price_map[sku_id])
-        set_increment_fields(sku, "p_cost", packaging_map[sku_id])
+
+
+# ── Per-SKU accumulator ────────────────────────────────────────────────────────
+
+def accumulate_sku_profit(sku_id, obj, result, price_map, packaging_map):
+    """
+    Merge a compute_order_net result into the sku_wise_profit dict.
+    Called once per unique sub_order_no (not per payment row).
+    """
+    if sku_id not in obj:
+        obj[sku_id] = {
+            "loss": 0, "profit": 0, "order_count": 0,
+            "final_price": price_map[sku_id],
+            "purchase_cost": 0, "total_purchase_cost": 0, "p_cost": 0,
+            "settled_amount": 0,
+            "claims_total": 0,
+            "claims_count": 0,
+            "return_count": 0,
+            "affiliate_adj": 0,
+        }
+
+    sku = obj[sku_id]
+    net = result["net"]
+
+    _inc(sku, "affiliate_adj", result["affiliate_fees"])
+
+    if result["is_adjustment_only"]:
+        _inc(sku, "loss", net)
+        _inc(sku, "order_count")
+        return
+
+    # Categorise order
+    if result["has_claim"]:
+        _inc(sku, "claims_total", result["claims"])
+        _inc(sku, "claims_count")
+    elif result["is_return"]:
+        _inc(sku, "return_count")
+
+    # Profit / loss buckets
+    if net >= Decimal("0"):
+        _inc(sku, "profit", net)
+        _inc(sku, "purchase_cost", price_map[sku_id])
+        _inc(sku, "p_cost", packaging_map.get(sku_id, Decimal("0")))
     else:
-        set_increment_fields(sku, "loss", order.final_settlement_amount)
-        
-    set_increment_fields(sku, "total_purchase_cost", price_map[sku_id])
-    set_increment_fields(sku, "total_packaging_cost", packaging_map[sku_id])
-    set_increment_fields(sku, "settled_amount", order.final_settlement_amount)   
-    set_increment_fields(sku, order.live_order_status)
-    set_increment_fields(sku, order.recovery_reason)
-    set_increment_fields(sku, "order_count")     
+        _inc(sku, "loss", net)
+
+    _inc(sku, "total_purchase_cost", price_map[sku_id])
+    _inc(sku, "total_packaging_cost", packaging_map.get(sku_id, Decimal("0")))
+    _inc(sku, "settled_amount", result["total_settlement"])
+    _inc(sku, result["status"] or "unknown")
+    _inc(sku, result["recovery_reason"])          # None key is silently skipped
+    _inc(sku, "order_count")
+
+@api_view(["GET"])
+def available_months(request):
+    """
+    Returns distinct order months (YYYY-MM) newest first.
+    Primary source: Order.order_date (DateField, reliable).
+    Falls back to OrderPayment.order_date if Order table is empty.
+    """
+    dates = list(Order.objects.dates("order_date", "month", order="DESC"))
+    if not dates:
+        dates = list(
+            OrderPayment.objects
+            .exclude(order_date=None)
+            .dates("order_date", "month", order="DESC")
+        )
+    return Response([d.strftime("%Y-%m") for d in dates])
+
+
+@api_view(["GET"])
+def unsettled_orders(request):
+    """Orders in the Order table that have no matching OrderPayment record."""
+    date_from = request.GET.get("date_from", "")
+    date_to   = request.GET.get("date_to", "")
+    page      = int(request.GET.get("page", 1))
+    page_size = int(request.GET.get("page_size", 50))
+    search    = request.GET.get("search", "")
+
+    order_qs = Order.objects.all()
+    if date_from:
+        order_qs = order_qs.filter(order_date__gte=date_from)
+    if date_to:
+        order_qs = order_qs.filter(order_date__lte=date_to)
+    if search:
+        order_qs = order_qs.filter(
+            DQ(sub_order_no__icontains=search) |
+            DQ(sku__icontains=search) |
+            DQ(product_name__icontains=search)
+        )
+
+    settled_nos = set(OrderPayment.objects.values_list("sub_order_no", flat=True).distinct())
+    # Deduplicate to latest status per sub_order_no before listing
+    latest_qs    = Order.latest_per_order(base_qs=order_qs)
+    unsettled_qs = latest_qs.exclude(sub_order_no__in=settled_nos).order_by("-order_date")
+
+    total       = unsettled_qs.count()
+    total_value = unsettled_qs.aggregate(v=Sum("supplier_discounted_price"))["v"] or 0
+
+    start = (page - 1) * page_size
+    items = unsettled_qs[start: start + page_size]
+    return Response({
+        "total": total,
+        "total_value": float(total_value),
+        "page": page,
+        "page_size": page_size,
+        "results": OrderSerializer(items, many=True).data,
+    })
+
 
 @api_view(["GET"])
 def profit_summary(request):
     """
-    Calculate overall Meesho profit:
-      Revenue    = SUM(final_settlement_amount) from OrderPayments
-      Ads Cost   = SUM(total_ads_cost) from AdsCost
-      Referral   = SUM(net_referral_amount) from ReferralPayments
-      Comp/Rec   = SUM(amount_incl_gst) from CompensationRecovery
-      Net Profit = Revenue + Ads Cost + Referral + Comp/Rec
-                   (negative values in Meesho sheets already represent costs)
+    Calculate overall Meesho profit.
+    Accepts date_from / date_to (YYYY-MM-DD).
+    Filters OrderPayment via Order.order_date join; falls back to
+    OrderPayment.order_date__date if Order table has no records for range.
     """
-    revenue = OrderPayment.objects.aggregate(
-        total=Sum("final_settlement_amount")
-    )["total"] or Decimal("0")
-    
-    price_map = {
-        fp.sku_id: fp.final_price or Decimal("0")
-        for fp in FinalPrice.objects.all()
-    }
-  
+    date_from = request.GET.get("date_from", "")
+    date_to   = request.GET.get("date_to", "")
+
+    qs = OrderPayment.objects.all()
+
+    if date_from or date_to:
+        # Primary: join through Order.order_date (reliable DateField)
+        ord_qs = Order.objects.all()
+        if date_from:
+            ord_qs = ord_qs.filter(order_date__gte=date_from)
+        if date_to:
+            ord_qs = ord_qs.filter(order_date__lte=date_to)
+        order_nos = list(ord_qs.values_list("sub_order_no", flat=True))
+        if order_nos:
+            qs = qs.filter(sub_order_no__in=order_nos)
+        else:
+            # Fallback: filter OrderPayment.order_date directly (DateTimeField)
+            if date_from:
+                qs = qs.filter(order_date__date__gte=date_from)
+            if date_to:
+                qs = qs.filter(order_date__date__lte=date_to)
+
+    revenue = qs.aggregate(total=Sum("final_settlement_amount"))["total"] or Decimal("0")
+
+    # Load pricing once — shared by both maps to avoid a second DB round-trip
+    _fp_all      = list(FinalPrice.objects.only("sku_id", "final_price", "packaging_cost"))
+    price_map    = {fp.sku_id: fp.final_price    or Decimal("0") for fp in _fp_all}
+    packaging_map = {fp.sku_id: fp.packaging_cost or Decimal("0") for fp in _fp_all}
+
+    _FIELDS = (
+        "sub_order_no", "supplier_sku", "quantity",
+        "final_settlement_amount", "live_order_status",
+        "recovery_reason", "claims", "return_shipping_charge",
+    )
+
+    # Group ALL payment rows by sub_order_no — one order may have multiple rows
+    # (main delivery row + blank-status affiliate/claim adjustment rows)
+    from collections import defaultdict
+    order_groups = defaultdict(list)
+    for payment in qs.only(*_FIELDS):
+        order_groups[payment.sub_order_no].append(payment)
+
     order_wise_profit = {}
     missing_sku = []
-    total_purchase_cost = 0
-    for order in OrderPayment.objects.only("quantity", "sub_order_no", "final_settlement_amount", "supplier_sku", "live_order_status", "recovery_reason"):
-        sku = order.supplier_sku
-        if sku and sku in price_map:
-            set_profit(sku, order_wise_profit, order, price_map)
-        else:
-            missing_sku.append(sku) 
-    missing_sku = list(set(missing_sku))       
-    total_profit = sum(item['profit'] for item in order_wise_profit.values())
-    total_loss = sum(item['loss'] for item in order_wise_profit.values())
-    total_purchase_cost = sum(item['purchase_cost'] for item in order_wise_profit.values())
-    total_packaging_cost = sum(item['p_cost'] for item in order_wise_profit.values())    
-    # total_orders = 0
-    # for d in order_wise_profit:
-    #     print(d.items())
-        
-        
 
+    for _, payments in order_groups.items():
+        # Primary row = first row that has a live_order_status; fallback to any row
+        primary = next((p for p in payments if p.live_order_status), payments[0])
+        sku = primary.supplier_sku
+        qty = primary.quantity or 1
 
-    ads = AdsCost.objects.aggregate(
-        total=Sum("total_ads_cost")
-    )["total"] or Decimal("0")
+        if not sku or sku not in price_map:
+            missing_sku.append(sku)
+            continue
 
-    referral = ReferralPayment.objects.aggregate(
-        total=Sum("net_referral_amount")
-    )["total"] or Decimal("0")
+        result = compute_order_net(payments, price_map[sku], qty)
+        accumulate_sku_profit(sku, order_wise_profit, result, price_map, packaging_map)
 
-    comp_recovery = CompensationRecovery.objects.aggregate(
-        total=Sum("amount_incl_gst")
-    )["total"] or Decimal("0")
+    missing_sku          = list(set(missing_sku))
+    total_profit         = sum(v["profit"]        for v in order_wise_profit.values())
+    total_loss           = sum(v["loss"]          for v in order_wise_profit.values())
+    total_purchase_cost  = sum(v["purchase_cost"] for v in order_wise_profit.values())
+    total_packaging_cost = sum(v["p_cost"]        for v in order_wise_profit.values())
 
-    gross_revenue = OrderPayment.objects.aggregate(
-        total=Sum("total_sale_amount")
-    )["total"] or Decimal("0")
+    # Aggregate affiliate fees — blank-status rows, forced negative (always a cost)
+    adj_qs = qs.filter(DQ(live_order_status__isnull=True) | DQ(live_order_status=""))
+    raw_aff = adj_qs.aggregate(total=Sum("final_settlement_amount"))["total"] or Decimal("0")
+    total_affiliate_fee = -abs(raw_aff)
 
-    total_commission = OrderPayment.objects.aggregate(
-        total=Sum("meesho_commission_incl_gst")
-    )["total"] or Decimal("0")
+    # Approved claims (positive claims field = money credited to supplier)
+    total_claims = (
+        qs.filter(claims__gt=0).aggregate(total=Sum("claims"))["total"] or Decimal("0")
+    )
 
-    total_tcs = OrderPayment.objects.aggregate(total=Sum("tcs"))["total"] or Decimal("0")
-    total_tds = OrderPayment.objects.aggregate(total=Sum("tds"))["total"] or Decimal("0")
-    total_shipping = OrderPayment.objects.aggregate(
-        total=Sum("shipping_charge_incl_gst")
-    )["total"] or Decimal("0")
+    ads_qs = AdsCost.objects.all()
+    if date_from:
+        ads_qs = ads_qs.filter(deduction_date__gte=date_from)
+    if date_to:
+        ads_qs = ads_qs.filter(deduction_date__lte=date_to)
+    ads = ads_qs.aggregate(total=Sum("total_ads_cost"))["total"] or Decimal("0")
 
-    net_profit = revenue + ads + referral + comp_recovery
+    ref_qs = ReferralPayment.objects.all()
+    if date_from:
+        ref_qs = ref_qs.filter(payment_date__gte=date_from)
+    if date_to:
+        ref_qs = ref_qs.filter(payment_date__lte=date_to)
+    referral = ref_qs.aggregate(total=Sum("net_referral_amount"))["total"] or Decimal("0")
+
+    comp_qs = CompensationRecovery.objects.all()
+    if date_from:
+        comp_qs = comp_qs.filter(date__gte=date_from)
+    if date_to:
+        comp_qs = comp_qs.filter(date__lte=date_to)
+    comp_recovery = comp_qs.aggregate(total=Sum("amount_incl_gst"))["total"] or Decimal("0")
+
+    gross_revenue    = qs.aggregate(total=Sum("total_sale_amount"))["total"] or Decimal("0")
+    total_commission = qs.aggregate(total=Sum("meesho_commission_incl_gst"))["total"] or Decimal("0")
+    total_tcs        = qs.aggregate(total=Sum("tcs"))["total"] or Decimal("0")
+    total_tds        = qs.aggregate(total=Sum("tds"))["total"] or Decimal("0")
+    total_shipping   = qs.aggregate(total=Sum("shipping_charge_incl_gst"))["total"] or Decimal("0")
 
     _, orders_with_price, orders_missing_price, orders_missing_sku = _compute_purchase_cost()
-    # total_profit = revenue - total_purchase_cost
-    
+    # net_revenue includes affiliate adjustments already embedded in total_profit/loss
     net_revenue = total_profit + total_loss + ads
 
     return Response({
@@ -375,9 +578,7 @@ def profit_summary(request):
         "orders_missing_price": orders_missing_price,
         "orders_missing_sku": orders_missing_sku,
         "missing_sku": missing_sku,
-        "total_packaging_cost":total_packaging_cost,
-        
-        # "final_price_sku_count": FinalPrice.objects.count(),
+        "total_packaging_cost": total_packaging_cost,
         "total_ads_cost": round(ads, 2),
         "total_referral_income": round(referral, 2),
         "total_compensation_recovery": round(comp_recovery, 2),
@@ -385,10 +586,15 @@ def profit_summary(request):
         "total_tcs": round(total_tcs, 2),
         "total_tds": round(total_tds, 2),
         "total_shipping_cost": round(total_shipping, 2),
-        # "net_profit": round(net_profit, 2),
-        "order_count": OrderPayment.objects.count(),
-        "ads_campaigns": AdsCost.objects.count(),
-        "referral_count": ReferralPayment.objects.count(),
+        "total_claims": round(total_claims, 2),
+        "total_affiliate_fee": round(total_affiliate_fee, 2),
+        # Counts derived from sku_wise_profit
+        "total_claimed_orders": sum(v.get("claims_count", 0) for v in order_wise_profit.values()),
+        "total_pure_returns":   sum(v.get("return_count",  0) for v in order_wise_profit.values()),
+        "order_count": len(order_groups),
+        "adjustment_count": adj_qs.count(),
+        "ads_campaigns": ads_qs.count(),
+        "referral_count": ref_qs.count(),
         "compensation_recovery_count": CompensationRecovery.objects.count(),
     })
 
@@ -552,47 +758,61 @@ def parent_price_detail(request, item_id):
     serializer.save()
     return Response(serializer.data)
 
-@api_view(["POST"])
-def parent_linking_to_sku(request):
+@api_view(["POST", "PUT"])
+def parent_linking_to_sku(request): 
     try:
-        parent = ParentItemPrice.objects.get(pk=request.data.get("parent_id"))
-    except:
+        
+        if request.method == "POST":
+            serializer = ParentItemPriceSerializer(data=request.data)
+        else:
+            obj = ParentItemPrice.objects.get(pk=request.data["item_id"])
+            serializer = ParentItemPriceSerializer(obj, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)    
+        parent = serializer.save()
+    except Exception as e:
         return Response(
         {
-            "message": f"Not Valid Parent",
-            "parent_id": request.data.get("parent_id")
+            "message": f"Not Valid Parent {e}",
+            "parent_id": request.data.get("item_id")
         },
         status=status.HTTP_400_BAD_REQUEST,
     )
+           
+    if request.method == "PUT":
+        sku_ids = request.data.get("sku_ids", "")
+
+        sku_ids = [
+            sku.strip()
+            for sku in sku_ids.split(",")
+            if sku.strip()
+        ]
         
+        updated_count = FinalPrice.objects.filter(
+            sku_id__in=sku_ids
+        ).update(
+            parent=parent,
+            item_price=parent.item_price,
+            tax_percent=parent.tax_percent,
+            packaging_cost=parent.packaging_cost,
+            final_price=parent.final_price,
+        )
 
-    sku_ids = request.data.get("sku_ids", "")
-
-    sku_ids = [
-        sku.strip()
-        for sku in sku_ids.split(",")
-        if sku.strip()
-    ]
-
-    updated_count = FinalPrice.objects.filter(
-        sku_id__in=sku_ids
-    ).update(
-        parent=parent,
-        item_price=parent.item_price,
-        tax_percent=parent.tax_percent,
-        packaging_cost=parent.packaging_cost,
-        final_price=parent.final_price,
-    )
-
-    return Response(
-        {
-            "message": f"{updated_count} SKU(s) linked successfully",
-            "parent_id": parent.item_id,
-            "sku_ids": sku_ids,
-        },
-        status=status.HTTP_200_OK,
-    )
-    
+        return Response(
+            {
+                "message": f"{updated_count} SKU(s) linked successfully",
+                "parent_id": parent.item_id,
+                "sku_ids": sku_ids,
+            },
+            status=status.HTTP_200_OK,
+        )
+    else:
+        return Response(
+            {
+                "message": "Parent Created successfully",
+                "parent_id": parent.item_id
+            },
+            status=status.HTTP_200_OK,
+        )
 @api_view(["POST"])
 @parser_classes([MultiPartParser])
 def upload_final_price(request):
@@ -727,8 +947,15 @@ def upload_orders_csv(request):
                 ).strip(),
             }
 
+            # Composite lookup: (sub_order_no, status, order_date).
+            # A new status change on the same order creates a new row so that
+            # the full lifecycle history is preserved.
+            lookup_status     = defaults.pop("reason_for_credit_entry")
+            lookup_order_date = defaults.pop("order_date")
             _, was_created = Order.objects.update_or_create(
                 sub_order_no=sub_order_no,
+                reason_for_credit_entry=lookup_status,
+                order_date=lookup_order_date,
                 defaults=defaults,
             )
 
@@ -787,16 +1014,19 @@ def full_orders_analytics(request):
     date_from = request.GET.get("date_from", "")
     date_to = request.GET.get("date_to", "")
 
-    qs = Order.objects.all()
+    date_filtered = Order.objects.all()
     if date_from:
-        qs = qs.filter(order_date__gte=date_from)
+        date_filtered = date_filtered.filter(order_date__gte=date_from)
     if date_to:
-        qs = qs.filter(order_date__lte=date_to)
+        date_filtered = date_filtered.filter(order_date__lte=date_to)
+
+    # Use latest status per order so lifecycle updates don't double-count
+    qs = Order.latest_per_order(base_qs=date_filtered)
 
     by_status = list(
         qs.values("reason_for_credit_entry")
         .annotate(
-            count=Count("sub_order_no"),
+            count=Count("sub_order_no", distinct=True),
             total_listed=Sum("supplier_listed_price"),
             total_discounted=Sum("supplier_discounted_price"),
         )
@@ -804,19 +1034,19 @@ def full_orders_analytics(request):
 
     by_state = list(
         qs.values("customer_state")
-        .annotate(count=Count("sub_order_no"))
+        .annotate(count=Count("sub_order_no", distinct=True))
         .order_by("-count")[:10]
     )
 
     by_sku = list(
         qs.values("sku")
-        .annotate(count=Count("sub_order_no"), total_qty=Sum("quantity"))
+        .annotate(count=Count("sub_order_no", distinct=True), total_qty=Sum("quantity"))
         .order_by("-count")[:20]
     )
 
     daily = list(
         qs.values("order_date")
-        .annotate(count=Count("sub_order_no"))
+        .annotate(count=Count("sub_order_no", distinct=True))
         .order_by("order_date")
     )
 
@@ -832,48 +1062,47 @@ def full_orders_analytics(request):
 @api_view(["GET"])
 def dashboard_analytics(request):
     """
-    Joins Order (full lifecycle) and OrderPayment (settled) by sub_order_no.
-    Strategy: filter Orders by order_date, then find payments for exactly
-    those orders — regardless of when the payment was received.
-    This correctly answers: "for orders placed in this period, what got settled?"
+    Primary filter: Order.order_date (reliable DateField).
+    Then join OrderPayment by sub_order_no to find settled orders.
+    Unsettled = orders in date range with no matching payment.
     """
     date_from = request.GET.get("date_from", "")
     date_to   = request.GET.get("date_to", "")
 
-    # ── Step 1: filter Orders by placement date ───────────────────────────────
-    order_qs = Order.objects.all()
+    # ── Step 1: filter Orders by placement date, then deduplicate to latest ──
+    date_filtered_qs = Order.objects.all()
     if date_from:
-        order_qs = order_qs.filter(order_date__gte=date_from)
+        date_filtered_qs = date_filtered_qs.filter(order_date__gte=date_from)
     if date_to:
-        order_qs = order_qs.filter(order_date__lte=date_to)
+        date_filtered_qs = date_filtered_qs.filter(order_date__lte=date_to)
 
+    # latest_per_order ensures each sub_order_no appears once (most-recent status row)
+    order_qs  = Order.latest_per_order(base_qs=date_filtered_qs)
     order_nos = set(order_qs.values_list("sub_order_no", flat=True))
 
-    # ── Step 2: find payments for ONLY those orders (join on sub_order_no) ────
-    # Do NOT apply a separate date filter on payments — we want to know which
-    # of the date-range orders have been settled, regardless of settlement date.
+    # ── Step 2: find payments for those orders ────────────────────────────────
     payment_qs = (
         OrderPayment.objects.filter(sub_order_no__in=order_nos)
         if order_nos
         else OrderPayment.objects.none()
     )
 
-    payment_nos = set(payment_qs.values_list("sub_order_no", flat=True))
+    payment_nos = set(payment_qs.values_list("sub_order_no", flat=True).distinct())
     matched     = order_nos & payment_nos
     match_rate  = round(len(matched) / len(order_nos) * 100, 1) if order_nos else 0.0
 
-    # ── Order aggregates ──────────────────────────────────────────────────────
+    # ── Order aggregates (on latest-per-order queryset) ───────────────────────
     order_by_status = list(
         order_qs.values("reason_for_credit_entry")
         .annotate(
-            count=Count("sub_order_no"),
+            count=Count("sub_order_no", distinct=True),
             total_value=Sum("supplier_discounted_price"),
         )
     )
 
     order_daily = list(
         order_qs.values("order_date")
-        .annotate(count=Count("sub_order_no"))
+        .annotate(count=Count("sub_order_no", distinct=True))
         .order_by("order_date")
         .values("order_date", "count")
     )
@@ -885,13 +1114,13 @@ def dashboard_analytics(request):
         total_commission=Sum("meesho_commission_incl_gst"),
         total_tcs=Sum("tcs"),
         total_tds=Sum("tds"),
-        settled_count=Count("sub_order_no"),
+        settled_count=Count("sub_order_no", distinct=True),
     )
 
     payment_by_status = list(
         payment_qs.values("live_order_status")
         .annotate(
-            count=Count("sub_order_no"),
+            count=Count("sub_order_no", distinct=True),
             total_settlement=Sum("final_settlement_amount"),
             total_sale=Sum("total_sale_amount"),
         )
@@ -900,12 +1129,15 @@ def dashboard_analytics(request):
     payment_daily = list(
         payment_qs.exclude(payment_date=None)
         .values("payment_date")
-        .annotate(count=Count("sub_order_no"), total=Sum("final_settlement_amount"))
+        .annotate(
+            count=Count("sub_order_no", distinct=True),
+            total=Sum("final_settlement_amount"),
+        )
         .order_by("payment_date")
         .values("payment_date", "count", "total")
     )
 
-    # ── Per-status settlement crosswalk ───────────────────────────────────────
+    # ── Per-status crosswalk ──────────────────────────────────────────────────
     status_settlement = []
     for row in order_by_status:
         status_val = row["reason_for_credit_entry"]
@@ -915,7 +1147,7 @@ def dashboard_analytics(request):
         )
         agg = payment_qs.filter(sub_order_no__in=sub_nos).aggregate(
             total=Sum("final_settlement_amount"),
-            count=Count("sub_order_no"),
+            count=Count("sub_order_no", distinct=True),
         )
         status_settlement.append({
             "status": status_val,
@@ -924,6 +1156,10 @@ def dashboard_analytics(request):
             "settlement_amount": float(agg["total"] or 0),
             "order_value": float(row["total_value"] or 0),
         })
+
+    # ── Unsettled orders summary (latest status per order, no payment row) ────
+    unsettled_qs  = order_qs.exclude(sub_order_no__in=payment_nos)
+    unsettled_agg = unsettled_qs.aggregate(total_value=Sum("supplier_discounted_price"))
 
     return Response({
         "order_stats": {
@@ -948,6 +1184,10 @@ def dashboard_analytics(request):
             "match_rate": match_rate,
         },
         "status_settlement": status_settlement,
+        "unsettled": {
+            "count": unsettled_qs.count(),
+            "total_value": float(unsettled_agg["total_value"] or 0),
+        },
     })
 
 
@@ -1134,9 +1374,23 @@ def upload_labels_pdf(request):
     if not file.name.lower().endswith(".pdf"):
         return Response({"error": "Only PDF files are accepted."}, status=status.HTTP_400_BAD_REQUEST)
 
-    pdf_bytes      = file.read()
-    today          = timezone.now().date()
-    sku_data       = {}
+    pdf_bytes = file.read()
+
+    # ── Batch date: accept back-dated uploads ─────────────────────────────────
+    # Caller can pass upload_date=YYYY-MM-DD in the form to record historical
+    # label batches under a past date. Must be ≤ today; defaults to today.
+    from datetime import date as _date_cls
+    today = timezone.now().date()
+    upload_date_str = request.data.get("upload_date", "").strip()
+    if upload_date_str:
+        try:
+            candidate = _date_cls.fromisoformat(upload_date_str)
+            if candidate <= today:
+                today = candidate
+        except ValueError:
+            pass  # invalid format — fall back to today
+
+    sku_data = {}
     page_details   = []
     crop_y_list    = []   # pdfplumber top-y for TAX INVOICE, per page
     pl_heights     = []   # pdfplumber page heights
@@ -1214,23 +1468,59 @@ def upload_labels_pdf(request):
                         status=status.HTTP_400_BAD_REQUEST)
 
     # ── Save parsed rows to DB ────────────────────────────────────────────────
+    # Rule: uploaded_date is SET only when a record is FIRST created.
+    # On re-upload the row's data (courier, AWB, SKU, address…) is refreshed
+    # but uploaded_date stays untouched — so orders remain on their original
+    # day and don't "move" when the same order appears in a later batch.
+    #
+    # Note: create_defaults (Django 5.0+) is not available; we use
+    # get_or_create + filter().update() which achieves the same semantics
+    # on Django 4.2.
     saved = updated = 0
     with transaction.atomic():
         for row in db_rows:
-            oid = row.pop("order_id")
-            _, created = LabelOrder.objects.update_or_create(order_id=oid, defaults=row)
+            oid         = row.pop("order_id")
+            upload_date = row.pop("uploaded_date")  # only used on first INSERT
+
+            _, created = LabelOrder.objects.get_or_create(
+                order_id=oid,
+                defaults={"uploaded_date": upload_date, **row},
+            )
             if created:
                 saved += 1
             else:
+                # Refresh all data fields — but leave uploaded_date alone
+                LabelOrder.objects.filter(order_id=oid).update(**row)
                 updated += 1
 
-    # ── Generate cropped PDF (label region only) ──────────────────────────────
+    # ── Generate cropped PDF (label region only, sorted by SKU count desc) ──────
+    # Build SKU rank so PDF page order matches the table (most-ordered SKU first)
+    sku_rank = {
+        sku: rank
+        for rank, (sku, _) in enumerate(
+            sorted(sku_data.items(), key=lambda x: -x[1]["count"])
+        )
+    }
+
     cropped_pdf_b64 = None
     if HAS_PYPDF:
         try:
             reader = PdfReader(io.BytesIO(pdf_bytes))
             writer = PdfWriter()
-            for i, pg in enumerate(reader.pages):
+            # Sort pages: by SKU rank then original page index so within each SKU
+            # group the original ordering is preserved; no-SKU pages go last.
+            page_order = sorted(
+                range(len(reader.pages)),
+                key=lambda i: (
+                    sku_rank.get(
+                        page_details[i]["sku"] if i < len(page_details) else "",
+                        len(sku_data),
+                    ),
+                    i,
+                ),
+            )
+            for i in page_order:
+                pg   = reader.pages[i]
                 ph   = float(pg.mediabox.height)
                 pw   = float(pg.mediabox.width)
                 pl_h = pl_heights[i] if i < len(pl_heights) else ph
@@ -1257,6 +1547,7 @@ def upload_labels_pdf(request):
 
     return Response({
         "success": True,
+        "upload_date":      str(today),          # actual date used (may be back-dated)
         "total_pages":      total_pages,
         "total_unique_skus":len(sku_data),
         "total_labels":     total_labels,
@@ -1317,27 +1608,27 @@ def label_orders_list(request):
 @api_view(["GET"])
 def label_couriers_summary(request):
     """
-    Courier-wise order count for a date.  Defaults to today.
+    Courier-wise order count for a date range.
     Query params: date (single day), date_from, date_to
+    No date params = return all records.
     Also returns the list of available uploaded dates for the date-picker.
     """
     date_single = request.GET.get("date", "")
     date_from   = request.GET.get("date_from", "")
     date_to     = request.GET.get("date_to", "")
 
-    if not date_single and not date_from and not date_to:
-        date_single = timezone.now().date().isoformat()
-
     qs = LabelOrder.objects.all()
     if date_single:
         qs = qs.filter(uploaded_date=date_single)
         filter_label = date_single
-    else:
+    elif date_from or date_to:
         if date_from:
             qs = qs.filter(uploaded_date__gte=date_from)
         if date_to:
             qs = qs.filter(uploaded_date__lte=date_to)
         filter_label = f"{date_from or '…'} → {date_to or '…'}"
+    else:
+        filter_label = "All"
 
     courier_rows = list(
         qs.values("courier_name")
@@ -1369,4 +1660,282 @@ def label_couriers_summary(request):
         "courier_summary": courier_rows,
         "sku_summary":     sku_rows,
         "available_dates": [str(d) for d in available_dates],
+    })
+
+
+@api_view(["GET"])
+def label_duplicate_customers(request):
+    """
+    Find repeat customers within an optional date range.
+    Uses DB-level GROUP BY instead of Python-level scanning for speed.
+
+    Query params: date_from, date_to (both optional; no params = all time)
+    Groups by: customer_name, customer_pincode
+    """
+    from collections import defaultdict
+
+    date_from = request.GET.get("date_from", "")
+    date_to   = request.GET.get("date_to",   "")
+
+    has_date_filter = bool(date_from or date_to)
+
+    # ── Step 1: find which customers/pincodes appear in the selected period ───
+    period_qs = LabelOrder.objects.exclude(customer_name="")
+    if date_from:
+        period_qs = period_qs.filter(uploaded_date__gte=date_from)
+    if date_to:
+        period_qs = period_qs.filter(uploaded_date__lte=date_to)
+
+    # ── Step 2: for those customers, check ALL-TIME order counts ─────────────
+    # This lets a customer who ordered today (once) still appear if they also
+    # ordered last week — their full history is visible on click.
+    period_names = set(period_qs.values_list("customer_name", flat=True).distinct())
+    if not period_names:
+        return Response({"total_by_name": 0, "total_by_location": 0,
+                         "by_name": [], "by_location": []})
+
+    all_time_qs = LabelOrder.objects.exclude(customer_name="").filter(
+        customer_name__in=period_names
+    )
+
+    # All-time aggregates (only for customers present in the period)
+    name_agg = list(
+        all_time_qs.values("customer_name")
+        .annotate(
+            order_count=Count("order_id"),
+            first_ordered=Min("uploaded_date"),
+            last_ordered=Max("uploaded_date"),
+        )
+        .filter(order_count__gt=1)
+        .order_by("-order_count")
+    )
+
+    # Period count per customer (how many in the selected window)
+    period_count_map = {}
+    if has_date_filter:
+        period_count_map = dict(
+            period_qs.values("customer_name").annotate(cnt=Count("order_id")).values_list("customer_name", "cnt")
+        )
+
+    if name_agg:
+        repeat_names = [r["customer_name"] for r in name_agg]
+        detail_rows = list(
+            all_time_qs.filter(customer_name__in=repeat_names)
+            .values("customer_name", "customer_city", "customer_state", "customer_pincode", "sku")
+            .distinct()
+        )
+        sku_map  = defaultdict(set)
+        meta_map = {}
+        for row in detail_rows:
+            name = row["customer_name"]
+            if row["sku"]:
+                sku_map[name].add(row["sku"])
+            if name not in meta_map:
+                meta_map[name] = {
+                    "city": row["customer_city"], "state": row["customer_state"],
+                    "pincode": row["customer_pincode"],
+                }
+    else:
+        sku_map = {}
+        meta_map = {}
+
+    by_name = [
+        {
+            "customer_name":    r["customer_name"],
+            "customer_city":    meta_map.get(r["customer_name"], {}).get("city", ""),
+            "customer_state":   meta_map.get(r["customer_name"], {}).get("state", ""),
+            "customer_pincode": meta_map.get(r["customer_name"], {}).get("pincode", ""),
+            "order_count":      r["order_count"],          # all-time total
+            "period_count":     period_count_map.get(r["customer_name"], r["order_count"]),
+            "skus":             list(sku_map.get(r["customer_name"], set())),
+            "first_ordered":    str(r["first_ordered"]),
+            "last_ordered":     str(r["last_ordered"]),
+        }
+        for r in name_agg
+    ]
+
+    # ── By pincode — same all-time + period logic ─────────────────────────────
+    period_pins = set(
+        period_qs.exclude(customer_pincode="").values_list("customer_pincode", flat=True).distinct()
+    )
+    all_time_pin_qs = LabelOrder.objects.exclude(customer_name="").exclude(customer_pincode="")
+    if period_pins:
+        all_time_pin_qs = all_time_pin_qs.filter(customer_pincode__in=period_pins)
+
+    pin_agg = list(
+        all_time_pin_qs.values("customer_pincode")
+        .annotate(
+            order_count=Count("order_id"),
+            first_ordered=Min("uploaded_date"),
+            last_ordered=Max("uploaded_date"),
+        )
+        .filter(order_count__gt=1)
+        .order_by("-order_count")
+    )
+
+    pin_period_count_map = {}
+    if has_date_filter:
+        pin_period_count_map = dict(
+            period_qs.exclude(customer_pincode="")
+            .values("customer_pincode").annotate(cnt=Count("order_id")).values_list("customer_pincode", "cnt")
+        )
+
+    if pin_agg:
+        repeat_pins = [r["customer_pincode"] for r in pin_agg]
+        pin_detail  = list(
+            all_time_pin_qs.filter(customer_pincode__in=repeat_pins)
+            .values("customer_pincode", "customer_name", "customer_city", "customer_state", "sku")
+            .distinct()
+        )
+        pin_names = defaultdict(set)
+        pin_skus  = defaultdict(set)
+        pin_meta  = {}
+        for row in pin_detail:
+            pin = row["customer_pincode"]
+            if row["customer_name"]:
+                pin_names[pin].add(row["customer_name"])
+            if row["sku"]:
+                pin_skus[pin].add(row["sku"])
+            if pin not in pin_meta:
+                pin_meta[pin] = {"city": row["customer_city"], "state": row["customer_state"]}
+    else:
+        pin_names = {}
+        pin_skus  = {}
+        pin_meta  = {}
+
+    by_location = [
+        {
+            "customer_pincode": r["customer_pincode"],
+            "customer_city":    pin_meta.get(r["customer_pincode"], {}).get("city", ""),
+            "customer_state":   pin_meta.get(r["customer_pincode"], {}).get("state", ""),
+            "order_count":      r["order_count"],
+            "period_count":     pin_period_count_map.get(r["customer_pincode"], r["order_count"]),
+            "distinct_names":   len(pin_names.get(r["customer_pincode"], set())),
+            "customer_names":   list(pin_names.get(r["customer_pincode"], set()))[:6],
+            "skus":             list(pin_skus.get(r["customer_pincode"], set()))[:5],
+            "first_ordered":    str(r["first_ordered"]),
+            "last_ordered":     str(r["last_ordered"]),
+        }
+        for r in pin_agg
+    ]
+
+    return Response({
+        "total_by_name":     len(by_name),
+        "total_by_location": len(by_location),
+        "by_name":           by_name,
+        "by_location":       by_location,
+    })
+
+
+@api_view(["GET"])
+def label_customer_history(request):
+    """
+    Full order + settlement history for one customer.
+
+    Query params (at least one required):
+      name    – customer name (case-insensitive exact match)
+      pincode – customer pincode (exact)
+
+    Joins:
+      LabelOrder  →  Order        (via order_id = sub_order_no) for delivery status
+      LabelOrder  →  OrderPayment (via order_id = sub_order_no) for settlement
+    """
+    from datetime import date as _date, datetime as _datetime
+
+    name    = request.GET.get("name", "").strip()
+    pincode = request.GET.get("pincode", "").strip()
+
+    if not name and not pincode:
+        return Response({"error": "Provide at least name or pincode."}, status=400)
+
+    qs = LabelOrder.objects.all()
+    if name:
+        qs = qs.filter(customer_name__iexact=name)
+    if pincode:
+        qs = qs.filter(customer_pincode=pincode)
+
+    label_list = list(qs.order_by("-uploaded_date").values())
+    if not label_list:
+        return Response({"orders": [], "summary": {}, "customer_name": name})
+
+    order_ids = [r["order_id"] for r in label_list]
+
+    # Join OrderPayment
+    payment_map = {
+        p.sub_order_no: {
+            "live_order_status":  p.live_order_status or "",
+            "settlement_amount":  float(p.final_settlement_amount or 0),
+            "total_sale_amount":  float(p.total_sale_amount or 0),
+            "payment_date":       str(p.payment_date) if p.payment_date else None,
+        }
+        for p in OrderPayment.objects.filter(sub_order_no__in=order_ids)
+    }
+
+    # Join Order (lifecycle status)
+    status_map = {
+        o.sub_order_no: o.reason_for_credit_entry
+        for o in Order.objects.filter(sub_order_no__in=order_ids)
+    }
+
+    # ── Enrich and accumulate ────────────────────────────────────────────────
+    delivered = rto = cancelled = settled_count = 0
+    total_settlement = 0.0
+    enriched = []
+
+    for lo in label_list:
+        oid             = lo["order_id"]
+        pmt             = payment_map.get(oid)
+        delivery_status = status_map.get(oid, "")
+        is_settled      = oid in payment_map
+        amt             = pmt["settlement_amount"] if pmt else None
+
+        if delivery_status == "DELIVERED":
+            delivered += 1
+        elif delivery_status == "RTO_COMPLETE":
+            rto += 1
+        elif delivery_status == "CANCELLED":
+            cancelled += 1
+
+        if is_settled:
+            settled_count    += 1
+            total_settlement += (amt or 0)
+
+        # Serialize dates to strings
+        row = {}
+        for k, v in lo.items():
+            if isinstance(v, (_date, _datetime)):
+                row[k] = str(v)
+            else:
+                row[k] = v
+
+        row.update({
+            "delivery_status":   delivery_status,
+            "live_order_status": pmt["live_order_status"] if pmt else "",
+            "settlement_amount": amt,
+            "total_sale_amount": pmt["total_sale_amount"] if pmt else None,
+            "payment_date":      pmt["payment_date"] if pmt else None,
+            "is_settled":        is_settled,
+        })
+        enriched.append(row)
+
+    first = label_list[0]
+    total = len(label_list)
+
+    return Response({
+        "customer_name":    first.get("customer_name", ""),
+        "customer_address": first.get("customer_address", ""),
+        "customer_city":    first.get("customer_city", ""),
+        "customer_state":   first.get("customer_state", ""),
+        "customer_pincode": first.get("customer_pincode", ""),
+        "summary": {
+            "total_orders":     total,
+            "total_items":      sum(r.get("qty", 1) for r in label_list),
+            "delivered":        delivered,
+            "rto":              rto,
+            "cancelled":        cancelled,
+            "pending":          total - delivered - rto - cancelled,
+            "settled_count":    settled_count,
+            "total_settlement": round(total_settlement, 2),
+        },
+        "orders": enriched,
     })
