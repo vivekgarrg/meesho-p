@@ -120,11 +120,15 @@ export function SKUAnalysisTab() {
       .then(r => r.json())
       .then(d => {
         const raw = d.sku_wise_profit || {};
-        const prepared = Object.keys(raw).map(key => ({
-          sku_id:     key,
-          net_profit: raw[key]["profit"] + raw[key]["loss"],
-          ...raw[key],
-        }));
+        const prepared = Object.keys(raw).map(key => {
+          const r = raw[key];
+          console.log(r, "~r")
+          return {
+            sku_id: key,
+            ...r,
+            net_profit: Number(r.net_profit ?? (Number(r.delivered_profit || 0) + Number(r.return_loss || 0))),
+          };
+        });
         setAllData(prepared.sort((a, b) => b.net_profit - a.net_profit));
         setLoading(false);
       })
@@ -140,11 +144,14 @@ export function SKUAnalysisTab() {
     view === "loss"   ? lossRows   :
     allData;
 
-  const totalNet    = allData.reduce((a, s) => a + s.net_profit, 0);
-  const totalProfit = profitRows.reduce((a, s) => a + s.net_profit, 0);
-  const totalLoss   = lossRows.reduce((a, s) => a + s.net_profit, 0);
-  const bestSKU     = profitRows[0];
-  const worstSKU    = lossRows[0];
+  const totalNet             = allData.reduce((a, s) => a + s.net_profit, 0);
+  const totalDeliveredProfit = allData.reduce((a, s) => a + Number(s.delivered_profit || 0), 0);
+  const totalReturnLoss      = allData.reduce((a, s) => a + Number(s.return_loss || 0), 0);
+  const totalClaims          = allData.reduce((a, s) => a + Number(s.claims_total || 0), 0);
+  const totalDelivered       = allData.reduce((a, s) => a + (s.delivered_count || 0), 0);
+  const totalReturns         = allData.reduce((a, s) => a + (s.return_count || 0), 0);
+  const bestSKU              = profitRows[0];
+  const worstSKU             = lossRows[0];
 
   const chartData =
     view === "all"
@@ -232,9 +239,10 @@ export function SKUAnalysisTab() {
         <>
           {/* KPI cards */}
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 14 }}>
-            <StatCard label="Net P&L"      value={totalNet}             accent={totalNet >= 0 ? C.green : C.red} icon="💹" sub={`${allData.length} mapped SKUs`} />
-            <StatCard label="Total Profit" value={totalProfit}          accent={C.green} icon="✅" sub={`${profitRows.length} SKUs earning`} />
-            <StatCard label="Total Loss"   value={totalLoss}            accent={C.red}   icon="📉" sub={`${lossRows.length} SKUs in loss`} />
+            <StatCard label="Net P&L"            value={totalNet}             accent={totalNet >= 0 ? C.green : C.red} icon="💹" sub={`${allData.length} mapped SKUs`} />
+            <StatCard label="Delivered Profit"   value={totalDeliveredProfit} accent={C.amber} icon="✅" sub={`${totalDelivered} delivered orders`} />
+            <StatCard label="Return Loss"        value={totalReturnLoss}      accent={C.red}   icon="📉" sub={`${totalReturns} returns`} />
+            <StatCard label="Claims Received"    value={totalClaims}          accent={C.blue}  icon="🔖" sub={`${allData.reduce((a,s)=>a+(s.claims_count||0),0)} claimed orders`} />
             {bestSKU  && <StatCard label="Best SKU"  value={bestSKU.net_profit}  accent={C.green} sub={bestSKU.sku_id}  icon="🏆" />}
             {worstSKU && <StatCard label="Worst SKU" value={worstSKU.net_profit} accent={C.red}   sub={worstSKU.sku_id} icon="⚠️" />}
           </div>

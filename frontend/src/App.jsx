@@ -203,11 +203,9 @@ export function SKUTable({ data, mode }) {
   const [page,   setPage]   = useState(1);
 
   const filtered = data.filter(
-    (s) => !search || s.sku_id.toLowerCase().includes(search.toLowerCase()) ||
-      (s.product_name || "").toLowerCase().includes(search.toLowerCase())
+    (s) => !search || s.sku_id.toLowerCase().includes(search.toLowerCase())
   );
 
-  // Reset to page 1 whenever the search or data changes
   useEffect(() => { setPage(1); }, [search, data]);
 
   const visible = filtered.slice((page - 1) * SKU_PAGE_SIZE, page * SKU_PAGE_SIZE);
@@ -217,83 +215,109 @@ export function SKUTable({ data, mode }) {
     mode === "loss"   ? "⚠️ Loss-making SKUs" :
     "📊 All SKUs";
 
+  const thR = { ...S.th, textAlign: "right" };
+
   return (
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, flexWrap: "wrap", gap: 10 }}>
         <p style={{ ...S.cardTitle, marginBottom: 0 }}>
           {modeLabel} — {filtered.length} items
         </p>
-        <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search SKU or product…"
+        <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search SKU…"
           style={{ ...S.inp, width: 220, fontSize: 12 }} />
       </div>
       <div style={{ overflowX: "auto" }}>
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
           <thead>
             <tr>
-              {["#", "SKU ID", "Final Price", "Loss", "Profit", "Purchase Cost", "Settled Amount", "Total Purchase Cost", "Claims", "Delivered", "Returns", "Net Profit / Loss"].map((h) => (
-                <th key={h} style={{ ...S.th, textAlign: h.includes("Price") || h.includes("Profit") || h.includes("Loss") || h === "Claims" ? "right" : "left" }}>{h}</th>
-              ))}
+              <th style={S.th}>#</th>
+              <th style={S.th}>SKU ID</th>
+              <th style={thR}>Unit Price</th>
+              <th style={thR}>Deliveries</th>
+              <th style={thR}>Returns</th>
+              <th style={thR}>RTO</th>
+              <th style={thR}>Claims</th>
+              <th style={thR}>Net P&L</th>
             </tr>
           </thead>
           <tbody>
             {visible.map((s, i) => {
-              const globalIdx = (page - 1) * SKU_PAGE_SIZE + i;
-              const rowBg = globalIdx % 2 === 0 ? C.white : C.gray50;
+              const globalIdx    = (page - 1) * SKU_PAGE_SIZE + i;
+              const rowBg        = globalIdx % 2 === 0 ? C.white : C.gray100;
+              const delCount     = s.delivered_count ?? 0;
+              const retCount     = s.return_count    ?? 0;
+              const rtoCount     = s.rto_count       ?? 0;
+              const claimCount   = s.claims_count    ?? 0;
               return (
                 <tr key={s.sku_id} style={{ background: rowBg }}
                   onMouseEnter={(e) => (e.currentTarget.style.background = "#F0F7FF")}
                   onMouseLeave={(e) => (e.currentTarget.style.background = rowBg)}
                 >
                   <td style={{ ...S.td, color: C.gray400, fontSize: 11 }}>{globalIdx + 1}</td>
+
+                  {/* SKU ID */}
                   <td style={S.td}>
                     <span style={{ fontFamily: "monospace", fontSize: 12, color: C.orange, fontWeight: 600, background: C.orangeLight, padding: "2px 6px", borderRadius: 4 }}>
                       {s.sku_id}
                     </span>
                   </td>
-                  <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", fontWeight: 600 }}>{fmt(s.final_price)}</td>
-                  <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", fontWeight: 600 }}>{fmt(s.loss)}</td>
-                  <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", fontWeight: 600 }}>{fmt(s.profit)}</td>
-                  <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", fontWeight: 600 }}>{fmt(s.purchase_cost)}</td>
-                  <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", fontWeight: 600 }}>{fmt(s.settled_amount)}</td>
-                  <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", fontWeight: 600 }}>{fmt(s.total_purchase_cost)}</td>
+
+                  {/* Unit Price */}
+                  <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", fontWeight: 600 }}>
+                    {fmt(s.one_unit_price)}
+                  </td>
+
+                  {/* Deliveries: count + profit */}
                   <td style={{ ...S.td, textAlign: "right" }}>
-                    {(s.claims_total ?? 0) !== 0 ? (
-                      <span style={{
-                        fontFamily: "monospace", fontWeight: 600, fontSize: 12,
-                        color: s.claims_total > 0 ? C.blue : C.red,
-                        background: s.claims_total > 0 ? C.blueLight : C.redLight,
-                        padding: "2px 8px", borderRadius: 4,
-                        border: `1px solid ${s.claims_total > 0 ? "#BFDBFE" : C.redBorder}`,
-                      }}>{fmt(s.claims_total)}</span>
+                    {delCount > 0 ? (
+                      <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 3 }}>
+                        <Tag variant="green">{delCount} orders</Tag>
+                        <span style={{ fontFamily: "monospace", fontSize: 12, color: C.green, fontWeight: 600 }}>
+                          +{fmt(s.delivered_profit)}
+                        </span>
+                      </div>
                     ) : <span style={{ color: C.gray300 }}>—</span>}
                   </td>
-                  <td style={{ ...S.td, textAlign: "center" }}><Tag variant="green">{s.Delivered ?? 0}</Tag></td>
-                  <td style={{ ...S.td, textAlign: "center" }}>
-                    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                      {/* Pure returns (no claim) */}
-                      <Tag variant="red">↩ Returns: {s.return_count ?? (s.Return ?? 0)}</Tag>
-                      <Tag variant="gray">RTO: {s.RTO ?? 0}</Tag>
-                      <Tag variant="amber">Exchange: {s.Exchange ?? 0}</Tag>
-                      <Tag variant="gray">Cancelled: {s.Cancelled ?? 0}</Tag>
-                      <Tag variant="green">Shipped: {s.Shipped ?? 0}</Tag>
-                      {/* Claimed orders — separate from returns */}
-                      {(s.claims_count ?? 0) > 0 && (
-                        <span style={{
-                          padding: "2px 8px", borderRadius: 20, fontSize: 11, fontWeight: 700,
-                          background: C.blueLight, color: C.blue, border: "1px solid #BFDBFE",
-                          whiteSpace: "nowrap",
-                        }}>
-                          ✅ Claims: {s.claims_count} ({s.claims_total > 0 ? "+" : ""}{Number(s.claims_total).toFixed(0)})
-                        </span>
-                      )}
+
+                  {/* Returns: count + loss */}
+                  <td style={{ ...S.td, textAlign: "right" }}>
+                    <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 3 }}>
+                      <Tag variant={retCount>0 ?  "red": "gray"}>{retCount} returns</Tag>
+                      {retCount> 0 && <span style={{ fontFamily: "monospace", fontSize: 12, color: C.red, fontWeight: 600 }}>
+                        {fmt(s.return_loss)}
+                      </span>}
                     </div>
                   </td>
+
+                  {/* RTO: count + net */}
+                  <td style={{ ...S.td, textAlign: "right" }}>
+                      <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 3 }}>
+                        <Tag variant={rtoCount>0 ?"amber":"gray"}>{rtoCount} RTO</Tag>
+                       {rtoCount>0 && <span style={{ fontFamily: "monospace", fontSize: 12, color: C.amber, fontWeight: 600 }}>
+                          {fmt(s.rto_loss)}
+                        </span>}
+                      </div>
+                  </td>
+
+                  {/* Claims: count + amount */}
+                  <td style={{ ...S.td, textAlign: "right" }}>
+                   
+                      <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 3 }}>
+                        <Tag variant={claimCount>0 ?"blue":"gray"}>{claimCount} claims</Tag>
+                        {claimCount>0 && <span style={{ fontFamily: "monospace", fontSize: 12, color: C.blue, fontWeight: 600 }}>
+                          {fmt(s.claims_total)}
+                        </span>}
+                      </div>
+                   
+                  </td>
+
+                  {/* Net P&L */}
                   <td style={{ ...S.td, textAlign: "right" }}>
                     <span style={{
                       fontFamily: "monospace", fontWeight: 700, fontSize: 13,
                       background: s.net_profit >= 0 ? C.greenLight : C.redLight,
-                      color: s.net_profit >= 0 ? C.green : C.red,
-                      border: `1px solid ${s.net_profit >= 0 ? C.greenBorder : C.redBorder}`,
+                      color:      s.net_profit >= 0 ? C.green      : C.red,
+                      border:     `1px solid ${s.net_profit >= 0 ? C.greenBorder : C.redBorder}`,
                       padding: "3px 10px", borderRadius: 6, display: "inline-block",
                     }}>
                       {fmt(s.net_profit)}
@@ -303,7 +327,7 @@ export function SKUTable({ data, mode }) {
               );
             })}
             {visible.length === 0 && (
-              <tr><td colSpan={12} style={{ ...S.td, textAlign: "center", padding: 40, color: C.gray400 }}>
+              <tr><td colSpan={8} style={{ ...S.td, textAlign: "center", padding: 40, color: C.gray400 }}>
                 {data.length === 0 ? "No data — upload Meesho report and add SKU pricing first" : "No results matching search"}
               </td></tr>
             )}

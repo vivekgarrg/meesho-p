@@ -305,8 +305,8 @@ OverviewTab() {
                 { label: "Ads Cost",      val: profit.total_ads_cost,              color: C.red,    op: "+" },
                 { label: "Referral",      val: profit.total_referral_income,       color: C.green,  op: "+" },
                 { label: "Comp/Recovery", val: profit.total_compensation_recovery, color: C.amber,  op: "+" },
-                { label: "Claims",        val: profit.total_claims,                           color: C.blue, op: "+" },
-                { label: "Affiliate Fee", val: Math.abs(Number(profit.total_affiliate_fee)), color: C.red,  op: "−" },
+                // { label: "RTO/RETURNS",    val: profit.total_loss,                 color: C.red, op: "+" },
+                // { label: "Affiliate Fee", val: Math.abs(Number(profit.total_affiliate_fee)), color: C.red,  op: "−" },
               ].map((item, i) => (
                 <span key={i} style={{ display: "flex", alignItems: "center", gap: 6 }}>
                   {item.op && <span style={{ fontSize: 16, color: C.gray400, fontWeight: 300 }}>{item.op}</span>}
