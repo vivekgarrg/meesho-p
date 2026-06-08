@@ -4,6 +4,7 @@ import {
   ResponsiveContainer, Cell,
 } from "recharts";
 import { C, S, API, SectionHeader, Pagination, fmt } from "../../App";
+import { PAGE_SIZE } from "../../lib/helper";
 
 const CHART_COLORS = [
   "#E8510A", "#F59E0B", "#10B981", "#3B82F6", "#8B5CF6",
@@ -320,7 +321,7 @@ export function LabelsTab() {
   // ── Fetch all-orders section (only when expanded) ─────────────────────────
   const fetchOrders = useCallback(async (ar, pg, courier) => {
     setOrdersLoading(true);
-    const params = new URLSearchParams({ page: pg, page_size: 50 });
+    const params = new URLSearchParams({ page: pg, page_size: PAGE_SIZE });
     if (ar.date_from) params.set("date_from", ar.date_from);
     if (ar.date_to)   params.set("date_to",   ar.date_to);
     if (courier)      params.set("courier",   courier);
@@ -812,7 +813,7 @@ export function LabelsTab() {
                         </tbody>
                       </table>
                     </div>
-                    {orderTotal > 50 && <Pagination page={ordersPage} total={orderTotal} pageSize={50} onChange={p => setOrdersPage(p)} />}
+                    {orderTotal > PAGE_SIZE && <Pagination page={ordersPage} total={orderTotal} pageSize={PAGE_SIZE} onChange={p => setOrdersPage(p)} />}
                   </>
                 )}
               </>

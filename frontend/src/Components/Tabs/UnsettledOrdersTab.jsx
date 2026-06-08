@@ -1,7 +1,8 @@
 import React,{ useState, useEffect, useMemo } from "react";
 import { API, C, S, fmt, btn, Tag, Pagination } from "../../App";
+import { PAGE_SIZE as pageSize } from "../../lib/helper";
 
-const PAGE_SIZE = 50;
+const PAGE_SIZE = pageSize;
 
 function fmtMonth(ym) {
   const [y, m] = ym.split("-").map(Number);
@@ -80,7 +81,7 @@ function FilterBar({ mode, setMode, selectedMonth, setSelectedMonth, months,
   );
 }
 
-export function UnsettledOrdersTab() {
+export function UnsettledOrdersTab({ initialMonth }) {
   const [months,  setMonths]  = useState([]);
   const [mode,    setMode]    = useState("all");
   const [selMonth, setSelMonth] = useState("");
@@ -93,22 +94,23 @@ export function UnsettledOrdersTab() {
   const [data,   setData]   = useState(null);
   const [loading, setLoading] = useState(true);
 
-  // Load available months, default to latest
+  // Load available months; use initialMonth if provided (e.g. navigated from Overview)
   useEffect(() => {
     fetch(`${API}/profit/available-months/`)
       .then(r => r.json())
       .then(ms => {
         setMonths(ms);
-        if (ms.length > 0) {
+        const target = (initialMonth && ms.includes(initialMonth)) ? initialMonth : (ms[0] || null);
+        if (target) {
           setMode("month");
-          setSelMonth(ms[0]);
-          setActiveRange(monthToRange(ms[0]));
+          setSelMonth(target);
+          setActiveRange(monthToRange(target));
         } else {
           setActiveRange({});
         }
       })
       .catch(() => setActiveRange({}));
-  }, []);
+  }, []); // eslint-disable-line
 
   // Reset to page 1 when filter or search changes
   useEffect(() => { setPage(1); }, [activeRange, search]);

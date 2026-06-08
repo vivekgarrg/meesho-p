@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   LineChart, Line, Legend, PieChart, Pie, Cell,
 } from "recharts";
-import { API, C, S, CHART_COLORS, StatCard, Tag, fmt, btn } from "../../App";
+import { API, C, S, CHART_COLORS, Tag, fmt, btn } from "../../App";
 
 // Hardcoded to avoid circular-import TDZ at module init
 const STATUS_COLOR = {
@@ -12,16 +13,26 @@ const STATUS_COLOR = {
   CANCELLED:    "#9CA3AF",
 };
 
-function KpiCard({ label, value, sub, accent, icon }) {
+function KpiCard({ label, value, sub, accent, icon, onClick }) {
   return (
-    <div style={{ ...S.card, borderTop: `3px solid ${accent}`, display: "flex", flexDirection: "column", gap: 6 }}>
-      <p style={{ fontSize: 11, fontWeight: 700, color: C.gray400, letterSpacing: "0.07em", textTransform: "uppercase" }}>
+    <div
+      onClick={onClick}
+      style={{
+        ...S.card, borderTop: `3px solid ${accent}`, display: "flex", flexDirection: "column", gap: 6,
+        minWidth: "max-content",
+        ...(onClick && { cursor: "pointer", transition: "box-shadow 0.15s" }),
+      }}
+      onMouseEnter={onClick ? (e) => (e.currentTarget.style.boxShadow = "0 4px 12px rgba(0,0,0,0.1)") : undefined}
+      onMouseLeave={onClick ? (e) => (e.currentTarget.style.boxShadow = S.card.boxShadow) : undefined}
+    >
+      <p style={{ fontSize: 11, fontWeight: 700, color: C.gray400, letterSpacing: "0.07em", textTransform: "uppercase", whiteSpace: "nowrap" }}>
         {icon && <span style={{ marginRight: 5 }}>{icon}</span>}{label}
       </p>
-      <p style={{ fontSize: 22, fontWeight: 800, color: accent, fontFamily: "'DM Mono', monospace", lineHeight: 1.1 }}>
+      <p style={{ fontSize: 22, fontWeight: 800, color: accent, fontFamily: "'DM Mono', monospace", lineHeight: 1.2, whiteSpace: "nowrap" }}>
         {value}
       </p>
-      {sub && <p style={{ fontSize: 11, color: C.gray400 }}>{sub}</p>}
+      {sub && <p style={{ fontSize: 11, color: C.gray400, whiteSpace: "nowrap" }}>{sub}</p>}
+      {onClick && <p style={{ fontSize: 10, color: accent, marginTop: 2, opacity: 0.7 }}>Click to view →</p>}
     </div>
   );
 }
@@ -138,8 +149,8 @@ function FilterBar({ mode, setMode, selectedMonth, setSelectedMonth, months,
 }
 
 // ── Main component ────────────────────────────────────────────────────────────
-export function 
-OverviewTab() {
+export function OverviewTab() {
+  const navigate = useNavigate();
   const [profit,  setProfit]  = useState(null);
   const [dash,    setDash]    = useState(null);
   const [loading, setLoading] = useState(true);
@@ -190,7 +201,13 @@ OverviewTab() {
 
   // ── Derived values ──────────────────────────────────────────────────────────
   const netProfit     = Number(profit?.net_revenue ?? 0);
-  const { order_stats, payment_stats, join_stats, status_settlement } = dash || {};
+  const { order_stats, payment_stats, join_stats, status_settlement, unsettled } = dash || {};
+
+  const goToUnsettled = () => {
+    const params = new URLSearchParams({ view: "unsettled" });
+    if (mode === "month" && selectedMonth) params.set("month", selectedMonth);
+    navigate(`/orders?${params}`);
+  };
   const matchRate     = join_stats?.match_rate ?? 0;
   const netSettlement = payment_stats?.total_settlement ?? 0;
   const totalSale     = payment_stats?.total_sale ?? 0;
@@ -285,58 +302,96 @@ OverviewTab() {
 
           {/* Dashboard KPI cards */}
           {dash && (
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 14 }}>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 14 }}>
               <KpiCard label="Settled Payments"      value={payment_stats.total.toLocaleString()}           accent={C.green}                              icon="💰" sub="from payment data" />
               <KpiCard label="Orders Tracked"        value={order_stats.total.toLocaleString()}             accent={C.blue}                               icon="📦" sub="matched in Orders CSV" />
               <KpiCard label="Match Rate"            value={`${matchRate}%`}                                accent={matchRate >= 80 ? C.green : C.amber}  icon="🔗" sub={`${join_stats.matched_count} linked`} />
               <KpiCard label="Net Settlement"        value={fmt(netSettlement)}                             accent={netSettlement >= 0 ? C.green : C.red} icon="💳" />
               <KpiCard label="Settlement Efficiency" value={`${settlementEff}%`}                            accent={C.orange}                             icon="📈" sub="settlement ÷ sale amount" />
               <KpiCard label="Unmatched Payments"    value={join_stats.unmatched_count.toLocaleString()}    accent={C.amber}                              icon="⚠️" sub="no Order record" />
+              <KpiCard
+                label="Unsettled Orders"
+                value={(unsettled?.count ?? 0).toLocaleString()}
+                sub={unsettled?.total_value ? `At-risk: ${fmt(unsettled.total_value)}` : "no payment record"}
+                accent={C.red}
+                icon="🔴"
+                onClick={goToUnsettled}
+              />
             </div>
           )}
 
-          {/* Profit formula */}
-          <div style={{ ...S.card, padding: "16px 24px" }}>
-            <p style={{ ...S.cardTitle, marginBottom: 12 }}>Profit Formula</p>
-            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, fontSize: 13 }}>
-              {[
-                { label: "Settlement",    val: profit.net_settlement_revenue,      color: C.green },
-                { label: "Purchase Cost", val: profit.total_purchase_cost,         color: C.amber,  op: "-" },
-                { label: "Ads Cost",      val: profit.total_ads_cost,              color: C.red,    op: "+" },
-                { label: "Referral",      val: profit.total_referral_income,       color: C.green,  op: "+" },
-                { label: "Comp/Recovery", val: profit.total_compensation_recovery, color: C.amber,  op: "+" },
-                // { label: "RTO/RETURNS",    val: profit.total_loss,                 color: C.red, op: "+" },
-                // { label: "Affiliate Fee", val: Math.abs(Number(profit.total_affiliate_fee)), color: C.red,  op: "−" },
-              ].map((item, i) => (
-                <span key={i} style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  {item.op && <span style={{ fontSize: 16, color: C.gray400, fontWeight: 300 }}>{item.op}</span>}
-                  <span style={{ background: C.gray50, border: `1px solid ${C.border}`, borderRadius: 8, padding: "6px 12px", display: "inline-flex", flexDirection: "column", gap: 1 }}>
-                    <span style={{ fontSize: 10, color: C.gray400, fontWeight: 600 }}>{item.label}</span>
-                    <span style={{ fontFamily: "monospace", fontWeight: 700, color: item.color }}>{fmt(item.val)}</span>
-                  </span>
-                </span>
-              ))}
-              <span style={{ fontSize: 18, color: C.gray300 }}>=</span>
-              <span style={{ background: netProfit >= 0 ? C.greenLight : C.redLight, border: `1px solid ${netProfit >= 0 ? C.greenBorder : C.redBorder}`, borderRadius: 8, padding: "8px 16px", display: "inline-flex", flexDirection: "column", gap: 1 }}>
-                <span style={{ fontSize: 10, color: C.gray400, fontWeight: 600 }}>NET PROFIT</span>
-                <span style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 16, color: netProfit >= 0 ? C.green : C.red }}>{fmt(netProfit)}</span>
-              </span>
+          {/* ── P&L Summary ─────────────────────────────────────────────── */}
+          <div style={S.card}>
+            <SectionTitle>P&L Summary</SectionTitle>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 0, border: `1px solid ${C.border}`, borderRadius: 10, overflow: "hidden" }}>
+
+              {/* Col 1: Revenue */}
+              <div style={{ padding: "16px 20px", borderRight: `1px solid ${C.border}` }}>
+                <p style={{ fontSize: 10, fontWeight: 700, color: C.gray500, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 12 }}>Revenue</p>
+                {[
+                  { label: "Gross Revenue",      val: profit.gross_revenue,           color: C.gray800 },
+                  { label: "Net Settlement",      val: profit.net_settlement_revenue,  color: C.green },
+                  { label: "Purchase Cost",       val: profit.total_purchase_cost,     color: C.amber },
+                  { label: "Packaging Cost",      val: profit.total_packaging_cost,    color: C.gray600 },
+                  { label: "Net P&L",             val: netProfit,                      color: netProfit >= 0 ? C.green : C.red, bold: true },
+                ].map(r => (
+                  <div key={r.label} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderBottom: `1px solid ${C.gray100}` }}>
+                    <span style={{ fontSize: 12, color: C.gray500 }}>{r.label}</span>
+                    <span style={{ fontSize: r.bold ? 14 : 13, fontWeight: r.bold ? 800 : 600, color: r.color, fontFamily: "monospace" }}>{fmt(r.val)}</span>
+                  </div>
+                ))}
+              </div>
+
+              {/* Col 2: Profit & Loss */}
+              <div style={{ padding: "16px 20px", borderRight: `1px solid ${C.border}` }}>
+                <p style={{ fontSize: 10, fontWeight: 700, color: C.gray500, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 12 }}>Profit & Loss</p>
+                {[
+                  { label: "Delivered Profit",    val: profit.total_profit,                  color: C.green },
+                  { label: "Return Loss",          val: profit.total_loss,                   color: C.red },
+                  { label: "Claims Received",      val: profit.total_claims,                 color: C.blue },
+                  { label: "Referral Income",      val: profit.total_referral_income,        color: C.green },
+                  { label: "Comp / Recovery",      val: profit.total_compensation_recovery,  color: C.amber },
+                ].map(r => (
+                  <div key={r.label} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderBottom: `1px solid ${C.gray100}` }}>
+                    <span style={{ fontSize: 12, color: C.gray500 }}>{r.label}</span>
+                    <span style={{ fontSize: 13, fontWeight: 600, color: r.color, fontFamily: "monospace" }}>{fmt(r.val)}</span>
+                  </div>
+                ))}
+              </div>
+
+              {/* Col 3: Deductions */}
+              <div style={{ padding: "16px 20px" }}>
+                <p style={{ fontSize: 10, fontWeight: 700, color: C.gray500, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 12 }}>Deductions</p>
+                {[
+                  { label: "Ads Cost",         val: profit.total_ads_cost,           color: C.red },
+                  { label: "Shipping",          val: profit.total_shipping_cost,      color: C.amber },
+                  { label: "Commission",        val: profit.total_commission_paid,    color: C.orange },
+                  { label: "TCS",               val: profit.total_tcs,               color: C.gray500 },
+                  { label: "TDS",               val: profit.total_tds,               color: C.gray500 },
+                  { label: "Affiliate Fee",     val: profit.total_affiliate_fee,     color: C.red },
+                ].map(r => (
+                  <div key={r.label} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderBottom: `1px solid ${C.gray100}` }}>
+                    <span style={{ fontSize: 12, color: C.gray500 }}>{r.label}</span>
+                    <span style={{ fontSize: 13, fontWeight: 600, color: r.color, fontFamily: "monospace" }}>{fmt(r.val)}</span>
+                  </div>
+                ))}
+              </div>
             </div>
           </div>
 
-          {/* Profit stat grid */}
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 14 }}>
-            <StatCard label="Net Settlement"  value={profit.net_settlement_revenue}       accent={C.green}   icon="💰" />
-            <StatCard label="Purchase Cost"   value={profit.total_purchase_cost}          accent={C.blue}    icon="🛒" />
-            <StatCard label="Packaging Cost"  value={profit.total_packaging_cost}         accent={C.gray600} icon="📦" />
-            <StatCard label="RTO / Loss"      value={profit.total_loss}                   accent={C.red}     icon="↩" />
-            <StatCard label="Ads Cost"        value={profit.total_ads_cost}               accent={C.amber}   icon="📣" />
-            <StatCard label="Commission"      value={profit.total_commission_paid}        accent={C.green}   icon="%" />
-            <StatCard label="TCS Deducted"    value={profit.total_tcs}                    accent={C.gray400} icon="🏛" />
-            <StatCard label="TDS Deducted"    value={profit.total_tds}                    accent={C.gray400} icon="🏛" />
-            <StatCard label="Comp/Recovery"   value={profit.total_compensation_recovery}  accent={C.red}     icon="🔄" />
-            <StatCard label="Claims Approved"  value={profit.total_claims}        accent={C.blue} icon="✅" sub={`${profit.total_claimed_orders ?? 0} claimed orders`} />
-            <StatCard label="Affiliate Fee"    value={profit.total_affiliate_fee}  accent={C.red}  icon="💸" sub={`${profit.adjustment_count ?? 0} adjustment rows`} />
+          {/* ── Operations row ──────────────────────────────────────────────── */}
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 12 }}>
+            {[
+              { icon: "🛒", label: "Orders Settled",  value: profit.order_count.toLocaleString(),           sub: `${profit.orders_with_price} with price`,     accent: C.blue },
+              { icon: "⚠️", label: "Missing Price",   value: profit.orders_missing_price.toLocaleString(),  sub: "SKUs without pricing",                        accent: C.amber },
+              { icon: "↩",  label: "Pure Returns",    value: profit.total_pure_returns.toLocaleString(),    sub: "return-only orders",                          accent: C.red },
+              { icon: "✅", label: "Claimed Orders",  value: profit.total_claimed_orders.toLocaleString(),  sub: fmt(profit.total_claims),                      accent: C.blue },
+              { icon: "📣", label: "Ad Campaigns",    value: profit.ads_campaigns.toLocaleString(),         sub: `${profit.adjustment_count} adj. rows`,        accent: C.orange },
+              { icon: "🔗", label: "Referral Count",  value: (profit.referral_count ?? 0).toLocaleString(), sub: fmt(profit.total_referral_income),             accent: C.green },
+              { icon: "🔄", label: "Comp Records",    value: (profit.compensation_recovery_count ?? 0).toLocaleString(), sub: fmt(profit.total_compensation_recovery), accent: C.gray600 },
+            ].map(c => (
+              <KpiCard key={c.label} label={c.label} value={c.value} sub={c.sub} accent={c.accent} icon={c.icon} />
+            ))}
           </div>
 
           {/* Status-Settlement Crosswalk */}

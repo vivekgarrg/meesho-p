@@ -1,9 +1,12 @@
 import React,{ useCallback, useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell,
 } from "recharts";
 import { S, SectionHeader, C, Pagination, API, fmt, Tag, StatCard } from "../../App";
 import { DateRangePicker } from "../shared/DateRangePicker";
+import { UnsettledOrdersTab } from "./UnsettledOrdersTab";
+import { PAGE_SIZE } from "../../lib/helper";
 
 const ORDER_STATUSES = ["DELIVERED", "RTO_COMPLETE", "CANCELLED"];
 
@@ -14,6 +17,22 @@ const STATUS_META = {
 };
 
 export function OrdersTab() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const view = searchParams.get("view") || "all";
+
+  const setView = (v) => {
+    setSearchParams(prev => {
+      const next = new URLSearchParams(prev);
+      if (v === "all") {
+        next.delete("view");
+        next.delete("month");
+      } else {
+        next.set("view", v);
+      }
+      return next;
+    }, { replace: true });
+  };
+
   const [data, setData] = useState([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -23,9 +42,10 @@ export function OrdersTab() {
   const [analytics, setAnalytics] = useState(null);
 
   const load = useCallback(async () => {
+    if (view !== "all") return;
     const params = new URLSearchParams({
       page,
-      page_size: 50,
+      page_size: PAGE_SIZE,
       ...(statusFilter && { status: statusFilter }),
       ...(skuFilter && { sku: skuFilter }),
       ...(dateRange.from && { date_from: dateRange.from }),
@@ -37,16 +57,17 @@ export function OrdersTab() {
       setData(d.results);
       setTotal(d.total);
     }
-  }, [page, statusFilter, skuFilter, dateRange]);
+  }, [view, page, statusFilter, skuFilter, dateRange]);
 
   const loadAnalytics = useCallback(async () => {
+    if (view !== "all") return;
     const params = new URLSearchParams({
       ...(dateRange.from && { date_from: dateRange.from }),
       ...(dateRange.to && { date_to: dateRange.to }),
     });
     const r = await fetch(`${API}/full-orders/analytics/?${params}`);
     if (r.ok) setAnalytics(await r.json());
-  }, [dateRange]);
+  }, [view, dateRange]);
 
   useEffect(() => { load(); loadAnalytics(); }, [load, loadAnalytics]);
 
@@ -58,11 +79,46 @@ export function OrdersTab() {
   const totalOrders     = analytics?.total ?? 0;
   const deliveredPct    = totalOrders > 0 ? ((deliveredCount / totalOrders) * 100).toFixed(1) : "0.0";
 
+  const ViewToggle = (
+    <div style={{ display: "flex", background: C.gray100, borderRadius: 10, padding: 3 }}>
+      {[
+        { id: "all",       label: "All Orders", icon: "📦" },
+        { id: "unsettled", label: "Unsettled",   icon: "⚠️" },
+      ].map(({ id, label, icon }) => {
+        const active = view === id;
+        return (
+          <button key={id} onClick={() => setView(id)} style={{
+            padding: "7px 18px", borderRadius: 8, border: "none", cursor: "pointer",
+            fontFamily: "inherit", fontSize: 13, fontWeight: active ? 700 : 500,
+            background: active ? C.white : "transparent",
+            color: active ? (id === "unsettled" ? C.red : C.gray800) : C.gray500,
+            boxShadow: active ? "0 1px 3px rgba(0,0,0,0.1)" : "none",
+            transition: "all 0.15s",
+          }}>
+            {icon} {label}
+          </button>
+        );
+      })}
+    </div>
+  );
+
+  if (view === "unsettled") {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+        <div style={{ display: "flex", justifyContent: "flex-end" }}>{ViewToggle}</div>
+        <UnsettledOrdersTab initialMonth={searchParams.get("month")} />
+      </div>
+    );
+  }
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
 
+      {/* View toggle */}
+      <div style={{ display: "flex", justifyContent: "flex-end" }}>{ViewToggle}</div>
+
       {/* Summary KPI cards */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 14 }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 14 }}>
         <StatCard label="Total Orders" value={null} sub={`${totalOrders.toLocaleString()} orders`} accent={C.blue} icon="📦" />
         <StatCard label="Delivered" value={null} sub={`${deliveredCount.toLocaleString()} (${deliveredPct}%)`} accent={C.green} icon="✅" />
         <StatCard label="RTO Complete" value={null} sub={`${rtoCount.toLocaleString()} orders`} accent={C.red} icon="↩" />
@@ -202,7 +258,7 @@ export function OrdersTab() {
           </table>
         </div>
 
-        <Pagination page={page} total={total} pageSize={50} onChange={setPage} />
+        <Pagination page={page} total={total} pageSize={PAGE_SIZE} onChange={setPage} />
       </div>
     </div>
   );

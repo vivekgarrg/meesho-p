@@ -1,3 +1,5 @@
+import { PAGE_SIZE } from "./helper";
+
 export const API_BASE = "http://localhost:8000/api";
 
 function buildQuery(params) {
@@ -11,14 +13,14 @@ function buildQuery(params) {
 
 export const api = {
   // ── Payments (OrderPayment / settlements) ─────────────────────────
-  payments({ page = 1, pageSize = 50, status = "", sku = "", dateFrom = "", dateTo = "" } = {}) {
+  payments({ page = 1, pageSize = PAGE_SIZE, status = "", sku = "", dateFrom = "", dateTo = "" } = {}) {
     return fetch(
       `${API_BASE}/orders/${buildQuery({ page, page_size: pageSize, status, sku, date_from: dateFrom, date_to: dateTo })}`
     ).then((r) => r.json());
   },
 
   // ── Full Orders (Order model — full lifecycle) ─────────────────────
-  orders({ page = 1, pageSize = 50, status = "", sku = "", dateFrom = "", dateTo = "" } = {}) {
+  orders({ page = 1, pageSize = PAGE_SIZE, status = "", sku = "", dateFrom = "", dateTo = "" } = {}) {
     return fetch(
       `${API_BASE}/full-orders/${buildQuery({ page, page_size: pageSize, status, sku, date_from: dateFrom, date_to: dateTo })}`
     ).then((r) => r.json());

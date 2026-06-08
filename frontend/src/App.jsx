@@ -11,6 +11,7 @@ import { PricingTab }   from "./Components/Tabs/PricingTab";
 import { UploadTab }    from "./Components/Tabs/UploadTab";
 import { SKUAnalysisTab } from "./Components/Tabs/SKUProfitTab";
 import { LabelsTab }       from "./Components/Tabs/LabelsTab";
+import { SKU_PAGE_SIZE as skuPageSize } from "./lib/helper";
 
 // ── API base (re-exported for tabs that import directly from App) ───────────
 export const API = "http://localhost:8000/api";
@@ -149,15 +150,15 @@ export function StatCard({ label, value, sub, accent = C.orange, icon }) {
       ? C.gray400
       : isNeg ? C.red : num > 0 ? C.green : C.gray700;
   return (
-    <div style={{ ...S.card, position: "relative", overflow: "hidden", borderTop: `3px solid ${accent}` }}>
-      <p style={{ fontSize: 11, fontWeight: 700, color: C.gray400, letterSpacing: "0.07em", textTransform: "uppercase", marginBottom: 8 }}>
+    <div style={{ ...S.card, position: "relative", borderTop: `3px solid ${accent}`, minWidth: "max-content" }}>
+      <p style={{ fontSize: 11, fontWeight: 700, color: C.gray400, letterSpacing: "0.07em", textTransform: "uppercase", marginBottom: 8, whiteSpace: "nowrap" }}>
         {icon && <span style={{ marginRight: 5 }}>{icon}</span>}{label}
       </p>
-      <p style={{ fontSize: 24, fontWeight: 800, color: valColor, fontFamily: "'DM Mono', monospace", lineHeight: 1.1 }}>
+      <p style={{ fontSize: 24, fontWeight: 800, color: valColor, fontFamily: "'DM Mono', monospace", lineHeight: 1.2, whiteSpace: "nowrap" }}>
         {value !== null && value !== undefined ? fmt(value) : sub || "—"}
       </p>
       {sub && value !== null && value !== undefined && (
-        <p style={{ fontSize: 11, color: C.gray400, marginTop: 5 }}>{sub}</p>
+        <p style={{ fontSize: 11, color: C.gray400, marginTop: 5, whiteSpace: "nowrap" }}>{sub}</p>
       )}
     </div>
   );
@@ -196,9 +197,9 @@ export function Pagination({ page, total, pageSize, onChange }) {
 }
 
 // ── SKU Table (shared by SKU Analysis tab) ────────────────────────────────────
-const SKU_PAGE_SIZE = 20;
+const SKU_PAGE_SIZE = skuPageSize;
 
-export function SKUTable({ data, mode }) {
+export function SKUTable({ data, mode, onRowClick }) {
   const [search, setSearch] = useState("");
   const [page,   setPage]   = useState(1);
 
@@ -219,13 +220,18 @@ export function SKUTable({ data, mode }) {
 
   return (
     <div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, flexWrap: "wrap", gap: 10 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, flexWrap: "wrap", gap: 10 }}>
         <p style={{ ...S.cardTitle, marginBottom: 0 }}>
           {modeLabel} — {filtered.length} items
         </p>
         <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search SKU…"
           style={{ ...S.inp, width: 220, fontSize: 12 }} />
       </div>
+      {onRowClick && (
+        <p style={{ fontSize: 11, color: C.gray400, marginBottom: 12 }}>
+          💡 Click any row to see monthly breakdown
+        </p>
+      )}
       <div style={{ overflowX: "auto" }}>
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
           <thead>
@@ -236,6 +242,7 @@ export function SKUTable({ data, mode }) {
               <th style={thR}>Deliveries</th>
               <th style={thR}>Returns</th>
               <th style={thR}>RTO</th>
+              <th style={thR}>Cancelled</th>
               <th style={thR}>Claims</th>
               <th style={thR}>Net P&L</th>
             </tr>
@@ -249,7 +256,9 @@ export function SKUTable({ data, mode }) {
               const rtoCount     = s.rto_count       ?? 0;
               const claimCount   = s.claims_count    ?? 0;
               return (
-                <tr key={s.sku_id} style={{ background: rowBg }}
+                <tr key={s.sku_id}
+                  style={{ background: rowBg, cursor: onRowClick ? "pointer" : "default" }}
+                  onClick={() => onRowClick?.(s)}
                   onMouseEnter={(e) => (e.currentTarget.style.background = "#F0F7FF")}
                   onMouseLeave={(e) => (e.currentTarget.style.background = rowBg)}
                 >
@@ -289,14 +298,24 @@ export function SKUTable({ data, mode }) {
                     </div>
                   </td>
 
-                  {/* RTO: count + net */}
+                  {/* RTO: count + loss */}
                   <td style={{ ...S.td, textAlign: "right" }}>
-                      <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 3 }}>
-                        <Tag variant={rtoCount>0 ?"amber":"gray"}>{rtoCount} RTO</Tag>
-                       {rtoCount>0 && <span style={{ fontFamily: "monospace", fontSize: 12, color: C.amber, fontWeight: 600 }}>
+                    <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 3 }}>
+                      <Tag variant={rtoCount > 0 ? "amber" : "gray"}>{rtoCount} RTO</Tag>
+                      {rtoCount > 0 && (
+                        <span style={{ fontFamily: "monospace", fontSize: 12, color: C.amber, fontWeight: 600 }}>
                           {fmt(s.rto_loss)}
-                        </span>}
-                      </div>
+                        </span>
+                      )}
+                    </div>
+                  </td>
+
+                  {/* Cancelled: count only (settlement is always 0) */}
+                  <td style={{ ...S.td, textAlign: "right" }}>
+                    {(s.cancelled_count || 0) > 0
+                      ? <Tag variant="gray">{s.cancelled_count} cancelled</Tag>
+                      : <span style={{ color: C.gray300 }}>—</span>
+                    }
                   </td>
 
                   {/* Claims: count + amount */}
@@ -327,7 +346,7 @@ export function SKUTable({ data, mode }) {
               );
             })}
             {visible.length === 0 && (
-              <tr><td colSpan={8} style={{ ...S.td, textAlign: "center", padding: 40, color: C.gray400 }}>
+              <tr><td colSpan={9} style={{ ...S.td, textAlign: "center", padding: 40, color: C.gray400 }}>
                 {data.length === 0 ? "No data — upload Meesho report and add SKU pricing first" : "No results matching search"}
               </td></tr>
             )}
@@ -345,7 +364,7 @@ export function SKUTable({ data, mode }) {
 const TABS = [
   { path: "/",              label: "Overview",       icon: "📊", end: true },
   { path: "/orders",        label: "Orders",         icon: "📦" },
-  { path: "/unsettled",     label: "Unsettled",      icon: "⚠️" },
+//  { path: "/unsettled",     label: "Unsettled",      icon: "⚠️" },
   { path: "/payments",      label: "Payments",       icon: "💰" },
   { path: "/sku-analysis",  label: "SKU Analysis",   icon: "📊" },
   { path: "/pricing",       label: "SKU Pricing",    icon: "⚙️" },

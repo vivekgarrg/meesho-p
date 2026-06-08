@@ -1,6 +1,7 @@
 import React,{ useCallback, useEffect, useState } from "react";
 import { S, SectionHeader, C, STATUS_COLORS, Pagination, API, StatusTag, fmt } from "../../App";
 import { DateRangePicker } from "../shared/DateRangePicker";
+import { PAGE_SIZE } from "../../lib/helper";
 
 const PAYMENT_STATUSES = ["DELIVERED", "RTO", "RETURN", "PENDING", "CANCELLED"];
 
@@ -15,7 +16,7 @@ export function PaymentsTab() {
   const load = useCallback(async () => {
     const params = new URLSearchParams({
       page,
-      page_size: 50,
+      page_size: PAGE_SIZE,
       ...(statusFilter && { status: statusFilter }),
       ...(skuFilter && { sku: skuFilter }),
       ...(dateRange.from && { date_from: dateRange.from }),
@@ -111,7 +112,7 @@ export function PaymentsTab() {
         </table>
       </div>
 
-      <Pagination page={page} total={total} pageSize={50} onChange={setPage} />
+      <Pagination page={page} total={total} pageSize={PAGE_SIZE} onChange={setPage} />
     </div>
   );
 }

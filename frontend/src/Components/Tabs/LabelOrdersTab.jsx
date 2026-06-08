@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { C, S, API, SectionHeader, Pagination, fmt } from "../../App";
+import { PAGE_SIZE } from "../../lib/helper";
 
 // ── Design helpers ────────────────────────────────────────────────────────────
 
@@ -495,7 +496,7 @@ export function LabelOrdersTab() {
     const params = new URLSearchParams({
       date: selectedDate,
       page,
-      page_size: 50,
+      page_size: PAGE_SIZE,
       ...(courierFilter && { courier: courierFilter }),
     });
     const r = await fetch(`${API}/labels/orders/?${params}`);
@@ -769,7 +770,7 @@ export function LabelOrdersTab() {
                     </tbody>
                   </table>
                 </div>
-                <Pagination page={page} total={orderTotal} pageSize={50} onChange={setPage} />
+                <Pagination page={page} total={orderTotal} pageSize={PAGE_SIZE} onChange={setPage} />
               </>
             )}
           </div>
