@@ -3,18 +3,19 @@ import { useState, useEffect } from "react";
 import { Routes, Route, NavLink } from "react-router-dom";
 
 // ── Tab components ─────────────────────────────────────────────────────────────
-import { OverviewTab }         from "./Components/Tabs/OverviewTab";
+import { OverviewTab } from "./Components/Tabs/OverviewTab";
 import { UnsettledOrdersTab } from "./Components/Tabs/UnsettledOrdersTab";
-import { OrdersTab }    from "./Components/Tabs/OrdersTab";
-import { PaymentsTab }  from "./Components/Tabs/PaymentsTab";
-import { PricingTab }   from "./Components/Tabs/PricingTab";
-import { UploadTab }    from "./Components/Tabs/UploadTab";
+import { OrdersTab } from "./Components/Tabs/OrdersTab";
+import { PaymentsTab } from "./Components/Tabs/PaymentsTab";
+import { PricingTab } from "./Components/Tabs/PricingTab";
+import { UploadTab } from "./Components/Tabs/UploadTab";
 import { SKUAnalysisTab } from "./Components/Tabs/SKUProfitTab";
-import { LabelsTab }       from "./Components/Tabs/LabelsTab";
-import { PurchasesTab }      from "./Components/Tabs/PurchasesTab";
-import { InventoryTab }      from "./Components/Tabs/InventoryTab";
+import { LabelsTab } from "./Components/Tabs/LabelsTab";
+import { PurchasesTab } from "./Components/Tabs/PurchasesTab";
+import { InventoryTab } from "./Components/Tabs/InventoryTab";
 import { FraudCustomersTab } from "./Components/Tabs/FraudCustomersTab";
 import { SKU_PAGE_SIZE as skuPageSize } from "./lib/helper";
+import TableData from "./Components/Table/TableData";
 
 // ── API base (re-exported for tabs that import directly from App) ───────────
 export const API = "http://localhost:8000/api";
@@ -54,6 +55,7 @@ export const C = {
   border: "#E5E7EB",
   bg: "#F5F6FA",
   surface: "#FFFFFF",
+  colorsSet: ["#F59E0B", "#10B981", "#3B82F6", "#8B5CF6", "#EC4899", "#06B6D4", "#84CC16"]
 };
 
 export const CHART_COLORS = [C.orange, "#F59E0B", "#10B981", "#3B82F6", "#8B5CF6", "#EC4899", "#06B6D4", "#84CC16"];
@@ -106,26 +108,31 @@ export function btn(variant = "primary", size = "md") {
     lg: { padding: "11px 24px", fontSize: 14 },
   };
   const variants = {
-    primary:      { background: C.orange, color: C.white, border: "none" },
-    secondary:    { background: C.blue,   color: C.white, border: "none" },
-    success:      { background: C.green,  color: C.white, border: "none" },
-    danger:       { background: C.red,    color: C.white, border: "none" },
-    ghost:        { background: "transparent", color: C.gray600, border: `1px solid ${C.gray300}` },
-    ghostOrange:  { background: C.orangeLight, color: C.orange,  border: `1px solid ${C.orangeBorder}` },
+    primary: { background: C.orange, color: C.white, border: "none" },
+    secondary: { background: C.blue, color: C.white, border: "none" },
+    success: { background: C.green, color: C.white, border: "none" },
+    danger: { background: C.red, color: C.white, border: "none" },
+    ghost: { background: "transparent", color: C.gray600, border: `1px solid ${C.gray300}` },
+    ghostOrange: { background: C.orangeLight, color: C.orange, border: `1px solid ${C.orangeBorder}` },
   };
   return { ...variants[variant], ...sizes[size], borderRadius: 8, cursor: "pointer", fontWeight: 600, fontFamily: "inherit" };
 }
 
+const set = ["a", "b", "c", "d", "e", "f", "g"]
+
 // ── Shared components ─────────────────────────────────────────────────────────
 export function Tag({ children, variant = "gray", fontSize }) {
   const vars = {
-    green:  { bg: C.greenLight,  color: C.green,  border: C.greenBorder },
-    red:    { bg: C.redLight,    color: C.red,     border: C.redBorder },
-    orange: { bg: C.orangeLight, color: C.orange,  border: C.orangeBorder },
-    blue:   { bg: C.blueLight,   color: C.blue,    border: "#BFDBFE" },
-    gray:   { bg: C.gray100,     color: C.gray600, border: C.gray200 },
-    amber:  { bg: C.amberLight,  color: C.amber,   border: "#FDE68A" },
+    green: { bg: C.greenLight, color: C.green, border: C.greenBorder },
+    red: { bg: C.redLight, color: C.red, border: C.redBorder },
+    orange: { bg: C.orangeLight, color: C.orange, border: C.orangeBorder },
+    blue: { bg: C.blueLight, color: C.blue, border: "#BFDBFE" },
+    gray: { bg: C.gray100, color: C.gray600, border: C.gray200 },
+    amber: { bg: C.amberLight, color: C.amber, border: "#FDE68A" },
   };
+  C.colorsSet.map((color, index) => {
+    vars[set[index]] = { bg: color, color: C.white, border: color - 304 }
+  });
   const v = vars[variant] || vars.gray;
   return (
     <span style={{
@@ -204,7 +211,8 @@ const SKU_PAGE_SIZE = skuPageSize;
 
 export function SKUTable({ data, mode, onRowClick }) {
   const [search, setSearch] = useState("");
-  const [page,   setPage]   = useState(1);
+  const [page, setPage] = useState(1);
+  const [showTotalData, setShowTotalData] = useState(false);
 
   const filtered = data.filter(
     (s) => !search || s.sku_id.toLowerCase().includes(search.toLowerCase())
@@ -216,8 +224,8 @@ export function SKUTable({ data, mode, onRowClick }) {
 
   const modeLabel =
     mode === "profit" ? "✅ Profitable SKUs" :
-    mode === "loss"   ? "⚠️ Loss-making SKUs" :
-    "📊 All SKUs";
+      mode === "loss" ? "⚠️ Loss-making SKUs" :
+        "📊 All SKUs";
 
   const thR = { ...S.th, textAlign: "right" };
 
@@ -227,8 +235,16 @@ export function SKUTable({ data, mode, onRowClick }) {
         <p style={{ ...S.cardTitle, marginBottom: 0 }}>
           {modeLabel} — {filtered.length} items
         </p>
+
         <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search SKU…"
           style={{ ...S.inp, width: 220, fontSize: 12 }} />
+      </div>
+      <div style={{ display: "flex", alignItems: "center" }}>
+        <input checked={showTotalData} onClick={() => setShowTotalData(prev => !prev)} type="checkbox" /> &nbsp;
+        <span style={{ ...S.cardTitle, marginBottom: 0 }}>
+          Show Total Data on Mouse Hover
+        </span>
+
       </div>
       {onRowClick && (
         <p style={{ fontSize: 11, color: C.gray400, marginBottom: 12 }}>
@@ -252,12 +268,12 @@ export function SKUTable({ data, mode, onRowClick }) {
           </thead>
           <tbody>
             {visible.map((s, i) => {
-              const globalIdx    = (page - 1) * SKU_PAGE_SIZE + i;
-              const rowBg        = globalIdx % 2 === 0 ? C.white : C.gray100;
-              const delCount     = s.delivered_count ?? 0;
-              const retCount     = s.return_count    ?? 0;
-              const rtoCount     = s.rto_count       ?? 0;
-              const claimCount   = s.claims_count    ?? 0;
+              const globalIdx = (page - 1) * SKU_PAGE_SIZE + i;
+              const rowBg = globalIdx % 2 === 0 ? C.white : C.gray100;
+              const delCount = s.delivered_count ?? 0;
+              const retCount = s.return_count ?? 0;
+              const rtoCount = s.rto_count ?? 0;
+              const claimCount = s.claims_count ?? 0;
               return (
                 <tr key={s.sku_id}
                   style={{ background: rowBg, cursor: onRowClick ? "pointer" : "default" }}
@@ -279,39 +295,9 @@ export function SKUTable({ data, mode, onRowClick }) {
                     {fmt(s.one_unit_price)}
                   </td>
 
-                  {/* Deliveries: count + profit */}
-                  <td style={{ ...S.td, textAlign: "right" }}>
-                    {delCount > 0 ? (
-                      <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 3 }}>
-                        <Tag variant="green">{delCount} orders</Tag>
-                        <span style={{ fontFamily: "monospace", fontSize: 12, color: C.green, fontWeight: 600 }}>
-                          +{fmt(s.delivered_profit)}
-                        </span>
-                      </div>
-                    ) : <span style={{ color: C.gray300 }}>—</span>}
-                  </td>
-
-                  {/* Returns: count + loss */}
-                  <td style={{ ...S.td, textAlign: "right" }}>
-                    <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 3 }}>
-                      <Tag variant={retCount>0 ?  "red": "gray"}>{retCount} returns</Tag>
-                      {retCount> 0 && <span style={{ fontFamily: "monospace", fontSize: 12, color: C.red, fontWeight: 600 }}>
-                        {fmt(s.return_loss)}
-                      </span>}
-                    </div>
-                  </td>
-
-                  {/* RTO: count + loss */}
-                  <td style={{ ...S.td, textAlign: "right" }}>
-                    <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 3 }}>
-                      <Tag variant={rtoCount > 0 ? "amber" : "gray"}>{rtoCount} RTO</Tag>
-                      {rtoCount > 0 && (
-                        <span style={{ fontFamily: "monospace", fontSize: 12, color: C.amber, fontWeight: 600 }}>
-                          {fmt(s.rto_loss)}
-                        </span>
-                      )}
-                    </div>
-                  </td>
+                  <TableData showTotalData={showTotalData} mainKey={delCount} data={s} dataKey="delivered" color="green" profit />
+                  <TableData showTotalData={showTotalData} mainKey={retCount} data={s} dataKey="return" color="red" />
+                  <TableData showTotalData={showTotalData} mainKey={rtoCount} data={s} dataKey="rto" />
 
                   {/* Cancelled: count only (settlement is always 0) */}
                   <td style={{ ...S.td, textAlign: "right" }}>
@@ -321,25 +307,15 @@ export function SKUTable({ data, mode, onRowClick }) {
                     }
                   </td>
 
-                  {/* Claims: count + amount */}
-                  <td style={{ ...S.td, textAlign: "right" }}>
-                   
-                      <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 3 }}>
-                        <Tag variant={claimCount>0 ?"blue":"gray"}>{claimCount} claims</Tag>
-                        {claimCount>0 && <span style={{ fontFamily: "monospace", fontSize: 12, color: C.blue, fontWeight: 600 }}>
-                          {fmt(s.claims_total)}
-                        </span>}
-                      </div>
-                   
-                  </td>
+                  <TableData showTotalData={showTotalData} mainKey={claimCount} data={s} dataKey="claims" color="blue" profit claims />
 
                   {/* Net P&L */}
                   <td style={{ ...S.td, textAlign: "right" }}>
                     <span style={{
                       fontFamily: "monospace", fontWeight: 700, fontSize: 13,
                       background: s.net_profit >= 0 ? C.greenLight : C.redLight,
-                      color:      s.net_profit >= 0 ? C.green      : C.red,
-                      border:     `1px solid ${s.net_profit >= 0 ? C.greenBorder : C.redBorder}`,
+                      color: s.net_profit >= 0 ? C.green : C.red,
+                      border: `1px solid ${s.net_profit >= 0 ? C.greenBorder : C.redBorder}`,
                       padding: "3px 10px", borderRadius: 6, display: "inline-block",
                     }}>
                       {fmt(s.net_profit)}
@@ -365,17 +341,17 @@ export function SKUTable({ data, mode, onRowClick }) {
 
 // ── Navigation tabs config ────────────────────────────────────────────────────
 const TABS = [
-  { path: "/",              label: "Overview",       icon: "📊", end: true },
-  { path: "/orders",        label: "Orders",         icon: "📦" },
-//  { path: "/unsettled",     label: "Unsettled",      icon: "⚠️" },
-  { path: "/payments",      label: "Payments",       icon: "💰" },
-  { path: "/sku-analysis",  label: "SKU Analysis",   icon: "📊" },
-  { path: "/pricing",       label: "SKU Pricing",    icon: "⚙️" },
-  { path: "/upload",        label: "Upload",         icon: "⬆️" },
-  { path: "/labels",        label: "Labels",         icon: "🏷" },
-  { path: "/purchases",     label: "Purchases",      icon: "🛒" },
-  { path: "/inventory",     label: "Inventory",      icon: "📦" },
-  { path: "/fraud",         label: "Fraud",          icon: "🚨" },
+  { path: "/", label: "Overview", icon: "📊", end: true },
+  { path: "/orders", label: "Orders", icon: "📦" },
+  //  { path: "/unsettled",     label: "Unsettled",      icon: "⚠️" },
+  { path: "/payments", label: "Payments", icon: "💰" },
+  { path: "/sku-analysis", label: "SKU Analysis", icon: "📊" },
+  { path: "/pricing", label: "SKU Pricing", icon: "⚙️" },
+  { path: "/upload", label: "Upload", icon: "⬆️" },
+  { path: "/labels", label: "Labels", icon: "🏷" },
+  { path: "/purchases", label: "Purchases", icon: "🛒" },
+  { path: "/inventory", label: "Inventory", icon: "📦" },
+  { path: "/fraud", label: "Fraud", icon: "🚨" },
 ];
 
 // ── App shell ─────────────────────────────────────────────────────────────────
@@ -426,17 +402,17 @@ export default function App() {
       {/* Page content */}
       <div style={{ maxWidth: 1360, margin: "0 auto", padding: "28px 20px" }}>
         <Routes>
-          <Route path="/"              element={<OverviewTab />} />
-          <Route path="/orders"        element={<OrdersTab />} />
-          <Route path="/unsettled"     element={<UnsettledOrdersTab />} />
-          <Route path="/payments"      element={<PaymentsTab />} />
-          <Route path="/sku-analysis"  element={<SKUAnalysisTab />} />
-          <Route path="/pricing"       element={<PricingTab />} />
-          <Route path="/upload"        element={<UploadTab />} />
-          <Route path="/labels"        element={<LabelsTab />} />
-          <Route path="/purchases"     element={<PurchasesTab />} />
-          <Route path="/inventory"     element={<InventoryTab />} />
-          <Route path="/fraud"         element={<FraudCustomersTab />} />
+          <Route path="/" element={<OverviewTab />} />
+          <Route path="/orders" element={<OrdersTab />} />
+          <Route path="/unsettled" element={<UnsettledOrdersTab />} />
+          <Route path="/payments" element={<PaymentsTab />} />
+          <Route path="/sku-analysis" element={<SKUAnalysisTab />} />
+          <Route path="/pricing" element={<PricingTab />} />
+          <Route path="/upload" element={<UploadTab />} />
+          <Route path="/labels" element={<LabelsTab />} />
+          <Route path="/purchases" element={<PurchasesTab />} />
+          <Route path="/inventory" element={<InventoryTab />} />
+          <Route path="/fraud" element={<FraudCustomersTab />} />
         </Routes>
       </div>
     </div>

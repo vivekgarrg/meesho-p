@@ -29,21 +29,13 @@ const DELIVERY_STATUS_STYLE = {
 function cs(name) {
   return COURIER_COLORS[name] || { bg: C.gray100, fg: C.gray600, border: C.gray200 };
 }
-
-function todayISO() {
-  return new Date().toISOString().slice(0, 10);
-}
-
+function todayISO() { return new Date().toISOString().slice(0, 10); }
 function offsetDate(days) {
-  const d = new Date();
-  d.setDate(d.getDate() + days);
-  return d.toISOString().slice(0, 10);
+  const d = new Date(); d.setDate(d.getDate() + days); return d.toISOString().slice(0, 10);
 }
-
 function daysDiff(iso) {
   return Math.round((Date.now() - new Date(iso).getTime()) / 86_400_000);
 }
-
 function downloadCroppedPDF(b64, fileName) {
   const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
   const blob  = new Blob([bytes], { type: "application/pdf" });
@@ -53,18 +45,17 @@ function downloadCroppedPDF(b64, fileName) {
   a.click(); URL.revokeObjectURL(url);
 }
 
-// ── Small shared Tag ─────────────────────────────────────────────────────────
-
+// ── Shared tag ───────────────────────────────────────────────────────────────
 function CTag({ children, bg, fg, border, fontSize = 11 }) {
   return (
-    <span style={{ padding: "2px 9px", borderRadius: 20, fontSize, fontWeight: 600, background: bg, color: fg, border: `1px solid ${border}`, whiteSpace: "nowrap" }}>
+    <span style={{ padding: "2px 9px", borderRadius: 20, fontSize, fontWeight: 600,
+                   background: bg, color: fg, border: `1px solid ${border}`, whiteSpace: "nowrap" }}>
       {children}
     </span>
   );
 }
 
-// ── KPI card (upload results) ────────────────────────────────────────────────
-
+// ── KPI card ─────────────────────────────────────────────────────────────────
 function KpiCard({ label, value, sub, accent, icon, highlight }) {
   return (
     <div style={{ ...S.card, borderTop: `3px solid ${accent}`, display: "flex", flexDirection: "column", gap: 6, background: highlight ? `${accent}0D` : C.white }}>
@@ -76,7 +67,6 @@ function KpiCard({ label, value, sub, accent, icon, highlight }) {
 }
 
 // ── Drop zone ────────────────────────────────────────────────────────────────
-
 function DropZone({ onFile, disabled }) {
   const inputRef = useRef(null);
   const [dragging, setDragging] = useState(false);
@@ -91,7 +81,9 @@ function DropZone({ onFile, disabled }) {
       onDragOver={e => { e.preventDefault(); if (!disabled) setDragging(true); }}
       onDragLeave={() => setDragging(false)}
       onDrop={e => { e.preventDefault(); setDragging(false); if (!disabled) handle(e.dataTransfer.files[0]); }}
-      style={{ border: `2px dashed ${dragging ? C.orange : C.gray300}`, borderRadius: 14, padding: "40px 32px", textAlign: "center", cursor: disabled ? "not-allowed" : "pointer", background: dragging ? C.orangeLight : C.gray50, transition: "all 0.2s", opacity: disabled ? 0.6 : 1 }}
+      style={{ border: `2px dashed ${dragging ? C.orange : C.gray300}`, borderRadius: 14, padding: "40px 32px",
+               textAlign: "center", cursor: disabled ? "not-allowed" : "pointer",
+               background: dragging ? C.orangeLight : C.gray50, transition: "all 0.2s", opacity: disabled ? 0.6 : 1 }}
     >
       <div style={{ fontSize: 40, marginBottom: 10 }}>📄</div>
       <p style={{ fontSize: 14, fontWeight: 700, color: C.gray700, marginBottom: 5 }}>Drop Meesho Labels PDF here</p>
@@ -103,7 +95,6 @@ function DropZone({ onFile, disabled }) {
 }
 
 // ── Batch date picker ────────────────────────────────────────────────────────
-
 function BatchDatePicker({ value, onChange }) {
   const today = todayISO();
   const diff  = daysDiff(value);
@@ -144,8 +135,7 @@ function BatchDatePicker({ value, onChange }) {
   );
 }
 
-// ── Customer history drawer ──────────────────────────────────────────────────
-
+// ── Customer history drawer ───────────────────────────────────────────────────
 function SummaryKpi({ label, value, sub, accent, icon }) {
   return (
     <div style={{ ...S.card, borderTop: `3px solid ${accent}`, display: "flex", flexDirection: "column", gap: 5 }}>
@@ -182,11 +172,8 @@ function CustomerHistoryDrawer({ query, onClose }) {
             <h3 style={{ fontSize: 17, fontWeight: 800, color: C.gray800, marginBottom: 4 }}>👤 {query.name || `Pincode ${query.pincode}`}</h3>
             {data && <p style={{ fontSize: 12, color: C.gray400 }}>{[data.customer_city, data.customer_state, data.customer_pincode].filter(Boolean).join(", ")}</p>}
           </div>
-          <button onClick={onClose} style={{ padding: "6px 14px", borderRadius: 8, border: `1px solid ${C.gray300}`, background: C.white, color: C.gray600, cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: 500, flexShrink: 0 }}>
-            ✕ Close
-          </button>
+          <button onClick={onClose} style={{ padding: "6px 14px", borderRadius: 8, border: `1px solid ${C.gray300}`, background: C.white, color: C.gray600, cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: 500, flexShrink: 0 }}>✕ Close</button>
         </div>
-
         <div style={{ padding: "20px 24px", flex: 1 }}>
           {loading && <div style={{ textAlign: "center", padding: 60, color: C.gray400 }}>Loading history…</div>}
           {error   && <div style={{ padding: 20, color: C.red, background: C.redLight, borderRadius: 8 }}>{error}</div>}
@@ -206,7 +193,6 @@ function CustomerHistoryDrawer({ query, onClose }) {
                 <SummaryKpi label="Pending"        value={s.pending}       accent={s.pending > 0 ? C.amber : C.green} icon="⏳" />
                 <SummaryKpi label="Net Settlement" value={fmt(s.total_settlement)} accent={s.total_settlement > 0 ? C.green : C.gray400} icon="💰" sub={`${s.settled_count} of ${s.total_orders} settled`} />
               </div>
-
               <p style={{ ...S.cardTitle, marginBottom: 12 }}>Order History — {s.total_orders} orders</p>
               <div style={{ overflowX: "auto", border: `1px solid ${C.border}`, borderRadius: 10, overflow: "hidden" }}>
                 <table style={{ width: "100%", borderCollapse: "collapse" }}>
@@ -222,8 +208,7 @@ function CustomerHistoryDrawer({ query, onClose }) {
                       return (
                         <tr key={r.order_id} style={{ background: rowBg }}
                           onMouseEnter={e => e.currentTarget.style.background = "#F0F7FF"}
-                          onMouseLeave={e => e.currentTarget.style.background = rowBg}
-                        >
+                          onMouseLeave={e => e.currentTarget.style.background = rowBg}>
                           <td style={{ ...S.td, fontSize: 12, color: C.gray500, whiteSpace: "nowrap" }}>{r.uploaded_date || "—"}</td>
                           <td style={{ ...S.td, fontFamily: "monospace", fontSize: 10, color: C.gray400 }}>…{String(r.order_id || "").slice(-12)}</td>
                           <td style={S.td}>{r.sku ? <span style={{ fontFamily: "monospace", fontSize: 11, color: C.orange, fontWeight: 600, background: C.orangeLight, padding: "2px 6px", borderRadius: 4 }}>{r.sku}</span> : <span style={{ color: C.gray300 }}>—</span>}</td>
@@ -250,13 +235,371 @@ function CustomerHistoryDrawer({ query, onClose }) {
   );
 }
 
-// ── Main merged LabelsTab ────────────────────────────────────────────────────
+// ── Duplicate address drawer ──────────────────────────────────────────────────
+function DuplicateAddressDrawer({ entry, onClose }) {
+  const { address_key, customer_city, customer_state, customer_pincode, orders = [] } = entry;
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.5)", zIndex: 9100, display: "flex", justifyContent: "flex-end" }}>
+      <div onClick={e => e.stopPropagation()} style={{ width: "min(860px, 97vw)", height: "100vh", background: C.white, overflowY: "auto", boxShadow: "-12px 0 48px rgba(0,0,0,0.2)", display: "flex", flexDirection: "column" }}>
 
+        {/* Header */}
+        <div style={{ padding: "18px 24px 14px", borderBottom: `1px solid ${C.border}`, background: "#FFFBEB", position: "sticky", top: 0, zIndex: 10 }}>
+          <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
+            <div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                <span style={{ fontSize: 20 }}>🔁</span>
+                <h3 style={{ fontSize: 16, fontWeight: 800, color: C.gray800 }}>Repeated Address</h3>
+                <span style={{ background: C.amberLight, color: C.amber, border: "1px solid #FDE68A", padding: "2px 10px", borderRadius: 20, fontSize: 12, fontWeight: 700 }}>{orders.length} orders</span>
+              </div>
+              <p style={{ fontSize: 13, color: C.gray600, fontFamily: "monospace" }}>
+                📍 {customer_city}{customer_state ? `, ${customer_state}` : ""} — Pincode: <strong>{customer_pincode}</strong>
+              </p>
+              <p style={{ fontSize: 11, color: C.gray400, marginTop: 2 }}>
+                Same delivery address found in {orders.length} different orders
+              </p>
+            </div>
+            <button onClick={onClose} style={{ padding: "6px 14px", borderRadius: 8, border: `1px solid ${C.gray300}`, background: C.white, color: C.gray600, cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: 500, flexShrink: 0 }}>✕ Close</button>
+          </div>
+        </div>
+
+        {/* Orders detail table */}
+        <div style={{ padding: "20px 24px", flex: 1 }}>
+          <div style={{ overflowX: "auto", border: `1px solid ${C.border}`, borderRadius: 10, overflow: "hidden" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead>
+                <tr>
+                  {["#", "Upload Date", "Order ID", "Customer Name", "City", "State", "Pincode", "Courier", "AWB", "Payment", "SKU", "Qty", "Packed"].map(h => (
+                    <th key={h} style={{ ...S.th, fontSize: 11, whiteSpace: "nowrap" }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {orders.map((o, i) => {
+                  const rowBg = i % 2 === 0 ? C.white : "#FFFBEB";
+                  return (
+                    <tr key={o.order_id} style={{ background: rowBg }}
+                      onMouseEnter={e => e.currentTarget.style.background = "#FEF9C3"}
+                      onMouseLeave={e => e.currentTarget.style.background = rowBg}>
+                      <td style={{ ...S.td, color: C.gray400, fontSize: 11 }}>{i + 1}</td>
+                      <td style={{ ...S.td, whiteSpace: "nowrap", color: C.gray500, fontSize: 12 }}>{o.uploaded_date || "—"}</td>
+                      <td style={{ ...S.td, fontFamily: "monospace", fontSize: 10, color: C.gray400, whiteSpace: "nowrap" }}>…{String(o.order_id || "").slice(-14)}</td>
+                      <td style={{ ...S.td, fontWeight: 700, color: C.gray800, whiteSpace: "nowrap" }}>{o.customer_name || "—"}</td>
+                      <td style={{ ...S.td, color: C.gray600, whiteSpace: "nowrap" }}>{o.customer_city || "—"}</td>
+                      <td style={{ ...S.td, color: C.gray600 }}>{o.customer_state || "—"}</td>
+                      <td style={{ ...S.td, fontFamily: "monospace", fontWeight: 700, color: C.blue }}>{o.customer_pincode || "—"}</td>
+                      <td style={S.td}>{o.courier_name ? <CTag bg={cs(o.courier_name).bg} fg={cs(o.courier_name).fg} border={cs(o.courier_name).border}>{o.courier_name}</CTag> : <span style={{ color: C.gray300 }}>—</span>}</td>
+                      <td style={{ ...S.td, fontFamily: "monospace", fontSize: 10, color: C.gray500 }}>{o.awb_number || "—"}</td>
+                      <td style={S.td}>{o.payment_type === "Prepaid" ? <CTag bg="#F0FDF4" fg="#16A34A" border="#BBF7D0">Prepaid</CTag> : o.payment_type === "COD" ? <CTag bg="#FFFBEB" fg="#D97706" border="#FDE68A">COD</CTag> : <span style={{ color: C.gray300 }}>—</span>}</td>
+                      <td style={S.td}>{o.sku ? <span style={{ fontFamily: "monospace", fontSize: 10, color: C.orange, fontWeight: 700, background: C.orangeLight, padding: "2px 6px", borderRadius: 4 }}>{o.sku}</span> : <span style={{ color: C.gray300 }}>—</span>}</td>
+                      <td style={{ ...S.td, textAlign: "center", fontFamily: "monospace" }}>{o.qty || 1}</td>
+                      <td style={{ ...S.td, textAlign: "center" }}>
+                        {o.is_packed
+                          ? <span style={{ fontSize: 11, background: C.greenLight, color: C.green, border: `1px solid ${C.greenBorder}`, padding: "1px 8px", borderRadius: 20, fontWeight: 700 }}>✓ Packed</span>
+                          : <span style={{ fontSize: 11, background: C.gray100, color: C.gray400, border: `1px solid ${C.gray200}`, padding: "1px 8px", borderRadius: 20 }}>—</span>}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Duplicate address banner ──────────────────────────────────────────────────
+function DuplicateBanner({ repData, repLoading }) {
+  const [open, setOpen]           = useState(null); // entry to show in drawer
+  const [expanded, setExpanded]   = useState(false);
+
+  if (repLoading) return null;
+  if (!repData || repData.total === 0) return null;
+
+  const results = repData.results || [];
+  const shown   = expanded ? results : results.slice(0, 3);
+
+  return (
+    <>
+      {open && <DuplicateAddressDrawer entry={open} onClose={() => setOpen(null)} />}
+
+      <div style={{ background: "#FFFBEB", border: `2px solid #FDE68A`, borderRadius: 10, padding: "12px 16px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+          <span style={{ fontSize: 16 }}>🔁</span>
+          <span style={{ fontSize: 13, fontWeight: 800, color: C.amber }}>
+            {repData.total} Repeated Address{repData.total !== 1 ? "es" : ""} Found
+          </span>
+          <span style={{ fontSize: 11, color: C.gray500 }}>— same delivery address ordered multiple times</span>
+        </div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+          {shown.map((entry) => (
+            <button key={entry.address_key}
+              onClick={() => setOpen(entry)}
+              style={{
+                padding: "5px 14px", borderRadius: 20, fontSize: 12, cursor: "pointer",
+                fontFamily: "inherit", fontWeight: 600,
+                background: C.amberLight, color: "#92400E",
+                border: "1px solid #FDE68A",
+                display: "flex", alignItems: "center", gap: 6,
+              }}>
+              <span>📍 {entry.address_key}</span>
+              <span style={{ background: "#FDE68A", color: "#78350F", borderRadius: 20, padding: "1px 7px", fontSize: 10 }}>{entry.order_count}×</span>
+            </button>
+          ))}
+          {results.length > 3 && (
+            <button onClick={() => setExpanded(e => !e)} style={{ padding: "5px 14px", borderRadius: 20, fontSize: 12, cursor: "pointer", fontFamily: "inherit", fontWeight: 600, background: C.white, color: C.amber, border: "1px solid #FDE68A" }}>
+              {expanded ? "Show less ▲" : `+${results.length - 3} more ▼`}
+            </button>
+          )}
+        </div>
+      </div>
+    </>
+  );
+}
+
+// ── Orders by partner tab ─────────────────────────────────────────────────────
+function OrdersByPartnerTab({ availDates, activeRange, onRangeChange, onViewHistory }) {
+  const [orders,      setOrders]      = useState([]);
+  const [loading,     setLoading]     = useState(false);
+  const [filter,      setFilter]      = useState("all");   // "all" | "packed" | "unpacked"
+  const [search,      setSearch]      = useState("");
+  const [suggestions, setSuggestions] = useState([]);
+  const [dateMode,    setDateMode]    = useState("all");
+  const [selDate,     setSelDate]     = useState("");
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    const params = new URLSearchParams({ page_size: 1000 });
+    if (activeRange?.date_from) params.set("date_from", activeRange.date_from);
+    if (activeRange?.date_to)   params.set("date_to",   activeRange.date_to);
+    try {
+      const r = await fetch(`${API}/labels/orders/?${params}`);
+      if (r.ok) setOrders((await r.json()).results || []);
+    } finally { setLoading(false); }
+  }, [JSON.stringify(activeRange)]); // eslint-disable-line
+
+  useEffect(() => { if (activeRange !== null) load(); }, [load, activeRange]);
+
+  const togglePacked = async (order_id, current) => {
+    const res = await fetch(`${API}/labels/orders/${encodeURIComponent(order_id)}/pack/`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ packed: !current }),
+    });
+    if (res.ok) {
+      const upd = (list) => list.map(o => o.order_id === order_id ? { ...o, is_packed: !current } : o);
+      setOrders(upd); setSuggestions(upd);
+    }
+  };
+
+  const markAllPacked = async () => {
+    const targets = displayed.filter(o => !o.is_packed);
+    if (targets.length === 0) return;
+    if (!window.confirm(`Mark all ${targets.length} displayed orders as packed?`)) return;
+    const res = await fetch(`${API}/labels/bulk-pack/`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ order_ids: targets.map(o => o.order_id), packed: true }),
+    });
+    if (res.ok) setOrders(prev => prev.map(o => targets.find(t => t.order_id === o.order_id) ? { ...o, is_packed: true } : o));
+  };
+
+  const handleSearch = (val) => {
+    setSearch(val);
+    const v = val.trim();
+    if (v.length >= 2) {
+      setSuggestions(
+        orders.filter(o => {
+          const id = String(o.order_id);
+          return id.slice(-4).includes(v) || id.endsWith(v);
+        }).slice(0, 8)
+      );
+    } else { setSuggestions([]); }
+  };
+
+  const applyDate = (mode, dateStr, range) => {
+    setDateMode(mode);
+    if (dateStr) setSelDate(dateStr);
+    onRangeChange(range);
+  };
+
+  const packedCount   = orders.filter(o => o.is_packed).length;
+  const unpackedCount = orders.length - packedCount;
+  const allPacked     = orders.length > 0 && unpackedCount === 0;
+
+  const displayed = orders.filter(o => {
+    if (filter === "packed")   return o.is_packed;
+    if (filter === "unpacked") return !o.is_packed;
+    return true;
+  });
+
+  const byCourier = displayed.reduce((acc, o) => {
+    const c = o.courier_name || "Unknown";
+    if (!acc[c]) acc[c] = [];
+    acc[c].push(o);
+    return acc;
+  }, {});
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+
+      {/* Date filter */}
+      <div style={{ ...S.card, padding: "12px 16px", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <span style={{ fontSize: 12, fontWeight: 700, color: C.gray500, textTransform: "uppercase", letterSpacing: "0.06em" }}>📅 Date</span>
+        <button onClick={() => applyDate("all", "", {})} style={{ padding: "4px 12px", borderRadius: 20, fontSize: 12, cursor: "pointer", fontFamily: "inherit", fontWeight: dateMode === "all" ? 700 : 500, border: `1.5px solid ${dateMode === "all" ? C.orange : C.gray300}`, background: dateMode === "all" ? C.orangeLight : C.white, color: dateMode === "all" ? C.orange : C.gray600 }}>All Time</button>
+        {availDates.slice(0, 7).map(d => (
+          <button key={d} onClick={() => applyDate("single", d, { date_from: d, date_to: d })} style={{ padding: "4px 12px", borderRadius: 20, fontSize: 11, cursor: "pointer", fontFamily: "inherit", fontWeight: dateMode === "single" && selDate === d ? 700 : 500, border: `1.5px solid ${dateMode === "single" && selDate === d ? C.orange : C.gray300}`, background: dateMode === "single" && selDate === d ? C.orangeLight : C.white, color: dateMode === "single" && selDate === d ? C.orange : C.gray600 }}>{d}</button>
+        ))}
+        <button onClick={load} style={{ padding: "4px 10px", borderRadius: 8, border: `1px solid ${C.gray300}`, background: C.white, color: C.gray500, cursor: "pointer", fontFamily: "inherit", fontSize: 12 }}>⟳</button>
+      </div>
+
+      {loading ? (
+        <div style={{ textAlign: "center", padding: 48, color: C.gray400 }}>Loading orders…</div>
+      ) : orders.length === 0 ? (
+        <div style={{ textAlign: "center", padding: 48, color: C.gray400 }}>No orders found for this period.</div>
+      ) : (
+        <>
+          {/* Stats + search row */}
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "flex-start" }}>
+            {/* KPIs */}
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+              {[
+                { label: "Total", value: orders.length,  color: C.blue   },
+                { label: "Packed",   value: packedCount,   color: C.green  },
+                { label: "Not Packed", value: unpackedCount, color: unpackedCount > 0 ? C.red : C.gray300 },
+              ].map(k => (
+                <div key={k.label} style={{ background: C.gray50, border: `1px solid ${C.border}`, borderRadius: 10, padding: "8px 16px", textAlign: "center" }}>
+                  <p style={{ fontSize: 10, fontWeight: 700, color: C.gray400, textTransform: "uppercase" }}>{k.label}</p>
+                  <p style={{ fontSize: 18, fontWeight: 800, color: k.color, fontFamily: "monospace" }}>{k.value}</p>
+                </div>
+              ))}
+              {!allPacked && (
+                <button onClick={markAllPacked} style={{ alignSelf: "center", padding: "8px 16px", borderRadius: 8, border: `1px solid ${C.green}`, background: C.greenLight, color: C.green, cursor: "pointer", fontFamily: "inherit", fontSize: 12, fontWeight: 700 }}>
+                  ✓ Mark All Packed
+                </button>
+              )}
+              {allPacked && (
+                <div style={{ alignSelf: "center", padding: "8px 14px", borderRadius: 8, background: C.greenLight, color: C.green, fontSize: 12, fontWeight: 700, border: `1px solid ${C.greenBorder}` }}>🎉 All Packed!</div>
+              )}
+            </div>
+
+            {/* Autocomplete search */}
+            <div style={{ position: "relative", minWidth: 260 }}>
+              <label style={{ ...S.label, marginBottom: 3 }}>Find by last 4 digits of suborder #</label>
+              <input value={search} onChange={e => handleSearch(e.target.value)} placeholder="e.g. 0480"
+                style={{ ...S.inp, fontSize: 13 }} />
+              {suggestions.length > 0 && (
+                <div style={{ position: "absolute", top: "100%", left: 0, right: 0, zIndex: 50, background: C.white, border: `1px solid ${C.border}`, borderRadius: 8, boxShadow: "0 8px 24px rgba(0,0,0,0.12)", marginTop: 2, overflow: "hidden" }}>
+                  {suggestions.map(o => (
+                    <div key={o.order_id} style={{ padding: "8px 12px", display: "flex", alignItems: "center", justifyContent: "space-between", borderBottom: `1px solid ${C.gray100}`, background: o.is_packed ? "#F0FDF4" : C.white }}>
+                      <div>
+                        <span style={{ fontFamily: "monospace", fontSize: 11, color: C.gray500 }}>…{o.order_id.slice(-14)}</span>
+                        <span style={{ marginLeft: 8, fontSize: 12, color: C.gray600 }}>{o.customer_name}</span>
+                      </div>
+                      <button onClick={() => { togglePacked(o.order_id, o.is_packed); setSearch(""); setSuggestions([]); }}
+                        style={{ padding: "3px 10px", borderRadius: 20, fontSize: 11, cursor: "pointer", fontFamily: "inherit", fontWeight: 600, border: "none", background: o.is_packed ? C.greenLight : "#FEE2E2", color: o.is_packed ? C.green : C.red }}>
+                        {o.is_packed ? "✓ Packed" : "Not Packed"}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Filter tabs */}
+            <div style={{ display: "flex", gap: 4, background: C.gray100, borderRadius: 8, padding: 3, alignSelf: "flex-end" }}>
+              {[["all", "All"], ["packed", "✓ Packed"], ["unpacked", "Not Packed"]].map(([id, label]) => (
+                <button key={id} onClick={() => setFilter(id)} style={{ padding: "5px 14px", borderRadius: 6, border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 12, fontWeight: filter === id ? 700 : 500, background: filter === id ? C.white : "transparent", color: filter === id ? C.orange : C.gray500, boxShadow: filter === id ? "0 1px 4px rgba(0,0,0,0.08)" : "none" }}>
+                  {label} ({id === "all" ? orders.length : id === "packed" ? packedCount : unpackedCount})
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Orders grouped by courier */}
+          {displayed.length === 0 ? (
+            <p style={{ textAlign: "center", padding: 32, color: C.gray400 }}>
+              {filter === "packed" ? "No packed orders." : filter === "unpacked" ? "🎉 All orders packed!" : "No orders."}
+            </p>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              {Object.entries(byCourier).sort().map(([courier, rows]) => {
+                const cst = cs(courier);
+                const cp  = rows.filter(o => o.is_packed).length;
+                return (
+                  <div key={courier} style={{ border: `1px solid ${cst.border}`, borderRadius: 10, overflow: "hidden" }}>
+                    {/* Courier header */}
+                    <div style={{ background: cst.bg, padding: "10px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
+                      <span style={{ fontWeight: 800, fontSize: 14, color: cst.fg }}>{courier}</span>
+                      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                        <span style={{ fontSize: 12, color: cst.fg, fontWeight: 600 }}>{rows.length} orders</span>
+                        <span style={{ fontSize: 11, background: C.greenLight, color: C.green, border: `1px solid ${C.greenBorder}`, padding: "1px 8px", borderRadius: 20, fontWeight: 700 }}>{cp} packed</span>
+                        {cp < rows.length && <span style={{ fontSize: 11, background: C.redLight, color: C.red, border: `1px solid ${C.redBorder}`, padding: "1px 8px", borderRadius: 20, fontWeight: 700 }}>{rows.length - cp} left</span>}
+                      </div>
+                    </div>
+
+                    {/* Orders table */}
+                    <div style={{ overflowX: "auto" }}>
+                      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                        <thead>
+                          <tr style={{ background: C.gray50 }}>
+                            {["Order ID", "Customer", "City / State", "AWB", "Payment", "SKU", "Qty", "Date", "Packed"].map(h => (
+                              <th key={h} style={{ ...S.th, fontSize: 10, whiteSpace: "nowrap" }}>{h}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {rows.map((o, i) => (
+                            <tr key={o.order_id}
+                              style={{ background: o.is_packed ? "#F0FDF4" : i % 2 === 0 ? C.white : C.gray50, borderTop: `1px solid ${C.gray100}`, cursor: "pointer" }}
+                              onClick={() => onViewHistory({ name: o.customer_name, pincode: o.customer_pincode })}
+                              onMouseEnter={e => e.currentTarget.style.background = o.is_packed ? "#D1FAE5" : "#F0F7FF"}
+                              onMouseLeave={e => e.currentTarget.style.background = o.is_packed ? "#F0FDF4" : i % 2 === 0 ? C.white : C.gray50}
+                            >
+                              <td style={{ ...S.td, fontFamily: "monospace", fontSize: 10, color: C.gray400, whiteSpace: "nowrap" }}>…{o.order_id.slice(-14)}</td>
+                              <td style={{ ...S.td, fontWeight: 600, color: C.gray700, maxWidth: 120, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{o.customer_name || "—"}</td>
+                              <td style={{ ...S.td, color: C.gray500, whiteSpace: "nowrap", fontSize: 11 }}>{[o.customer_city, o.customer_state].filter(Boolean).join(", ") || "—"}</td>
+                              <td style={{ ...S.td, fontFamily: "monospace", fontSize: 10, color: C.gray500 }}>{o.awb_number || "—"}</td>
+                              <td style={{ ...S.td, textAlign: "center" }}>
+                                {o.payment_type === "COD"
+                                  ? <CTag bg="#FFFBEB" fg="#D97706" border="#FDE68A">COD</CTag>
+                                  : o.payment_type === "Prepaid"
+                                  ? <CTag bg="#F0FDF4" fg="#16A34A" border="#BBF7D0">PP</CTag>
+                                  : <span style={{ color: C.gray300 }}>—</span>}
+                              </td>
+                              <td style={{ ...S.td, fontFamily: "monospace", fontSize: 10, color: C.orange, fontWeight: 700 }}>{o.sku || "—"}</td>
+                              <td style={{ ...S.td, textAlign: "center", fontFamily: "monospace" }}>{o.qty || 1}</td>
+                              <td style={{ ...S.td, color: C.gray400, fontSize: 11, whiteSpace: "nowrap" }}>{o.uploaded_date || "—"}</td>
+                              <td style={{ ...S.td, textAlign: "center" }} onClick={e => { e.stopPropagation(); togglePacked(o.order_id, o.is_packed); }}>
+                                <button style={{ padding: "3px 10px", borderRadius: 20, fontSize: 11, cursor: "pointer", fontFamily: "inherit", fontWeight: 600, whiteSpace: "nowrap", background: o.is_packed ? C.greenLight : C.white, color: o.is_packed ? C.green : C.gray400, border: `1px solid ${o.is_packed ? C.greenBorder : C.gray300}` }}>
+                                  {o.is_packed ? "✓ Packed" : "Not Packed"}
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+// ── Main LabelsTab ────────────────────────────────────────────────────────────
 export function LabelsTab() {
   const today = todayISO();
 
+  // Sub-tab
+  const [subTab, setSubTab] = useState("upload"); // "upload" | "orders"
+
   // Upload state
-  const [uploadOpen,    setUploadOpen]    = useState(true);
   const [batchDate,     setBatchDate]     = useState(today);
   const [uploadResult,  setUploadResult]  = useState(null);
   const [uploadLoading, setUploadLoading] = useState(false);
@@ -265,30 +608,27 @@ export function LabelsTab() {
   const [showPages,     setShowPages]     = useState(false);
   const [skuSearch,     setSkuSearch]     = useState("");
 
-  // Date filter state
+  // Date filter (shared between tabs)
   const [availDates,  setAvailDates]  = useState([]);
   const [dateMode,    setDateMode]    = useState("all");
   const [selDate,     setSelDate]     = useState("");
   const [customFrom,  setCustomFrom]  = useState("");
   const [customTo,    setCustomTo]    = useState("");
-  const [activeRange, setActiveRange] = useState(null); // null = not yet initialised
+  const [activeRange, setActiveRange] = useState(null);
 
-  // Repeat customers state
-  const [repData,      setRepData]      = useState(null);
-  const [repLoading,   setRepLoading]   = useState(false);
-  const [repTab,       setRepTab]       = useState("name");
+  // Repeat customers
+  const [repData,    setRepData]    = useState(null);
+  const [repLoading, setRepLoading] = useState(false);
+
+  // History drawer
   const [historyQuery, setHistoryQuery] = useState(null);
 
-  // All-orders section (lazy)
-  const [ordersOpen,    setOrdersOpen]    = useState(false);
-  const [summary,       setSummary]       = useState(null);
-  const [orders,        setOrders]        = useState([]);
-  const [orderTotal,    setOrderTotal]    = useState(0);
-  const [ordersPage,    setOrdersPage]    = useState(1);
-  const [courierFilter, setCourierFilter] = useState("");
-  const [ordersLoading, setOrdersLoading] = useState(false);
+  // Packing tracker (for current upload)
+  const [packedTarget,  setPackedTarget]  = useState("");
+  const [packingOrders, setPackingOrders] = useState([]);
+  const [packingShow,   setPackingShow]   = useState(false);
 
-  // ── Init: load available dates, default to latest ──────────────────────────
+  // ── Init ──────────────────────────────────────────────────────────────────
   useEffect(() => {
     fetch(`${API}/labels/summary/`)
       .then(r => r.json())
@@ -305,7 +645,7 @@ export function LabelsTab() {
       .catch(() => setActiveRange({}));
   }, []);
 
-  // ── Fetch repeat customers when activeRange changes ────────────────────────
+  // ── Fetch repeat customers (address-based) ────────────────────────────────
   useEffect(() => {
     if (activeRange === null) return;
     setRepLoading(true); setRepData(null);
@@ -318,42 +658,12 @@ export function LabelsTab() {
       .catch(() => setRepLoading(false));
   }, [JSON.stringify(activeRange)]); // eslint-disable-line
 
-  // ── Fetch all-orders section (only when expanded) ─────────────────────────
-  const fetchOrders = useCallback(async (ar, pg, courier) => {
-    setOrdersLoading(true);
-    const params = new URLSearchParams({ page: pg, page_size: PAGE_SIZE });
-    if (ar.date_from) params.set("date_from", ar.date_from);
-    if (ar.date_to)   params.set("date_to",   ar.date_to);
-    if (courier)      params.set("courier",   courier);
-    try {
-      const [sumRes, ordRes] = await Promise.all([
-        fetch(`${API}/labels/summary/?${params}`).then(r => r.json()),
-        fetch(`${API}/labels/orders/?${params}`).then(r => r.json()),
-      ]);
-      setSummary(sumRes);
-      setOrders(ordRes.results || []);
-      setOrderTotal(ordRes.total || 0);
-    } catch {}
-    setOrdersLoading(false);
-  }, []);
+  const applyRange = (range) => { setActiveRange(range); };
 
-  useEffect(() => {
-    if (!ordersOpen || activeRange === null) return;
-    fetchOrders(activeRange, ordersPage, courierFilter);
-  }, [ordersOpen, JSON.stringify(activeRange), ordersPage, courierFilter, fetchOrders]); // eslint-disable-line
-
-  // ── Date filter helpers ────────────────────────────────────────────────────
-  const applyRange = (range) => {
-    setActiveRange(range);
-    setOrdersPage(1);
-    setCourierFilter("");
-    setSummary(null);
-    setOrders([]);
-  };
-
-  // ── Upload handlers ────────────────────────────────────────────────────────
+  // ── Upload handlers ───────────────────────────────────────────────────────
   const handleFile = async (file) => {
     setUploadLoading(true); setUploadError(""); setUploadResult(null);
+    setPackingOrders([]); setPackingShow(false);
     setFileName(file.name);
     const form = new FormData();
     form.append("file", file);
@@ -366,7 +676,11 @@ export function LabelsTab() {
       } else {
         setUploadResult(data);
         setAvailDates(prev => prev.includes(batchDate) ? prev : [batchDate, ...prev].sort().reverse());
-        setActiveRange(ar => ar ? { ...ar } : {});  // re-trigger repeat customer fetch
+        setActiveRange(ar => ar ? { ...ar } : {});
+        const ords = (data.page_details || []).filter(pd => pd.order_id)
+          .map(pd => ({ order_id: pd.order_id, sku: pd.sku, qty: pd.qty || 1, is_packed: false }));
+        setPackingOrders(ords);
+        if (ords.length > 0) setPackingShow(true);
       }
     } catch {
       setUploadError("Could not reach the server — is the backend running?");
@@ -377,6 +691,37 @@ export function LabelsTab() {
   const resetUpload = () => {
     setUploadResult(null); setUploadError(""); setFileName("");
     setShowPages(false); setSkuSearch(""); setBatchDate(todayISO());
+    setPackedTarget(""); setPackingOrders([]); setPackingShow(false);
+  };
+
+  const togglePacked = async (order_id) => {
+    const current = packingOrders.find(o => o.order_id === order_id)?.is_packed ?? false;
+    const res = await fetch(`${API}/labels/orders/${encodeURIComponent(order_id)}/pack/`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ packed: !current }),
+    });
+    if (res.ok) setPackingOrders(prev => prev.map(o => o.order_id === order_id ? { ...o, is_packed: !current } : o));
+  };
+
+  const markAllPacked = async () => {
+    const ids = packingOrders.map(o => o.order_id);
+    const res = await fetch(`${API}/labels/bulk-pack/`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ order_ids: ids, packed: true }),
+    });
+    if (res.ok) setPackingOrders(prev => prev.map(o => ({ ...o, is_packed: true })));
+  };
+
+  const applyPackedTarget = async () => {
+    const n = parseInt(packedTarget, 10);
+    if (isNaN(n) || n < 0 || packingOrders.length === 0) return;
+    const toPackIds   = packingOrders.slice(0, n).map(o => o.order_id);
+    const toUnpackIds = packingOrders.slice(n).map(o => o.order_id);
+    await Promise.all([
+      toPackIds.length   && fetch(`${API}/labels/bulk-pack/`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ order_ids: toPackIds,   packed: true  }) }),
+      toUnpackIds.length && fetch(`${API}/labels/bulk-pack/`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ order_ids: toUnpackIds, packed: false }) }),
+    ].filter(Boolean));
+    setPackingOrders(prev => prev.map((o, i) => ({ ...o, is_packed: i < n })));
   };
 
   // ── Derived ───────────────────────────────────────────────────────────────
@@ -386,34 +731,49 @@ export function LabelsTab() {
   const totalLabels  = uploadResult?.total_labels ?? 0;
   const totalPages   = uploadResult?.total_pages  ?? 0;
 
-  const repTotal = repData ? (repTab === "name" ? repData.total_by_name : repData.total_by_location) : 0;
-  const repRows  = repData ? (repTab === "name" ? repData.by_name : repData.by_location) : [];
-
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 22 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       {historyQuery && <CustomerHistoryDrawer query={historyQuery} onClose={() => setHistoryQuery(null)} />}
 
       {/* Header */}
-      <div>
-        <h2 style={{ fontSize: 18, fontWeight: 800, color: C.gray800, marginBottom: 4 }}>🏷 Labels</h2>
-        <p style={{ fontSize: 13, color: C.gray400 }}>Upload Meesho label PDFs and track repeat customers.</p>
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
+        <div>
+          <h2 style={{ fontSize: 18, fontWeight: 800, color: C.gray800, marginBottom: 3 }}>🏷 Labels</h2>
+          <p style={{ fontSize: 13, color: C.gray400 }}>Upload Meesho label PDFs, track packing, and monitor delivery partners.</p>
+        </div>
+        {/* Sub-tab navigation */}
+        <div style={{ display: "flex", gap: 0, background: C.gray100, borderRadius: 10, padding: 4 }}>
+          {[["upload", "📤 Upload & Pack"], ["orders", "🚚 Orders by Partner"]].map(([id, label]) => (
+            <button key={id} onClick={() => setSubTab(id)} style={{ padding: "8px 20px", borderRadius: 8, border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: subTab === id ? 700 : 500, background: subTab === id ? C.white : "transparent", color: subTab === id ? C.orange : C.gray500, boxShadow: subTab === id ? "0 2px 8px rgba(0,0,0,0.1)" : "none", transition: "all 0.15s" }}>
+              {label}
+            </button>
+          ))}
+        </div>
       </div>
 
-      {/* ── UPLOAD SECTION ────────────────────────────────────────────────── */}
-      <div style={S.card}>
-        <div onClick={() => setUploadOpen(o => !o)} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer", marginBottom: uploadOpen ? 16 : 0 }}>
-          <p style={{ ...S.cardTitle, marginBottom: 0 }}>
-            📤 Upload New Labels PDF
-            {uploadResult && <span style={{ marginLeft: 10, fontWeight: 400, color: C.green, textTransform: "none", letterSpacing: 0 }}>✓ {fileName}</span>}
-          </p>
-          <span style={{ fontSize: 12, color: C.gray400 }}>{uploadOpen ? "▲ Hide" : "▼ Show"}</span>
-        </div>
+      {/* Duplicate address banner — shown on both tabs */}
+      <DuplicateBanner repData={repData} repLoading={repLoading} />
 
-        {uploadOpen && (
-          <>
+      {/* ════════════════ TAB 1: UPLOAD & PACK ══════════════════════════════ */}
+      {subTab === "upload" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+
+          {/* Upload card */}
+          <div style={S.card}>
+            <p style={{ ...S.cardTitle, marginBottom: 16 }}>
+              📤 Upload New Labels PDF
+              {uploadResult && <span style={{ marginLeft: 10, fontWeight: 400, color: C.green, textTransform: "none", letterSpacing: 0 }}>✓ {fileName}</span>}
+            </p>
+
             {!uploadResult && !uploadLoading && (
               <>
                 <BatchDatePicker value={batchDate} onChange={setBatchDate} />
+                <div style={{ marginTop: 14, padding: "12px 16px", background: C.gray50, borderRadius: 10, border: `1px solid ${C.border}`, display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+                  <span style={{ fontSize: 13, color: C.gray600, fontWeight: 600 }}>📦 How many did you pack today?</span>
+                  <input type="number" min="0" value={packedTarget} onChange={e => setPackedTarget(e.target.value)} placeholder="e.g. 45"
+                    style={{ width: 90, padding: "7px 10px", borderRadius: 8, border: `1px solid ${C.gray300}`, fontSize: 13, fontFamily: "inherit", outline: "none" }} />
+                  <span style={{ fontSize: 12, color: C.gray400 }}>Leave blank if you packed everything</span>
+                </div>
                 <div style={{ marginTop: 16 }}><DropZone onFile={handleFile} /></div>
               </>
             )}
@@ -435,7 +795,7 @@ export function LabelsTab() {
 
             {uploadResult && (
               <>
-                {/* Badges + action buttons */}
+                {/* Badges + actions */}
                 <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 16 }}>
                   <span style={{ background: C.greenLight, border: `1px solid ${C.greenBorder}`, color: C.green, padding: "4px 12px", borderRadius: 20, fontSize: 12, fontWeight: 600 }}>✓ {fileName}</span>
                   {(() => {
@@ -459,14 +819,11 @@ export function LabelsTab() {
                   </div>
                 </div>
 
-                {/* Blocked customers warning banner */}
+                {/* Blocked customers warning */}
                 {(uploadResult.blocked_customers_found?.length > 0) && (
-                  <div style={{
-                    background: "#FFF5F5", border: `2px solid ${C.red}`, borderRadius: 10,
-                    padding: "14px 18px", marginBottom: 16,
-                  }}>
+                  <div style={{ background: "#FFF5F5", border: `2px solid ${C.red}`, borderRadius: 10, padding: "14px 18px", marginBottom: 16 }}>
                     <p style={{ fontSize: 13, fontWeight: 800, color: C.red, marginBottom: 8 }}>
-                      🚨 {uploadResult.blocked_customers_found.length} Blocked Customer{uploadResult.blocked_customers_found.length > 1 ? "s" : ""} Found in This Upload!
+                      🚨 {uploadResult.blocked_customers_found.length} Blocked Customer{uploadResult.blocked_customers_found.length > 1 ? "s" : ""} Found!
                     </p>
                     <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
                       {uploadResult.blocked_customers_found.map((bc, i) => (
@@ -489,7 +846,64 @@ export function LabelsTab() {
                   <KpiCard label="Multi-Qty"    value={highQtyCount}                   sub="qty > 1 orders"        accent={highQtyCount > 0 ? C.amber : C.green} icon={highQtyCount > 0 ? "⚠️" : "✓"} highlight={highQtyCount > 0} />
                 </div>
 
-                {/* Bar chart */}
+                {/* Packing tracker */}
+                {packingShow && packingOrders.length > 0 && (() => {
+                  const packedCount   = packingOrders.filter(o => o.is_packed).length;
+                  const unpackedCount = packingOrders.length - packedCount;
+                  const pct           = Math.round((packedCount / packingOrders.length) * 100);
+                  const allDone       = packedCount === packingOrders.length;
+                  return (
+                    <div style={{ background: allDone ? C.greenLight : C.amberLight, border: `2px solid ${allDone ? C.greenBorder : "#FDE68A"}`, borderRadius: 12, padding: "14px 18px", marginBottom: 16 }}>
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10, marginBottom: 12 }}>
+                        <div>
+                          <p style={{ fontSize: 14, fontWeight: 800, color: allDone ? C.green : C.amber }}>📦 Packing Tracker — {packedCount} / {packingOrders.length} packed</p>
+                          {!allDone && <p style={{ fontSize: 12, color: C.gray500, marginTop: 2 }}>{unpackedCount} order{unpackedCount !== 1 ? "s" : ""} not yet packed</p>}
+                        </div>
+                        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                          <input type="number" min="0" max={packingOrders.length} value={packedTarget} onChange={e => setPackedTarget(e.target.value)} placeholder={`0–${packingOrders.length}`}
+                            style={{ width: 80, padding: "5px 9px", borderRadius: 8, border: `1px solid ${C.gray300}`, fontSize: 12, fontFamily: "inherit", outline: "none" }} />
+                          <button onClick={applyPackedTarget} style={{ padding: "5px 12px", borderRadius: 8, border: `1px solid ${C.amber}`, background: C.amberLight, color: C.amber, fontSize: 12, cursor: "pointer", fontFamily: "inherit", fontWeight: 600 }}>Apply</button>
+                          {!allDone && (
+                            <button onClick={markAllPacked} style={{ padding: "5px 12px", borderRadius: 8, border: `1px solid ${C.green}`, background: C.greenLight, color: C.green, fontSize: 12, cursor: "pointer", fontFamily: "inherit", fontWeight: 600 }}>✓ Mark All Packed</button>
+                          )}
+                        </div>
+                      </div>
+                      <div style={{ height: 8, background: "#E5E7EB", borderRadius: 4, overflow: "hidden", marginBottom: 14 }}>
+                        <div style={{ width: `${pct}%`, height: "100%", background: allDone ? C.green : C.amber, borderRadius: 4, transition: "width 0.3s" }} />
+                      </div>
+                      {!allDone && (
+                        <div style={{ maxHeight: 260, overflowY: "auto" }}>
+                          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                            <thead>
+                              <tr style={{ background: "rgba(0,0,0,0.04)" }}>
+                                {["Order ID", "SKU", "Qty", "Packed?"].map(h => (
+                                  <th key={h} style={{ ...S.th, fontSize: 10, padding: "6px 10px" }}>{h}</th>
+                                ))}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {packingOrders.map((o, i) => (
+                                <tr key={o.order_id} style={{ background: o.is_packed ? "#F0FDF4" : i % 2 === 0 ? C.white : C.gray50, opacity: o.is_packed ? 0.55 : 1 }}>
+                                  <td style={{ ...S.td, fontFamily: "monospace", fontSize: 10, color: C.gray400, padding: "7px 10px" }}>…{o.order_id.slice(-14)}</td>
+                                  <td style={{ ...S.td, fontFamily: "monospace", fontSize: 11, color: C.orange, fontWeight: 600, padding: "7px 10px" }}>{o.sku || "—"}</td>
+                                  <td style={{ ...S.td, textAlign: "center", padding: "7px 10px" }}>{o.qty}</td>
+                                  <td style={{ ...S.td, padding: "7px 10px" }}>
+                                    <button onClick={() => togglePacked(o.order_id)} style={{ padding: "3px 12px", borderRadius: 20, fontSize: 11, cursor: "pointer", fontFamily: "inherit", fontWeight: 600, background: o.is_packed ? C.greenLight : C.white, color: o.is_packed ? C.green : C.gray500, border: `1px solid ${o.is_packed ? C.greenBorder : C.gray300}` }}>
+                                      {o.is_packed ? "✓ Packed" : "Mark Packed"}
+                                    </button>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                      {allDone && <p style={{ fontSize: 14, fontWeight: 700, color: C.green, textAlign: "center" }}>🎉 All orders packed!</p>}
+                    </div>
+                  );
+                })()}
+
+                {/* SKU distribution chart */}
                 {chartData.length > 0 && (
                   <div style={{ background: C.gray50, borderRadius: 10, padding: "16px 16px 0", marginBottom: 16 }}>
                     <p style={{ ...S.cardTitle }}>SKU Distribution — Top {chartData.length}</p>
@@ -529,8 +943,7 @@ export function LabelsTab() {
                         return (
                           <tr key={row.sku} style={{ background: rowBg }}
                             onMouseEnter={e => e.currentTarget.style.background = isHQ ? "#FDE68A55" : "#F0F7FF"}
-                            onMouseLeave={e => e.currentTarget.style.background = rowBg}
-                          >
+                            onMouseLeave={e => e.currentTarget.style.background = rowBg}>
                             <td style={{ ...S.td, color: C.gray400, fontSize: 11, width: 36 }}>{i + 1}</td>
                             <td style={S.td}>
                               <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
@@ -590,259 +1003,38 @@ export function LabelsTab() {
                 </div>
               </>
             )}
-          </>
-        )}
-      </div>
-
-      {/* ── DATE FILTER ───────────────────────────────────────────────────── */}
-      <div style={{ ...S.card, padding: "14px 20px", display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-        <span style={{ fontSize: 12, fontWeight: 700, color: C.gray500, textTransform: "uppercase", letterSpacing: "0.06em", marginRight: 4 }}>📅 Filter</span>
-
-        <button onClick={() => { setDateMode("all"); applyRange({}); }}
-          style={{ padding: "5px 14px", borderRadius: 8, border: "none", cursor: "pointer", fontSize: 12, fontWeight: dateMode === "all" ? 700 : 500, fontFamily: "inherit", background: dateMode === "all" ? C.orange : C.gray100, color: dateMode === "all" ? C.white : C.gray600 }}>
-          All Time
-        </button>
-
-        {availDates.slice(0, 7).map(d => (
-          <button key={d} onClick={() => { setSelDate(d); setDateMode("single"); applyRange({ date_from: d, date_to: d }); }}
-            style={{ padding: "4px 12px", borderRadius: 20, fontSize: 11, cursor: "pointer", fontFamily: "inherit", fontWeight: dateMode === "single" && selDate === d ? 700 : 500, border: `1.5px solid ${dateMode === "single" && selDate === d ? C.orange : C.gray300}`, background: dateMode === "single" && selDate === d ? C.orangeLight : C.white, color: dateMode === "single" && selDate === d ? C.orange : C.gray600 }}>
-            {d}
-          </button>
-        ))}
-
-        <span style={{ color: C.gray300, fontSize: 18 }}>|</span>
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <span style={{ fontSize: 12, color: C.gray500, fontWeight: 600 }}>Range:</span>
-          <input type="date" value={customFrom} onChange={e => setCustomFrom(e.target.value)} style={{ ...S.inp, width: 140, fontSize: 12, padding: "7px 10px" }} />
-          <span style={{ color: C.gray400, fontSize: 13 }}>→</span>
-          <input type="date" value={customTo} onChange={e => setCustomTo(e.target.value)} style={{ ...S.inp, width: 140, fontSize: 12, padding: "7px 10px" }} />
-          <button
-            disabled={!customFrom || !customTo}
-            onClick={() => { if (!customFrom || !customTo) return; setDateMode("custom"); applyRange({ date_from: customFrom, date_to: customTo }); }}
-            style={{ padding: "6px 14px", borderRadius: 8, fontSize: 12, cursor: (!customFrom || !customTo) ? "not-allowed" : "pointer", fontFamily: "inherit", fontWeight: 600, background: dateMode === "custom" ? C.orange : C.gray100, color: dateMode === "custom" ? C.white : C.gray600, border: "none", opacity: (!customFrom || !customTo) ? 0.5 : 1 }}>
-            Apply
-          </button>
-        </div>
-      </div>
-
-      {/* ── REPEAT CUSTOMERS (auto-loads with date filter) ─────────────────── */}
-      <div style={{ ...S.card, borderLeft: `4px solid ${C.amber}`, background: "#FFFDF5" }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10, marginBottom: 16 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <span style={{ fontSize: 16 }}>⚠️</span>
-            <h3 style={{ fontSize: 14, fontWeight: 800, color: C.gray800 }}>Repeat Customers</h3>
-            {repData && <span style={{ background: C.amberLight, color: C.amber, border: "1px solid #FDE68A", padding: "2px 10px", borderRadius: 20, fontSize: 11, fontWeight: 700 }}>{repTotal} found</span>}
           </div>
-          <div style={{ display: "flex", gap: 4, background: C.gray100, borderRadius: 8, padding: 3 }}>
-            {[{ id: "name", label: `By Name${repData ? ` (${repData.total_by_name})` : ""}` }, { id: "location", label: `By Location${repData ? ` (${repData.total_by_location})` : ""}` }].map(t => (
-              <button key={t.id} onClick={() => setRepTab(t.id)} style={{ padding: "5px 14px", borderRadius: 6, fontSize: 12, cursor: "pointer", fontFamily: "inherit", fontWeight: repTab === t.id ? 700 : 500, border: "none", background: repTab === t.id ? C.white : "transparent", color: repTab === t.id ? C.gray800 : C.gray500, boxShadow: repTab === t.id ? "0 1px 3px rgba(0,0,0,0.1)" : "none" }}>
-                {t.label}
-              </button>
+
+          {/* Date filter (for banner context) */}
+          <div style={{ ...S.card, padding: "12px 16px", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            <span style={{ fontSize: 12, fontWeight: 700, color: C.gray500, textTransform: "uppercase", letterSpacing: "0.06em" }}>📅 Date Filter</span>
+            <button onClick={() => { setDateMode("all"); applyRange({}); }} style={{ padding: "4px 12px", borderRadius: 20, fontSize: 12, cursor: "pointer", fontFamily: "inherit", fontWeight: dateMode === "all" ? 700 : 500, border: `1.5px solid ${dateMode === "all" ? C.orange : C.gray300}`, background: dateMode === "all" ? C.orangeLight : C.white, color: dateMode === "all" ? C.orange : C.gray600 }}>All Time</button>
+            {availDates.slice(0, 7).map(d => (
+              <button key={d} onClick={() => { setSelDate(d); setDateMode("single"); applyRange({ date_from: d, date_to: d }); }} style={{ padding: "4px 12px", borderRadius: 20, fontSize: 11, cursor: "pointer", fontFamily: "inherit", fontWeight: dateMode === "single" && selDate === d ? 700 : 500, border: `1.5px solid ${dateMode === "single" && selDate === d ? C.orange : C.gray300}`, background: dateMode === "single" && selDate === d ? C.orangeLight : C.white, color: dateMode === "single" && selDate === d ? C.orange : C.gray600 }}>{d}</button>
             ))}
+            <span style={{ color: C.gray300, fontSize: 18 }}>|</span>
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <input type="date" value={customFrom} onChange={e => setCustomFrom(e.target.value)} style={{ ...S.inp, width: 140, fontSize: 12, padding: "7px 10px" }} />
+              <span style={{ color: C.gray400, fontSize: 13 }}>→</span>
+              <input type="date" value={customTo} onChange={e => setCustomTo(e.target.value)} style={{ ...S.inp, width: 140, fontSize: 12, padding: "7px 10px" }} />
+              <button disabled={!customFrom || !customTo} onClick={() => { if (!customFrom || !customTo) return; setDateMode("custom"); applyRange({ date_from: customFrom, date_to: customTo }); }}
+                style={{ padding: "6px 14px", borderRadius: 8, fontSize: 12, cursor: (!customFrom || !customTo) ? "not-allowed" : "pointer", fontFamily: "inherit", fontWeight: 600, background: dateMode === "custom" ? C.orange : C.gray100, color: dateMode === "custom" ? C.white : C.gray600, border: "none", opacity: (!customFrom || !customTo) ? 0.5 : 1 }}>
+                Apply
+              </button>
+            </div>
           </div>
         </div>
+      )}
 
-        {repLoading && <div style={{ textAlign: "center", padding: 40, color: C.gray400 }}>Loading repeat customers…</div>}
-
-        {!repLoading && repData && repTotal === 0 && (
-          <div style={{ textAlign: "center", padding: 40, color: C.gray400 }}>
-            <p style={{ fontSize: 28, marginBottom: 8 }}>🎉</p>
-            <p style={{ fontWeight: 600 }}>No repeat customers for this period</p>
-          </div>
-        )}
-
-        {!repLoading && repRows.length > 0 && (
-          <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse" }}>
-              <thead>
-                <tr>
-                  {(repTab === "name"
-                    ? ["Customer", "City / State", "Orders", "SKUs", "Date Range", "Action"]
-                    : ["Pincode", "City / State", "Orders", "Names", "SKUs", "Action"]
-                  ).map(h => <th key={h} style={{ ...S.th, fontSize: 10 }}>{h}</th>)}
-                </tr>
-              </thead>
-              <tbody>
-                {repRows.map((row, i) => {
-                  const rowBg = i % 2 === 0 ? "#FFFDF5" : C.amberLight;
-                  const key   = repTab === "name" ? row.customer_name : row.customer_pincode;
-                  return (
-                    <tr key={key} style={{ background: rowBg }}
-                      onMouseEnter={e => e.currentTarget.style.background = "#FEF9C3"}
-                      onMouseLeave={e => e.currentTarget.style.background = rowBg}
-                    >
-                      {repTab === "name" ? (
-                        <>
-                          <td style={{ ...S.td, fontWeight: 700, color: C.gray800 }}>{row.customer_name}</td>
-                          <td style={{ ...S.td, fontSize: 12, color: C.gray500, whiteSpace: "nowrap" }}>{[row.customer_city, row.customer_state].filter(Boolean).join(", ") || "—"}</td>
-                          <td style={S.td}>
-                            <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-                              <span style={{ fontSize: 18, fontWeight: 800, fontFamily: "monospace", color: C.amber }}>{row.order_count}</span>
-                              {row.period_count !== row.order_count && (
-                                <span style={{ fontSize: 10, color: C.gray400 }}>{row.period_count} in period</span>
-                              )}
-                            </div>
-                          </td>
-                          <td style={S.td}>
-                            <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-                              {(row.skus || []).slice(0, 3).map(sku => <span key={sku} style={{ fontFamily: "monospace", fontSize: 10, color: C.orange, background: C.orangeLight, padding: "1px 6px", borderRadius: 4, fontWeight: 600 }}>{sku.length > 22 ? sku.slice(0, 20) + "…" : sku}</span>)}
-                              {row.skus?.length > 3 && <span style={{ fontSize: 10, color: C.gray400 }}>+{row.skus.length - 3}</span>}
-                            </div>
-                          </td>
-                          <td style={{ ...S.td, fontSize: 11, color: C.gray400, whiteSpace: "nowrap" }}>
-                            {row.first_ordered === row.last_ordered ? row.first_ordered : `${row.first_ordered} → ${row.last_ordered}`}
-                          </td>
-                          <td style={S.td}>
-                            <button onClick={() => setHistoryQuery({ name: row.customer_name, pincode: row.customer_pincode })}
-                              style={{ padding: "5px 14px", borderRadius: 7, fontSize: 12, cursor: "pointer", border: `1.5px solid ${C.amber}`, background: C.amberLight, color: C.amber, fontFamily: "inherit", fontWeight: 600 }}>
-                              View History →
-                            </button>
-                          </td>
-                        </>
-                      ) : (
-                        <>
-                          <td style={{ ...S.td, fontFamily: "monospace", fontWeight: 700, color: C.gray700 }}>{row.customer_pincode}</td>
-                          <td style={{ ...S.td, fontSize: 12, color: C.gray500, whiteSpace: "nowrap" }}>{[row.customer_city, row.customer_state].filter(Boolean).join(", ") || "—"}</td>
-                          <td style={S.td}>
-                            <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-                              <span style={{ fontSize: 18, fontWeight: 800, fontFamily: "monospace", color: C.amber }}>{row.order_count}</span>
-                              {row.period_count !== row.order_count && (
-                                <span style={{ fontSize: 10, color: C.gray400 }}>{row.period_count} in period</span>
-                              )}
-                            </div>
-                          </td>
-                          <td style={S.td}>
-                            <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-                              {(row.customer_names || []).slice(0, 3).map(n => <span key={n} style={{ fontSize: 11, color: C.gray700, background: C.gray100, padding: "1px 7px", borderRadius: 4, fontWeight: 500 }}>{n}</span>)}
-                              {row.customer_names?.length > 3 && <span style={{ fontSize: 11, color: C.gray400 }}>+{row.customer_names.length - 3}</span>}
-                            </div>
-                          </td>
-                          <td style={S.td}>
-                            <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-                              {(row.skus || []).slice(0, 2).map(sku => <span key={sku} style={{ fontFamily: "monospace", fontSize: 10, color: C.orange, background: C.orangeLight, padding: "1px 6px", borderRadius: 4, fontWeight: 600 }}>{sku.length > 20 ? sku.slice(0, 18) + "…" : sku}</span>)}
-                            </div>
-                          </td>
-                          <td style={S.td}>
-                            <button onClick={() => setHistoryQuery({ pincode: row.customer_pincode })}
-                              style={{ padding: "5px 14px", borderRadius: 7, fontSize: 12, cursor: "pointer", border: `1.5px solid ${C.amber}`, background: C.amberLight, color: C.amber, fontFamily: "inherit", fontWeight: 600 }}>
-                              View History →
-                            </button>
-                          </td>
-                        </>
-                      )}
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
-
-      {/* ── ALL ORDERS — lazy, only loads on click ────────────────────────── */}
-      <div style={S.card}>
-        <div onClick={() => setOrdersOpen(o => !o)} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer" }}>
-          <p style={{ ...S.cardTitle, marginBottom: 0 }}>
-            📋 All Orders
-            {summary && ordersOpen && <span style={{ marginLeft: 8, fontWeight: 400, color: C.gray500, textTransform: "none", letterSpacing: 0 }}>— {summary.total} orders</span>}
-          </p>
-          <span style={{ fontSize: 12, color: C.orange, fontWeight: 600 }}>
-            {ordersOpen ? "▲ Hide" : "▼ Show All Orders"}
-          </span>
-        </div>
-
-        {ordersOpen && (
-          <div style={{ marginTop: 16 }}>
-            {ordersLoading && !summary && <div style={{ textAlign: "center", padding: 40, color: C.gray400 }}>Loading orders…</div>}
-
-            {!ordersLoading && summary && summary.total === 0 && (
-              <div style={{ textAlign: "center", padding: 40, color: C.gray400 }}>
-                <p style={{ fontSize: 28, marginBottom: 8 }}>📭</p>
-                <p style={{ fontWeight: 600 }}>No orders for this period</p>
-              </div>
-            )}
-
-            {summary && summary.total > 0 && (
-              <>
-                {/* Courier breakdown */}
-                <p style={{ ...S.cardTitle, marginBottom: 12 }}>Courier Breakdown</p>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 10, marginBottom: 20 }}>
-                  {(summary.courier_summary || []).map(row => {
-                    const active = courierFilter === row.courier_name;
-                    const style  = cs(row.courier_name);
-                    return (
-                      <div key={row.courier_name}
-                        onClick={() => setCourierFilter(active ? "" : row.courier_name)}
-                        style={{ padding: "10px 16px", borderRadius: 10, cursor: "pointer", background: active ? style.bg : C.white, border: `${active ? 2 : 1}px solid ${active ? style.fg : style.border}` }}
-                        onMouseEnter={e => { if (!active) e.currentTarget.style.background = style.bg; }}
-                        onMouseLeave={e => { if (!active) e.currentTarget.style.background = C.white; }}
-                      >
-                        <div style={{ display: "flex", justifyContent: "space-between" }}>
-                          <span style={{ fontWeight: 700, color: style.fg, fontSize: 13 }}>{row.courier_name || "Unknown"}</span>
-                          <span style={{ fontSize: 22, fontWeight: 800, color: style.fg, fontFamily: "'DM Mono', monospace" }}>{row.count}</span>
-                        </div>
-                        <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
-                          <span style={{ fontSize: 11, color: C.green, fontWeight: 600 }}>✓ {row.prepaid}</span>
-                          <span style={{ fontSize: 11, color: C.amber, fontWeight: 600 }}>₹ {row.cod}</span>
-                          <span style={{ fontSize: 11, color: C.blue, fontWeight: 600 }}>×{row.total_items}</span>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-
-                {/* Orders table */}
-                <SectionHeader title={`Orders${courierFilter ? ` — ${courierFilter}` : ""}`} count={orderTotal} />
-                {ordersLoading ? (
-                  <div style={{ textAlign: "center", padding: 32, color: C.gray400 }}>Loading…</div>
-                ) : (
-                  <>
-                    <div style={{ overflowX: "auto" }}>
-                      <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                        <thead>
-                          <tr>{["Order ID", "Customer", "City / State", "Courier", "AWB", "Payment", "SKU", "Qty", "Upload Date"].map(h => (
-                            <th key={h} style={{ ...S.th, whiteSpace: "nowrap" }}>{h}</th>
-                          ))}</tr>
-                        </thead>
-                        <tbody>
-                          {orders.map((r, i) => {
-                            const style = cs(r.courier_name);
-                            const rowBg = i % 2 === 0 ? C.white : C.gray50;
-                            return (
-                              <tr key={r.order_id} style={{ background: rowBg, cursor: "pointer" }}
-                                onClick={() => setHistoryQuery({ name: r.customer_name, pincode: r.customer_pincode })}
-                                onMouseEnter={e => e.currentTarget.style.background = "#F0F7FF"}
-                                onMouseLeave={e => e.currentTarget.style.background = rowBg}
-                              >
-                                <td style={{ ...S.td, fontFamily: "monospace", fontSize: 11, color: C.gray400 }}>…{r.order_id.slice(-14)}</td>
-                                <td style={{ ...S.td, maxWidth: 130, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 600, color: C.gray700 }}>{r.customer_name || "—"}</td>
-                                <td style={{ ...S.td, whiteSpace: "nowrap", fontSize: 12 }}>
-                                  <span style={{ color: C.gray600 }}>{r.customer_city || "—"}</span>
-                                  {r.customer_state && <span style={{ color: C.gray400 }}>, {r.customer_state}</span>}
-                                </td>
-                                <td style={S.td}><CTag bg={style.bg} fg={style.fg} border={style.border}>{r.courier_name || "—"}</CTag></td>
-                                <td style={{ ...S.td, fontFamily: "monospace", fontSize: 11, color: C.gray500, whiteSpace: "nowrap" }}>{r.awb_number || "—"}</td>
-                                <td style={S.td}>{r.payment_type === "Prepaid" ? <CTag bg="#F0FDF4" fg="#16A34A" border="#BBF7D0">Prepaid</CTag> : r.payment_type === "COD" ? <CTag bg="#FFFBEB" fg="#D97706" border="#FDE68A">COD</CTag> : <span style={{ color: C.gray300 }}>—</span>}</td>
-                                <td style={S.td}>{r.sku ? <span style={{ fontFamily: "monospace", fontSize: 11, color: C.orange, fontWeight: 600, background: C.orangeLight, padding: "2px 7px", borderRadius: 4 }}>{r.sku}</span> : <span style={{ color: C.gray300 }}>—</span>}</td>
-                                <td style={{ ...S.td, textAlign: "center" }}>{r.qty > 1 ? <CTag bg={C.amberLight} fg={C.amber} border="#FDE68A">×{r.qty}</CTag> : <span style={{ color: C.gray400, fontSize: 12 }}>1</span>}</td>
-                                <td style={{ ...S.td, color: C.gray400, fontSize: 12, whiteSpace: "nowrap" }}>{r.uploaded_date || "—"}</td>
-                              </tr>
-                            );
-                          })}
-                          {orders.length === 0 && (
-                            <tr><td colSpan={9} style={{ ...S.td, textAlign: "center", padding: 40, color: C.gray400 }}>No orders found</td></tr>
-                          )}
-                        </tbody>
-                      </table>
-                    </div>
-                    {orderTotal > PAGE_SIZE && <Pagination page={ordersPage} total={orderTotal} pageSize={PAGE_SIZE} onChange={p => setOrdersPage(p)} />}
-                  </>
-                )}
-              </>
-            )}
-          </div>
-        )}
-      </div>
+      {/* ════════════════ TAB 2: ORDERS BY PARTNER ══════════════════════════ */}
+      {subTab === "orders" && (
+        <OrdersByPartnerTab
+          availDates={availDates}
+          activeRange={activeRange}
+          onRangeChange={applyRange}
+          onViewHistory={setHistoryQuery}
+        />
+      )}
     </div>
   );
 }

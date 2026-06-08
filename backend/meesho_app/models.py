@@ -308,6 +308,10 @@ class LabelOrder(models.Model):
     order_date    = models.DateField(null=True, blank=True)        # from invoice section
     uploaded_date = models.DateField(db_index=True)                # date PDF was processed
 
+    # Packing tracking
+    is_packed     = models.BooleanField(default=False, db_index=True)
+    packed_at     = models.DateTimeField(null=True, blank=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

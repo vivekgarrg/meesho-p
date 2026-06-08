@@ -31,8 +31,16 @@ urlpatterns = [
     path("blocked-customers/",                views.blocked_customers_list,   name="blocked_customers_list"),
     path("blocked-customers/<int:bc_id>/",    views.blocked_customer_detail,  name="blocked_customer_detail"),
     # Purchases & Inventory
-    path("purchases/",              views.purchases_list,   name="purchases_list"),
+    path("purchases/",              views.purchases_list,      name="purchases_list"),
     path("purchases/<int:bill_id>/",     views.purchase_detail, name="purchase_detail"),
     path("purchases/<int:bill_id>/pdf/", views.purchase_pdf,    name="purchase_pdf"),
-    path("inventory/",              views.inventory_view,   name="inventory_view"),
+    path("purchases/sku-items/",    views.purchase_sku_items,   name="purchase_sku_items"),
+    path("purchases/sku-monthly/",  views.purchase_sku_monthly, name="purchase_sku_monthly"),
+    path("purchases/items/<int:item_id>/", views.purchase_item_detail, name="purchase_item_detail"),
+    path("inventory/",              views.inventory_view,      name="inventory_view"),
+    path("inventory/<str:sku_id>/", views.inventory_delete_sku, name="inventory_delete_sku"),
+    # Label packing
+    path("labels/orders/<str:order_id>/pack/", views.label_order_pack, name="label_order_pack"),
+    path("labels/bulk-pack/",       views.label_bulk_pack,     name="label_bulk_pack"),
+    path("labels/unpacked/",        views.label_unpacked,      name="label_unpacked"),
 ]

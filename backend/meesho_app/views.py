@@ -379,6 +379,7 @@ def key_maker(sku, key, loss_ya_profit) :
         sku[f"{key}_purchase_cost"] = 0
         sku[f"{key}_packaging_cost"] = 0
         sku[f"{key}_count"] = 0
+        sku[f"{key}_quantity"] = 0
 
 
 def initialize_keys(sku, unique_statuses):
@@ -403,6 +404,7 @@ def inject_cost(sku, result, net, key):
     _inc(sku, f"{key}_purchase_cost", result["purchase_cost"])
     _inc(sku, f"{key}_packaging_cost", result["packaging_cost"])
     _inc(sku, f"{key}_count")
+    _inc(sku, f"{key}_quantity", result["quantity"])
 
 
 # ── Per-SKU accumulator ────────────────────────────────────────────────────────
@@ -1789,41 +1791,43 @@ def label_couriers_summary(request):
 @api_view(["GET"])
 def label_duplicate_customers(request):
     """
-    Find repeat customers within an optional date range.
-    Uses DB-level GROUP BY instead of Python-level scanning for speed.
+    Find repeat customers by ADDRESS (city + state + pincode) — NOT by name.
+    Returns addresses that appear in more than one LabelOrder.
 
-    Query params: date_from, date_to (both optional; no params = all time)
-    Groups by: customer_name, customer_pincode
+    For each duplicate address, returns every order's full details so the
+    frontend can display a complete history drawer.
+
+    Query params: date_from, date_to (optional)
     """
-    from collections import defaultdict
-
     date_from = request.GET.get("date_from", "")
     date_to   = request.GET.get("date_to",   "")
 
-    has_date_filter = bool(date_from or date_to)
-
-    # ── Step 1: find which customers/pincodes appear in the selected period ───
-    period_qs = LabelOrder.objects.exclude(customer_name="")
+    # Step 1: addresses that appear in the selected period
+    period_qs = LabelOrder.objects.exclude(customer_pincode="").exclude(customer_city="")
     if date_from:
         period_qs = period_qs.filter(uploaded_date__gte=date_from)
     if date_to:
         period_qs = period_qs.filter(uploaded_date__lte=date_to)
 
-    # ── Step 2: for those customers, check ALL-TIME order counts ─────────────
-    # This lets a customer who ordered today (once) still appear if they also
-    # ordered last week — their full history is visible on click.
-    period_names = set(period_qs.values_list("customer_name", flat=True).distinct())
-    if not period_names:
-        return Response({"total_by_name": 0, "total_by_location": 0,
-                         "by_name": [], "by_location": []})
-
-    all_time_qs = LabelOrder.objects.exclude(customer_name="").filter(
-        customer_name__in=period_names
+    # Step 2: find which (pincode, city, state) tuples appear > 1 time all-time,
+    # but only for addresses that show up in the requested period.
+    period_addrs = set(
+        period_qs.values_list("customer_pincode", "customer_city", "customer_state").distinct()
     )
+    if not period_addrs:
+        return Response({"total": 0, "results": []})
 
-    # All-time aggregates (only for customers present in the period)
-    name_agg = list(
-        all_time_qs.values("customer_name")
+    from django.db.models import Q
+    addr_filter = Q()
+    for pin, city, state in period_addrs:
+        addr_filter |= Q(customer_pincode=pin, customer_city=city, customer_state=state)
+
+    all_time_qs = LabelOrder.objects.filter(addr_filter)
+
+    # Aggregate per address
+    addr_agg = list(
+        all_time_qs
+        .values("customer_pincode", "customer_city", "customer_state")
         .annotate(
             order_count=Count("order_id"),
             first_ordered=Min("uploaded_date"),
@@ -1833,121 +1837,33 @@ def label_duplicate_customers(request):
         .order_by("-order_count")
     )
 
-    # Period count per customer (how many in the selected window)
-    period_count_map = {}
-    if has_date_filter:
-        period_count_map = dict(
-            period_qs.values("customer_name").annotate(cnt=Count("order_id")).values_list("customer_name", "cnt")
+    results = []
+    for agg in addr_agg:
+        pin   = agg["customer_pincode"]
+        city  = agg["customer_city"]
+        state = agg["customer_state"]
+        orders = list(
+            LabelOrder.objects
+            .filter(customer_pincode=pin, customer_city=city, customer_state=state)
+            .values(
+                "order_id", "customer_name", "customer_city", "customer_state",
+                "customer_pincode", "uploaded_date", "courier_name", "awb_number",
+                "payment_type", "sku", "qty", "is_packed",
+            )
+            .order_by("-uploaded_date")
         )
+        results.append({
+            "address_key":      f"{city}, {state} – {pin}",
+            "customer_pincode": pin,
+            "customer_city":    city,
+            "customer_state":   state,
+            "order_count":      agg["order_count"],
+            "first_ordered":    str(agg["first_ordered"]),
+            "last_ordered":     str(agg["last_ordered"]),
+            "orders":           orders,
+        })
 
-    if name_agg:
-        repeat_names = [r["customer_name"] for r in name_agg]
-        detail_rows = list(
-            all_time_qs.filter(customer_name__in=repeat_names)
-            .values("customer_name", "customer_city", "customer_state", "customer_pincode", "sku")
-            .distinct()
-        )
-        sku_map  = defaultdict(set)
-        meta_map = {}
-        for row in detail_rows:
-            name = row["customer_name"]
-            if row["sku"]:
-                sku_map[name].add(row["sku"])
-            if name not in meta_map:
-                meta_map[name] = {
-                    "city": row["customer_city"], "state": row["customer_state"],
-                    "pincode": row["customer_pincode"],
-                }
-    else:
-        sku_map = {}
-        meta_map = {}
-
-    by_name = [
-        {
-            "customer_name":    r["customer_name"],
-            "customer_city":    meta_map.get(r["customer_name"], {}).get("city", ""),
-            "customer_state":   meta_map.get(r["customer_name"], {}).get("state", ""),
-            "customer_pincode": meta_map.get(r["customer_name"], {}).get("pincode", ""),
-            "order_count":      r["order_count"],          # all-time total
-            "period_count":     period_count_map.get(r["customer_name"], r["order_count"]),
-            "skus":             list(sku_map.get(r["customer_name"], set())),
-            "first_ordered":    str(r["first_ordered"]),
-            "last_ordered":     str(r["last_ordered"]),
-        }
-        for r in name_agg
-    ]
-
-    # ── By pincode — same all-time + period logic ─────────────────────────────
-    period_pins = set(
-        period_qs.exclude(customer_pincode="").values_list("customer_pincode", flat=True).distinct()
-    )
-    all_time_pin_qs = LabelOrder.objects.exclude(customer_name="").exclude(customer_pincode="")
-    if period_pins:
-        all_time_pin_qs = all_time_pin_qs.filter(customer_pincode__in=period_pins)
-
-    pin_agg = list(
-        all_time_pin_qs.values("customer_pincode")
-        .annotate(
-            order_count=Count("order_id"),
-            first_ordered=Min("uploaded_date"),
-            last_ordered=Max("uploaded_date"),
-        )
-        .filter(order_count__gt=1)
-        .order_by("-order_count")
-    )
-
-    pin_period_count_map = {}
-    if has_date_filter:
-        pin_period_count_map = dict(
-            period_qs.exclude(customer_pincode="")
-            .values("customer_pincode").annotate(cnt=Count("order_id")).values_list("customer_pincode", "cnt")
-        )
-
-    if pin_agg:
-        repeat_pins = [r["customer_pincode"] for r in pin_agg]
-        pin_detail  = list(
-            all_time_pin_qs.filter(customer_pincode__in=repeat_pins)
-            .values("customer_pincode", "customer_name", "customer_city", "customer_state", "sku")
-            .distinct()
-        )
-        pin_names = defaultdict(set)
-        pin_skus  = defaultdict(set)
-        pin_meta  = {}
-        for row in pin_detail:
-            pin = row["customer_pincode"]
-            if row["customer_name"]:
-                pin_names[pin].add(row["customer_name"])
-            if row["sku"]:
-                pin_skus[pin].add(row["sku"])
-            if pin not in pin_meta:
-                pin_meta[pin] = {"city": row["customer_city"], "state": row["customer_state"]}
-    else:
-        pin_names = {}
-        pin_skus  = {}
-        pin_meta  = {}
-
-    by_location = [
-        {
-            "customer_pincode": r["customer_pincode"],
-            "customer_city":    pin_meta.get(r["customer_pincode"], {}).get("city", ""),
-            "customer_state":   pin_meta.get(r["customer_pincode"], {}).get("state", ""),
-            "order_count":      r["order_count"],
-            "period_count":     pin_period_count_map.get(r["customer_pincode"], r["order_count"]),
-            "distinct_names":   len(pin_names.get(r["customer_pincode"], set())),
-            "customer_names":   list(pin_names.get(r["customer_pincode"], set()))[:6],
-            "skus":             list(pin_skus.get(r["customer_pincode"], set()))[:5],
-            "first_ordered":    str(r["first_ordered"]),
-            "last_ordered":     str(r["last_ordered"]),
-        }
-        for r in pin_agg
-    ]
-
-    return Response({
-        "total_by_name":     len(by_name),
-        "total_by_location": len(by_location),
-        "by_name":           by_name,
-        "by_location":       by_location,
-    })
+    return Response({"total": len(results), "results": results})
 
 
 @api_view(["GET"])
@@ -2211,8 +2127,21 @@ def purchase_pdf(request, bill_id):
     elems = []
 
     # Header
-    elems.append(Paragraph("PURCHASE BILL", title_style))
-    elems.append(Paragraph("Meesho Profit Tracker — Inventory Record", sub_style))
+    # Brand header: Rudam + bill title on same line
+    brand_style = ParagraphStyle("brand", fontSize=26, fontName="Helvetica-Bold",
+                                  textColor=colors.HexColor("#E8510A"), spaceAfter=0)
+    tagline_style = ParagraphStyle("tagline", fontSize=9, fontName="Helvetica",
+                                   textColor=colors.HexColor("#9CA3AF"), spaceAfter=6)
+    brand_tbl = Table(
+        [[Paragraph("RUDAM", brand_style), Paragraph("PURCHASE BILL", title_style)]],
+        colWidths=[W * 0.4, W * 0.6],
+    )
+    brand_tbl.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "BOTTOM"),
+        ("ALIGN",  (1, 0), (1, 0),  "RIGHT"),
+    ]))
+    elems.append(brand_tbl)
+    elems.append(Paragraph("Official Purchase Record", tagline_style))
     elems.append(HRFlowable(width=W, thickness=1, color=orange, spaceAfter=10))
 
     # Meta info table (left: labels, right: values)
@@ -2285,7 +2214,7 @@ def purchase_pdf(request, bill_id):
     elems.append(Spacer(1, 6))
     elems.append(HRFlowable(width=W, thickness=0.5, color=gray200))
     elems.append(Spacer(1, 8))
-    elems.append(Paragraph("Generated by Meesho Profit Tracker", sub_style))
+    elems.append(Paragraph("Rudam — Generated by Meesho Profit Tracker", sub_style))
 
     doc.build(elems)
     buf.seek(0)
@@ -2383,6 +2312,148 @@ def inventory_view(request):
         })
 
     results.sort(key=lambda r: r["current_stock"])
+    return Response({"results": results, "total": len(results)})
+
+
+# ── Purchase item-level CRUD ──────────────────────────────────────────────────
+
+@api_view(["GET"])
+def purchase_sku_items(request):
+    """All PurchaseItems for a given parent_sku, with bill metadata."""
+    parent_sku = request.GET.get("parent_sku", "").strip()
+    if not parent_sku:
+        return Response({"error": "parent_sku required"}, status=400)
+    items = (
+        PurchaseItem.objects
+        .filter(parent_sku_id=parent_sku)
+        .select_related("bill")
+        .order_by("-bill__date", "-bill__id")
+    )
+    results = []
+    for it in items:
+        results.append({
+            "id":                  it.id,
+            "bill_id":             it.bill_id,
+            "bill_number":         it.bill.bill_number or f"#{it.bill_id}",
+            "bill_date":           str(it.bill.date),
+            "seller_name":         it.bill.seller_name,
+            "product_description": it.product_description,
+            "quantity":            it.quantity,
+            "price_per_unit":      str(it.price_per_unit),
+            "is_exchange":         it.is_exchange,
+            "total_amount":        str(it.quantity * it.price_per_unit if not it.is_exchange else 0),
+        })
+    return Response({"results": results, "total": len(results)})
+
+
+@api_view(["PUT", "DELETE"])
+def purchase_item_detail(request, item_id):
+    try:
+        item = PurchaseItem.objects.select_related("bill").get(pk=item_id)
+    except PurchaseItem.DoesNotExist:
+        return Response({"error": "Not found"}, status=404)
+
+    if request.method == "PUT":
+        data = request.data
+        item.product_description = data.get("product_description", item.product_description)
+        item.quantity            = int(data.get("quantity", item.quantity))
+        item.price_per_unit      = Decimal(str(data.get("price_per_unit", item.price_per_unit)))
+        item.is_exchange         = bool(data.get("is_exchange", item.is_exchange))
+        item.save()
+        return Response({
+            "id":             item.id,
+            "quantity":       item.quantity,
+            "price_per_unit": str(item.price_per_unit),
+            "is_exchange":    item.is_exchange,
+            "total_amount":   str(item.quantity * item.price_per_unit if not item.is_exchange else 0),
+        })
+
+    # DELETE
+    bill = item.bill
+    item.delete()
+    # If no items left on the bill, delete the bill too
+    if not bill.items.exists():
+        bill.delete()
+    return Response({"message": "Item deleted"})
+
+
+@api_view(["GET"])
+def purchase_sku_monthly(request):
+    """Monthly purchase aggregates for a parent SKU."""
+    parent_sku = request.GET.get("parent_sku", "").strip()
+    if not parent_sku:
+        return Response({"error": "parent_sku required"}, status=400)
+    from django.db.models.functions import TruncMonth
+    from django.db.models import ExpressionWrapper as EW, F as Fld, DecimalField as DField
+    rows = (
+        PurchaseItem.objects
+        .filter(parent_sku_id=parent_sku, is_exchange=False)
+        .annotate(month=TruncMonth("bill__date"))
+        .values("month")
+        .annotate(
+            total_qty=Sum("quantity"),
+            total_value=Sum(
+                EW(Fld("quantity") * Fld("price_per_unit"), output_field=DField(max_digits=14, decimal_places=2))
+            ),
+            bill_count=Count("bill_id", distinct=True),
+        )
+        .order_by("month")
+    )
+    results = [{
+        "month":       r["month"].strftime("%Y-%m") if r["month"] else "",
+        "label":       r["month"].strftime("%b %Y") if r["month"] else "",
+        "total_qty":   r["total_qty"],
+        "total_value": str(r["total_value"] or 0),
+        "bill_count":  r["bill_count"],
+    } for r in rows]
+    return Response({"results": results, "sku_id": parent_sku})
+
+
+# ── Label packing ──────────────────────────────────────────────────────────────
+
+@api_view(["PATCH"])
+def label_order_pack(request, order_id):
+    """Toggle or set is_packed on a LabelOrder."""
+    try:
+        lo = LabelOrder.objects.get(pk=order_id)
+    except LabelOrder.DoesNotExist:
+        return Response({"error": "Not found"}, status=404)
+
+    force = request.data.get("packed")   # None = toggle, True/False = set
+    if force is None:
+        lo.is_packed = not lo.is_packed
+    else:
+        lo.is_packed = bool(force)
+
+    lo.packed_at = timezone.now() if lo.is_packed else None
+    lo.save(update_fields=["is_packed", "packed_at"])
+    return Response({"order_id": order_id, "is_packed": lo.is_packed})
+
+
+@api_view(["POST"])
+def label_bulk_pack(request):
+    """Mark a list of order_ids as packed=True/False."""
+    order_ids = request.data.get("order_ids", [])
+    packed    = bool(request.data.get("packed", True))
+    packed_at = timezone.now() if packed else None
+    updated   = LabelOrder.objects.filter(order_id__in=order_ids).update(
+        is_packed=packed, packed_at=packed_at
+    )
+    return Response({"updated": updated, "packed": packed})
+
+
+@api_view(["GET"])
+def label_unpacked(request):
+    """List unpacked LabelOrders, optionally filtered by uploaded_date."""
+    qs = LabelOrder.objects.filter(is_packed=False)
+    date = request.GET.get("date", "").strip()
+    if date:
+        qs = qs.filter(uploaded_date=date)
+    results = list(qs.values(
+        "order_id", "customer_name", "customer_pincode",
+        "customer_city", "customer_state",
+        "sku", "qty", "courier_name", "uploaded_date", "order_date",
+    ))
     return Response({"results": results, "total": len(results)})
 
 
@@ -2562,3 +2633,15 @@ def blocked_customer_detail(request, bc_id):
     bc.reason = request.data.get("reason", bc.reason)
     bc.save()
     return Response({"id": bc.id, "reason": bc.reason})
+
+
+@api_view(["DELETE"])
+def inventory_delete_sku(request, sku_id):
+    """Delete all purchase items for a parent SKU; also delete bills that become empty."""
+    items = PurchaseItem.objects.filter(parent_sku_id=sku_id)
+    bill_ids = list(items.values_list("bill_id", flat=True).distinct())
+    items.delete()
+    for bid in bill_ids:
+        if not PurchaseItem.objects.filter(bill_id=bid).exists():
+            PurchaseBill.objects.filter(pk=bid).delete()
+    return Response({"deleted": True})

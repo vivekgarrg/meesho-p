@@ -517,6 +517,18 @@ export function LabelOrdersTab() {
     setCourierFilter("");
   };
 
+  const handleTogglePacked = async (e, order_id, current) => {
+    e.stopPropagation();
+    const res = await fetch(`${API}/labels/orders/${encodeURIComponent(order_id)}/pack/`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ packed: !current }),
+    });
+    if (res.ok) {
+      setOrders(prev => prev.map(o => o.order_id === order_id ? { ...o, is_packed: !current } : o));
+    }
+  };
+
   const totalOrders = summary?.total ?? 0;
 
   return (
@@ -703,7 +715,7 @@ export function LabelOrdersTab() {
                   <table style={{ width: "100%", borderCollapse: "collapse" }}>
                     <thead>
                       <tr>
-                        {["Order ID", "Customer", "City / State", "Courier", "AWB", "Payment", "SKU", "Qty", "Order Date"].map((h) => (
+                        {["Order ID", "Customer", "City / State", "Courier", "AWB", "Payment", "SKU", "Qty", "Order Date", "Packed"].map((h) => (
                           <th key={h} style={{ ...S.th, whiteSpace: "nowrap" }}>{h}</th>
                         ))}
                       </tr>
@@ -768,12 +780,23 @@ export function LabelOrdersTab() {
                             <td style={{ ...S.td, color: C.gray400, fontSize: 12, whiteSpace: "nowrap" }}>
                               {r.order_date || "—"}
                             </td>
+                            <td style={S.td} onClick={(e) => handleTogglePacked(e, r.order_id, r.is_packed)}>
+                              <button style={{
+                                padding: "3px 10px", borderRadius: 20, fontSize: 11,
+                                cursor: "pointer", fontFamily: "inherit", fontWeight: 600,
+                                background: r.is_packed ? C.greenLight  : C.white,
+                                color:      r.is_packed ? C.green       : C.gray400,
+                                border:     `1px solid ${r.is_packed ? C.greenBorder : C.gray300}`,
+                              }}>
+                                {r.is_packed ? "✓ Packed" : "Not Packed"}
+                              </button>
+                            </td>
                           </tr>
                         );
                       })}
                       {orders.length === 0 && (
                         <tr>
-                          <td colSpan={9} style={{ ...S.td, textAlign: "center", padding: 40, color: C.gray400 }}>
+                          <td colSpan={10} style={{ ...S.td, textAlign: "center", padding: 40, color: C.gray400 }}>
                             No orders found
                           </td>
                         </tr>
