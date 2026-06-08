@@ -11,6 +11,9 @@ import { PricingTab }   from "./Components/Tabs/PricingTab";
 import { UploadTab }    from "./Components/Tabs/UploadTab";
 import { SKUAnalysisTab } from "./Components/Tabs/SKUProfitTab";
 import { LabelsTab }       from "./Components/Tabs/LabelsTab";
+import { PurchasesTab }      from "./Components/Tabs/PurchasesTab";
+import { InventoryTab }      from "./Components/Tabs/InventoryTab";
+import { FraudCustomersTab } from "./Components/Tabs/FraudCustomersTab";
 import { SKU_PAGE_SIZE as skuPageSize } from "./lib/helper";
 
 // ── API base (re-exported for tabs that import directly from App) ───────────
@@ -370,6 +373,9 @@ const TABS = [
   { path: "/pricing",       label: "SKU Pricing",    icon: "⚙️" },
   { path: "/upload",        label: "Upload",         icon: "⬆️" },
   { path: "/labels",        label: "Labels",         icon: "🏷" },
+  { path: "/purchases",     label: "Purchases",      icon: "🛒" },
+  { path: "/inventory",     label: "Inventory",      icon: "📦" },
+  { path: "/fraud",         label: "Fraud",          icon: "🚨" },
 ];
 
 // ── App shell ─────────────────────────────────────────────────────────────────
@@ -428,6 +434,9 @@ export default function App() {
           <Route path="/pricing"       element={<PricingTab />} />
           <Route path="/upload"        element={<UploadTab />} />
           <Route path="/labels"        element={<LabelsTab />} />
+          <Route path="/purchases"     element={<PurchasesTab />} />
+          <Route path="/inventory"     element={<InventoryTab />} />
+          <Route path="/fraud"         element={<FraudCustomersTab />} />
         </Routes>
       </div>
     </div>

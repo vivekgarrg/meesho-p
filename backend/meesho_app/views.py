@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 from decimal import Decimal, InvalidOperation
 from django.db import transaction
-from django.db.models import Sum, Count, Min, Max, Q as DQ
+from django.db.models import Sum, Count, Min, Max, ExpressionWrapper, F, DecimalField as DjDecimalField, Q as DQ
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.decorators import api_view, parser_classes
@@ -10,7 +10,7 @@ from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
 from datetime import datetime, time
 
-from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice, LabelOrder
+from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice, LabelOrder, PurchaseBill, PurchaseItem, BlockedCustomer
 from .serializers import (
     OrderPaymentSerializer, AdsCostSerializer,
     ReferralPaymentSerializer, CompensationRecoverySerializer,
@@ -1640,6 +1640,23 @@ def upload_labels_pdf(request):
     )
     total_labels = sum(v["count"] for v in sku_data.values())
 
+    # ── Flag blocked customers found in this upload ───────────────────────────
+    blocked_set = set(
+        BlockedCustomer.objects.filter(is_active=True)
+        .values_list("customer_name", "customer_pincode")
+    )
+    blocked_in_batch = []
+    for pd in page_details:
+        name    = pd.get("customer_name", "")
+        pincode = pd.get("customer_pincode", "")
+        if name and (name, pincode) in blocked_set:
+            blocked_in_batch.append({
+                "order_id":       pd.get("order_id", ""),
+                "customer_name":  name,
+                "customer_pincode": pincode,
+                "sku":            pd.get("sku", ""),
+            })
+
     return Response({
         "success": True,
         "upload_date":      str(today),          # actual date used (may be back-dated)
@@ -1653,6 +1670,7 @@ def upload_labels_pdf(request):
         "cropped_pdf_b64":  cropped_pdf_b64,
         "db_saved":         saved,
         "db_updated":       updated,
+        "blocked_customers_found": blocked_in_batch,
     })
 
 
@@ -1690,13 +1708,23 @@ def label_orders_list(request):
 
     total = qs.count()
     start = (page - 1) * page_size
-    items = qs[start : start + page_size]
+    items = list(qs[start : start + page_size])
+
+    # Annotate blocked status: build lookup set from active blocked customers
+    blocked_set = set(
+        BlockedCustomer.objects.filter(is_active=True)
+        .values_list("customer_name", "customer_pincode")
+    )
+
+    serialized = LabelOrderSerializer(items, many=True).data
+    for row in serialized:
+        row["is_blocked"] = (row.get("customer_name", ""), row.get("customer_pincode", "")) in blocked_set
 
     return Response({
         "total":     total,
         "page":      page,
         "page_size": page_size,
-        "results":   LabelOrderSerializer(items, many=True).data,
+        "results":   serialized,
     })
 
 
@@ -2034,3 +2062,503 @@ def label_customer_history(request):
         },
         "orders": enriched,
     })
+
+
+# ── Purchases & Inventory ─────────────────────────────────────────────────────
+
+def _bill_to_dict(bill):
+    """Serialize a PurchaseBill (with pre-fetched items) to a plain dict."""
+    total = Decimal("0")
+    items = []
+    for item in bill.items.all():
+        item_total = item.quantity * item.price_per_unit if not item.is_exchange else Decimal("0")
+        total += item_total
+        items.append({
+            "id":                  item.id,
+            "parent_sku_id":       item.parent_sku_id,
+            "product_description": item.product_description,
+            "quantity":            item.quantity,
+            "price_per_unit":      str(item.price_per_unit),
+            "is_exchange":         item.is_exchange,
+            "total_amount":        str(item_total),
+        })
+    return {
+        "id":           bill.id,
+        "date":         str(bill.date),
+        "seller_name":  bill.seller_name,
+        "bill_number":  bill.bill_number,
+        "notes":        bill.notes,
+        "total_amount": str(total),
+        "items":        items,
+        "created_at":   bill.created_at.isoformat(),
+    }
+
+
+@api_view(["GET", "POST"])
+def purchases_list(request):
+    if request.method == "GET":
+        qs = PurchaseBill.objects.prefetch_related("items").order_by("-date", "-created_at")
+        date_from = request.GET.get("date_from")
+        date_to   = request.GET.get("date_to")
+        seller    = request.GET.get("seller", "").strip()
+        if date_from:
+            qs = qs.filter(date__gte=date_from)
+        if date_to:
+            qs = qs.filter(date__lte=date_to)
+        if seller:
+            qs = qs.filter(seller_name__icontains=seller)
+        bills = [_bill_to_dict(b) for b in qs]
+        return Response({"results": bills, "total": len(bills)})
+
+    # POST — create new bill with nested items
+    data = request.data
+    with transaction.atomic():
+        bill = PurchaseBill.objects.create(
+            date=data["date"],
+            seller_name=data["seller_name"],
+            bill_number=data.get("bill_number", ""),
+            notes=data.get("notes", ""),
+        )
+        for it in data.get("items", []):
+            PurchaseItem.objects.create(
+                bill=bill,
+                parent_sku_id=it.get("parent_sku_id") or None,
+                product_description=it.get("product_description", ""),
+                quantity=int(it["quantity"]),
+                price_per_unit=Decimal(str(it["price_per_unit"])),
+                is_exchange=bool(it.get("is_exchange", False)),
+            )
+    bill.refresh_from_db()
+    bill.items.all()  # warm cache
+    return Response(_bill_to_dict(PurchaseBill.objects.prefetch_related("items").get(pk=bill.pk)), status=201)
+
+
+@api_view(["GET", "PUT", "DELETE"])
+def purchase_detail(request, bill_id):
+    try:
+        bill = PurchaseBill.objects.prefetch_related("items").get(pk=bill_id)
+    except PurchaseBill.DoesNotExist:
+        return Response({"error": "Not found"}, status=404)
+
+    if request.method == "GET":
+        return Response(_bill_to_dict(bill))
+
+    if request.method == "PUT":
+        data = request.data
+        with transaction.atomic():
+            bill.date        = data.get("date", bill.date)
+            bill.seller_name = data.get("seller_name", bill.seller_name)
+            bill.bill_number = data.get("bill_number", bill.bill_number)
+            bill.notes       = data.get("notes", bill.notes)
+            bill.save()
+            # Replace all items
+            bill.items.all().delete()
+            for it in data.get("items", []):
+                PurchaseItem.objects.create(
+                    bill=bill,
+                    parent_sku_id=it.get("parent_sku_id") or None,
+                    product_description=it.get("product_description", ""),
+                    quantity=int(it["quantity"]),
+                    price_per_unit=Decimal(str(it["price_per_unit"])),
+                    is_exchange=bool(it.get("is_exchange", False)),
+                )
+        bill = PurchaseBill.objects.prefetch_related("items").get(pk=bill_id)
+        return Response(_bill_to_dict(bill))
+
+    # DELETE
+    bill.delete()
+    return Response({"message": "Deleted"})
+
+
+@api_view(["GET"])
+def purchase_pdf(request, bill_id):
+    """Generate and stream a PDF receipt for one purchase bill."""
+    from io import BytesIO
+    from django.http import HttpResponse
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib import colors
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.platypus import (
+        SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, HRFlowable,
+    )
+    from reportlab.lib.enums import TA_CENTER, TA_RIGHT
+
+    try:
+        bill = PurchaseBill.objects.prefetch_related("items").get(pk=bill_id)
+    except PurchaseBill.DoesNotExist:
+        return HttpResponse("Not found", status=404)
+
+    buf = BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=A4,
+        leftMargin=20*mm, rightMargin=20*mm,
+        topMargin=18*mm, bottomMargin=18*mm,
+    )
+    W = A4[0] - 40*mm  # usable width
+
+    orange = colors.HexColor("#E8510A")
+    gray50 = colors.HexColor("#F9FAFB")
+    gray200 = colors.HexColor("#E5E7EB")
+    gray700 = colors.HexColor("#374151")
+
+    title_style  = ParagraphStyle("title",  fontSize=20, fontName="Helvetica-Bold", textColor=orange, spaceAfter=2)
+    sub_style    = ParagraphStyle("sub",    fontSize=10, fontName="Helvetica",      textColor=colors.HexColor("#6B7280"), spaceAfter=4)
+    label_style  = ParagraphStyle("lbl",    fontSize=9,  fontName="Helvetica-Bold", textColor=gray700)
+    value_style  = ParagraphStyle("val",    fontSize=9,  fontName="Helvetica",      textColor=gray700)
+    total_style  = ParagraphStyle("tot",    fontSize=12, fontName="Helvetica-Bold", textColor=orange, alignment=TA_RIGHT)
+
+    elems = []
+
+    # Header
+    elems.append(Paragraph("PURCHASE BILL", title_style))
+    elems.append(Paragraph("Meesho Profit Tracker — Inventory Record", sub_style))
+    elems.append(HRFlowable(width=W, thickness=1, color=orange, spaceAfter=10))
+
+    # Meta info table (left: labels, right: values)
+    bill_no_display = bill.bill_number or f"#{bill.id}"
+    meta = [
+        [Paragraph("Bill No:", label_style),   Paragraph(bill_no_display, value_style),
+         Paragraph("Date:", label_style),       Paragraph(str(bill.date), value_style)],
+        [Paragraph("Seller:", label_style),     Paragraph(bill.seller_name, value_style),
+         Paragraph("", label_style),            Paragraph("", value_style)],
+    ]
+    if bill.notes:
+        meta.append([Paragraph("Notes:", label_style), Paragraph(bill.notes, value_style), Paragraph("", label_style), Paragraph("", value_style)])
+    meta_tbl = Table(meta, colWidths=[22*mm, W/2 - 22*mm, 22*mm, W/2 - 22*mm])
+    meta_tbl.setStyle(TableStyle([
+        ("VALIGN",    (0, 0), (-1, -1), "TOP"),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+    ]))
+    elems.append(meta_tbl)
+    elems.append(Spacer(1, 10))
+    elems.append(HRFlowable(width=W, thickness=0.5, color=gray200, spaceAfter=8))
+
+    # Items table
+    col_w = [W * f for f in (0.20, 0.35, 0.10, 0.15, 0.15, 0.05)]
+    hdr = [
+        Paragraph("<b>SKU</b>", label_style),
+        Paragraph("<b>Description</b>", label_style),
+        Paragraph("<b>Qty</b>", label_style),
+        Paragraph("<b>Price/Unit</b>", label_style),
+        Paragraph("<b>Total</b>", label_style),
+        Paragraph("<b>Exch</b>", label_style),
+    ]
+    rows = [hdr]
+    grand_total = Decimal("0")
+    for item in bill.items.all():
+        line_total = item.quantity * item.price_per_unit if not item.is_exchange else Decimal("0")
+        grand_total += line_total
+        rows.append([
+            Paragraph(item.parent_sku_id or "—", value_style),
+            Paragraph(item.product_description or "—", value_style),
+            Paragraph(str(item.quantity), value_style),
+            Paragraph(f"₹{item.price_per_unit}", value_style),
+            Paragraph(f"₹{line_total}", value_style),
+            Paragraph("Y" if item.is_exchange else "N", value_style),
+        ])
+    # Total row
+    rows.append([
+        Paragraph("", value_style), Paragraph("", value_style),
+        Paragraph("", value_style), Paragraph("<b>TOTAL</b>", label_style),
+        Paragraph(f"<b>₹{grand_total}</b>", label_style),
+        Paragraph("", value_style),
+    ])
+
+    items_tbl = Table(rows, colWidths=col_w)
+    items_tbl.setStyle(TableStyle([
+        ("BACKGROUND",    (0, 0), (-1, 0),  gray50),
+        ("GRID",          (0, 0), (-1, -2), 0.4, gray200),
+        ("LINEABOVE",     (0, -1), (-1, -1), 1, orange),
+        ("BACKGROUND",    (0, -1), (-1, -1), colors.HexColor("#FFF0EA")),
+        ("TOPPADDING",    (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("LEFTPADDING",   (0, 0), (-1, -1), 5),
+        ("RIGHTPADDING",  (0, 0), (-1, -1), 5),
+        ("VALIGN",        (0, 0), (-1, -1), "TOP"),
+    ]))
+    elems.append(items_tbl)
+    elems.append(Spacer(1, 14))
+
+    # Grand total callout
+    elems.append(Paragraph(f"Grand Total: ₹{grand_total}", total_style))
+    elems.append(Spacer(1, 6))
+    elems.append(HRFlowable(width=W, thickness=0.5, color=gray200))
+    elems.append(Spacer(1, 8))
+    elems.append(Paragraph("Generated by Meesho Profit Tracker", sub_style))
+
+    doc.build(elems)
+    buf.seek(0)
+    filename = f"purchase_bill_{bill.bill_number or bill.id}.pdf"
+    resp = HttpResponse(buf.read(), content_type="application/pdf")
+    resp["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return resp
+
+
+@api_view(["GET"])
+def inventory_view(request):
+    """
+    Compute current stock per parent SKU:
+      current_stock = purchased_qty (non-exchange) - sold_qty (DELIVERED) + rto_qty (RTO_COMPLETE)
+    """
+    from django.db.models import ExpressionWrapper, F, DecimalField as DField
+
+    # 1. Purchases per parent SKU
+    purchase_agg = (
+        PurchaseItem.objects
+        .filter(is_exchange=False, parent_sku__isnull=False)
+        .values("parent_sku_id")
+        .annotate(
+            purchased_qty=Sum("quantity"),
+            purchase_value=Sum(
+                ExpressionWrapper(F("quantity") * F("price_per_unit"), output_field=DField(max_digits=14, decimal_places=2))
+            ),
+        )
+    )
+    purchased_by_parent = {
+        r["parent_sku_id"]: {"qty": r["purchased_qty"], "value": r["purchase_value"]}
+        for r in purchase_agg
+    }
+    if not purchased_by_parent:
+        return Response({"results": [], "total": 0})
+
+    # 2. Map child SKU → parent SKU
+    sku_to_parent = dict(
+        FinalPrice.objects
+        .filter(parent_id__in=purchased_by_parent.keys())
+        .values_list("sku_id", "parent_id")
+    )
+
+    # 3. Sold qty (DELIVERED) and returned qty (RTO_COMPLETE) per child SKU
+    child_skus = list(sku_to_parent.keys())
+    delivered_by_sku = dict(
+        Order.objects
+        .filter(reason_for_credit_entry="DELIVERED", sku__in=child_skus)
+        .values("sku")
+        .annotate(qty=Sum("quantity"))
+        .values_list("sku", "qty")
+    )
+    rto_by_sku = dict(
+        Order.objects
+        .filter(reason_for_credit_entry="RTO_COMPLETE", sku__in=child_skus)
+        .values("sku")
+        .annotate(qty=Sum("quantity"))
+        .values_list("sku", "qty")
+    )
+
+    # 4. Roll up child → parent
+    sold_by_parent = {}
+    rto_by_parent  = {}
+    for sku, qty in delivered_by_sku.items():
+        parent = sku_to_parent.get(sku)
+        if parent:
+            sold_by_parent[parent] = sold_by_parent.get(parent, 0) + qty
+    for sku, qty in rto_by_sku.items():
+        parent = sku_to_parent.get(sku)
+        if parent:
+            rto_by_parent[parent] = rto_by_parent.get(parent, 0) + qty
+
+    # 5. Last purchase date per parent SKU
+    last_purchase = dict(
+        PurchaseItem.objects
+        .filter(parent_sku_id__in=purchased_by_parent.keys())
+        .values("parent_sku_id")
+        .annotate(last=Max("bill__date"))
+        .values_list("parent_sku_id", "last")
+    )
+
+    results = []
+    for parent_id, pdata in purchased_by_parent.items():
+        purchased = pdata["qty"]
+        sold      = sold_by_parent.get(parent_id, 0)
+        rto       = rto_by_parent.get(parent_id, 0)
+        results.append({
+            "sku_id":          parent_id,
+            "purchased_qty":   purchased,
+            "sold_qty":        sold,
+            "rto_qty":         rto,
+            "current_stock":   purchased - sold + rto,
+            "purchase_value":  str(pdata["value"] or 0),
+            "last_purchase":   str(last_purchase.get(parent_id, "")),
+        })
+
+    results.sort(key=lambda r: r["current_stock"])
+    return Response({"results": results, "total": len(results)})
+
+
+# ── Fraud Customers & Blocked Customers ──────────────────────────────────────
+
+def _risk_level(rto_rate, claim_count):
+    """Return 'high' / 'medium' / 'low' risk label."""
+    if rto_rate >= 0.75 or claim_count >= 3:
+        return "high"
+    if rto_rate >= 0.40 or claim_count >= 1:
+        return "medium"
+    return "low"
+
+
+@api_view(["GET"])
+def fraud_customers(request):
+    """
+    Compute per-customer fraud metrics using LabelOrder → Order join.
+
+    Identity key: customer_name + customer_pincode
+    Metrics per customer:
+      - total_orders  : distinct order_ids from LabelOrder
+      - delivered     : Order rows with DELIVERED
+      - rto           : Order rows with RTO_COMPLETE
+      - cancelled     : Order rows with CANCELLED
+      - rto_rate      : rto / (delivered + rto) if > 0
+      - claim_count   : distinct orders with a non-zero OrderPayment.claims
+      - risk_level    : high / medium / low
+    """
+    min_orders = int(request.GET.get("min_orders", 2))  # ignore customers with only 1 order
+
+    # 1. All label orders grouped by customer identity
+    label_qs = (
+        LabelOrder.objects
+        .exclude(customer_name="")
+        .values("customer_name", "customer_pincode")
+        .annotate(
+            total_orders=Count("order_id", distinct=True),
+            last_order=Max("order_date"),
+            city=Min("customer_city"),
+            state=Min("customer_state"),
+        )
+        .filter(total_orders__gte=min_orders)
+    )
+
+    if not label_qs.exists():
+        return Response({"results": [], "total": 0})
+
+    # 2. All LabelOrder order_ids for these customers
+    all_order_ids = list(
+        LabelOrder.objects
+        .exclude(customer_name="")
+        .values_list("order_id", flat=True)
+    )
+
+    # 3. Order outcomes keyed by sub_order_no
+    outcome_map = {}
+    for row in Order.objects.filter(sub_order_no__in=all_order_ids).values("sub_order_no", "reason_for_credit_entry"):
+        outcome_map.setdefault(row["sub_order_no"], []).append(row["reason_for_credit_entry"])
+
+    # 4. Orders with claims (non-zero claims amount)
+    claimed_order_ids = set(
+        OrderPayment.objects
+        .filter(sub_order_no__in=all_order_ids, claims__isnull=False)
+        .exclude(claims=0)
+        .values_list("sub_order_no", flat=True)
+        .distinct()
+    )
+
+    # 5. Per customer: map order_ids → outcomes
+    customer_order_ids = {}
+    for lo in LabelOrder.objects.exclude(customer_name="").values("order_id", "customer_name", "customer_pincode"):
+        key = (lo["customer_name"], lo["customer_pincode"])
+        customer_order_ids.setdefault(key, []).append(lo["order_id"])
+
+    # 6. Build blocked lookup
+    blocked_set = set(
+        BlockedCustomer.objects.filter(is_active=True)
+        .values_list("customer_name", "customer_pincode")
+    )
+
+    results = []
+    for row in label_qs:
+        name    = row["customer_name"]
+        pincode = row["customer_pincode"]
+        key     = (name, pincode)
+        order_ids = customer_order_ids.get(key, [])
+
+        delivered  = sum(1 for oid in order_ids if "DELIVERED"    in outcome_map.get(oid, []))
+        rto        = sum(1 for oid in order_ids if "RTO_COMPLETE" in outcome_map.get(oid, []))
+        cancelled  = sum(1 for oid in order_ids if "CANCELLED"    in outcome_map.get(oid, []))
+        claim_count = sum(1 for oid in order_ids if oid in claimed_order_ids)
+        settled     = delivered + rto
+        rto_rate    = round(rto / settled, 3) if settled > 0 else 0.0
+
+        results.append({
+            "customer_name":    name,
+            "customer_pincode": pincode,
+            "customer_city":    row["city"] or "",
+            "customer_state":   row["state"] or "",
+            "total_orders":     row["total_orders"],
+            "delivered":        delivered,
+            "rto":              rto,
+            "cancelled":        cancelled,
+            "claim_count":      claim_count,
+            "rto_rate":         rto_rate,
+            "risk_level":       _risk_level(rto_rate, claim_count),
+            "last_order":       str(row["last_order"]) if row["last_order"] else "",
+            "is_blocked":       key in blocked_set,
+        })
+
+    # Sort: high risk first, then by rto_rate desc
+    order_map = {"high": 0, "medium": 1, "low": 2}
+    results.sort(key=lambda r: (order_map[r["risk_level"]], -r["rto_rate"]))
+
+    # Filter to show only suspicious customers by default
+    risk_filter = request.GET.get("risk", "")
+    if risk_filter in ("high", "medium", "low"):
+        results = [r for r in results if r["risk_level"] == risk_filter]
+
+    return Response({"results": results, "total": len(results)})
+
+
+@api_view(["GET", "POST"])
+def blocked_customers_list(request):
+    if request.method == "GET":
+        qs = BlockedCustomer.objects.filter(is_active=True).order_by("-blocked_at")
+        results = [{
+            "id":               bc.id,
+            "customer_name":    bc.customer_name,
+            "customer_pincode": bc.customer_pincode,
+            "customer_city":    bc.customer_city,
+            "customer_state":   bc.customer_state,
+            "reason":           bc.reason,
+            "blocked_at":       bc.blocked_at.isoformat(),
+        } for bc in qs]
+        return Response({"results": results, "total": len(results)})
+
+    # POST — block a customer
+    data = request.data
+    name    = (data.get("customer_name") or "").strip()
+    pincode = (data.get("customer_pincode") or "").strip()
+    if not name or not pincode:
+        return Response({"error": "customer_name and customer_pincode are required."}, status=400)
+
+    bc, created = BlockedCustomer.objects.update_or_create(
+        customer_name=name,
+        customer_pincode=pincode,
+        defaults={
+            "customer_city":  data.get("customer_city", ""),
+            "customer_state": data.get("customer_state", ""),
+            "reason":         data.get("reason", ""),
+            "is_active":      True,
+        },
+    )
+    return Response({
+        "id":            bc.id,
+        "customer_name": bc.customer_name,
+        "created":       created,
+    }, status=201 if created else 200)
+
+
+@api_view(["DELETE", "PATCH"])
+def blocked_customer_detail(request, bc_id):
+    try:
+        bc = BlockedCustomer.objects.get(pk=bc_id)
+    except BlockedCustomer.DoesNotExist:
+        return Response({"error": "Not found"}, status=404)
+
+    if request.method == "DELETE":
+        # Soft-unblock
+        bc.is_active = False
+        bc.save()
+        return Response({"message": "Unblocked"})
+
+    # PATCH — update reason
+    bc.reason = request.data.get("reason", bc.reason)
+    bc.save()
+    return Response({"id": bc.id, "reason": bc.reason})

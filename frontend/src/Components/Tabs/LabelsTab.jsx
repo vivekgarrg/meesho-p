@@ -459,6 +459,28 @@ export function LabelsTab() {
                   </div>
                 </div>
 
+                {/* Blocked customers warning banner */}
+                {(uploadResult.blocked_customers_found?.length > 0) && (
+                  <div style={{
+                    background: "#FFF5F5", border: `2px solid ${C.red}`, borderRadius: 10,
+                    padding: "14px 18px", marginBottom: 16,
+                  }}>
+                    <p style={{ fontSize: 13, fontWeight: 800, color: C.red, marginBottom: 8 }}>
+                      🚨 {uploadResult.blocked_customers_found.length} Blocked Customer{uploadResult.blocked_customers_found.length > 1 ? "s" : ""} Found in This Upload!
+                    </p>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                      {uploadResult.blocked_customers_found.map((bc, i) => (
+                        <div key={i} style={{ fontSize: 12, color: "#B91C1C", display: "flex", gap: 12, flexWrap: "wrap" }}>
+                          <strong>{bc.customer_name}</strong>
+                          <span style={{ color: C.gray500 }}>Pincode: {bc.customer_pincode}</span>
+                          {bc.sku && <span style={{ fontFamily: "monospace", background: C.redLight, padding: "0 6px", borderRadius: 4 }}>{bc.sku}</span>}
+                          <span style={{ color: C.gray400, fontFamily: "monospace", fontSize: 11 }}>{bc.order_id}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 {/* KPI cards */}
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 12, marginBottom: 16 }}>
                   <KpiCard label="Total Pages"  value={uploadResult.total_pages}      sub="one label per page"   accent={C.blue}   icon="📄" />

@@ -711,21 +711,32 @@ export function LabelOrdersTab() {
                     <tbody>
                       {orders.map((r, i) => {
                         const style = cs(r.courier_name);
-                        const rowBg = i % 2 === 0 ? C.white : C.gray50;
+                        const rowBg = r.is_blocked
+                          ? "#FFF5F5"
+                          : i % 2 === 0 ? C.white : C.gray50;
                         return (
                           <tr
                             key={r.order_id}
                             style={{ background: rowBg, cursor: "pointer" }}
                             onClick={() => setHistoryQuery({ name: r.customer_name, pincode: r.customer_pincode })}
-                            onMouseEnter={(e) => (e.currentTarget.style.background = "#F0F7FF")}
+                            onMouseEnter={(e) => (e.currentTarget.style.background = r.is_blocked ? "#FFECEC" : "#F0F7FF")}
                             onMouseLeave={(e) => (e.currentTarget.style.background = rowBg)}
-                            title="Click to view customer history"
+                            title={r.is_blocked ? "⚠ BLOCKED CUSTOMER — " + r.customer_name : "Click to view customer history"}
                           >
                             <td style={{ ...S.td, fontFamily: "monospace", fontSize: 11, color: C.gray400 }}>
                               …{r.order_id.slice(-14)}
                             </td>
-                            <td style={{ ...S.td, maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 600, color: C.gray700 }}>
-                              {r.customer_name || "—"}
+                            <td style={{ ...S.td, maxWidth: 160, fontWeight: 600, color: C.gray700 }}>
+                              <div style={{ display: "flex", flexDirection: "column", gap: 2, maxWidth: 140 }}>
+                                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                  {r.customer_name || "—"}
+                                </span>
+                                {r.is_blocked && (
+                                  <span style={{ fontSize: 9, fontWeight: 800, color: C.red, background: C.redLight, padding: "1px 6px", borderRadius: 10, width: "fit-content", letterSpacing: "0.04em" }}>
+                                    🚫 BLOCKED
+                                  </span>
+                                )}
+                              </div>
                             </td>
                             <td style={{ ...S.td, whiteSpace: "nowrap", fontSize: 12 }}>
                               <span style={{ color: C.gray600 }}>{r.customer_city || "—"}</span>

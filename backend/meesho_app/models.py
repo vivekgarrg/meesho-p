@@ -218,6 +218,65 @@ class Order(models.Model):
         return self.sub_order_no
 
 
+class BlockedCustomer(models.Model):
+    """
+    Customers manually blocked by the seller.
+    Matched on customer_name + customer_pincode (same way LabelOrder identifies a person).
+    Blocked customers are flagged whenever their labels are parsed.
+    """
+    customer_name    = models.CharField(max_length=255, db_index=True)
+    customer_pincode = models.CharField(max_length=10, db_index=True)
+    customer_city    = models.CharField(max_length=100, blank=True)
+    customer_state   = models.CharField(max_length=100, blank=True)
+    reason           = models.TextField(blank=True)
+    blocked_at       = models.DateTimeField(auto_now_add=True)
+    is_active        = models.BooleanField(default=True, db_index=True)
+
+    class Meta:
+        db_table = "blocked_customers"
+        unique_together = [("customer_name", "customer_pincode")]
+        ordering = ["-blocked_at"]
+
+    def __str__(self):
+        return f"{self.customer_name} ({self.customer_pincode})"
+
+
+class PurchaseBill(models.Model):
+    """One purchase transaction / vendor bill."""
+    date        = models.DateField()
+    seller_name = models.CharField(max_length=255)
+    bill_number = models.CharField(max_length=100, blank=True)
+    notes       = models.TextField(blank=True)
+    created_at  = models.DateTimeField(auto_now_add=True)
+    updated_at  = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "purchase_bills"
+        ordering = ["-date", "-created_at"]
+
+    def __str__(self):
+        return f"Bill {self.bill_number or self.id} — {self.seller_name} ({self.date})"
+
+
+class PurchaseItem(models.Model):
+    """One line item within a PurchaseBill."""
+    bill               = models.ForeignKey(PurchaseBill, on_delete=models.CASCADE, related_name="items")
+    parent_sku         = models.ForeignKey(
+        ParentItemPrice, on_delete=models.SET_NULL,
+        null=True, blank=True, db_column="parent_sku_id",
+    )
+    product_description = models.CharField(max_length=500, blank=True)
+    quantity           = models.PositiveIntegerField()
+    price_per_unit     = models.DecimalField(max_digits=10, decimal_places=2)
+    is_exchange        = models.BooleanField(default=False)
+
+    class Meta:
+        db_table = "purchase_items"
+
+    def __str__(self):
+        return f"{self.parent_sku_id} x{self.quantity} ({'exchange' if self.is_exchange else 'purchase'})"
+
+
 class LabelOrder(models.Model):
     """
     One row per label (= one shipping order) parsed from an uploaded Meesho labels PDF.
