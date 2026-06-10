@@ -1,6 +1,25 @@
-import React,{ useState, useEffect, useMemo } from "react";
-import { API, C, S, fmt, btn, Tag, Pagination } from "../../App";
+import React, { useState, useEffect, useMemo } from "react";
+import { API, C, fmt } from "../../App";
 import { PAGE_SIZE as pageSize } from "../../lib/helper";
+
+import {
+  Box,
+  Button,
+  Card,
+  CardContent,
+  Chip,
+  FormControl,
+  InputAdornment,
+  InputLabel,
+  MenuItem,
+  Paper,
+  Select,
+  TextField,
+  Typography,
+} from "@mui/material";
+import { DataGrid } from "@mui/x-data-grid";
+import SearchIcon from "@mui/icons-material/Search";
+import CalendarTodayIcon from "@mui/icons-material/CalendarToday";
 
 const PAGE_SIZE = pageSize;
 
@@ -15,90 +34,124 @@ function monthToRange(ym) {
   return { date_from: `${ym}-01`, date_to: `${ym}-${String(last).padStart(2, "0")}` };
 }
 
+const STATUS_CHIP_COLOR = {
+  DELIVERED:    "success",
+  RTO_COMPLETE: "error",
+  CANCELLED:    "default",
+};
+
+// ── Filter bar ────────────────────────────────────────────────────────────────
 function FilterBar({ mode, setMode, selectedMonth, setSelectedMonth, months,
                      customFrom, setCustomFrom, customTo, setCustomTo, onApply }) {
-  const pill = (active) => ({
-    padding: "6px 14px", borderRadius: 8, border: "none", cursor: "pointer",
-    fontSize: 12, fontWeight: active ? 700 : 500, fontFamily: "inherit",
-    background: active ? C.orange : C.gray100,
-    color: active ? C.white : C.gray600,
-    transition: "all 0.15s",
-  });
-
   return (
-    <div style={{ ...S.card, padding: "14px 20px", display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-      <span style={{ fontSize: 12, fontWeight: 700, color: C.gray500, textTransform: "uppercase", letterSpacing: "0.06em", marginRight: 4 }}>
-        📅 Filter
-      </span>
+    <Paper
+      variant="outlined"
+      sx={{ p: "14px 20px", display: "flex", alignItems: "center", gap: 1.5, flexWrap: "wrap", borderRadius: 2 }}
+    >
+      <Box sx={{ display: "flex", alignItems: "center", gap: 0.5, mr: 0.5 }}>
+        <CalendarTodayIcon fontSize="small" sx={{ color: "text.secondary" }} />
+        <Typography variant="caption" sx={{ fontWeight: 700, color: "text.secondary", textTransform: "uppercase", letterSpacing: "0.06em" }}>
+          Filter
+        </Typography>
+      </Box>
 
-      <button style={pill(mode === "all")} onClick={() => { setMode("all"); onApply({}); }}>
-        All Time
-      </button>
-
-      <select
-        value={mode === "month" ? selectedMonth : ""}
-        onChange={e => {
-          const m = e.target.value;
-          if (!m) return;
-          setMode("month");
-          setSelectedMonth(m);
-          onApply(monthToRange(m));
-        }}
-        style={{
-          ...S.inp, width: "auto", minWidth: 175, cursor: "pointer", fontSize: 12,
-          background: mode === "month" ? C.orangeLight : C.white,
-          borderColor: mode === "month" ? C.orange : C.gray300,
-          color: mode === "month" ? C.orange : C.gray700,
-          fontWeight: mode === "month" ? 700 : 400,
-        }}
+      {/* All time */}
+      <Button
+        size="small"
+        variant={mode === "all" ? "contained" : "outlined"}
+        color="primary"
+        onClick={() => { setMode("all"); onApply({}); }}
+        sx={{ textTransform: "none", fontWeight: mode === "all" ? 700 : 500 }}
       >
-        <option value="">Select month…</option>
-        {months.map(m => <option key={m} value={m}>{fmtMonth(m)}</option>)}
-      </select>
+        All Time
+      </Button>
 
-      <span style={{ color: C.gray300, fontSize: 18 }}>|</span>
+      {/* Month select */}
+      <FormControl size="small" sx={{ minWidth: 180 }}>
+        <InputLabel>Select month</InputLabel>
+        <Select
+          value={mode === "month" ? selectedMonth : ""}
+          label="Select month"
+          onChange={(e) => {
+            const m = e.target.value;
+            if (!m) return;
+            setMode("month");
+            setSelectedMonth(m);
+            onApply(monthToRange(m));
+          }}
+          sx={{
+            bgcolor: mode === "month" ? "#F5F3FF" : undefined,
+            "& .MuiOutlinedInput-notchedOutline": {
+              borderColor: mode === "month" ? C.orange : undefined,
+            },
+          }}
+        >
+          <MenuItem value=""><em>Select month…</em></MenuItem>
+          {months.map((m) => (
+            <MenuItem key={m} value={m}>{fmtMonth(m)}</MenuItem>
+          ))}
+        </Select>
+      </FormControl>
 
-      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-        <span style={{ fontSize: 12, color: C.gray500, fontWeight: 600 }}>Custom:</span>
-        <input type="date" value={customFrom} onChange={e => setCustomFrom(e.target.value)}
-          style={{ ...S.inp, width: 140, fontSize: 12, padding: "7px 10px" }} />
-        <span style={{ color: C.gray400, fontSize: 13 }}>→</span>
-        <input type="date" value={customTo} onChange={e => setCustomTo(e.target.value)}
-          style={{ ...S.inp, width: 140, fontSize: 12, padding: "7px 10px" }} />
-        <button
+      <Box sx={{ width: "1px", height: 32, bgcolor: "divider" }} />
+
+      {/* Custom range */}
+      <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+        <Typography variant="caption" sx={{ fontWeight: 600, color: "text.secondary" }}>Custom:</Typography>
+        <TextField
+          type="date"
+          size="small"
+          value={customFrom}
+          onChange={(e) => setCustomFrom(e.target.value)}
+          sx={{ width: 150 }}
+          InputLabelProps={{ shrink: true }}
+        />
+        <Typography variant="body2" sx={{ color: "text.disabled" }}>→</Typography>
+        <TextField
+          type="date"
+          size="small"
+          value={customTo}
+          onChange={(e) => setCustomTo(e.target.value)}
+          sx={{ width: 150 }}
+          InputLabelProps={{ shrink: true }}
+        />
+        <Button
+          size="small"
+          variant={mode === "custom" ? "contained" : "outlined"}
           disabled={!customFrom || !customTo}
           onClick={() => {
             if (!customFrom || !customTo) return;
             setMode("custom");
             onApply({ date_from: customFrom, date_to: customTo });
           }}
-          style={{ ...btn(mode === "custom" ? "primary" : "ghost", "sm"), opacity: (!customFrom || !customTo) ? 0.45 : 1 }}
+          sx={{ textTransform: "none" }}
         >
           Apply
-        </button>
-      </div>
-    </div>
+        </Button>
+      </Box>
+    </Paper>
   );
 }
 
+// ── Main Tab ─────────────────────────────────────────────────────────────────
 export function UnsettledOrdersTab({ initialMonth }) {
-  const [months,  setMonths]  = useState([]);
-  const [mode,    setMode]    = useState("all");
+  const [months,   setMonths]   = useState([]);
+  const [mode,     setMode]     = useState("all");
   const [selMonth, setSelMonth] = useState("");
   const [custFrom, setCustFrom] = useState("");
   const [custTo,   setCustTo]   = useState("");
 
   const [activeRange, setActiveRange] = useState(null); // null = waiting
-  const [page,   setPage]   = useState(1);
-  const [search, setSearch] = useState("");
-  const [data,   setData]   = useState(null);
+  const [page,    setPage]    = useState(0);            // DataGrid is 0-indexed
+  const [search,  setSearch]  = useState("");
+  const [data,    setData]    = useState(null);
   const [loading, setLoading] = useState(true);
 
-  // Load available months; use initialMonth if provided (e.g. navigated from Overview)
+  // Load available months; use initialMonth if provided
   useEffect(() => {
     fetch(`${API}/profit/available-months/`)
-      .then(r => r.json())
-      .then(ms => {
+      .then((r) => r.json())
+      .then((ms) => {
         setMonths(ms);
         const target = (initialMonth && ms.includes(initialMonth)) ? initialMonth : (ms[0] || null);
         if (target) {
@@ -112,8 +165,8 @@ export function UnsettledOrdersTab({ initialMonth }) {
       .catch(() => setActiveRange({}));
   }, []); // eslint-disable-line
 
-  // Reset to page 1 when filter or search changes
-  useEffect(() => { setPage(1); }, [activeRange, search]);
+  // Reset to page 0 when filter or search changes
+  useEffect(() => { setPage(0); }, [activeRange, search]);
 
   // Stable query key — prevents double fetch when page reset races activeRange change
   const queryKey = useMemo(
@@ -124,11 +177,11 @@ export function UnsettledOrdersTab({ initialMonth }) {
   useEffect(() => {
     if (queryKey === null) return;
     setLoading(true);
-    const params = { ...activeRange, page, page_size: PAGE_SIZE };
+    const params = { ...activeRange, page: page + 1, page_size: PAGE_SIZE }; // API is 1-indexed
     if (search) params.search = search;
     fetch(`${API}/orders/unsettled/?${new URLSearchParams(params)}`)
-      .then(r => r.json())
-      .then(d => { setData(d); setLoading(false); })
+      .then((r) => r.json())
+      .then((d) => { setData(d); setLoading(false); })
       .catch(() => setLoading(false));
   }, [queryKey]);
 
@@ -137,148 +190,227 @@ export function UnsettledOrdersTab({ initialMonth }) {
     mode === "custom" ? `${custFrom} → ${custTo}` :
     "All Time";
 
-  const STATUS_VARIANT = { DELIVERED: "green", RTO_COMPLETE: "red", CANCELLED: "gray" };
+  // ── DataGrid columns ──────────────────────────────────────────────────────
+  const columns = [
+    {
+      field: "_idx",
+      headerName: "#",
+      width: 60,
+      sortable: false,
+      renderCell: ({ api, row }) => {
+        const idx = api.getRowIndexRelativeToVisibleRows(row.sub_order_no);
+        return (
+          <Typography variant="caption" sx={{ color: "text.disabled" }}>
+            {page * PAGE_SIZE + (idx ?? 0) + 1}
+          </Typography>
+        );
+      },
+    },
+    {
+      field: "order_date",
+      headerName: "Order Date",
+      width: 110,
+      renderCell: ({ value }) => (
+        <Typography variant="body2" sx={{ color: C.gray600, fontSize: 12, whiteSpace: "nowrap" }}>{value}</Typography>
+      ),
+    },
+    {
+      field: "sub_order_no",
+      headerName: "Sub Order No",
+      width: 160,
+      renderCell: ({ value }) => (
+        <Typography sx={{ fontFamily: "monospace", fontSize: 11, color: C.blue, fontWeight: 600, bgcolor: C.blueLight, px: 0.75, py: 0.25, borderRadius: 1 }}>
+          {value}
+        </Typography>
+      ),
+    },
+    {
+      field: "sku",
+      headerName: "SKU",
+      width: 120,
+      renderCell: ({ value }) => (
+        <Chip
+          label={value}
+          size="small"
+          sx={{ fontFamily: "monospace", fontSize: 11, fontWeight: 600, bgcolor: C.orangeLight, color: C.orange, border: `1px solid ${C.orangeBorder}` }}
+        />
+      ),
+    },
+    {
+      field: "product_name",
+      headerName: "Product Name",
+      flex: 1,
+      minWidth: 160,
+      renderCell: ({ value }) => (
+        <Typography variant="body2" sx={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {value}
+        </Typography>
+      ),
+    },
+    {
+      field: "size",
+      headerName: "Size",
+      width: 70,
+      renderCell: ({ value }) => (
+        <Typography variant="body2">{value || "—"}</Typography>
+      ),
+    },
+    {
+      field: "quantity",
+      headerName: "Qty",
+      width: 65,
+      type: "number",
+      renderCell: ({ value }) => (
+        <Typography sx={{ fontFamily: "monospace", fontWeight: 600, fontSize: 13 }}>{value}</Typography>
+      ),
+    },
+    {
+      field: "supplier_discounted_price",
+      headerName: "Order Value",
+      width: 120,
+      type: "number",
+      renderCell: ({ value }) => (
+        <Typography sx={{ fontFamily: "monospace", fontWeight: 600, color: "warning.main", fontSize: 13 }}>
+          {fmt(value)}
+        </Typography>
+      ),
+    },
+    {
+      field: "reason_for_credit_entry",
+      headerName: "Status",
+      width: 140,
+      renderCell: ({ value }) => (
+        <Chip
+          label={value || "—"}
+          color={STATUS_CHIP_COLOR[value] || "default"}
+          size="small"
+          sx={{ fontWeight: 600, fontSize: 11 }}
+        />
+      ),
+    },
+    {
+      field: "customer_state",
+      headerName: "State",
+      width: 110,
+      renderCell: ({ value }) => (
+        <Typography variant="body2" sx={{ color: C.gray500, fontSize: 12 }}>{value || "—"}</Typography>
+      ),
+    },
+  ];
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+    <Box sx={{ display: "flex", flexDirection: "column", gap: 2.5 }}>
 
       {/* Header */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
-        <div>
-          <h2 style={{ fontSize: 18, fontWeight: 800, color: C.gray800, marginBottom: 4 }}>
-            ⚠️ Unsettled Orders
-          </h2>
-          <p style={{ fontSize: 13, color: C.gray400 }}>
-            Orders placed but not yet settled by Meesho — no payment record found.
-          </p>
-        </div>
-      </div>
+      <Box>
+        <Typography variant="h6" sx={{ fontWeight: 800, color: C.gray800, mb: 0.5 }}>
+          Unsettled Orders
+        </Typography>
+        <Typography variant="body2" sx={{ color: C.gray400 }}>
+          Orders placed but not yet settled by Meesho — no payment record found.
+        </Typography>
+      </Box>
 
       {/* Filter bar */}
       <FilterBar
-        mode={mode} setMode={setMode}
+        mode={mode}       setMode={setMode}
         selectedMonth={selMonth} setSelectedMonth={setSelMonth}
         months={months}
         customFrom={custFrom} setCustomFrom={setCustFrom}
-        customTo={custTo} setCustomTo={setCustTo}
-        onApply={range => setActiveRange(range)}
+        customTo={custTo}   setCustomTo={setCustTo}
+        onApply={(range) => setActiveRange(range)}
       />
 
-      {/* Summary hero */}
+      {/* Hero summary cards */}
       {data && !loading && (
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-          <div style={{
-            ...S.card,
-            background: "linear-gradient(135deg, #FEF2F2 0%, #FFFFFF 60%)",
-            borderTop: `3px solid ${C.red}`,
-          }}>
-            <p style={{ fontSize: 11, fontWeight: 700, color: C.gray400, letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 8 }}>
-              ⚠️ UNSETTLED ORDERS — {filterLabel.toUpperCase()}
-            </p>
-            <p style={{ fontSize: 48, fontWeight: 800, fontFamily: "'DM Mono', monospace", color: C.red, lineHeight: 1 }}>
-              {data.total.toLocaleString()}
-            </p>
-            <p style={{ fontSize: 13, color: C.gray400, marginTop: 6 }}>orders with no payment record</p>
-          </div>
-          <div style={{ ...S.card, borderTop: `3px solid ${C.amber}` }}>
-            <p style={{ fontSize: 11, fontWeight: 700, color: C.gray400, letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 8 }}>
-              💸 AT-RISK ORDER VALUE
-            </p>
-            <p style={{ fontSize: 36, fontWeight: 800, fontFamily: "'DM Mono', monospace", color: C.amber, lineHeight: 1 }}>
-              {fmt(data.total_value)}
-            </p>
-            <p style={{ fontSize: 13, color: C.gray400, marginTop: 6 }}>total discounted value of unsettled orders</p>
-          </div>
-        </div>
+        <Box sx={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 2 }}>
+          <Card
+            variant="outlined"
+            sx={{
+              background: "linear-gradient(135deg, #FEF2F2 0%, #FFFFFF 60%)",
+              borderTop: "3px solid",
+              borderTopColor: "error.main",
+            }}
+          >
+            <CardContent>
+              <Typography variant="caption" sx={{ fontWeight: 700, color: "text.secondary", textTransform: "uppercase", letterSpacing: "0.08em", display: "block", mb: 1 }}>
+                Unsettled Orders — {filterLabel.toUpperCase()}
+              </Typography>
+              <Typography sx={{ fontSize: 48, fontWeight: 800, fontFamily: "monospace", color: "error.main", lineHeight: 1 }}>
+                {data.total.toLocaleString()}
+              </Typography>
+              <Typography variant="body2" sx={{ color: "text.secondary", mt: 0.75 }}>
+                orders with no payment record
+              </Typography>
+            </CardContent>
+          </Card>
+
+          <Card variant="outlined" sx={{ borderTop: "3px solid", borderTopColor: "warning.main" }}>
+            <CardContent>
+              <Typography variant="caption" sx={{ fontWeight: 700, color: "text.secondary", textTransform: "uppercase", letterSpacing: "0.08em", display: "block", mb: 1 }}>
+                At-Risk Order Value
+              </Typography>
+              <Typography sx={{ fontSize: 36, fontWeight: 800, fontFamily: "monospace", color: "warning.main", lineHeight: 1 }}>
+                {fmt(data.total_value)}
+              </Typography>
+              <Typography variant="body2" sx={{ color: "text.secondary", mt: 0.75 }}>
+                total discounted value of unsettled orders
+              </Typography>
+            </CardContent>
+          </Card>
+        </Box>
       )}
 
-      {/* Table card */}
-      <div style={S.card}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, flexWrap: "wrap", gap: 10 }}>
-          <p style={{ ...S.cardTitle, marginBottom: 0 }}>
-            Unsettled Orders {data ? `— ${data.total.toLocaleString()} total` : ""}
-          </p>
-          <input
+      {/* DataGrid card */}
+      <Paper variant="outlined" sx={{ borderRadius: 2, overflow: "hidden" }}>
+        <Box sx={{ p: "14px 20px 10px", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 1.5 }}>
+          <Typography variant="subtitle2" sx={{ fontWeight: 700, color: C.gray800 }}>
+            Unsettled Orders{data ? ` — ${data.total.toLocaleString()} total` : ""}
+          </Typography>
+          <TextField
             value={search}
-            onChange={e => setSearch(e.target.value)}
+            onChange={(e) => setSearch(e.target.value)}
             placeholder="Search order no, SKU, product…"
-            style={{ ...S.inp, width: 240, fontSize: 12 }}
+            size="small"
+            sx={{ width: 260 }}
+            InputProps={{
+              startAdornment: (
+                <InputAdornment position="start">
+                  <SearchIcon fontSize="small" sx={{ color: "text.disabled" }} />
+                </InputAdornment>
+              ),
+            }}
           />
-        </div>
+        </Box>
 
-        {loading && (
-          <div style={{ textAlign: "center", padding: 60, color: C.gray400 }}>
-            <div style={{ fontSize: 28, marginBottom: 10 }}>⏳</div>
-            Loading unsettled orders…
-          </div>
-        )}
-
-        {!loading && data && (
-          <>
-            <div style={{ overflowX: "auto" }}>
-              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-                <thead>
-                  <tr>
-                    {["#", "Order Date", "Sub Order No", "SKU", "Product", "Size", "Qty", "Order Value", "Status", "State"].map(h => (
-                      <th key={h} style={{ ...S.th, textAlign: h === "Order Value" || h === "Qty" ? "right" : "left" }}>{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {data.results.length === 0 && (
-                    <tr>
-                      <td colSpan={10} style={{ ...S.td, textAlign: "center", padding: 48, color: C.gray400 }}>
-                        {search ? "No orders matching search" : "No unsettled orders for this period 🎉"}
-                      </td>
-                    </tr>
-                  )}
-                  {data.results.map((order, i) => {
-                    const rowBg = i % 2 === 0 ? C.white : C.gray50;
-                    const globalIdx = (page - 1) * PAGE_SIZE + i + 1;
-                    return (
-                      <tr key={order.sub_order_no} style={{ background: rowBg }}
-                        onMouseEnter={e => (e.currentTarget.style.background = "#FFF8F0")}
-                        onMouseLeave={e => (e.currentTarget.style.background = rowBg)}
-                      >
-                        <td style={{ ...S.td, color: C.gray400, fontSize: 11 }}>{globalIdx}</td>
-                        <td style={{ ...S.td, whiteSpace: "nowrap", color: C.gray600, fontSize: 12 }}>{order.order_date}</td>
-                        <td style={{ ...S.td }}>
-                          <span style={{ fontFamily: "monospace", fontSize: 11, color: C.blue, fontWeight: 600, background: C.blueLight, padding: "2px 6px", borderRadius: 4 }}>
-                            {order.sub_order_no}
-                          </span>
-                        </td>
-                        <td style={{ ...S.td }}>
-                          <span style={{ fontFamily: "monospace", fontSize: 12, color: C.orange, fontWeight: 600, background: C.orangeLight, padding: "2px 6px", borderRadius: 4 }}>
-                            {order.sku}
-                          </span>
-                        </td>
-                        <td style={{ ...S.td, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                          {order.product_name}
-                        </td>
-                        <td style={{ ...S.td }}>{order.size || "—"}</td>
-                        <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", fontWeight: 600 }}>{order.quantity}</td>
-                        <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", fontWeight: 600, color: C.amber }}>
-                          {fmt(order.supplier_discounted_price)}
-                        </td>
-                        <td style={S.td}>
-                          <Tag variant={STATUS_VARIANT[order.reason_for_credit_entry] || "gray"}>
-                            {order.reason_for_credit_entry || "—"}
-                          </Tag>
-                        </td>
-                        <td style={{ ...S.td, fontSize: 12, color: C.gray500 }}>{order.customer_state || "—"}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-
-            {data.total > PAGE_SIZE && (
-              <Pagination page={page} total={data.total} pageSize={PAGE_SIZE} onChange={setPage} />
-            )}
-          </>
-        )}
-      </div>
-    </div>
+        <DataGrid
+          rows={data?.results ?? []}
+          columns={columns}
+          getRowId={(row) => row.sub_order_no}
+          rowHeight={52}
+          loading={loading}
+          autoHeight
+          // Server-side pagination
+          paginationMode="server"
+          rowCount={data?.total ?? 0}
+          paginationModel={{ page, pageSize: PAGE_SIZE }}
+          onPaginationModelChange={(model) => setPage(model.page)}
+          pageSizeOptions={[PAGE_SIZE]}
+          disableRowSelectionOnClick
+          sx={{
+            border: 0,
+            borderTop: `1px solid ${C.border}`,
+            "& .MuiDataGrid-columnHeaders": { bgcolor: C.gray50 },
+            "& .MuiDataGrid-cell": { alignItems: "center" },
+            "& .MuiDataGrid-overlayWrapper": { minHeight: 120 },
+          }}
+          localeText={{
+            noRowsLabel: search
+              ? "No orders matching search"
+              : "No unsettled orders for this period",
+          }}
+        />
+      </Paper>
+    </Box>
   );
 }

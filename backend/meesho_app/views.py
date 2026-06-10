@@ -9,13 +9,19 @@ from rest_framework.decorators import api_view, parser_classes
 from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
 from datetime import datetime, time
+import requests as http_requests
+import base64
+import io
+import concurrent.futures
+from PIL import Image
 
-from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice, LabelOrder, PurchaseBill, PurchaseItem, BlockedCustomer
+from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, PurchaseBill, PurchaseItem, BlockedCustomer
 from .serializers import (
     OrderPaymentSerializer, AdsCostSerializer,
     ReferralPaymentSerializer, CompensationRecoverySerializer,
     FinalPriceSerializer,
     ParentItemPriceSerializer,
+    ParentPriceHistorySerializer,
     OrderSerializer,
     LabelOrderSerializer,
 )
@@ -185,21 +191,26 @@ def upload_excel(request):
         df = df[df["deduction_date"].notna()]
         df = df[~df["deduction_date"].astype(str).str.strip().str.startswith("No data")]
 
-        created = 0
+        created = skipped = 0
         with transaction.atomic():
             for _, row in df.iterrows():
-                AdsCost.objects.create(
+                _, was_created = AdsCost.objects.update_or_create(
                     deduction_duration=safe_date(row.get("deduction_duration")),
                     deduction_date=safe_date(row.get("deduction_date")),
                     campaign_id=safe_str(row.get("campaign_id")),
-                    ad_cost=safe_decimal(row.get("ad_cost")),
-                    credits_waivers_discounts=safe_decimal(row.get("credits_waivers_discounts")),
-                    ad_cost_incl_credits_waivers=safe_decimal(row.get("ad_cost_incl_credits_waivers")),
-                    gst=safe_decimal(row.get("gst")),
-                    total_ads_cost=safe_decimal(row.get("total_ads_cost")),
+                    defaults={
+                        "ad_cost": safe_decimal(row.get("ad_cost")),
+                        "credits_waivers_discounts": safe_decimal(row.get("credits_waivers_discounts")),
+                        "ad_cost_incl_credits_waivers": safe_decimal(row.get("ad_cost_incl_credits_waivers")),
+                        "gst": safe_decimal(row.get("gst")),
+                        "total_ads_cost": safe_decimal(row.get("total_ads_cost")),
+                    },
                 )
-                created += 1
-        results["ads_cost"] = {"created": created}
+                if was_created:
+                    created += 1
+                else:
+                    skipped += 1
+        results["ads_cost"] = {"created": created, "updated": skipped}
 
     # ── 3. Referral Payments ─────────────────────────────────────────────────
     if "Referral Payments" in xl.sheet_names:
@@ -554,24 +565,51 @@ def profit_summary(request):
                 qs = qs.filter(order_date__date__lte=date_to)
 
     # Load pricing once
-    _fp_all       = list(FinalPrice.objects.only("sku_id", "final_price", "packaging_cost"))
+    _fp_all       = list(FinalPrice.objects.only("sku_id", "final_price", "packaging_cost", "parent_id"))
     price_map     = {fp.sku_id: fp.final_price    or Decimal("0") for fp in _fp_all}
     packaging_map = {fp.sku_id: fp.packaging_cost or Decimal("0") for fp in _fp_all}
+    sku_parent_map = {fp.sku_id: fp.parent_id for fp in _fp_all if fp.parent_id}
+
+    # Build date-effective price history: {parent_id: [(effective_from, final_price, packaging_cost), ...]}
+    # Sorted ascending so we can binary-search or simply scan backwards.
+    from collections import defaultdict
+    _hist = list(
+        ParentPriceHistory.objects
+        .values("parent_id", "effective_from", "final_price", "packaging_cost")
+        .order_by("effective_from")
+    )
+    _parent_histories = defaultdict(list)
+    for h in _hist:
+        _parent_histories[h["parent_id"]].append(
+            (h["effective_from"], h["final_price"] or Decimal("0"), h["packaging_cost"] or Decimal("0"))
+        )
+
+    def get_eff_price(sku_id, order_date):
+        """Return (final_price, packaging_cost) effective on order_date, falling back to flat price_map."""
+        if order_date:
+            if hasattr(order_date, "date"):
+                order_date = order_date.date()
+            pid = sku_parent_map.get(sku_id)
+            if pid:
+                applicable = [(d, fp, pkg) for d, fp, pkg in _parent_histories[pid] if d <= order_date]
+                if applicable:
+                    _, fp, pkg = applicable[-1]  # last entry = most recent before order_date
+                    return fp, pkg
+        return price_map.get(sku_id, Decimal("0")), packaging_map.get(sku_id, Decimal("0"))
 
     # Pre-fetch distinct statuses ONCE — passed into per-order accumulator to
     # avoid an N+1 DB query (initialize_keys was previously querying DB per order)
-    unique_statuses = list([ "Cancelled", "Delivered", "Return", "RTO", "Shipped", "Exchange"])
+    unique_statuses = list(["Cancelled", "Delivered", "Return", "RTO", "Shipped", "Exchange"])
 
     _FIELDS = (
         "sub_order_no", "supplier_sku", "quantity",
         "final_settlement_amount", "live_order_status",
         "recovery_reason", "claims", "return_shipping_charge",
+        "order_date",
     )
 
     # Group ALL payment rows by sub_order_no
-    from collections import defaultdict
     order_groups = defaultdict(list)
-    print(order_groups, "~~~oRDERGORUPS...")
     for payment in qs.only(*_FIELDS):
         order_groups[payment.sub_order_no].append(payment)
 
@@ -590,7 +628,8 @@ def profit_summary(request):
             orders_missing_price += 1
             continue
 
-        result = compute_order_net(payments, price_map[sku], packaging_map[sku], qty)
+        eff_price, eff_pkg = get_eff_price(sku, primary.order_date)
+        result = compute_order_net(payments, eff_price, eff_pkg, qty)
         accumulate_sku_profit(sku, order_wise_profit, result, price_map, packaging_map, unique_statuses)
         orders_with_price += 1
 
@@ -909,6 +948,71 @@ def parent_linking_to_sku(request):
             },
             status=status.HTTP_200_OK,
         )
+def _sync_parent_current_price(parent_id):
+    """After adding/deleting a history entry, keep ParentItemPrice + linked FinalPrices in sync."""
+    history = ParentPriceHistory.objects.filter(parent_id=parent_id).order_by("-effective_from").first()
+    if not history:
+        return
+    ParentItemPrice.objects.filter(pk=parent_id).update(
+        item_price=history.item_price,
+        tax_percent=history.tax_percent,
+        packaging_cost=history.packaging_cost,
+        final_price=history.final_price,
+    )
+    FinalPrice.objects.filter(parent_id=parent_id).update(
+        item_price=history.item_price,
+        tax_percent=history.tax_percent,
+        packaging_cost=history.packaging_cost,
+        final_price=history.final_price,
+    )
+
+
+@api_view(["GET", "POST"])
+def parent_price_history_list(request, item_id):
+    try:
+        parent = ParentItemPrice.objects.get(pk=item_id)
+    except ParentItemPrice.DoesNotExist:
+        return Response({"error": "Parent not found."}, status=404)
+
+    if request.method == "GET":
+        return Response(ParentPriceHistorySerializer(parent.price_history.all(), many=True).data)
+
+    data = request.data.copy()
+    data["parent"] = item_id
+    if "item_price" in data and "final_price" not in data:
+        ip  = Decimal(str(data.get("item_price") or 0))
+        tax = Decimal(str(data.get("tax_percent") or 0)) / 100
+        pkg = Decimal(str(data.get("packaging_cost") or 0))
+        data["final_price"] = str((ip + ip * tax + pkg).quantize(Decimal("0.01")))
+
+    serializer = ParentPriceHistorySerializer(data=data)
+    serializer.is_valid(raise_exception=True)
+    serializer.save()
+    _sync_parent_current_price(item_id)
+    return Response(serializer.data, status=201)
+
+
+@api_view(["DELETE"])
+def parent_price_history_detail(request, item_id, pk):
+    try:
+        obj = ParentPriceHistory.objects.get(pk=pk, parent_id=item_id)
+    except ParentPriceHistory.DoesNotExist:
+        return Response({"error": "Not found."}, status=404)
+    obj.delete()
+    _sync_parent_current_price(item_id)
+    return Response({"deleted": True})
+
+
+@api_view(["GET"])
+def unlinked_skus(request):
+    """Return FinalPrice SKUs not linked to any parent — used for autocomplete suggestions."""
+    q = request.GET.get("q", "")
+    qs = FinalPrice.objects.filter(parent__isnull=True)
+    if q:
+        qs = qs.filter(sku_id__icontains=q)
+    return Response({"results": list(qs.values("sku_id", "item_price", "final_price")[:80])})
+
+
 @api_view(["POST"])
 @parser_classes([MultiPartParser])
 def upload_final_price(request):
@@ -2645,3 +2749,87 @@ def inventory_delete_sku(request, sku_id):
         if not PurchaseItem.objects.filter(bill_id=bid).exists():
             PurchaseBill.objects.filter(pk=bid).delete()
     return Response({"deleted": True})
+
+
+# ── Product Photography AI ────────────────────────────────────────────────────
+
+_PHOTO_STYLES = [
+    {"index": 0, "name": "White Studio",    "prompt": "professional product photography, clean white background, soft box studio lighting, crisp shadows, commercial quality, sharp focus"},
+    {"index": 1, "name": "Marble Luxury",   "prompt": "product on white marble surface, luxury brand aesthetic, soft diffused natural light, minimalist high-end photography, elegant"},
+    {"index": 2, "name": "Dark Dramatic",   "prompt": "product photography, dark charcoal background, dramatic moody cinematic lighting, premium contrast shadows, bold artistic"},
+    {"index": 3, "name": "Wooden Table",    "prompt": "product on rustic light wooden table, warm cozy interior, soft golden natural light, lifestyle photography, homely aesthetic"},
+    {"index": 4, "name": "Nature Outdoor",  "prompt": "product in lush green outdoor nature setting, bokeh foliage background, golden hour sunlight, fresh organic aesthetic"},
+    {"index": 5, "name": "Pastel Flat Lay", "prompt": "product flat lay overhead shot, soft pastel pink background, Instagram aesthetic, minimalist styling, clean composition"},
+    {"index": 6, "name": "Navy Premium",    "prompt": "product on deep navy blue background, premium luxury brand aesthetic, subtle gradient, professional commercial shot, rich tones"},
+    {"index": 7, "name": "Botanical",       "prompt": "product surrounded by tropical leaves and flowers, botanical garden aesthetic, lush vibrant greens, artistic lifestyle shot"},
+    {"index": 8, "name": "Warm Gradient",   "prompt": "product photography, warm orange and amber gradient background, sunset tones, lifestyle brand shot, soft glowing light"},
+    {"index": 9, "name": "Minimal Concrete","prompt": "product on smooth concrete surface, Scandinavian minimalist aesthetic, cool neutral tones, editorial photography, clean modern look"},
+]
+
+
+def _resize_for_sdxl(image_bytes):
+    """Resize and pad image to 1024x1024 for SDXL img2img."""
+    img = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
+    img.thumbnail((1024, 1024), Image.LANCZOS)
+    bg = Image.new("RGBA", (1024, 1024), (255, 255, 255, 255))
+    offset = ((1024 - img.width) // 2, (1024 - img.height) // 2)
+    bg.paste(img, offset, img)
+    final = bg.convert("RGB")
+    buf = io.BytesIO()
+    final.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _call_stability(api_key, image_bytes, style):
+    try:
+        resp = http_requests.post(
+            "https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/image-to-image",
+            headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
+            files={"init_image": ("product.png", image_bytes, "image/png")},
+            data={
+                "image_strength": 0.40,
+                "text_prompts[0][text]": style["prompt"],
+                "text_prompts[0][weight]": 1,
+                "text_prompts[1][text]": "blurry, low quality, watermark, text, logo, deformed, ugly, distorted",
+                "text_prompts[1][weight]": -1,
+                "cfg_scale": 7,
+                "steps": 30,
+                "samples": 1,
+            },
+            timeout=120,
+        )
+        if resp.status_code == 200:
+            img_b64 = resp.json()["artifacts"][0]["base64"]
+            return {"index": style["index"], "name": style["name"], "image": img_b64, "status": "ok"}
+        return {"index": style["index"], "name": style["name"], "status": "error", "error": resp.text[:300]}
+    except Exception as exc:
+        return {"index": style["index"], "name": style["name"], "status": "error", "error": str(exc)}
+
+
+@api_view(["POST"])
+@parser_classes([MultiPartParser])
+def generate_product_images(request):
+    image_file = request.FILES.get("image")
+    api_key = request.data.get("api_key", "").strip()
+
+    if not image_file:
+        return Response({"error": "No image file provided."}, status=400)
+    if not api_key:
+        return Response({"error": "Stability AI API key is required."}, status=400)
+
+    try:
+        resized_bytes = _resize_for_sdxl(image_file.read())
+    except Exception as exc:
+        return Response({"error": f"Could not process image: {exc}"}, status=400)
+
+    results = [None] * len(_PHOTO_STYLES)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
+        future_map = {
+            pool.submit(_call_stability, api_key, resized_bytes, style): style["index"]
+            for style in _PHOTO_STYLES
+        }
+        for future in concurrent.futures.as_completed(future_map):
+            result = future.result()
+            results[result["index"]] = result
+
+    return Response({"results": results})

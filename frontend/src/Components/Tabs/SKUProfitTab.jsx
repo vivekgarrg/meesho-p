@@ -1,488 +1,534 @@
-import React,{ useState, useEffect } from "react";
-import { API, C, fmt, S, SKUTable, StatCard, btn } from "../../App";
-import { Bar, BarChart, CartesianGrid, Cell, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import React, { useState, useEffect, useCallback } from "react";
+import Box from "@mui/material/Box";
+import Card from "@mui/material/Card";
+import CardContent from "@mui/material/CardContent";
+import Typography from "@mui/material/Typography";
+import Paper from "@mui/material/Paper";
+import Button from "@mui/material/Button";
+import ButtonGroup from "@mui/material/ButtonGroup";
+import Chip from "@mui/material/Chip";
+import Grid from "@mui/material/Grid";
+import LinearProgress from "@mui/material/LinearProgress";
+import CircularProgress from "@mui/material/CircularProgress";
+import TextField from "@mui/material/TextField";
+import Dialog from "@mui/material/Dialog";
+import DialogTitle from "@mui/material/DialogTitle";
+import DialogContent from "@mui/material/DialogContent";
+import IconButton from "@mui/material/IconButton";
+import Tooltip from "@mui/material/Tooltip";
+import Table from "@mui/material/Table";
+import TableHead from "@mui/material/TableHead";
+import TableRow from "@mui/material/TableRow";
+import TableCell from "@mui/material/TableCell";
+import TableBody from "@mui/material/TableBody";
+import TableSortLabel from "@mui/material/TableSortLabel";
+import { DataGrid } from "@mui/x-data-grid";
+import { BarChart } from "@mui/x-charts/BarChart";
+import { API, C, fmt } from "../../App";
 
-// ── Date helpers (same pattern as OverviewTab) ────────────────────────────────
-
-function fmtMonth(ym) {
+// ── utils ─────────────────────────────────────────────────────────────────────
+const fmtMonth = ym => new Date(...ym.split("-").map((v, i) => i === 1 ? v - 1 : +v), 1)
+  .toLocaleString("en-IN", { month: "long", year: "numeric" });
+const fmtShort = ym => new Date(...ym.split("-").map((v, i) => i === 1 ? v - 1 : +v), 1)
+  .toLocaleString("en-IN", { month: "short", year: "2-digit" });
+const toRange = ym => {
   const [y, m] = ym.split("-").map(Number);
-  return new Date(y, m - 1, 1).toLocaleString("en-IN", { month: "long", year: "numeric" });
-}
+  return { date_from: `${ym}-01`, date_to: `${ym}-${String(new Date(y, m, 0).getDate()).padStart(2, "0")}` };
+};
+const pct = (n, d) => d > 0 ? Math.round(n / d * 100) : 0;
 
-function monthToRange(ym) {
-  const [y, m] = ym.split("-").map(Number);
-  const last = new Date(y, m, 0).getDate();
-  return { date_from: `${ym}-01`, date_to: `${ym}-${String(last).padStart(2, "0")}` };
-}
-
-// ── Filter bar ────────────────────────────────────────────────────────────────
-
-function FilterBar({ mode, setMode, selMonth, setSelMonth, months,
-                     customFrom, setCustomFrom, customTo, setCustomTo, onApply }) {
-  const pill = (active) => ({
-    padding: "6px 14px", borderRadius: 8, border: "none", cursor: "pointer",
-    fontSize: 12, fontWeight: active ? 700 : 500, fontFamily: "inherit",
-    background: active ? C.orange : C.gray100,
-    color: active ? C.white : C.gray600,
-    transition: "all 0.15s",
-  });
+// ── Month filter (pill row) ───────────────────────────────────────────────────
+function MonthFilter({ months, selMonth, onSelect }) {
+  const [showCustom, setShowCustom] = useState(false);
+  const [cf, setCf] = useState(""); const [ct, setCt] = useState("");
 
   return (
-    <div style={{ ...S.card, padding: "14px 20px", display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-      <span style={{ fontSize: 12, fontWeight: 700, color: C.gray500, textTransform: "uppercase", letterSpacing: "0.06em", marginRight: 4 }}>
-        📅 Filter
-      </span>
-
-      <button style={pill(mode === "all")} onClick={() => { setMode("all"); onApply({}); }}>
-        All Time
-      </button>
-
-      <select
-        value={mode === "month" ? selMonth : ""}
-        onChange={e => {
-          const m = e.target.value;
-          if (!m) return;
-          setMode("month"); setSelMonth(m); onApply(monthToRange(m));
-        }}
-        style={{
-          ...S.inp, width: "auto", minWidth: 175, cursor: "pointer", fontSize: 12,
-          background: mode === "month" ? C.orangeLight : C.white,
-          borderColor: mode === "month" ? C.orange : C.gray300,
-          color: mode === "month" ? C.orange : C.gray700,
-          fontWeight: mode === "month" ? 700 : 400,
-        }}
-      >
-        <option value="">Select month…</option>
-        {months.map(m => <option key={m} value={m}>{fmtMonth(m)}</option>)}
-      </select>
-
-      <span style={{ color: C.gray300, fontSize: 18 }}>|</span>
-
-      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-        <span style={{ fontSize: 12, color: C.gray500, fontWeight: 600 }}>Custom:</span>
-        <input type="date" value={customFrom} onChange={e => setCustomFrom(e.target.value)}
-          style={{ ...S.inp, width: 140, fontSize: 12, padding: "7px 10px" }} />
-        <span style={{ color: C.gray400, fontSize: 13 }}>→</span>
-        <input type="date" value={customTo} onChange={e => setCustomTo(e.target.value)}
-          style={{ ...S.inp, width: 140, fontSize: 12, padding: "7px 10px" }} />
-        <button
-          disabled={!customFrom || !customTo}
-          onClick={() => {
-            if (!customFrom || !customTo) return;
-            setMode("custom"); onApply({ date_from: customFrom, date_to: customTo });
-          }}
-          style={{ ...btn(mode === "custom" ? "primary" : "ghost", "sm"), opacity: (!customFrom || !customTo) ? 0.45 : 1 }}
-        >Apply</button>
-      </div>
-    </div>
+    <Paper elevation={1} sx={{ p: 1.5 }}>
+      <Box sx={{ display: "flex", alignItems: "center", gap: 1, flexWrap: "wrap" }}>
+        <Typography variant="subtitle2" sx={{ mr: 0.5 }}>Period</Typography>
+        <Chip label="All time" size="small" onClick={() => onSelect(null, {})}
+          color={selMonth === null ? "primary" : "default"}
+          variant={selMonth === null ? "filled" : "outlined"} />
+        {months.slice(0, 12).map(m => (
+          <Chip key={m} label={fmtShort(m)} size="small" onClick={() => onSelect(m, toRange(m))}
+            color={selMonth === m ? "primary" : "default"}
+            variant={selMonth === m ? "filled" : "outlined"} />
+        ))}
+        <Chip label={`Custom ${showCustom ? "▲" : "▼"}`} size="small"
+          onClick={() => setShowCustom(s => !s)}
+          color={showCustom ? "secondary" : "default"}
+          variant={showCustom ? "filled" : "outlined"} />
+      </Box>
+      {showCustom && (
+        <Box sx={{ display: "flex", gap: 1.5, alignItems: "center", mt: 1.5, flexWrap: "wrap" }}>
+          <Typography variant="body2" color="text.secondary">From</Typography>
+          <TextField size="small" type="date" value={cf} onChange={e => setCf(e.target.value)} sx={{ width: 155 }} InputLabelProps={{ shrink: true }} label="From" />
+          <Typography variant="body2" color="text.secondary">to</Typography>
+          <TextField size="small" type="date" value={ct} onChange={e => setCt(e.target.value)} sx={{ width: 155 }} InputLabelProps={{ shrink: true }} label="To" />
+          <Button size="small" variant="contained" disableElevation disabled={!cf || !ct}
+            onClick={() => { if (cf && ct) { onSelect("custom", { date_from: cf, date_to: ct }); setShowCustom(false); } }}>
+            Apply
+          </Button>
+        </Box>
+      )}
+    </Paper>
   );
 }
 
-// ── SKU detail modal (monthly drill-down) ─────────────────────────────────────
+// ── Unified metrics panel ─────────────────────────────────────────────────────
+function MetricsPanel({ data, filterLabel }) {
+  const netPL = data.reduce((a, s) => a + s.net_profit, 0);
+  const delPft = data.reduce((a, s) => a + (s.delivered_profit || 0), 0);
+  const retLoss = data.reduce((a, s) => a + (s.return_loss || 0), 0);
+  const rtoLoss = data.reduce((a, s) => a + (s.rto_loss || 0), 0);
+  const claims = data.reduce((a, s) => a + (s.claims_total || 0), 0);
+  const nDel = data.reduce((a, s) => a + (s.delivered_count || 0), 0);
+  const nRet = data.reduce((a, s) => a + (s.return_count || 0), 0);
+  const nRTO = data.reduce((a, s) => a + (s.rto_count || 0), 0);
+  const nTotal = nDel + nRet + nRTO;
+  const nProfit = data.filter(s => s.net_profit > 0).length;
+  const nLoss = data.filter(s => s.net_profit < 0).length;
+  const pos = netPL >= 0;
 
+  return (
+    <Card elevation={1} sx={{ overflow: "hidden" }}>
+      <Box sx={{ height: 3, background: `linear-gradient(90deg, ${pos ? C.green : C.red}, ${C.orange})` }} />
+      <CardContent>
+        <Grid container spacing={2} alignItems="flex-start">
+          {/* Net P&L hero */}
+          <Grid item xs={12} md="auto">
+            <Box sx={{ pr: { md: 3 }, borderRight: { md: "1px solid" }, borderColor: "divider", mr: { md: 2 } }}>
+              <Typography variant="subtitle2" sx={{ mb: 0.5 }}>Net P&L · {filterLabel}</Typography>
+              <Typography variant="h3" sx={{ fontFamily: "monospace", fontWeight: 900, color: pos ? C.green : C.red, lineHeight: 1.1 }}>
+                {pos ? "+" : ""}{fmt(netPL)}
+              </Typography>
+              <Box sx={{ display: "flex", gap: 1, mt: 1, flexWrap: "wrap" }}>
+                {nProfit > 0 && <Chip label={`${nProfit} profitable`} color="success" size="small" />}
+                {nLoss > 0 && <Chip label={`${nLoss} in loss`} color="error" size="small" />}
+              </Box>
+            </Box>
+          </Grid>
+
+          {/* Breakdown */}
+          <Grid item xs={12} md>
+            <Grid container spacing={2}>
+              {[
+                { label: "Delivered Profit", value: fmt(delPft), color: C.green, sub: `${nDel} orders` },
+                { label: "Return Loss", value: fmt(retLoss), color: C.red, sub: `${nRet} returns` },
+                { label: "RTO Loss", value: fmt(rtoLoss), color: C.amber, sub: `${nRTO} RTOs` },
+                ...(claims !== 0 ? [{ label: "Claims", value: fmt(claims), color: C.blue, sub: `${data.reduce((a, s) => a + (s.claims_count || 0), 0)} claims` }] : []),
+              ].map(m => (
+                <Grid item key={m.label}>
+                  <Typography variant="subtitle2" sx={{ mb: 0.25 }}>{m.label}</Typography>
+                  <Typography variant="h6" sx={{ fontFamily: "monospace", fontWeight: 800, color: m.color }}>{m.value}</Typography>
+                  <Typography variant="caption">{m.sub}</Typography>
+                </Grid>
+              ))}
+
+              {/* Rate bars */}
+              <Grid item xs={12} md="auto" sx={{ minWidth: 200 }}>
+                <Typography variant="subtitle2" sx={{ mb: 1 }}>Order Rates ({nTotal} total)</Typography>
+                {[
+                  { label: "Delivered", p: pct(nDel, nTotal), color: C.green },
+                  { label: "Returns", p: pct(nRet, nTotal), color: C.red },
+                  { label: "RTO", p: pct(nRTO, nTotal), color: C.amber },
+                ].map(r => (
+                  <Box key={r.label} sx={{ mb: 0.75 }}>
+                    <Box sx={{ display: "flex", justifyContent: "space-between", mb: 0.25 }}>
+                      <Typography variant="caption">{r.label}</Typography>
+                      <Typography variant="caption" sx={{ fontWeight: 700, color: r.color }}>{r.p}%</Typography>
+                    </Box>
+                    <LinearProgress variant="determinate" value={r.p}
+                      sx={{ height: 5, borderRadius: 99, bgcolor: "grey.100", "& .MuiLinearProgress-bar": { bgcolor: r.color } }} />
+                  </Box>
+                ))}
+              </Grid>
+            </Grid>
+          </Grid>
+        </Grid>
+      </CardContent>
+    </Card>
+  );
+}
+
+// ── SKU DataGrid ──────────────────────────────────────────────────────────────
+function SKUDataTable({ data, onRowClick }) {
+  const columns = [
+    {
+      field: "sku_id", headerName: "SKU", minWidth: 180, flex: 1,
+      renderCell: p => (
+        <Box>
+          <Chip label={p.value} size="small" sx={{ fontFamily: "monospace", fontWeight: 700, bgcolor: C.orangeLight, color: C.orange, border: `1px solid ${C.orangeBorder}` }} />
+          {p.row.parent && <Typography variant="caption" sx={{ display: "block", color: "text.disabled", mt: 0.25 }}>↳ {p.row.parent}</Typography>}
+        </Box>
+      ),
+    },
+    {
+      field: "health", headerName: "Volume & Health", width: 200, sortable: false,
+      renderCell: p => {
+        const s = p.row;
+        const del = s.delivered_count || 0, ret = s.return_count || 0, rto = s.rto_count || 0, can = s.cancelled_count || 0;
+        const total = del + ret + rto + can;
+        const dr = pct(del, total);
+        return (
+          <Box sx={{ py: 0.5, width: "100%" }}>
+            <Box sx={{ display: "flex", gap: 1, fontSize: 12, mb: 0.5, flexWrap: "wrap" }}>
+              {del > 0 && <span style={{ color: C.green, fontWeight: 600 }}>✅ {del}</span>}
+              {ret > 0 && <span style={{ color: C.red, fontWeight: 600 }}>↩ {ret}</span>}
+              {rto > 0 && <span style={{ color: C.amber, fontWeight: 600 }}>🔄 {rto}</span>}
+            </Box>
+            <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+              <LinearProgress variant="determinate" value={dr} sx={{
+                flex: 1, height: 4, borderRadius: 99, bgcolor: "grey.100",
+                "& .MuiLinearProgress-bar": { bgcolor: dr >= 70 ? C.green : dr >= 45 ? C.amber : C.red }
+              }} />
+              <Typography variant="caption" sx={{ fontWeight: 700, minWidth: 32 }}>{dr}%</Typography>
+            </Box>
+          </Box>
+        );
+      },
+    },
+    {
+      field: "one_unit_price", headerName: "Cost", width: 120, type: "number",
+      valueFormatter: ({ value }) => fmt(value),
+      renderCell: p => <Typography variant="body2" sx={{ fontFamily: "monospace", color: "text.secondary" }}>{fmt(p.value)}</Typography>,
+    },
+    {
+      field: "delivered_profit", headerName: "Delivered +", width: 130, type: "number",
+      valueFormatter: ({ value }) => fmt(value),
+      renderCell: p => p.value ? <Typography variant="body2" sx={{ fontFamily: "monospace", color: C.green, fontWeight: 600 }}>+{fmt(p.value)}</Typography> : <span style={{ color: "#CBD5E1" }}>—</span>,
+    },
+    {
+      field: "total_loss", headerName: "Loss −", width: 120, type: "number",
+      valueGetter: p => (p?.row?.return_loss || 0) + (p?.row?.rto_loss || 0),
+      valueFormatter: ({ value }) => fmt(value),
+      renderCell: p => p.value ? <Typography variant="body2" sx={{ fontFamily: "monospace", color: C.red, fontWeight: 600 }}>{fmt(p.value)}</Typography> : <span style={{ color: "#CBD5E1" }}>—</span>,
+    },
+    {
+      field: "net_profit", headerName: "Net P&L", width: 150, type: "number",
+      valueFormatter: ({ value }) => fmt(value),
+      renderCell: p => {
+        const pos = p.value >= 0;
+        return (
+          <Chip label={`${pos ? "+" : ""}${fmt(p.value)}`} size="small"
+            sx={{
+              fontFamily: "monospace", fontWeight: 800, fontSize: 13,
+              bgcolor: pos ? C.greenLight : "#FFF1F2", color: pos ? C.green : C.red,
+              border: `1px solid ${pos ? C.greenBorder : "#FECDD3"}`
+            }} />
+        );
+      },
+    },
+    {
+      field: "actions", headerName: "", width: 60, sortable: false,
+      renderCell: p => (
+        <Tooltip title="Monthly breakdown">
+          <IconButton size="small" onClick={e => { e.stopPropagation(); onRowClick(p.row); }} sx={{ color: C.blue }}>
+            📊
+          </IconButton>
+        </Tooltip>
+      ),
+    },
+  ];
+
+  return (
+    <DataGrid
+      rows={data}
+      columns={columns}
+      getRowId={r => r.sku_id}
+      initialState={{ pagination: { paginationModel: { pageSize: 25 } } }}
+      pageSizeOptions={[25, 50, 100]}
+      onRowClick={p => onRowClick(p.row)}
+      rowHeight={64}
+      disableRowSelectionOnClick
+      sx={{ border: "none", "& .MuiDataGrid-row:hover": { bgcolor: "#F5F3FF", cursor: "pointer" } }}
+    />
+  );
+}
+
+// ── Monthly drill-down modal ──────────────────────────────────────────────────
 function SKUDetailModal({ sku, months, onClose }) {
-  const [monthlyData, setMonthlyData] = useState([]);
+  const [monthly, setMonthly] = useState([]);
   const [loading, setLoading] = useState(true);
 
-  // Close on Escape
   useEffect(() => {
-    const handler = (e) => { if (e.key === "Escape") onClose(); };
-    document.addEventListener("keydown", handler);
-    return () => document.removeEventListener("keydown", handler);
+    const h = e => e.key === "Escape" && onClose();
+    document.addEventListener("keydown", h);
+    return () => document.removeEventListener("keydown", h);
   }, [onClose]);
 
-  // Lock body scroll
-  useEffect(() => {
-    document.body.style.overflow = "hidden";
-    return () => { document.body.style.overflow = ""; };
-  }, []);
-
-  // Fetch each month in parallel
   useEffect(() => {
     setLoading(true);
-    const fetches = months.map(m => {
-      const range = monthToRange(m);
-      return fetch(`${API}/profit/?${new URLSearchParams(range)}`)
-        .then(r => r.json())
-        .then(d => {
-          const raw = (d.sku_wise_profit || {})[sku.sku_id] || {};
-          return {
-            month: m,
-            delivered_profit:       Number(raw.delivered_profit       || 0),
-            return_loss:            Number(raw.return_loss            || 0),
-            rto_loss:               Number(raw.rto_loss               || 0),
-            claims_total:           Number(raw.claims_total           || 0),
-            delivered_purchase_cost: Number(raw.delivered_purchase_cost || 0),
-            delivered_count:  raw.delivered_count  || 0,
-            return_count:     raw.return_count     || 0,
-            rto_count:        raw.rto_count        || 0,
-            claims_count:     raw.claims_count     || 0,
-            order_count:      raw.order_count      || 0,
-            net_profit: Number(raw.net_profit ?? (Number(raw.delivered_profit || 0) + Number(raw.return_loss || 0))),
-          };
-        })
-        .catch(() => ({
-          month: m, delivered_profit: 0, return_loss: 0, rto_loss: 0,
-          claims_total: 0, delivered_purchase_cost: 0,
-          delivered_count: 0, return_count: 0, rto_count: 0,
-          claims_count: 0, order_count: 0, net_profit: 0,
-        }));
-    });
-    Promise.all(fetches).then(results => {
-      setMonthlyData(results.sort((a, b) => a.month.localeCompare(b.month)));
-      setLoading(false);
-    });
+    Promise.all(months.map(m =>
+      fetch(`${API}/profit/?${new URLSearchParams(toRange(m))}`).then(r => r.json()).then(d => {
+        const raw = (d.sku_wise_profit || {})[sku.sku_id] || {};
+        return {
+          month: m,
+          net: Number(raw.net_profit ?? (Number(raw.delivered_profit || 0) + Number(raw.return_loss || 0))),
+          del_pft: Number(raw.delivered_profit || 0),
+          ret_loss: Number(raw.return_loss || 0),
+          rto_loss: Number(raw.rto_loss || 0),
+          claims: Number(raw.claims_total || 0),
+          del: raw.delivered_count || 0, ret: raw.return_count || 0,
+          rto: raw.rto_count || 0, ord: raw.order_count || 0,
+        };
+      }).catch(() => ({ month: m, net: 0, del_pft: 0, ret_loss: 0, rto_loss: 0, claims: 0, del: 0, ret: 0, rto: 0, ord: 0 }))
+    )).then(res => { setMonthly(res.sort((a, b) => a.month.localeCompare(b.month))); setLoading(false); });
   }, []); // eslint-disable-line
 
-  const zero = { net_profit: 0, delivered_profit: 0, return_loss: 0, rto_loss: 0,
-    claims_total: 0, delivered_purchase_cost: 0,
-    delivered_count: 0, return_count: 0, rto_count: 0, claims_count: 0, order_count: 0 };
-  const totals = monthlyData.reduce((acc, m) => ({
-    net_profit:              acc.net_profit              + m.net_profit,
-    delivered_profit:        acc.delivered_profit        + m.delivered_profit,
-    return_loss:             acc.return_loss             + m.return_loss,
-    rto_loss:                acc.rto_loss                + m.rto_loss,
-    claims_total:            acc.claims_total            + m.claims_total,
-    delivered_purchase_cost: acc.delivered_purchase_cost + m.delivered_purchase_cost,
-    delivered_count:         acc.delivered_count         + m.delivered_count,
-    return_count:            acc.return_count            + m.return_count,
-    rto_count:               acc.rto_count               + m.rto_count,
-    claims_count:            acc.claims_count            + m.claims_count,
-    order_count:             acc.order_count             + m.order_count,
-  }), zero);
+  const tot = monthly.reduce((acc, m) => ({
+    net: acc.net + m.net, del_pft: acc.del_pft + m.del_pft,
+    ret_loss: acc.ret_loss + m.ret_loss, rto_loss: acc.rto_loss + m.rto_loss,
+    claims: acc.claims + m.claims, del: acc.del + m.del,
+    ret: acc.ret + m.ret, rto: acc.rto + m.rto, ord: acc.ord + m.ord,
+  }), { net: 0, del_pft: 0, ret_loss: 0, rto_loss: 0, claims: 0, del: 0, ret: 0, rto: 0, ord: 0 });
 
-  const fmtMonthLabel = (ym) => {
-    const [y, m] = ym.split("-").map(Number);
-    return new Date(y, m - 1, 1).toLocaleString("en-IN", { month: "short", year: "2-digit" });
-  };
-
-  const chartData = monthlyData.map(m => ({
-    month: fmtMonthLabel(m.month),
-    "Delivered Profit": m.delivered_profit,
-    "Return Loss":      m.return_loss,
-    "RTO Loss":         m.rto_loss,
-    "Claims":           m.claims_total,
-    delivered: m.delivered_count,
-    returns:   m.return_count,
-    rto:       m.rto_count,
+  const chartData = monthly.map(m => ({
+    month: fmtShort(m.month),
+    "Delivered": m.del_pft,
+    "Return": Math.abs(m.ret_loss),
+    "RTO": Math.abs(m.rto_loss),
   }));
 
   return (
-    <div
-      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
-      style={{
-        position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)",
-        zIndex: 1000, display: "flex", alignItems: "flex-start",
-        justifyContent: "center", padding: "32px 20px", overflowY: "auto",
-      }}
-    >
-      <div style={{
-        background: C.white, borderRadius: 16, width: "100%", maxWidth: 940,
-        boxShadow: "0 25px 60px rgba(0,0,0,0.3)",
-        display: "flex", flexDirection: "column", marginBottom: 32,
-      }}>
-        {/* Header */}
-        <div style={{
-          padding: "18px 24px", borderBottom: `1px solid ${C.border}`,
-          display: "flex", alignItems: "center", justifyContent: "space-between",
-          background: C.gray50, borderRadius: "16px 16px 0 0", flexWrap: "wrap", gap: 10,
-        }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-            <span style={{ fontFamily: "monospace", fontSize: 15, color: C.orange, fontWeight: 700, background: C.orangeLight, padding: "4px 10px", borderRadius: 6 }}>
-              {sku.sku_id}
-            </span>
-            <span style={{ fontSize: 12, color: C.gray500 }}>
-              Unit Price: <strong style={{ fontFamily: "monospace", color: C.gray800 }}>{fmt(sku.one_unit_price)}</strong>
-            </span>
-            <span style={{ fontSize: 12, color: C.gray400 }}>·</span>
-            <span style={{ fontSize: 12, color: C.gray400 }}>{months.length} months analyzed</span>
-          </div>
-          <button onClick={onClose} style={{
-            background: C.gray100, border: "none", cursor: "pointer",
-            fontSize: 12, color: C.gray600, padding: "7px 14px",
-            borderRadius: 8, fontWeight: 700,
-          }}>✕ Close</button>
-        </div>
+    <Dialog open maxWidth="md" fullWidth onClose={onClose}
+      PaperProps={{ sx: { borderRadius: 4, maxHeight: "90vh" } }}>
+      <DialogTitle sx={{ bgcolor: "grey.50", display: "flex", alignItems: "center", gap: 2, flexWrap: "wrap", pb: 1.5 }}>
+        <Chip label={sku.sku_id} sx={{ fontFamily: "monospace", fontWeight: 700, bgcolor: C.orangeLight, color: C.orange, border: `1px solid ${C.orangeBorder}` }} />
+        <Box sx={{ display: "flex", gap: 1.5 }}>
+          <Typography variant="body2" color="text.secondary">Cost <strong style={{ color: C.gray800, fontFamily: "monospace" }}>{fmt(sku.one_unit_price)}</strong></Typography>
+          <Typography variant="body2" color="text.disabled">·</Typography>
+          <Typography variant="body2" color="text.secondary">{months.length} months</Typography>
+        </Box>
+        <Box sx={{ flex: 1 }} />
+        {!loading && (
+          <Chip label={`${tot.net >= 0 ? "+" : ""}${fmt(tot.net)} total`}
+            color={tot.net >= 0 ? "success" : "error"} sx={{ fontFamily: "monospace", fontWeight: 800, fontSize: 14 }} />
+        )}
+        <IconButton size="small" onClick={onClose}>✕</IconButton>
+      </DialogTitle>
 
-        {/* Body */}
-        <div style={{ padding: 24, display: "flex", flexDirection: "column", gap: 20 }}>
-          {loading ? (
-            <div style={{ textAlign: "center", padding: "60px 0" }}>
-              <div style={{ fontSize: 32, marginBottom: 12 }}>⏳</div>
-              <p style={{ color: C.gray600, fontWeight: 600 }}>Loading {months.length} months of data…</p>
-              <p style={{ fontSize: 12, color: C.gray400, marginTop: 4 }}>Fetching monthly breakdown for {sku.sku_id}</p>
-            </div>
-          ) : (
-            <>
-              {/* Summary cards */}
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 12 }}>
-                <StatCard label="Net P&L"          value={totals.net_profit}              accent={totals.net_profit >= 0 ? C.green : C.red} icon="💹" sub={`${totals.order_count} total orders`} />
-                <StatCard label="Delivered Profit"  value={totals.delivered_profit}        accent={C.green}   icon="✅" sub={`${totals.delivered_count} delivered`} />
-                <StatCard label="Return Loss"        value={totals.return_loss}             accent={C.red}     icon="📉" sub={`${totals.return_count} returns`} />
-                <StatCard label="RTO Loss"           value={totals.rto_loss}                accent={C.amber}   icon="↩" sub={`${totals.rto_count} RTO`} />
-                <StatCard label="Claims"             value={totals.claims_total}            accent={C.blue}    icon="🔖" sub={`${totals.claims_count} claims`} />
-                <StatCard label="Purchase Cost"      value={totals.delivered_purchase_cost} accent={C.gray500} icon="🛒" sub="delivered orders" />
-              </div>
+      <DialogContent sx={{ p: 3 }}>
+        {loading ? (
+          <Box sx={{ display: "flex", flexDirection: "column", alignItems: "center", py: 8, gap: 2 }}>
+            <CircularProgress color="primary" />
+            <Typography color="text.secondary">Loading {months.length} months…</Typography>
+          </Box>
+        ) : (
+          <Box sx={{ display: "flex", flexDirection: "column", gap: 3 }}>
+            {/* Summary grid */}
+            <Grid container spacing={1.5}>
+              {[
+                { label: "Net P&L", value: tot.net, color: tot.net >= 0 ? C.green : C.red, sub: `${tot.ord} orders` },
+                { label: "Delivered Profit", value: tot.del_pft, color: C.green, sub: `${tot.del} delivered` },
+                { label: "Return Loss", value: tot.ret_loss, color: C.red, sub: `${tot.ret} returns` },
+                { label: "RTO Loss", value: tot.rto_loss, color: C.amber, sub: `${tot.rto} RTOs` },
+                { label: "Claims", value: tot.claims, color: C.blue, sub: "net received" },
+              ].map(({ label, value, color, sub }) => (
+                <Grid item xs={6} md="auto" key={label} sx={{ minWidth: 140 }}>
+                  <Paper variant="outlined" sx={{ p: 1.5, bgcolor: "grey.50" }}>
+                    <Typography variant="subtitle2" sx={{ mb: 0.25, fontSize: 10 }}>{label}</Typography>
+                    <Typography variant="h6" sx={{ fontFamily: "monospace", fontWeight: 800, color }}>{fmt(value)}</Typography>
+                    <Typography variant="caption">{sub}</Typography>
+                  </Paper>
+                </Grid>
+              ))}
+            </Grid>
 
-              {/* Financial P&L per month */}
-              <div style={S.card}>
-                <p style={S.cardTitle}>Monthly Financial Performance</p>
-                <ResponsiveContainer width="100%" height={240}>
-                  <BarChart data={chartData} margin={{ top: 4, right: 12, left: 0, bottom: 4 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke={C.gray100} />
-                    <XAxis dataKey="month" tick={{ fill: C.gray500, fontSize: 11 }} axisLine={false} tickLine={false} />
-                    <YAxis tick={{ fill: C.gray400, fontSize: 10 }} axisLine={false} tickLine={false} />
-                    <Tooltip
-                      contentStyle={{ background: C.white, border: `1px solid ${C.border}`, borderRadius: 8, fontSize: 12 }}
-                      formatter={(v, name) => [fmt(v), name]}
-                    />
-                    <Legend wrapperStyle={{ fontSize: 11, paddingTop: 8 }} />
-                    <Bar dataKey="Delivered Profit" fill={C.green} radius={[3, 3, 0, 0]} />
-                    <Bar dataKey="Return Loss"      fill={C.red}   radius={[3, 3, 0, 0]} />
-                    <Bar dataKey="RTO Loss"         fill={C.amber} radius={[3, 3, 0, 0]} />
-                    <Bar dataKey="Claims"           fill={C.blue}  radius={[3, 3, 0, 0]} />
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
+            {/* P&L bar chart */}
+            <Paper variant="outlined" sx={{ p: 2, bgcolor: "grey.50" }}>
+              <Typography variant="subtitle2" sx={{ mb: 1 }}>Monthly Financial Breakdown</Typography>
+              <BarChart
+                dataset={chartData}
+                xAxis={[{ scaleType: "band", dataKey: "month" }]}
+                series={[
+                  { dataKey: "Delivered", label: "Delivered +", color: C.green, stack: "a" },
+                  { dataKey: "Return", label: "Return −", color: C.red, stack: "b" },
+                  { dataKey: "RTO", label: "RTO −", color: C.amber, stack: "b" },
+                ]}
+                height={220} borderRadius={4}
+                margin={{ left: 60, bottom: 30, right: 10, top: 10 }}
+              />
+            </Paper>
 
-              {/* Order volume per month */}
-              <div style={S.card}>
-                <p style={S.cardTitle}>Monthly Order Volume</p>
-                <ResponsiveContainer width="100%" height={180}>
-                  <BarChart data={chartData} margin={{ top: 4, right: 12, left: 0, bottom: 4 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke={C.gray100} />
-                    <XAxis dataKey="month" tick={{ fill: C.gray500, fontSize: 11 }} axisLine={false} tickLine={false} />
-                    <YAxis tick={{ fill: C.gray400, fontSize: 10 }} axisLine={false} tickLine={false} allowDecimals={false} />
-                    <Tooltip
-                      contentStyle={{ background: C.white, border: `1px solid ${C.border}`, borderRadius: 8, fontSize: 12 }}
-                    />
-                    <Legend wrapperStyle={{ fontSize: 11, paddingTop: 8 }} />
-                    <Bar dataKey="delivered" name="Delivered" fill={C.green} radius={[3, 3, 0, 0]} />
-                    <Bar dataKey="returns"   name="Returns"   fill={C.red}   radius={[3, 3, 0, 0]} />
-                    <Bar dataKey="rto"       name="RTO"       fill={C.amber} radius={[3, 3, 0, 0]} />
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
-            </>
-          )}
-        </div>
-      </div>
-    </div>
+            {/* Monthly detail table */}
+            <Box sx={{ overflowX: "auto" }}>
+              <Table size="small">
+                <TableHead>
+                  <TableRow>
+                    {["Month", "✅ Del.", "↩ Ret.", "🔄 RTO", "Profit +", "Loss −", "Net P&L"].map(h => (
+                      <TableCell key={h}>{h}</TableCell>
+                    ))}
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {monthly.map(m => {
+                    const loss = m.ret_loss + m.rto_loss;
+                    return (
+                      <TableRow key={m.month}>
+                        <TableCell sx={{ fontWeight: 600 }}>{fmtShort(m.month)}</TableCell>
+                        <TableCell sx={{ color: C.green, fontFamily: "monospace" }}>{m.del || "—"}</TableCell>
+                        <TableCell sx={{ color: C.red, fontFamily: "monospace" }}>{m.ret || "—"}</TableCell>
+                        <TableCell sx={{ color: C.amber, fontFamily: "monospace" }}>{m.rto || "—"}</TableCell>
+                        <TableCell sx={{ color: C.green, fontFamily: "monospace" }}>{m.del_pft !== 0 ? `+${fmt(m.del_pft)}` : "—"}</TableCell>
+                        <TableCell sx={{ color: C.red, fontFamily: "monospace" }}>{loss !== 0 ? fmt(loss) : "—"}</TableCell>
+                        <TableCell>
+                          <Chip label={`${m.net >= 0 ? "+" : ""}${fmt(m.net)}`} size="small"
+                            sx={{
+                              fontFamily: "monospace", fontWeight: 700, fontSize: 12,
+                              bgcolor: m.net >= 0 ? C.greenLight : "#FFF1F2",
+                              color: m.net >= 0 ? C.green : C.red,
+                              border: `1px solid ${m.net >= 0 ? C.greenBorder : "#FECDD3"}`
+                            }} />
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+            </Box>
+          </Box>
+        )}
+      </DialogContent>
+    </Dialog>
   );
 }
 
 // ── Main tab ──────────────────────────────────────────────────────────────────
-
 export function SKUAnalysisTab() {
-  const [allData,     setAllData]     = useState([]);
-  const [loading,     setLoading]     = useState(true);
-  const [view,        setView]        = useState("all");
-  const [selectedSKU, setSelectedSKU] = useState(null);
+  const [allData, setAllData] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [view, setView] = useState("all");
+  const [selSKU, setSelSKU] = useState(null);
+  const [months, setMonths] = useState([]);
+  const [selMonth, setSelMonth] = useState(null);
+  const [range, setRange] = useState(null);
+  const [label, setLabel] = useState("All time");
 
-  // Date filter state
-  const [months,      setMonths]      = useState([]);
-  const [mode,        setMode]        = useState("month");
-  const [selMonth,    setSelMonth]    = useState("");
-  const [customFrom,  setCustomFrom]  = useState("");
-  const [customTo,    setCustomTo]    = useState("");
-  const [activeRange, setActiveRange] = useState(null); // null = waiting for init
-
-  // ── Init: fetch available months, default to latest ────────────────────────
   useEffect(() => {
-    fetch(`${API}/profit/available-months/`)
-      .then(r => r.json())
-      .then(ms => {
-        setMonths(ms);
-        if (ms.length > 0) {
-          setMode("month"); setSelMonth(ms[0]);
-          setActiveRange(monthToRange(ms[0]));
-        } else {
-          setActiveRange({});
-        }
-      })
-      .catch(() => setActiveRange({}));
+    fetch(`${API}/profit/available-months/`).then(r => r.json()).then(ms => {
+      setMonths(ms);
+      if (ms.length > 0) { setSelMonth(ms[0]); setRange(toRange(ms[0])); setLabel(fmtMonth(ms[0])); }
+      else { setRange({}); setLabel("All time"); }
+    }).catch(() => { setRange({}); setLabel("All time"); });
   }, []);
 
-  // ── Fetch SKU data whenever activeRange changes ────────────────────────────
   useEffect(() => {
-    if (activeRange === null) return;
+    if (range === null) return;
     setLoading(true);
     const params = new URLSearchParams();
-    if (activeRange.date_from) params.set("date_from", activeRange.date_from);
-    if (activeRange.date_to)   params.set("date_to",   activeRange.date_to);
-    fetch(`${API}/profit/?${params}`)
-      .then(r => r.json())
-      .then(d => {
-        const raw = d.sku_wise_profit || {};
-        const prepared = Object.keys(raw).map(key => {
-          const r = raw[key];
-          return {
-            sku_id: key,
-            ...r,
-            net_profit: Number(r.net_profit ?? (
-              Number(r.delivered_profit || 0) +
-              Number(r.return_loss || 0) +
-              Number(r.rto_loss || 0)
-            )),
-          };
-        });
-        setAllData(prepared.sort((a, b) => b.net_profit - a.net_profit));
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
-  }, [JSON.stringify(activeRange)]); // eslint-disable-line
+    if (range.date_from) params.set("date_from", range.date_from);
+    if (range.date_to) params.set("date_to", range.date_to);
+    fetch(`${API}/profit/?${params}`).then(r => r.json()).then(d => {
+      const raw = d.sku_wise_profit || {};
+      const prepared = Object.keys(raw).map(key => {
+        const r = raw[key];
+        return {
+          sku_id: key, ...r,
+          net_profit: Number(r.net_profit ?? (Number(r.delivered_profit || 0) + Number(r.return_loss || 0) + Number(r.rto_loss || 0))),
+        };
+      }).sort((a, b) => b.net_profit - a.net_profit);
+      setAllData(prepared); setLoading(false);
+    }).catch(() => setLoading(false));
+  }, [JSON.stringify(range)]); // eslint-disable-line
 
-  // ── Derived ────────────────────────────────────────────────────────────────
   const profitRows = allData.filter(s => s.net_profit > 0);
-  const lossRows   = [...allData.filter(s => s.net_profit < 0)].reverse();
+  const lossRows = allData.filter(s => s.net_profit < 0).reverse();
+  const viewData = view === "profit" ? profitRows : view === "loss" ? lossRows : allData;
 
-  const viewData =
-    view === "profit" ? profitRows :
-    view === "loss"   ? lossRows   :
-    allData;
+  const chartData = [...allData].sort((a, b) => Math.abs(b.net_profit) - Math.abs(a.net_profit)).slice(0, 12);
 
-  const totalNet             = allData.reduce((a, s) => a + s.net_profit, 0);
-  const totalDeliveredProfit = allData.reduce((a, s) => a + Number(s.delivered_profit || 0), 0);
-  const totalReturnLoss      = allData.reduce((a, s) => a + Number(s.return_loss || 0), 0);
-  const totalRTOLoss         = allData.reduce((a, s) => a + Number(s.rto_loss || 0), 0);
-  const totalClaims          = allData.reduce((a, s) => a + Number(s.claims_total || 0), 0);
-  const totalDelivered       = allData.reduce((a, s) => a + (s.delivered_count || 0), 0);
-  const totalReturns         = allData.reduce((a, s) => a + (s.return_count || 0), 0);
-  const totalRTO             = allData.reduce((a, s) => a + (s.rto_count || 0), 0);
-  const totalCancelled       = allData.reduce((a, s) => a + (s.cancelled_count || 0), 0);
-  const bestSKU              = profitRows[0];
-  const worstSKU             = lossRows[0];
-
-  const chartData =
-    view === "all"
-      ? [...allData].sort((a, b) => Math.abs(b.net_profit) - Math.abs(a.net_profit)).slice(0, 10)
-      : viewData.slice(0, 10);
-
-  const filterLabel =
-    mode === "month"  ? fmtMonth(selMonth) :
-    mode === "custom" ? `${customFrom} → ${customTo}` :
-    "All Time";
+  const handleFilter = (month, r) => {
+    setSelMonth(month); setRange(r);
+    setLabel(month === null ? "All time" : month === "custom" ? `${r.date_from} → ${r.date_to}` : fmtMonth(month));
+  };
 
   const VIEWS = [
-    { id: "all",    label: "All SKUs",    count: allData.length    },
-    { id: "profit", label: "Profitable",  count: profitRows.length },
-    { id: "loss",   label: "Loss-making", count: lossRows.length   },
+    { id: "all", label: "All", count: allData.length },
+    { id: "profit", label: "Profitable", count: profitRows.length },
+    { id: "loss", label: "Loss", count: lossRows.length },
   ];
 
-  const chartTitle =
-    view === "profit" ? `Top ${chartData.length} Profitable SKUs` :
-    view === "loss"   ? `Worst ${chartData.length} Loss-making SKUs` :
-                        `Top ${chartData.length} SKUs by Impact`;
-
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+    <Box sx={{ display: "flex", flexDirection: "column", gap: 2.5 }}>
+      {/* Header */}
+      <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 1.5 }}>
+        <Box>
+          <Typography variant="h5" sx={{ fontWeight: 800, mb: 0.25 }}>SKU P&L Analysis</Typography>
+          <Typography variant="body2" color="text.secondary">Settled orders · {label}</Typography>
+        </Box>
+        <ButtonGroup size="small" variant="outlined">
+          {VIEWS.map(({ id, label: l, count }) => (
+            <Button key={id} onClick={() => setView(id)}
+              variant={view === id ? "contained" : "outlined"} disableElevation
+              color={id === "loss" ? "error" : id === "profit" ? "success" : "primary"}
+              sx={{ fontWeight: view === id ? 700 : 500 }}>
+              {l} <Chip label={count} size="small" sx={{ ml: 0.75, height: 18, fontSize: 10, bgcolor: "rgba(255,255,255,0.3)", color: "inherit" }} />
+            </Button>
+          ))}
+        </ButtonGroup>
+      </Box>
 
-      {/* Header + view toggle */}
-      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
-        <div>
-          <h2 style={{ fontSize: 18, fontWeight: 800, color: C.gray800, marginBottom: 4 }}>
-            📊 SKU P&L Analysis
-          </h2>
-          <p style={{ fontSize: 13, color: C.gray400 }}>
-            Profit and loss by SKU for <strong style={{ color: C.gray600 }}>{filterLabel}</strong> — settled orders only.
-          </p>
-        </div>
-        <div style={{ display: "flex", gap: 4, background: C.gray100, borderRadius: 10, padding: 3 }}>
-          {VIEWS.map(({ id, label, count }) => {
-            const active      = view === id;
-            const activeColor = id === "loss" ? C.red : id === "profit" ? C.green : C.gray800;
-            return (
-              <button key={id} onClick={() => setView(id)} style={{
-                padding: "6px 16px", borderRadius: 8, border: "none", cursor: "pointer",
-                fontFamily: "inherit", fontSize: 12, fontWeight: active ? 700 : 500,
-                background: active ? C.white : "transparent",
-                color: active ? activeColor : C.gray500,
-                boxShadow: active ? "0 1px 3px rgba(0,0,0,0.1)" : "none",
-                transition: "all 0.15s",
-              }}>
-                {label} <span style={{ fontSize: 11, opacity: 0.7 }}>({count})</span>
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* Date filter bar */}
-      <FilterBar
-        mode={mode} setMode={setMode}
-        selMonth={selMonth} setSelMonth={setSelMonth}
-        months={months}
-        customFrom={customFrom} setCustomFrom={setCustomFrom}
-        customTo={customTo}   setCustomTo={setCustomTo}
-        onApply={range => setActiveRange(range)}
-      />
+      {/* Month filter */}
+      <MonthFilter months={months} selMonth={selMonth} onSelect={handleFilter} />
 
       {/* Loading */}
       {loading && (
-        <div style={{ ...S.card, textAlign: "center", padding: "60px 32px" }}>
-          <div style={{ fontSize: 36, marginBottom: 14 }}>⏳</div>
-          <p style={{ fontSize: 15, fontWeight: 700, color: C.gray700, marginBottom: 6 }}>Loading SKU analysis…</p>
-          <p style={{ fontSize: 13, color: C.gray400 }}>Fetching profit data for {filterLabel}</p>
-        </div>
+        <Card elevation={1} sx={{ textAlign: "center", py: 8 }}>
+          <CircularProgress color="primary" sx={{ mb: 2 }} />
+          <Typography color="text.secondary">Loading SKU analysis… {label}</Typography>
+        </Card>
       )}
 
-      {/* Empty state */}
       {!loading && allData.length === 0 && (
-        <div style={{ ...S.card, textAlign: "center", padding: "60px 32px" }}>
-          <div style={{ fontSize: 36, marginBottom: 14 }}>📭</div>
-          <p style={{ fontSize: 15, fontWeight: 700, color: C.gray700, marginBottom: 6 }}>No data for {filterLabel}</p>
-          <p style={{ fontSize: 13, color: C.gray400 }}>No settled orders with pricing found for this period.</p>
-        </div>
+        <Card elevation={1} sx={{ textAlign: "center", py: 8 }}>
+          <Typography variant="h3" sx={{ mb: 1 }}>📭</Typography>
+          <Typography variant="h6" sx={{ fontWeight: 700 }}>No data for {label}</Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>No settled orders with pricing found.</Typography>
+        </Card>
       )}
 
-      {!loading && allData.length > 0 && (
-        <>
-          {/* KPI cards */}
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 14 }}>
-            <StatCard label="Net P&L"            value={totalNet}             accent={totalNet >= 0 ? C.green : C.red} icon="💹" sub={`${allData.length} mapped SKUs`} />
-            <StatCard label="Delivered Profit"   value={totalDeliveredProfit} accent={C.green} icon="✅" sub={`${totalDelivered} delivered`} />
-            <StatCard label="Return Loss"        value={totalReturnLoss}      accent={C.red}   icon="📉" sub={`${totalReturns} returns`} />
-            <StatCard label="RTO Loss"           value={totalRTOLoss}         accent={C.amber} icon="↩" sub={`${totalRTO} RTO`} />
-            <StatCard label="Claims Received"    value={totalClaims}          accent={C.blue}  icon="🔖" sub={`${allData.reduce((a,s)=>a+(s.claims_count||0),0)} claimed`} />
-            {totalCancelled > 0 && <StatCard label="Cancelled" value={null} sub={`${totalCancelled} cancelled`} accent={C.gray400} icon="✕" />}
-            {bestSKU  && <StatCard label="Best SKU"  value={bestSKU.net_profit}  accent={C.green} sub={bestSKU.sku_id}  icon="🏆" />}
-            {worstSKU && <StatCard label="Worst SKU" value={worstSKU.net_profit} accent={C.red}   sub={worstSKU.sku_id} icon="⚠️" />}
-          </div>
+      {!loading && allData.length > 0 && <>
+        <MetricsPanel data={allData} filterLabel={label} />
 
-          {/* Chart */}
-          {chartData.length > 0 && (
-            <div style={S.card}>
-              <p style={S.cardTitle}>{chartTitle}</p>
-              <ResponsiveContainer width="100%" height={220}>
-                <BarChart data={chartData} margin={{ top: 4, right: 8, left: 0, bottom: 50 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke={C.gray100} />
-                  <XAxis dataKey="sku_id" tick={{ fill: C.gray500, fontSize: 10 }} angle={-30} textAnchor="end" interval={0} tickLine={false} />
-                  <YAxis tick={{ fill: C.gray400, fontSize: 11 }} axisLine={false} tickLine={false} />
-                  <Tooltip
-                    contentStyle={{ background: C.white, border: `1px solid ${C.border}`, borderRadius: 8 }}
-                    formatter={(v) => [fmt(v), "Net P&L"]}
-                  />
-                  <Bar dataKey="net_profit" radius={[5, 5, 0, 0]}>
-                    {chartData.map((entry, i) => (
-                      <Cell key={i} fill={entry.net_profit >= 0 ? C.green : C.red} />
-                    ))}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          )}
+        {/* Top SKUs chart */}
+        {chartData.length > 0 && (
+          <Card elevation={1}>
+            <CardContent>
+              <Typography variant="subtitle2" sx={{ mb: 1 }}>Top {chartData.length} SKUs by Absolute Impact</Typography>
+              <BarChart
+                dataset={chartData}
+                xAxis={[{
+                  scaleType: "band", dataKey: "sku_id",
+                  tickLabelStyle: { fontSize: 10 }, tickLabelPlacement: "tick",
+                  colorMap: {
+                    type: "ordinal",
+                    values: chartData.map(d => d.sku_id),
+                    colors: chartData.map(d => d.net_profit >= 0 ? C.green : C.red),
+                  },
+                }]}
+                series={[{ dataKey: "net_profit", label: "Net P&L", valueFormatter: v => fmt(v) }]}
+                height={220} borderRadius={6}
+                margin={{ left: 70, bottom: 60, right: 10, top: 10 }}
+                slotProps={{ legend: { hidden: true } }}
+                onAxisClick={(_, d) => { const sku = allData.find(s => s.sku_id === d?.axisValue); if (sku) setSelSKU(sku); }}
+              />
+            </CardContent>
+          </Card>
+        )}
 
-          {/* Table */}
-          <div style={S.card}>
-            <SKUTable data={viewData} mode={view} onRowClick={setSelectedSKU} />
-          </div>
-        </>
-      )}
+        {/* SKU DataGrid */}
+        <Card elevation={1}>
+          <CardContent sx={{ pb: 0 }}>
+            <Typography variant="subtitle2" sx={{ mb: 1 }}>
+              {viewData.length} SKUs · click any row for monthly breakdown
+            </Typography>
+          </CardContent>
+          <SKUDataTable data={viewData} onRowClick={setSelSKU} />
+        </Card>
+      </>}
 
-      {/* Monthly drill-down modal */}
-      {selectedSKU && (
-        <SKUDetailModal sku={selectedSKU} months={months} onClose={() => setSelectedSKU(null)} />
-      )}
-    </div>
+      {selSKU && <SKUDetailModal sku={selSKU} months={months} onClose={() => setSelSKU(null)} />}
+    </Box>
   );
 }

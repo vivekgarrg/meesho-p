@@ -13,6 +13,9 @@ urlpatterns = [
     path("compensation/", views.compensation_recovery_list, name="compensation_recovery_list"),
     path("parent-prices/", views.parent_price_list, name="parent_price_list"),
     path("parent-prices/<str:item_id>/", views.parent_price_detail, name="parent_item_pricing"),
+    path("parent-prices/<str:item_id>/price-history/", views.parent_price_history_list, name="parent_price_history_list"),
+    path("parent-prices/<str:item_id>/price-history/<int:pk>/", views.parent_price_history_detail, name="parent_price_history_detail"),
+    path("final-prices/unlinked/", views.unlinked_skus, name="unlinked_skus"),
     path("parent-linking/", views.parent_linking_to_sku, name="parent_linking"),
     path("final-prices/", views.final_price_list, name="final_price_list"),
     path("final-prices/upload/", views.upload_final_price, name="upload_final_price"),
@@ -39,6 +42,8 @@ urlpatterns = [
     path("purchases/items/<int:item_id>/", views.purchase_item_detail, name="purchase_item_detail"),
     path("inventory/",              views.inventory_view,      name="inventory_view"),
     path("inventory/<str:sku_id>/", views.inventory_delete_sku, name="inventory_delete_sku"),
+    # Product Photography AI
+    path("product-photos/generate/", views.generate_product_images, name="generate_product_images"),
     # Label packing
     path("labels/orders/<str:order_id>/pack/", views.label_order_pack, name="label_order_pack"),
     path("labels/bulk-pack/",       views.label_bulk_pack,     name="label_bulk_pack"),

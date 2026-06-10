@@ -127,9 +127,38 @@ class AdsCost(models.Model):
     class Meta:
         db_table = "ads_cost"
         ordering = ["-deduction_date"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["deduction_duration", "deduction_date", "campaign_id"],
+                name="unique_ads_cost_entry",
+            )
+        ]
 
     def __str__(self):
         return f"Ad: {self.campaign_id} on {self.deduction_date}"
+
+
+class ParentPriceHistory(models.Model):
+    """One price-change entry for a parent SKU. effective_from tells when this price took effect."""
+    parent = models.ForeignKey(
+        ParentItemPrice, on_delete=models.CASCADE,
+        related_name="price_history", db_column="parent_id",
+    )
+    effective_from = models.DateField()
+    item_price = models.DecimalField(max_digits=12, decimal_places=2)
+    tax_percent = models.IntegerField(default=0)
+    packaging_cost = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    final_price = models.DecimalField(max_digits=12, decimal_places=2)
+    notes = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "parent_price_history"
+        unique_together = [("parent", "effective_from")]
+        ordering = ["effective_from"]
+
+    def __str__(self):
+        return f"{self.parent_id} from {self.effective_from}: ₹{self.final_price}"
 
 
 class ReferralPayment(models.Model):

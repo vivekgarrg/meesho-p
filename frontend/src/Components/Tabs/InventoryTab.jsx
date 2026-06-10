@@ -1,14 +1,21 @@
 import React, { useState, useEffect, useCallback } from "react";
+import { BarChart } from "@mui/x-charts/BarChart";
 import {
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-} from "recharts";
-import { API, C, S, fmt, btn } from "../../App";
+  Box, Button, Card, CardContent, Chip, Dialog, DialogActions,
+  DialogContent, DialogTitle, FormControlLabel, Checkbox,
+  Paper, Stack, Table, TableBody, TableCell, TableContainer,
+  TableFooter, TableHead, TableRow, TextField, Typography,
+  CircularProgress, Collapse, IconButton,
+} from "@mui/material";
+import { API, C, fmt } from "../../App";
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 function StockBadge({ stock }) {
-  if (stock <= 0)  return <span style={{ background: C.redLight,   color: C.red,   border: `1px solid ${C.redBorder}`,   padding: "2px 10px", borderRadius: 20, fontSize: 12, fontWeight: 700 }}>Out of Stock</span>;
-  if (stock <= 3)  return <span style={{ background: C.amberLight, color: C.amber, border: "1px solid #FDE68A",           padding: "2px 10px", borderRadius: 20, fontSize: 12, fontWeight: 700 }}>Low ({stock})</span>;
-  return                  <span style={{ background: C.greenLight, color: C.green, border: `1px solid ${C.greenBorder}`,  padding: "2px 10px", borderRadius: 20, fontSize: 12, fontWeight: 700 }}>{stock} units</span>;
+  if (stock <= 0)
+    return <Chip label="Out of Stock" size="small" sx={{ background: C.redLight, color: C.red, border: `1px solid ${C.redBorder}`, fontWeight: 700, fontSize: 12 }} />;
+  if (stock <= 3)
+    return <Chip label={`Low (${stock})`} size="small" sx={{ background: C.amberLight, color: C.amber, border: "1px solid #FDE68A", fontWeight: 700, fontSize: 12 }} />;
+  return <Chip label={`${stock} units`} size="small" sx={{ background: C.greenLight, color: C.green, border: `1px solid ${C.greenBorder}`, fontWeight: 700, fontSize: 12 }} />;
 }
 
 // ── Add Stock Modal ───────────────────────────────────────────────────────────
@@ -22,13 +29,6 @@ function AddStockModal({ skuId, onSave, onClose }) {
   const [exch,   setExch]   = useState(false);
   const [saving, setSaving] = useState(false);
   const [err,    setErr]    = useState("");
-
-  useEffect(() => {
-    const onKey = (e) => e.key === "Escape" && onClose();
-    document.addEventListener("keydown", onKey);
-    document.body.style.overflow = "hidden";
-    return () => { document.removeEventListener("keydown", onKey); document.body.style.overflow = ""; };
-  }, [onClose]);
 
   const save = async () => {
     if (!seller.trim())                         { setErr("Enter a seller name."); return; }
@@ -57,53 +57,97 @@ function AddStockModal({ skuId, onSave, onClose }) {
   };
 
   return (
-    <div style={{ position: "fixed", inset: 0, zIndex: 1100, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}
-      onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div style={{ background: "white", borderRadius: 14, width: 440, boxShadow: "0 20px 60px rgba(0,0,0,0.2)" }}>
-        <div style={{ padding: "16px 22px 12px", borderBottom: `1px solid ${C.border}` }}>
-          <p style={{ fontWeight: 800, fontSize: 15, color: C.gray800 }}>＋ Add Stock</p>
-          <p style={{ fontSize: 11, color: C.gray400, marginTop: 2, fontFamily: "monospace" }}>{skuId}</p>
-        </div>
-        <div style={{ padding: "16px 22px", display: "flex", flexDirection: "column", gap: 12 }}>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-            <div>
-              <label style={S.label}>Date</label>
-              <input type="date" value={date} onChange={e => setDate(e.target.value)} style={S.inp} />
-            </div>
-            <div>
-              <label style={S.label}>Seller Name</label>
-              <input value={seller} onChange={e => setSeller(e.target.value)} placeholder="e.g. Anand Traders" style={S.inp} />
-            </div>
-          </div>
-          <div>
-            <label style={S.label}>Description (optional)</label>
-            <input value={desc} onChange={e => setDesc(e.target.value)} placeholder="e.g. Cotton kurta set" style={S.inp} />
-          </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-            <div>
-              <label style={S.label}>Quantity</label>
-              <input type="number" min="1" value={qty} onChange={e => setQty(e.target.value)} style={S.inp} />
-            </div>
-            <div>
-              <label style={S.label}>Price / Unit (₹)</label>
-              <input type="number" min="0" step="0.01" value={price} onChange={e => setPrice(e.target.value)}
-                disabled={exch} placeholder="0.00" style={{ ...S.inp, opacity: exch ? 0.4 : 1 }} />
-            </div>
-          </div>
-          <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 13, color: C.gray600 }}>
-            <input type="checkbox" checked={exch} onChange={e => setExch(e.target.checked)} style={{ accentColor: C.amber }} />
-            Exchange item (not counted in cost or stock)
-          </label>
-          {err && <p style={{ fontSize: 12, color: C.red }}>{err}</p>}
-        </div>
-        <div style={{ padding: "10px 22px 16px", display: "flex", gap: 8, justifyContent: "flex-end" }}>
-          <button onClick={onClose} style={btn("ghost")}>Cancel</button>
-          <button onClick={save} disabled={saving} style={{ ...btn("primary"), opacity: saving ? 0.6 : 1 }}>
-            {saving ? "Saving…" : "Add Stock"}
-          </button>
-        </div>
-      </div>
-    </div>
+    <Dialog open onClose={onClose} maxWidth="sm" fullWidth>
+      <DialogTitle sx={{ fontWeight: 800, fontSize: 15, color: C.gray800, pb: 1, borderBottom: `1px solid ${C.border}` }}>
+        ＋ Add Stock
+        <Typography variant="caption" display="block" sx={{ fontFamily: "monospace", color: C.gray400, mt: 0.5 }}>
+          {skuId}
+        </Typography>
+      </DialogTitle>
+      <DialogContent sx={{ pt: 2 }}>
+        <Stack spacing={2} sx={{ mt: 1 }}>
+          <Box sx={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 1.5 }}>
+            <TextField
+              label="Date"
+              type="date"
+              size="small"
+              value={date}
+              onChange={e => setDate(e.target.value)}
+              InputLabelProps={{ shrink: true }}
+              fullWidth
+            />
+            <TextField
+              label="Seller Name"
+              size="small"
+              value={seller}
+              onChange={e => setSeller(e.target.value)}
+              placeholder="e.g. Anand Traders"
+              fullWidth
+            />
+          </Box>
+          <TextField
+            label="Description (optional)"
+            size="small"
+            value={desc}
+            onChange={e => setDesc(e.target.value)}
+            placeholder="e.g. Cotton kurta set"
+            fullWidth
+          />
+          <Box sx={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 1.5 }}>
+            <TextField
+              label="Quantity"
+              type="number"
+              size="small"
+              inputProps={{ min: 1 }}
+              value={qty}
+              onChange={e => setQty(e.target.value)}
+              fullWidth
+            />
+            <TextField
+              label="Price / Unit (₹)"
+              type="number"
+              size="small"
+              inputProps={{ min: 0, step: 0.01 }}
+              value={price}
+              onChange={e => setPrice(e.target.value)}
+              disabled={exch}
+              placeholder="0.00"
+              fullWidth
+            />
+          </Box>
+          <FormControlLabel
+            control={
+              <Checkbox
+                checked={exch}
+                onChange={e => setExch(e.target.checked)}
+                sx={{ color: C.amber, "&.Mui-checked": { color: C.amber } }}
+                size="small"
+              />
+            }
+            label={
+              <Typography variant="body2" sx={{ color: C.gray600 }}>
+                Exchange item (not counted in cost or stock)
+              </Typography>
+            }
+          />
+          {err && <Typography variant="caption" sx={{ color: C.red }}>{err}</Typography>}
+        </Stack>
+      </DialogContent>
+      <DialogActions sx={{ px: 3, pb: 2 }}>
+        <Button onClick={onClose} variant="outlined" size="small" sx={{ color: C.gray600, borderColor: C.gray200 }}>
+          Cancel
+        </Button>
+        <Button
+          onClick={save}
+          disabled={saving}
+          variant="contained"
+          size="small"
+          sx={{ background: C.orange, "&:hover": { background: C.orange }, opacity: saving ? 0.6 : 1 }}
+        >
+          {saving ? "Saving…" : "Add Stock"}
+        </Button>
+      </DialogActions>
+    </Dialog>
   );
 }
 
@@ -115,13 +159,6 @@ function EditItemModal({ item, onSave, onClose }) {
   const [exch,   setExch]   = useState(item.is_exchange);
   const [saving, setSaving] = useState(false);
   const [err,    setErr]    = useState("");
-
-  useEffect(() => {
-    const onKey = (e) => e.key === "Escape" && onClose();
-    document.addEventListener("keydown", onKey);
-    document.body.style.overflow = "hidden";
-    return () => { document.removeEventListener("keydown", onKey); document.body.style.overflow = ""; };
-  }, [onClose]);
 
   const save = async () => {
     if (!exch && !(parseFloat(price) > 0)) { setErr("Enter a valid price."); return; }
@@ -137,44 +174,76 @@ function EditItemModal({ item, onSave, onClose }) {
   };
 
   return (
-    <div style={{ position: "fixed", inset: 0, zIndex: 1100, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}
-      onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div style={{ background: C.white, borderRadius: 14, width: 420, boxShadow: "0 20px 60px rgba(0,0,0,0.2)" }}>
-        <div style={{ padding: "16px 22px 12px", borderBottom: `1px solid ${C.border}` }}>
-          <p style={{ fontWeight: 800, fontSize: 15, color: C.gray800 }}>Edit Purchase Item</p>
-          <p style={{ fontSize: 11, color: C.gray400, marginTop: 2 }}>
-            Bill {item.bill_number} · {item.bill_date} · {item.seller_name}
-          </p>
-        </div>
-        <div style={{ padding: "16px 22px", display: "flex", flexDirection: "column", gap: 12 }}>
-          <div>
-            <label style={S.label}>Description</label>
-            <input value={desc} onChange={e => setDesc(e.target.value)} style={S.inp} />
-          </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-            <div>
-              <label style={S.label}>Quantity</label>
-              <input type="number" min="1" value={qty} onChange={e => setQty(e.target.value)} style={S.inp} />
-            </div>
-            <div>
-              <label style={S.label}>Price / Unit (₹)</label>
-              <input type="number" min="0" step="0.01" value={price} onChange={e => setPrice(e.target.value)} disabled={exch} style={{ ...S.inp, opacity: exch ? 0.4 : 1 }} />
-            </div>
-          </div>
-          <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 13, color: C.gray600 }}>
-            <input type="checkbox" checked={exch} onChange={e => setExch(e.target.checked)} style={{ accentColor: C.amber }} />
-            Exchange item (excluded from cost & stock)
-          </label>
-          {err && <p style={{ fontSize: 12, color: C.red }}>{err}</p>}
-        </div>
-        <div style={{ padding: "10px 22px 16px", display: "flex", gap: 8, justifyContent: "flex-end" }}>
-          <button onClick={onClose} style={btn("ghost")}>Cancel</button>
-          <button onClick={save} disabled={saving} style={{ ...btn("primary"), opacity: saving ? 0.6 : 1 }}>
-            {saving ? "Saving…" : "Save"}
-          </button>
-        </div>
-      </div>
-    </div>
+    <Dialog open onClose={onClose} maxWidth="sm" fullWidth>
+      <DialogTitle sx={{ fontWeight: 800, fontSize: 15, color: C.gray800, pb: 1, borderBottom: `1px solid ${C.border}` }}>
+        Edit Purchase Item
+        <Typography variant="caption" display="block" sx={{ color: C.gray400, mt: 0.5 }}>
+          Bill {item.bill_number} · {item.bill_date} · {item.seller_name}
+        </Typography>
+      </DialogTitle>
+      <DialogContent sx={{ pt: 2 }}>
+        <Stack spacing={2} sx={{ mt: 1 }}>
+          <TextField
+            label="Description"
+            size="small"
+            value={desc}
+            onChange={e => setDesc(e.target.value)}
+            fullWidth
+          />
+          <Box sx={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 1.5 }}>
+            <TextField
+              label="Quantity"
+              type="number"
+              size="small"
+              inputProps={{ min: 1 }}
+              value={qty}
+              onChange={e => setQty(e.target.value)}
+              fullWidth
+            />
+            <TextField
+              label="Price / Unit (₹)"
+              type="number"
+              size="small"
+              inputProps={{ min: 0, step: 0.01 }}
+              value={price}
+              onChange={e => setPrice(e.target.value)}
+              disabled={exch}
+              fullWidth
+            />
+          </Box>
+          <FormControlLabel
+            control={
+              <Checkbox
+                checked={exch}
+                onChange={e => setExch(e.target.checked)}
+                sx={{ color: C.amber, "&.Mui-checked": { color: C.amber } }}
+                size="small"
+              />
+            }
+            label={
+              <Typography variant="body2" sx={{ color: C.gray600 }}>
+                Exchange item (excluded from cost &amp; stock)
+              </Typography>
+            }
+          />
+          {err && <Typography variant="caption" sx={{ color: C.red }}>{err}</Typography>}
+        </Stack>
+      </DialogContent>
+      <DialogActions sx={{ px: 3, pb: 2 }}>
+        <Button onClick={onClose} variant="outlined" size="small" sx={{ color: C.gray600, borderColor: C.gray200 }}>
+          Cancel
+        </Button>
+        <Button
+          onClick={save}
+          disabled={saving}
+          variant="contained"
+          size="small"
+          sx={{ background: C.orange, "&:hover": { background: C.orange }, opacity: saving ? 0.6 : 1 }}
+        >
+          {saving ? "Saving…" : "Save"}
+        </Button>
+      </DialogActions>
+    </Dialog>
   );
 }
 
@@ -218,191 +287,248 @@ function SKUDetailDrawer({ skuId, onClose, onRefreshInventory }) {
   const totalSpend       = items.filter(i => !i.is_exchange).reduce((s, i) => s + parseFloat(i.total_amount), 0);
   const exchangeCount    = items.filter(i => i.is_exchange).length;
 
-  const TabBtn = ({ id, label }) => (
-    <button onClick={() => setTab(id)} style={{
-      padding: "6px 14px", borderRadius: 8, border: "none", cursor: "pointer", fontFamily: "inherit",
-      fontSize: 12, fontWeight: tab === id ? 700 : 500,
-      background: tab === id ? C.orangeLight : "transparent",
-      color: tab === id ? C.orange : C.gray500,
-    }}>{label}</button>
-  );
-
   return (
     <>
       {editItem && (
         <EditItemModal item={editItem} onSave={handleSaved} onClose={() => setEditItem(null)} />
       )}
-      <div style={{ position: "fixed", inset: 0, zIndex: 1000, background: "rgba(15,23,42,0.45)", display: "flex", justifyContent: "flex-end" }}
-        onClick={(e) => e.target === e.currentTarget && onClose()}>
-        <div style={{ width: "min(720px, 96vw)", height: "100vh", background: C.white, overflowY: "auto", boxShadow: "-12px 0 48px rgba(0,0,0,0.18)", display: "flex", flexDirection: "column" }}
-          onClick={(e) => e.stopPropagation()}>
-
+      {/* Backdrop */}
+      <Box
+        onClick={onClose}
+        sx={{
+          position: "fixed", inset: 0, zIndex: 1000,
+          background: "rgba(15,23,42,0.45)",
+          display: "flex", justifyContent: "flex-end",
+        }}
+      >
+        {/* Drawer panel */}
+        <Box
+          onClick={e => e.stopPropagation()}
+          sx={{
+            width: "min(720px, 96vw)", height: "100vh",
+            background: C.white, overflowY: "auto",
+            boxShadow: "-12px 0 48px rgba(0,0,0,0.18)",
+            display: "flex", flexDirection: "column",
+          }}
+        >
           {/* Drawer header */}
-          <div style={{ padding: "18px 24px 14px", borderBottom: `1px solid ${C.border}`, background: C.gray50, position: "sticky", top: 0, zIndex: 10 }}>
-            <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
-              <div>
-                <span style={{ fontFamily: "monospace", fontSize: 18, fontWeight: 800, color: C.orange }}>{skuId}</span>
-                <p style={{ fontSize: 12, color: C.gray400, marginTop: 3 }}>
+          <Box
+            sx={{
+              px: 3, pt: 2.5, pb: 2,
+              borderBottom: `1px solid ${C.border}`,
+              background: C.gray50,
+              position: "sticky", top: 0, zIndex: 10,
+            }}
+          >
+            <Box sx={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 1.5 }}>
+              <Box>
+                <Typography sx={{ fontFamily: "monospace", fontSize: 18, fontWeight: 800, color: C.orange }}>
+                  {skuId}
+                </Typography>
+                <Typography variant="caption" sx={{ color: C.gray400, mt: 0.5, display: "block" }}>
                   {totalPurchased} units purchased · ₹{totalSpend.toLocaleString("en-IN", { minimumFractionDigits: 2 })} total spend
                   {exchangeCount > 0 && ` · ${exchangeCount} exchange${exchangeCount > 1 ? "s" : ""}`}
-                </p>
-              </div>
-              <button onClick={onClose} style={{ ...btn("ghost", "sm"), padding: "6px 10px", fontSize: 16, lineHeight: 1 }}>✕</button>
-            </div>
+                </Typography>
+              </Box>
+              <Button
+                onClick={onClose}
+                variant="outlined"
+                size="small"
+                sx={{ minWidth: 36, px: 1, color: C.gray600, borderColor: C.gray200, lineHeight: 1 }}
+              >
+                ✕
+              </Button>
+            </Box>
             {/* Tab bar */}
-            <div style={{ display: "flex", gap: 4, marginTop: 12, background: C.gray100, borderRadius: 8, padding: 3, width: "fit-content" }}>
-              <TabBtn id="history" label="📋 Purchase History" />
-              <TabBtn id="monthly" label="📊 Monthly Analysis" />
-            </div>
-          </div>
+            <Box sx={{ display: "flex", gap: 0.5, mt: 1.5, background: C.gray100, borderRadius: 2, p: 0.375, width: "fit-content" }}>
+              {[["history", "📋 Purchase History"], ["monthly", "📊 Monthly Analysis"]].map(([id, label]) => (
+                <Button
+                  key={id}
+                  onClick={() => setTab(id)}
+                  size="small"
+                  sx={{
+                    px: 1.75, py: 0.75, borderRadius: 1.5, border: "none",
+                    fontWeight: tab === id ? 700 : 500, fontSize: 12,
+                    background: tab === id ? C.orangeLight : "transparent",
+                    color: tab === id ? C.orange : C.gray500,
+                    textTransform: "none",
+                    "&:hover": { background: tab === id ? C.orangeLight : C.gray200 },
+                  }}
+                >
+                  {label}
+                </Button>
+              ))}
+            </Box>
+          </Box>
 
           {/* Drawer body */}
-          <div style={{ flex: 1, padding: "18px 24px" }}>
+          <Box sx={{ flex: 1, p: 3 }}>
             {loading ? (
-              <div style={{ textAlign: "center", padding: 48, color: C.gray400 }}>Loading…</div>
+              <Box sx={{ textAlign: "center", py: 6, color: C.gray400 }}>
+                <CircularProgress size={24} sx={{ color: C.orange }} />
+                <Typography variant="body2" sx={{ mt: 1, color: C.gray400 }}>Loading…</Typography>
+              </Box>
             ) : (
               <>
                 {/* ── History tab ── */}
                 {tab === "history" && (
-                  <>
-                    {items.length === 0 ? (
-                      <p style={{ color: C.gray400, textAlign: "center", padding: 40 }}>No purchase items found for this SKU.</p>
-                    ) : (
-                      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-                        <thead>
-                          <tr>
+                  items.length === 0 ? (
+                    <Typography sx={{ color: C.gray400, textAlign: "center", py: 5 }}>
+                      No purchase items found for this SKU.
+                    </Typography>
+                  ) : (
+                    <TableContainer component={Paper} elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: 2 }}>
+                      <Table size="small">
+                        <TableHead>
+                          <TableRow sx={{ background: C.gray50 }}>
                             {["Date", "Bill", "Seller", "Desc", "Qty", "Price/Unit", "Total", "Exch?", ""].map((h, i) => (
-                              <th key={h + i} style={{ ...S.th, textAlign: ["Qty", "Price/Unit", "Total"].includes(h) ? "right" : "left" }}>{h}</th>
+                              <TableCell
+                                key={h + i}
+                                align={["Qty", "Price/Unit", "Total"].includes(h) ? "right" : "left"}
+                                sx={{ fontSize: 11, fontWeight: 700, color: C.gray500, textTransform: "uppercase", letterSpacing: "0.06em", whiteSpace: "nowrap", borderBottom: `1px solid ${C.border}`, background: C.gray50 }}
+                              >
+                                {h}
+                              </TableCell>
                             ))}
-                          </tr>
-                        </thead>
-                        <tbody>
+                          </TableRow>
+                        </TableHead>
+                        <TableBody>
                           {items.map((it, i) => {
                             const rowBg = it.is_exchange ? "#FFFBEB" : i % 2 === 0 ? C.white : C.gray50;
                             return (
-                              <tr key={it.id} style={{ background: rowBg }}>
-                                <td style={{ ...S.td, whiteSpace: "nowrap", color: C.gray600 }}>{it.bill_date}</td>
-                                <td style={{ ...S.td, fontFamily: "monospace", fontSize: 11, color: C.blue }}>{it.bill_number}</td>
-                                <td style={{ ...S.td, maxWidth: 100, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{it.seller_name}</td>
-                                <td style={{ ...S.td, maxWidth: 120, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: C.gray500, fontSize: 12 }}>{it.product_description || "—"}</td>
-                                <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", fontWeight: 700 }}>{it.quantity}</td>
-                                <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace" }}>{fmt(it.price_per_unit)}</td>
-                                <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", fontWeight: 700, color: it.is_exchange ? C.gray300 : C.orange }}>
+                              <TableRow key={it.id} sx={{ background: rowBg }}>
+                                <TableCell sx={{ whiteSpace: "nowrap", color: C.gray600, fontSize: 13 }}>{it.bill_date}</TableCell>
+                                <TableCell sx={{ fontFamily: "monospace", fontSize: 11, color: C.blue }}>{it.bill_number}</TableCell>
+                                <TableCell sx={{ maxWidth: 100, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 13 }}>{it.seller_name}</TableCell>
+                                <TableCell sx={{ maxWidth: 120, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: C.gray500, fontSize: 12 }}>{it.product_description || "—"}</TableCell>
+                                <TableCell align="right" sx={{ fontFamily: "monospace", fontWeight: 700, fontSize: 13 }}>{it.quantity}</TableCell>
+                                <TableCell align="right" sx={{ fontFamily: "monospace", fontSize: 13 }}>{fmt(it.price_per_unit)}</TableCell>
+                                <TableCell align="right" sx={{ fontFamily: "monospace", fontWeight: 700, color: it.is_exchange ? C.gray300 : C.orange, fontSize: 13 }}>
                                   {it.is_exchange ? "—" : fmt(it.total_amount)}
-                                </td>
-                                <td style={{ ...S.td, textAlign: "center" }}>
+                                </TableCell>
+                                <TableCell align="center">
                                   {it.is_exchange
-                                    ? <span style={{ fontSize: 10, background: "#FFFBEB", color: C.amber, border: "1px solid #FDE68A", padding: "1px 7px", borderRadius: 10, fontWeight: 700 }}>Exch</span>
-                                    : <span style={{ color: C.gray200 }}>—</span>}
-                                </td>
-                                <td style={S.td}>
-                                  <div style={{ display: "flex", gap: 5 }}>
-                                    <button onClick={() => setEditItem(it)} style={{ ...btn("ghostOrange", "sm"), padding: "3px 9px", fontSize: 11 }}>✏</button>
-                                    <button onClick={() => handleDelete(it.id)} style={{ ...btn("ghost", "sm"), padding: "3px 9px", fontSize: 11, color: C.red }}>✕</button>
-                                  </div>
-                                </td>
-                              </tr>
+                                    ? <Chip label="Exch" size="small" sx={{ fontSize: 10, background: "#FFFBEB", color: C.amber, border: "1px solid #FDE68A", fontWeight: 700, height: 20 }} />
+                                    : <Typography sx={{ color: C.gray200 }}>—</Typography>}
+                                </TableCell>
+                                <TableCell>
+                                  <Box sx={{ display: "flex", gap: 0.625 }}>
+                                    <Button
+                                      onClick={() => setEditItem(it)}
+                                      size="small"
+                                      sx={{ minWidth: 0, px: 1, py: 0.375, fontSize: 11, background: C.orangeLight, color: C.orange, border: `1.5px solid ${C.orangeBorder}`, textTransform: "none" }}
+                                    >✏</Button>
+                                    <Button
+                                      onClick={() => handleDelete(it.id)}
+                                      size="small"
+                                      sx={{ minWidth: 0, px: 1, py: 0.375, fontSize: 11, color: C.red, border: `1.5px solid ${C.gray200}`, textTransform: "none" }}
+                                    >✕</Button>
+                                  </Box>
+                                </TableCell>
+                              </TableRow>
                             );
                           })}
-                        </tbody>
-                        <tfoot>
-                          <tr style={{ background: "#FFF0EA" }}>
-                            <td colSpan={4} style={{ ...S.td, fontWeight: 700 }}>Total (excl. exchanges)</td>
-                            <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", fontWeight: 800 }}>{totalPurchased}</td>
-                            <td style={S.td} />
-                            <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", fontWeight: 800, color: C.orange }}>
+                        </TableBody>
+                        <TableFooter>
+                          <TableRow sx={{ background: "#FFF0EA" }}>
+                            <TableCell colSpan={4} sx={{ fontWeight: 700, fontSize: 13, color: C.gray700 }}>Total (excl. exchanges)</TableCell>
+                            <TableCell align="right" sx={{ fontFamily: "monospace", fontWeight: 800, fontSize: 13, color: C.gray700 }}>{totalPurchased}</TableCell>
+                            <TableCell />
+                            <TableCell align="right" sx={{ fontFamily: "monospace", fontWeight: 800, color: C.orange, fontSize: 13 }}>
                               ₹{totalSpend.toLocaleString("en-IN", { minimumFractionDigits: 2 })}
-                            </td>
-                            <td colSpan={2} style={S.td} />
-                          </tr>
-                        </tfoot>
-                      </table>
-                    )}
-                  </>
+                            </TableCell>
+                            <TableCell colSpan={2} />
+                          </TableRow>
+                        </TableFooter>
+                      </Table>
+                    </TableContainer>
+                  )
                 )}
 
                 {/* ── Monthly analysis tab ── */}
                 {tab === "monthly" && (
-                  <>
-                    {monthly.length === 0 ? (
-                      <p style={{ color: C.gray400, textAlign: "center", padding: 40 }}>No purchase data for monthly analysis.</p>
-                    ) : (
-                      <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-                        {/* Bar chart — qty */}
-                        <div>
-                          <p style={{ fontSize: 12, fontWeight: 700, color: C.gray500, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 10 }}>Units Purchased per Month</p>
-                          <ResponsiveContainer width="100%" height={200}>
-                            <BarChart data={monthly} margin={{ top: 4, right: 8, left: -10, bottom: 4 }}>
-                              <CartesianGrid strokeDasharray="3 3" stroke={C.gray100} />
-                              <XAxis dataKey="label" tick={{ fill: C.gray400, fontSize: 11 }} axisLine={false} tickLine={false} />
-                              <YAxis allowDecimals={false} tick={{ fill: C.gray400, fontSize: 11 }} axisLine={false} tickLine={false} />
-                              <Tooltip
-                                contentStyle={{ background: C.white, border: `1px solid ${C.border}`, borderRadius: 8 }}
-                                cursor={{ fill: C.gray50 }}
-                                formatter={(v) => [`${v} units`, "Purchased"]}
-                              />
-                              <Bar dataKey="total_qty" fill={C.orange} radius={[5, 5, 0, 0]} />
-                            </BarChart>
-                          </ResponsiveContainer>
-                        </div>
+                  monthly.length === 0 ? (
+                    <Typography sx={{ color: C.gray400, textAlign: "center", py: 5 }}>
+                      No purchase data for monthly analysis.
+                    </Typography>
+                  ) : (
+                    <Stack spacing={2.5}>
+                      {/* Bar chart — qty */}
+                      <Box>
+                        <Typography sx={{ fontSize: 12, fontWeight: 700, color: C.gray500, textTransform: "uppercase", letterSpacing: "0.05em", mb: 1.25 }}>
+                          Units Purchased per Month
+                        </Typography>
+                        <BarChart
+                          dataset={monthly}
+                          xAxis={[{ scaleType: "band", dataKey: "label" }]}
+                          series={[{ dataKey: "total_qty", label: "Units", color: C.orange }]}
+                          height={220}
+                          borderRadius={4}
+                          margin={{ left: 60, bottom: 60, right: 10, top: 10 }}
+                        />
+                      </Box>
 
-                        {/* Bar chart — spend */}
-                        <div>
-                          <p style={{ fontSize: 12, fontWeight: 700, color: C.gray500, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 10 }}>Spend per Month (₹)</p>
-                          <ResponsiveContainer width="100%" height={200}>
-                            <BarChart data={monthly.map(m => ({ ...m, value: parseFloat(m.total_value) }))} margin={{ top: 4, right: 8, left: 0, bottom: 4 }}>
-                              <CartesianGrid strokeDasharray="3 3" stroke={C.gray100} />
-                              <XAxis dataKey="label" tick={{ fill: C.gray400, fontSize: 11 }} axisLine={false} tickLine={false} />
-                              <YAxis tick={{ fill: C.gray400, fontSize: 11 }} axisLine={false} tickLine={false} />
-                              <Tooltip
-                                contentStyle={{ background: C.white, border: `1px solid ${C.border}`, borderRadius: 8 }}
-                                cursor={{ fill: C.gray50 }}
-                                formatter={(v) => [`₹${v.toLocaleString("en-IN")}`, "Spend"]}
-                              />
-                              <Bar dataKey="value" fill={C.green} radius={[5, 5, 0, 0]} />
-                            </BarChart>
-                          </ResponsiveContainer>
-                        </div>
+                      {/* Bar chart — spend */}
+                      <Box>
+                        <Typography sx={{ fontSize: 12, fontWeight: 700, color: C.gray500, textTransform: "uppercase", letterSpacing: "0.05em", mb: 1.25 }}>
+                          Spend per Month (₹)
+                        </Typography>
+                        <BarChart
+                          dataset={monthly.map(m => ({ ...m, value: parseFloat(m.total_value) }))}
+                          xAxis={[{ scaleType: "band", dataKey: "label" }]}
+                          series={[{ dataKey: "value", label: "Spend (₹)", color: C.green }]}
+                          height={220}
+                          borderRadius={4}
+                          margin={{ left: 60, bottom: 60, right: 10, top: 10 }}
+                        />
+                      </Box>
 
-                        {/* Monthly table */}
-                        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-                          <thead>
-                            <tr>
+                      {/* Monthly table */}
+                      <TableContainer component={Paper} elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: 2 }}>
+                        <Table size="small">
+                          <TableHead>
+                            <TableRow sx={{ background: C.gray50 }}>
                               {["Month", "Bills", "Units", "Total Spend"].map(h => (
-                                <th key={h} style={{ ...S.th, textAlign: h !== "Month" ? "right" : "left" }}>{h}</th>
+                                <TableCell
+                                  key={h}
+                                  align={h !== "Month" ? "right" : "left"}
+                                  sx={{ fontSize: 11, fontWeight: 700, color: C.gray500, textTransform: "uppercase", letterSpacing: "0.06em", borderBottom: `1px solid ${C.border}`, background: C.gray50 }}
+                                >
+                                  {h}
+                                </TableCell>
                               ))}
-                            </tr>
-                          </thead>
-                          <tbody>
+                            </TableRow>
+                          </TableHead>
+                          <TableBody>
                             {monthly.map((m, i) => (
-                              <tr key={m.month} style={{ background: i % 2 === 0 ? C.white : C.gray50 }}>
-                                <td style={{ ...S.td, fontWeight: 600 }}>{m.label}</td>
-                                <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace" }}>{m.bill_count}</td>
-                                <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", fontWeight: 700 }}>{m.total_qty}</td>
-                                <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", color: C.orange, fontWeight: 700 }}>{fmt(m.total_value)}</td>
-                              </tr>
+                              <TableRow key={m.month} sx={{ background: i % 2 === 0 ? C.white : C.gray50 }}>
+                                <TableCell sx={{ fontWeight: 600, fontSize: 13, color: C.gray700 }}>{m.label}</TableCell>
+                                <TableCell align="right" sx={{ fontFamily: "monospace", fontSize: 13 }}>{m.bill_count}</TableCell>
+                                <TableCell align="right" sx={{ fontFamily: "monospace", fontWeight: 700, fontSize: 13 }}>{m.total_qty}</TableCell>
+                                <TableCell align="right" sx={{ fontFamily: "monospace", color: C.orange, fontWeight: 700, fontSize: 13 }}>{fmt(m.total_value)}</TableCell>
+                              </TableRow>
                             ))}
-                          </tbody>
-                          <tfoot>
-                            <tr style={{ background: "#FFF0EA" }}>
-                              <td style={{ ...S.td, fontWeight: 700 }}>All-time total</td>
-                              <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", fontWeight: 700 }}>{monthly.reduce((s, m) => s + m.bill_count, 0)}</td>
-                              <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", fontWeight: 800 }}>{monthly.reduce((s, m) => s + m.total_qty, 0)}</td>
-                              <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", fontWeight: 800, color: C.orange }}>
+                          </TableBody>
+                          <TableFooter>
+                            <TableRow sx={{ background: "#FFF0EA" }}>
+                              <TableCell sx={{ fontWeight: 700, fontSize: 13, color: C.gray700 }}>All-time total</TableCell>
+                              <TableCell align="right" sx={{ fontFamily: "monospace", fontWeight: 700, fontSize: 13, color: C.gray700 }}>{monthly.reduce((s, m) => s + m.bill_count, 0)}</TableCell>
+                              <TableCell align="right" sx={{ fontFamily: "monospace", fontWeight: 800, fontSize: 13, color: C.gray700 }}>{monthly.reduce((s, m) => s + m.total_qty, 0)}</TableCell>
+                              <TableCell align="right" sx={{ fontFamily: "monospace", fontWeight: 800, color: C.orange, fontSize: 13 }}>
                                 {fmt(monthly.reduce((s, m) => s + parseFloat(m.total_value), 0))}
-                              </td>
-                            </tr>
-                          </tfoot>
-                        </table>
-                      </div>
-                    )}
-                  </>
+                              </TableCell>
+                            </TableRow>
+                          </TableFooter>
+                        </Table>
+                      </TableContainer>
+                    </Stack>
+                  )
                 )}
               </>
             )}
-          </div>
-        </div>
-      </div>
+          </Box>
+        </Box>
+      </Box>
     </>
   );
 }
@@ -506,188 +632,259 @@ function PackingPanel() {
   }, {});
 
   return (
-    <div style={{ ...S.card, padding: 0, overflow: "hidden" }}>
+    <Paper elevation={1} sx={{ borderRadius: 3, overflow: "hidden", border: `1px solid ${C.border}` }}>
       {/* Header row */}
-      <div
-        style={{ padding: "14px 20px", display: "flex", alignItems: "center", justifyContent: "space-between",
-                 background: C.gray50, borderBottom: collapsed ? "none" : `1px solid ${C.border}`, cursor: "pointer" }}
+      <Box
         onClick={() => setCollapsed(c => !c)}
+        sx={{
+          px: 2.5, py: 1.75,
+          display: "flex", alignItems: "center", justifyContent: "space-between",
+          background: C.gray50,
+          borderBottom: collapsed ? "none" : `1px solid ${C.border}`,
+          cursor: "pointer",
+        }}
       >
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <span style={{ fontSize: 15, fontWeight: 800, color: C.gray800 }}>📦 Packing Status</span>
+        <Box sx={{ display: "flex", alignItems: "center", gap: 1.25 }}>
+          <Typography sx={{ fontSize: 15, fontWeight: 800, color: C.gray800 }}>📦 Packing Status</Typography>
           {!collapsed && orders.length > 0 && (
             allPacked
-              ? <span style={{ fontSize: 11, background: C.greenLight, color: C.green, border: `1px solid ${C.greenBorder}`, padding: "2px 10px", borderRadius: 20, fontWeight: 700 }}>✓ All Packed</span>
-              : <span style={{ fontSize: 11, background: C.redLight,   color: C.red,   border: `1px solid ${C.redBorder}`,   padding: "2px 10px", borderRadius: 20, fontWeight: 700 }}>{unpackedCount} Not Packed</span>
+              ? <Chip label="✓ All Packed" size="small" sx={{ fontSize: 11, background: C.greenLight, color: C.green, border: `1px solid ${C.greenBorder}`, fontWeight: 700 }} />
+              : <Chip label={`${unpackedCount} Not Packed`} size="small" sx={{ fontSize: 11, background: C.redLight, color: C.red, border: `1px solid ${C.redBorder}`, fontWeight: 700 }} />
           )}
-        </div>
-        <span style={{ color: C.gray400, fontSize: 13 }}>{collapsed ? "▼" : "▲"}</span>
-      </div>
+        </Box>
+        <Typography sx={{ color: C.gray400, fontSize: 13 }}>{collapsed ? "▼" : "▲"}</Typography>
+      </Box>
 
-      {!collapsed && (
-        <div style={{ padding: "16px 20px", display: "flex", flexDirection: "column", gap: 14 }}>
+      <Collapse in={!collapsed}>
+        <Box sx={{ px: 2.5, py: 2, display: "flex", flexDirection: "column", gap: 1.75 }}>
 
           {/* Date nav */}
-          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-            <button onClick={() => shiftDate(-1)} style={{ ...btn("ghost", "sm"), padding: "5px 12px" }}>‹ Prev</button>
-            <input type="date" value={date} onChange={e => setDate(e.target.value)}
-              style={{ ...S.inp, width: 150, fontSize: 13 }} />
-            <button onClick={() => shiftDate(1)} style={{ ...btn("ghost", "sm"), padding: "5px 12px" }}>Next ›</button>
-            <button onClick={() => setDate(todayStr())} style={{ ...btn("ghost", "sm"), padding: "5px 12px", color: C.orange }}>Today</button>
-            <button onClick={load} style={{ ...btn("ghost", "sm"), padding: "5px 12px" }}>⟳</button>
-          </div>
+          <Box sx={{ display: "flex", alignItems: "center", gap: 1, flexWrap: "wrap" }}>
+            <Button
+              onClick={() => shiftDate(-1)}
+              variant="outlined"
+              size="small"
+              sx={{ color: C.gray600, borderColor: C.gray200, textTransform: "none", px: 1.5 }}
+            >‹ Prev</Button>
+            <TextField
+              type="date"
+              size="small"
+              value={date}
+              onChange={e => setDate(e.target.value)}
+              InputLabelProps={{ shrink: true }}
+              sx={{ width: 160 }}
+            />
+            <Button
+              onClick={() => shiftDate(1)}
+              variant="outlined"
+              size="small"
+              sx={{ color: C.gray600, borderColor: C.gray200, textTransform: "none", px: 1.5 }}
+            >Next ›</Button>
+            <Button
+              onClick={() => setDate(todayStr())}
+              variant="outlined"
+              size="small"
+              sx={{ color: C.orange, borderColor: C.orangeBorder, textTransform: "none", px: 1.5 }}
+            >Today</Button>
+            <Button
+              onClick={load}
+              variant="outlined"
+              size="small"
+              sx={{ color: C.gray600, borderColor: C.gray200, textTransform: "none", px: 1.5 }}
+            >⟳</Button>
+          </Box>
 
           {loading ? (
-            <div style={{ textAlign: "center", padding: 24, color: C.gray400 }}>Loading orders…</div>
+            <Box sx={{ textAlign: "center", py: 3, color: C.gray400 }}>
+              <CircularProgress size={20} sx={{ color: C.orange }} />
+              <Typography variant="body2" sx={{ mt: 1, color: C.gray400 }}>Loading orders…</Typography>
+            </Box>
           ) : orders.length === 0 ? (
-            <div style={{ textAlign: "center", padding: 24, color: C.gray400 }}>No labels uploaded for {date}.</div>
+            <Typography sx={{ textAlign: "center", py: 3, color: C.gray400 }}>No labels uploaded for {date}.</Typography>
           ) : (
             <>
               {/* KPIs */}
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
+              <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1.25 }}>
                 {[
                   { label: "Total Orders", value: orders.length, color: C.blue },
                   { label: "Total Units",  value: totalUnits,    color: C.gray700 },
                   { label: "Packed",       value: packedCount,   color: C.green },
                   { label: "Not Packed",   value: unpackedCount, color: unpackedCount > 0 ? C.red : C.gray300 },
                 ].map(k => (
-                  <div key={k.label} style={{ background: C.gray50, border: `1px solid ${C.border}`, borderRadius: 10, padding: "8px 16px", minWidth: 90 }}>
-                    <p style={{ fontSize: 10, fontWeight: 700, color: C.gray400, textTransform: "uppercase", letterSpacing: "0.06em" }}>{k.label}</p>
-                    <p style={{ fontSize: 18, fontWeight: 800, color: k.color, fontFamily: "monospace" }}>{k.value}</p>
-                  </div>
+                  <Paper key={k.label} elevation={0} sx={{ background: C.gray50, border: `1px solid ${C.border}`, borderRadius: 2.5, px: 2, py: 1, minWidth: 90 }}>
+                    <Typography sx={{ fontSize: 10, fontWeight: 700, color: C.gray400, textTransform: "uppercase", letterSpacing: "0.06em" }}>{k.label}</Typography>
+                    <Typography sx={{ fontSize: 18, fontWeight: 800, color: k.color, fontFamily: "monospace" }}>{k.value}</Typography>
+                  </Paper>
                 ))}
                 {!allPacked && (
-                  <button onClick={markAllPacked} style={{ ...btn("success", "sm"), alignSelf: "center", marginLeft: 6 }}>
+                  <Button
+                    onClick={markAllPacked}
+                    variant="contained"
+                    size="small"
+                    sx={{ alignSelf: "center", ml: 0.75, background: C.green, "&:hover": { background: C.green }, textTransform: "none" }}
+                  >
                     ✓ Mark All Packed
-                  </button>
+                  </Button>
                 )}
                 {allPacked && (
-                  <div style={{ alignSelf: "center", marginLeft: 6, fontSize: 13, fontWeight: 700, color: C.green }}>
+                  <Typography sx={{ alignSelf: "center", ml: 0.75, fontSize: 13, fontWeight: 700, color: C.green }}>
                     🎉 All {orders.length} orders packed!
-                  </div>
+                  </Typography>
                 )}
-              </div>
+              </Box>
 
               {/* Search autocomplete */}
-              <div style={{ position: "relative", maxWidth: 320 }}>
-                <label style={{ ...S.label, marginBottom: 4 }}>Quick find by last 4 digits of suborder #</label>
-                <input
+              <Box sx={{ position: "relative", maxWidth: 320 }}>
+                <Typography variant="caption" sx={{ display: "block", fontWeight: 600, color: C.gray600, mb: 0.5 }}>
+                  Quick find by last 4 digits of suborder #
+                </Typography>
+                <TextField
+                  size="small"
                   value={search}
                   onChange={e => handleSearch(e.target.value)}
                   placeholder="e.g. 0480"
-                  style={{ ...S.inp, fontSize: 13 }}
+                  fullWidth
                 />
                 {suggestions.length > 0 && (
-                  <div style={{ position: "absolute", top: "100%", left: 0, right: 0, zIndex: 50,
-                                background: C.white, border: `1px solid ${C.border}`, borderRadius: 8,
-                                boxShadow: "0 8px 24px rgba(0,0,0,0.12)", marginTop: 2, overflow: "hidden" }}>
+                  <Paper
+                    elevation={3}
+                    sx={{
+                      position: "absolute", top: "100%", left: 0, right: 0, zIndex: 50,
+                      border: `1px solid ${C.border}`, borderRadius: 2, mt: 0.25, overflow: "hidden",
+                    }}
+                  >
                     {suggestions.map(o => (
-                      <div key={o.order_id}
-                        style={{ padding: "8px 12px", display: "flex", alignItems: "center", justifyContent: "space-between",
-                                 borderBottom: `1px solid ${C.gray100}`, cursor: "pointer",
-                                 background: o.is_packed ? "#F0FDF4" : C.white }}
-                        onMouseEnter={e => (e.currentTarget.style.background = C.gray50)}
-                        onMouseLeave={e => (e.currentTarget.style.background = o.is_packed ? "#F0FDF4" : C.white)}
+                      <Box
+                        key={o.order_id}
+                        sx={{
+                          px: 1.5, py: 1,
+                          display: "flex", alignItems: "center", justifyContent: "space-between",
+                          borderBottom: `1px solid ${C.gray100}`, cursor: "pointer",
+                          background: o.is_packed ? "#F0FDF4" : C.white,
+                          "&:hover": { background: C.gray50 },
+                        }}
                       >
-                        <div>
-                          <span style={{ fontFamily: "monospace", fontSize: 11, color: C.gray500 }}>…{o.order_id.slice(-14)}</span>
-                          <span style={{ marginLeft: 8, fontSize: 12, color: C.gray600 }}>{o.customer_name}</span>
-                        </div>
-                        <button
+                        <Box>
+                          <Typography component="span" sx={{ fontFamily: "monospace", fontSize: 11, color: C.gray500 }}>
+                            …{o.order_id.slice(-14)}
+                          </Typography>
+                          <Typography component="span" sx={{ ml: 1, fontSize: 12, color: C.gray600 }}>
+                            {o.customer_name}
+                          </Typography>
+                        </Box>
+                        <Button
                           onClick={(e) => { e.stopPropagation(); togglePacked(o.order_id, o.is_packed); setSearch(""); setSuggestions([]); }}
-                          style={{
-                            padding: "3px 10px", borderRadius: 20, fontSize: 11, cursor: "pointer",
-                            fontFamily: "inherit", fontWeight: 600, border: "none",
+                          size="small"
+                          sx={{
+                            px: 1.25, borderRadius: 10, fontSize: 11, fontWeight: 600,
                             background: o.is_packed ? C.greenLight : "#FEE2E2",
                             color:      o.is_packed ? C.green      : C.red,
+                            textTransform: "none",
+                            "&:hover": { background: o.is_packed ? C.greenLight : "#FEE2E2" },
                           }}
                         >
                           {o.is_packed ? "✓ Packed" : "Not Packed"}
-                        </button>
-                      </div>
+                        </Button>
+                      </Box>
                     ))}
-                  </div>
+                  </Paper>
                 )}
-              </div>
+              </Box>
 
               {/* Filter tabs */}
-              <div style={{ display: "flex", gap: 4, background: C.gray100, borderRadius: 8, padding: 3, width: "fit-content" }}>
+              <Box sx={{ display: "flex", gap: 0.5, background: C.gray100, borderRadius: 2, p: 0.375, width: "fit-content" }}>
                 {[["all", "All"], ["packed", "✓ Packed"], ["unpacked", "Not Packed"]].map(([id, label]) => (
-                  <button key={id} onClick={() => setFilter(id)} style={{
-                    padding: "5px 14px", borderRadius: 6, border: "none", cursor: "pointer", fontFamily: "inherit",
-                    fontSize: 12, fontWeight: filter === id ? 700 : 500,
-                    background: filter === id ? C.white : "transparent",
-                    color:      filter === id ? C.orange : C.gray500,
-                    boxShadow:  filter === id ? "0 1px 4px rgba(0,0,0,0.08)" : "none",
-                  }}>{label} {id === "all" ? `(${orders.length})` : id === "packed" ? `(${packedCount})` : `(${unpackedCount})`}</button>
+                  <Button
+                    key={id}
+                    onClick={() => setFilter(id)}
+                    size="small"
+                    sx={{
+                      px: 1.75, py: 0.625, borderRadius: 1.5, border: "none",
+                      fontWeight: filter === id ? 700 : 500, fontSize: 12,
+                      background: filter === id ? C.white : "transparent",
+                      color:      filter === id ? C.orange : C.gray500,
+                      boxShadow:  filter === id ? "0 1px 4px rgba(0,0,0,0.08)" : "none",
+                      textTransform: "none",
+                      "&:hover": { background: filter === id ? C.white : C.gray200 },
+                    }}
+                  >
+                    {label} {id === "all" ? `(${orders.length})` : id === "packed" ? `(${packedCount})` : `(${unpackedCount})`}
+                  </Button>
                 ))}
-              </div>
+              </Box>
 
               {/* Orders grouped by courier */}
               {displayed.length === 0 ? (
-                <p style={{ color: C.gray400, fontSize: 13, textAlign: "center", padding: 16 }}>
+                <Typography sx={{ color: C.gray400, fontSize: 13, textAlign: "center", py: 2 }}>
                   {filter === "packed" ? "No packed orders yet." : filter === "unpacked" ? "No unpacked orders — all done! 🎉" : "No orders."}
-                </p>
+                </Typography>
               ) : (
-                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                <Stack spacing={1.25}>
                   {Object.entries(byCourier).sort().map(([courier, rows]) => {
                     const cs = courierStyle(courier);
                     const cp = rows.filter(o => o.is_packed).length;
                     return (
-                      <div key={courier} style={{ border: `1px solid ${cs.border}`, borderRadius: 10, overflow: "hidden" }}>
+                      <Box key={courier} sx={{ border: `1px solid ${cs.border}`, borderRadius: 2.5, overflow: "hidden" }}>
                         {/* Courier header */}
-                        <div style={{ background: cs.bg, padding: "8px 14px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                          <span style={{ fontWeight: 700, fontSize: 13, color: cs.fg }}>{courier}</span>
-                          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                            <span style={{ fontSize: 11, color: cs.fg, fontWeight: 600 }}>{rows.length} orders</span>
-                            <span style={{ fontSize: 11, background: C.greenLight, color: C.green, border: `1px solid ${C.greenBorder}`, padding: "1px 8px", borderRadius: 20, fontWeight: 700 }}>{cp} packed</span>
-                            {cp < rows.length && <span style={{ fontSize: 11, background: C.redLight, color: C.red, border: `1px solid ${C.redBorder}`, padding: "1px 8px", borderRadius: 20, fontWeight: 700 }}>{rows.length - cp} left</span>}
-                          </div>
-                        </div>
+                        <Box sx={{ background: cs.bg, px: 1.75, py: 1, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                          <Typography sx={{ fontWeight: 700, fontSize: 13, color: cs.fg }}>{courier}</Typography>
+                          <Box sx={{ display: "flex", gap: 1, alignItems: "center" }}>
+                            <Typography sx={{ fontSize: 11, color: cs.fg, fontWeight: 600 }}>{rows.length} orders</Typography>
+                            <Chip label={`${cp} packed`} size="small" sx={{ fontSize: 11, background: C.greenLight, color: C.green, border: `1px solid ${C.greenBorder}`, fontWeight: 700, height: 20 }} />
+                            {cp < rows.length && <Chip label={`${rows.length - cp} left`} size="small" sx={{ fontSize: 11, background: C.redLight, color: C.red, border: `1px solid ${C.redBorder}`, fontWeight: 700, height: 20 }} />}
+                          </Box>
+                        </Box>
                         {/* Order rows */}
-                        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-                          <tbody>
+                        <Table size="small">
+                          <TableBody>
                             {rows.map((o, i) => (
-                              <tr key={o.order_id} style={{ background: o.is_packed ? "#F0FDF4" : i % 2 === 0 ? C.white : C.gray50,
-                                                            borderTop: `1px solid ${C.gray100}` }}>
-                                <td style={{ ...S.td, fontFamily: "monospace", fontSize: 11, color: C.gray400, width: 160 }}>
+                              <TableRow
+                                key={o.order_id}
+                                sx={{
+                                  background: o.is_packed ? "#F0FDF4" : i % 2 === 0 ? C.white : C.gray50,
+                                  borderTop: `1px solid ${C.gray100}`,
+                                }}
+                              >
+                                <TableCell sx={{ fontFamily: "monospace", fontSize: 11, color: C.gray400, width: 160 }}>
                                   …{o.order_id.slice(-14)}
-                                </td>
-                                <td style={{ ...S.td, fontWeight: 600, color: C.gray700 }}>{o.customer_name || "—"}</td>
-                                <td style={{ ...S.td, color: C.gray500 }}>{o.customer_city || "—"}</td>
-                                <td style={{ ...S.td, textAlign: "center" }}>
+                                </TableCell>
+                                <TableCell sx={{ fontWeight: 600, color: C.gray700, fontSize: 12 }}>{o.customer_name || "—"}</TableCell>
+                                <TableCell sx={{ color: C.gray500, fontSize: 12 }}>{o.customer_city || "—"}</TableCell>
+                                <TableCell align="center">
                                   {o.payment_type === "COD"
-                                    ? <span style={{ fontSize: 10, background: "#FFFBEB", color: C.amber, border: "1px solid #FDE68A", padding: "1px 7px", borderRadius: 10, fontWeight: 700 }}>COD</span>
-                                    : <span style={{ fontSize: 10, background: C.greenLight, color: C.green, border: `1px solid ${C.greenBorder}`, padding: "1px 7px", borderRadius: 10, fontWeight: 700 }}>PP</span>}
-                                </td>
-                                <td style={{ ...S.td, textAlign: "right" }}>
-                                  <button
+                                    ? <Chip label="COD" size="small" sx={{ fontSize: 10, background: "#FFFBEB", color: C.amber, border: "1px solid #FDE68A", fontWeight: 700, height: 20 }} />
+                                    : <Chip label="PP"  size="small" sx={{ fontSize: 10, background: C.greenLight, color: C.green, border: `1px solid ${C.greenBorder}`, fontWeight: 700, height: 20 }} />}
+                                </TableCell>
+                                <TableCell align="right">
+                                  <Button
                                     onClick={() => togglePacked(o.order_id, o.is_packed)}
-                                    style={{
-                                      padding: "3px 10px", borderRadius: 20, fontSize: 11, cursor: "pointer",
-                                      fontFamily: "inherit", fontWeight: 600, whiteSpace: "nowrap",
+                                    size="small"
+                                    sx={{
+                                      px: 1.25, borderRadius: 10, fontSize: 11, fontWeight: 600, whiteSpace: "nowrap",
                                       background: o.is_packed ? C.greenLight : C.white,
                                       color:      o.is_packed ? C.green      : C.gray400,
                                       border:     `1px solid ${o.is_packed ? C.greenBorder : C.gray300}`,
+                                      textTransform: "none",
+                                      "&:hover": { background: o.is_packed ? C.greenLight : C.gray50 },
                                     }}
                                   >
                                     {o.is_packed ? "✓ Packed" : "Not Packed"}
-                                  </button>
-                                </td>
-                              </tr>
+                                  </Button>
+                                </TableCell>
+                              </TableRow>
                             ))}
-                          </tbody>
-                        </table>
-                      </div>
+                          </TableBody>
+                        </Table>
+                      </Box>
                     );
                   })}
-                </div>
+                </Stack>
               )}
             </>
           )}
-        </div>
-      )}
-    </div>
+        </Box>
+      </Collapse>
+    </Paper>
   );
 }
 
@@ -739,10 +936,18 @@ export function InventoryTab() {
   const totalValue  = data.reduce((s, r) => s + parseFloat(r.purchase_value || 0), 0);
 
   const sortInd = (k) => sortKey === k ? (sortAsc ? " ↑" : " ↓") : "";
-  const thS     = (k) => ({ ...S.th, cursor: "pointer", userSelect: "none", color: sortKey === k ? C.orange : C.gray500 });
+
+  const thSx = (k) => ({
+    fontSize: 11, fontWeight: 700,
+    textTransform: "uppercase", letterSpacing: "0.06em",
+    whiteSpace: "nowrap", cursor: "pointer", userSelect: "none",
+    borderBottom: `1px solid ${C.border}`,
+    background: C.gray50,
+    color: sortKey === k ? C.orange : C.gray500,
+  });
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+    <Box sx={{ display: "flex", flexDirection: "column", gap: 2.5 }}>
 
       {addSku && (
         <AddStockModal skuId={addSku} onClose={() => setAddSku(null)} onSave={() => { setAddSku(null); load(); }} />
@@ -760,154 +965,187 @@ export function InventoryTab() {
       )}
 
       {/* Header */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
-        <div>
-          <h1 style={{ fontSize: 20, fontWeight: 800, color: C.gray800, marginBottom: 3 }}>📦 Inventory</h1>
-          <p style={{ fontSize: 13, color: C.gray400 }}>
+      <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 1.5 }}>
+        <Box>
+          <Typography sx={{ fontSize: 20, fontWeight: 800, color: C.gray800, mb: 0.375 }}>📦 Inventory</Typography>
+          <Typography sx={{ fontSize: 13, color: C.gray400 }}>
             Live stock = purchased − sold (delivered) + returned (RTO). Click any row to edit purchases or analyse monthly trend.
-          </p>
-        </div>
-        <button onClick={load} style={{ padding: "8px 16px", borderRadius: 8, border: `1px solid ${C.border}`, background: C.white, cursor: "pointer", fontSize: 12, color: C.gray600, fontFamily: "inherit" }}>
+          </Typography>
+        </Box>
+        <Button
+          onClick={load}
+          variant="outlined"
+          size="small"
+          sx={{ color: C.gray600, borderColor: C.border, textTransform: "none", fontSize: 12 }}
+        >
           ⟳ Refresh
-        </button>
-      </div>
+        </Button>
+      </Box>
 
       {/* KPI strip */}
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 14 }}>
+      <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1.75 }}>
         {[
           { label: "Total Stock",   value: totalStock,  accent: C.green,   icon: "📦" },
           { label: "SKUs Tracked",  value: data.length, accent: C.blue,    icon: "🏷" },
           { label: "Out of Stock",  value: outOfStock,  accent: C.red,     icon: "⛔" },
           { label: "Low Stock ≤3",  value: lowStock,    accent: C.amber,   icon: "⚠️" },
         ].map(k => (
-          <div key={k.label} style={{ ...S.card, borderTop: `3px solid ${k.accent}`, minWidth: "max-content" }}>
-            <p style={{ fontSize: 11, fontWeight: 700, color: C.gray400, letterSpacing: "0.07em", textTransform: "uppercase", marginBottom: 8, whiteSpace: "nowrap" }}>{k.icon} {k.label}</p>
-            <p style={{ fontSize: 22, fontWeight: 800, fontFamily: "'DM Mono', monospace", color: k.accent, whiteSpace: "nowrap" }}>{k.value.toLocaleString("en-IN")}</p>
-          </div>
+          <Card key={k.label} elevation={1} sx={{ borderTop: `3px solid ${k.accent}`, borderRadius: 3, minWidth: "max-content" }}>
+            <CardContent sx={{ py: 1.5, px: 2, "&:last-child": { pb: 1.5 } }}>
+              <Typography sx={{ fontSize: 11, fontWeight: 700, color: C.gray400, letterSpacing: "0.07em", textTransform: "uppercase", mb: 1, whiteSpace: "nowrap" }}>
+                {k.icon} {k.label}
+              </Typography>
+              <Typography sx={{ fontSize: 22, fontWeight: 800, fontFamily: "'DM Mono', monospace", color: k.accent, whiteSpace: "nowrap" }}>
+                {k.value.toLocaleString("en-IN")}
+              </Typography>
+            </CardContent>
+          </Card>
         ))}
-        <div style={{ ...S.card, borderTop: `3px solid ${C.orange}`, minWidth: "max-content" }}>
-          <p style={{ fontSize: 11, fontWeight: 700, color: C.gray400, letterSpacing: "0.07em", textTransform: "uppercase", marginBottom: 8, whiteSpace: "nowrap" }}>💰 Total Purchase Value</p>
-          <p style={{ fontSize: 22, fontWeight: 800, fontFamily: "'DM Mono', monospace", color: C.orange, whiteSpace: "nowrap" }}>
-            {`₹${totalValue.toLocaleString("en-IN", { minimumFractionDigits: 2 })}`}
-          </p>
-        </div>
-      </div>
+        <Card elevation={1} sx={{ borderTop: `3px solid ${C.orange}`, borderRadius: 3, minWidth: "max-content" }}>
+          <CardContent sx={{ py: 1.5, px: 2, "&:last-child": { pb: 1.5 } }}>
+            <Typography sx={{ fontSize: 11, fontWeight: 700, color: C.gray400, letterSpacing: "0.07em", textTransform: "uppercase", mb: 1, whiteSpace: "nowrap" }}>
+              💰 Total Purchase Value
+            </Typography>
+            <Typography sx={{ fontSize: 22, fontWeight: 800, fontFamily: "'DM Mono', monospace", color: C.orange, whiteSpace: "nowrap" }}>
+              {`₹${totalValue.toLocaleString("en-IN", { minimumFractionDigits: 2 })}`}
+            </Typography>
+          </CardContent>
+        </Card>
+      </Box>
 
       {/* Table */}
-      <div style={S.card}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14, flexWrap: "wrap", gap: 10 }}>
-          <p style={{ ...S.cardTitle, marginBottom: 0 }}>
-            Stock by Parent SKU &nbsp;
-            <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0, fontSize: 11, color: C.gray400 }}>— click a row to view/edit purchases or see monthly analysis</span>
-          </p>
-          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="🔍 Search SKU…" style={{ ...S.inp, width: 200, fontSize: 12 }} />
-        </div>
+      <Paper elevation={1} sx={{ borderRadius: 3, border: `1px solid ${C.border}`, p: 3 }}>
+        <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 1.75, flexWrap: "wrap", gap: 1.25 }}>
+          <Box>
+            <Typography component="span" sx={{ fontSize: 11, fontWeight: 700, color: C.gray400, letterSpacing: "0.08em", textTransform: "uppercase" }}>
+              Stock by Parent SKU
+            </Typography>
+            <Typography component="span" sx={{ fontSize: 11, color: C.gray400, ml: 1 }}>
+              — click a row to view/edit purchases or see monthly analysis
+            </Typography>
+          </Box>
+          <TextField
+            size="small"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="🔍 Search SKU…"
+            sx={{ width: 200 }}
+          />
+        </Box>
 
         {loading ? (
-          <div style={{ textAlign: "center", padding: 60, color: C.gray400 }}><div style={{ fontSize: 28, marginBottom: 10 }}>⏳</div> Loading inventory…</div>
+          <Box sx={{ textAlign: "center", py: 7.5, color: C.gray400 }}>
+            <Typography sx={{ fontSize: 28, mb: 1.25 }}>⏳</Typography>
+            <Typography sx={{ color: C.gray400 }}>Loading inventory…</Typography>
+          </Box>
         ) : (
-          <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse" }}>
-              <thead>
-                <tr>
-                  <th onClick={() => toggle("sku_id")}         style={thS("sku_id")}>Parent SKU{sortInd("sku_id")}</th>
-                  <th onClick={() => toggle("purchased_qty")}  style={{ ...thS("purchased_qty"),  textAlign: "right" }}>Purchased{sortInd("purchased_qty")}</th>
-                  <th onClick={() => toggle("sold_qty")}       style={{ ...thS("sold_qty"),       textAlign: "right" }}>Sold{sortInd("sold_qty")}</th>
-                  <th onClick={() => toggle("rto_qty")}        style={{ ...thS("rto_qty"),        textAlign: "right" }}>RTO{sortInd("rto_qty")}</th>
-                  <th onClick={() => toggle("current_stock")}  style={{ ...thS("current_stock"),  textAlign: "right" }}>Current Stock{sortInd("current_stock")}</th>
-                  <th onClick={() => toggle("purchase_value")} style={{ ...thS("purchase_value"), textAlign: "right" }}>Purchase Value{sortInd("purchase_value")}</th>
-                  <th onClick={() => toggle("last_purchase")}  style={thS("last_purchase")}>Last Purchase{sortInd("last_purchase")}</th>
-                  <th style={S.th}>Status</th>
-                  <th style={S.th}>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
+          <TableContainer sx={{ overflowX: "auto" }}>
+            <Table>
+              <TableHead>
+                <TableRow>
+                  <TableCell onClick={() => toggle("sku_id")}         sx={thSx("sku_id")}>Parent SKU{sortInd("sku_id")}</TableCell>
+                  <TableCell onClick={() => toggle("purchased_qty")}  sx={{ ...thSx("purchased_qty"),  textAlign: "right" }}>Purchased{sortInd("purchased_qty")}</TableCell>
+                  <TableCell onClick={() => toggle("sold_qty")}       sx={{ ...thSx("sold_qty"),       textAlign: "right" }}>Sold{sortInd("sold_qty")}</TableCell>
+                  <TableCell onClick={() => toggle("rto_qty")}        sx={{ ...thSx("rto_qty"),        textAlign: "right" }}>RTO{sortInd("rto_qty")}</TableCell>
+                  <TableCell onClick={() => toggle("current_stock")}  sx={{ ...thSx("current_stock"),  textAlign: "right" }}>Current Stock{sortInd("current_stock")}</TableCell>
+                  <TableCell onClick={() => toggle("purchase_value")} sx={{ ...thSx("purchase_value"), textAlign: "right" }}>Purchase Value{sortInd("purchase_value")}</TableCell>
+                  <TableCell onClick={() => toggle("last_purchase")}  sx={thSx("last_purchase")}>Last Purchase{sortInd("last_purchase")}</TableCell>
+                  <TableCell sx={thSx("_status")}>Status</TableCell>
+                  <TableCell sx={thSx("_actions")}>Actions</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
                 {filtered.map((r, i) => {
                   const rowBg = i % 2 === 0 ? C.white : C.gray50;
                   const stockColor = r.current_stock <= 0 ? C.red : r.current_stock <= 3 ? C.amber : C.green;
                   return (
-                    <tr key={r.sku_id} style={{ background: rowBg, cursor: "pointer" }}
-                      onMouseEnter={e => (e.currentTarget.style.background = "#F0FFF4")}
-                      onMouseLeave={e => (e.currentTarget.style.background = rowBg)}
+                    <TableRow
+                      key={r.sku_id}
+                      sx={{ background: rowBg, cursor: "pointer", "&:hover": { background: "#F0FFF4" } }}
                       onClick={() => setDetailSku(r.sku_id)}
                     >
-                      <td style={{ ...S.td, fontFamily: "monospace", fontWeight: 700, color: C.orange }}>{r.sku_id}</td>
-                      <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace" }}>{r.purchased_qty}</td>
-                      <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", color: C.red }}>{r.sold_qty}</td>
-                      <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", color: C.green }}>{r.rto_qty}</td>
-                      <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", fontWeight: 800, fontSize: 15, color: stockColor }}>{r.current_stock}</td>
-                      <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace" }}>{fmt(r.purchase_value)}</td>
-                      <td style={{ ...S.td, color: C.gray500, whiteSpace: "nowrap" }}>{r.last_purchase || "—"}</td>
-                      <td style={S.td}><StockBadge stock={r.current_stock} /></td>
-                      <td style={S.td} onClick={e => e.stopPropagation()}>
-                        <div style={{ display: "flex", gap: 5 }}>
-                          <button
+                      <TableCell sx={{ fontFamily: "monospace", fontWeight: 700, color: C.orange, fontSize: 13 }}>{r.sku_id}</TableCell>
+                      <TableCell align="right" sx={{ fontFamily: "monospace", fontSize: 13 }}>{r.purchased_qty}</TableCell>
+                      <TableCell align="right" sx={{ fontFamily: "monospace", fontSize: 13, color: C.red }}>{r.sold_qty}</TableCell>
+                      <TableCell align="right" sx={{ fontFamily: "monospace", fontSize: 13, color: C.green }}>{r.rto_qty}</TableCell>
+                      <TableCell align="right" sx={{ fontFamily: "monospace", fontWeight: 800, fontSize: 15, color: stockColor }}>{r.current_stock}</TableCell>
+                      <TableCell align="right" sx={{ fontFamily: "monospace", fontSize: 13 }}>{fmt(r.purchase_value)}</TableCell>
+                      <TableCell sx={{ color: C.gray500, whiteSpace: "nowrap", fontSize: 13 }}>{r.last_purchase || "—"}</TableCell>
+                      <TableCell><StockBadge stock={r.current_stock} /></TableCell>
+                      <TableCell onClick={e => e.stopPropagation()}>
+                        <Box sx={{ display: "flex", gap: 0.625 }}>
+                          <Button
                             onClick={() => setAddSku(r.sku_id)}
-                            style={{ ...btn("success", "sm"), padding: "4px 10px", fontSize: 11 }}
+                            size="small"
                             title="Add stock purchase"
-                          >＋ Add</button>
-                          <button
+                            sx={{ minWidth: 0, px: 1.25, py: 0.5, fontSize: 11, background: C.green, color: C.white, textTransform: "none", "&:hover": { background: C.green } }}
+                          >＋ Add</Button>
+                          <Button
                             onClick={() => setDetailSku(r.sku_id)}
-                            style={{ ...btn("ghostOrange", "sm"), padding: "4px 10px", fontSize: 11 }}
+                            size="small"
                             title="View/edit purchase history"
-                          >📋</button>
-                          <button
+                            sx={{ minWidth: 0, px: 1.25, py: 0.5, fontSize: 11, background: C.orangeLight, color: C.orange, border: `1.5px solid ${C.orangeBorder}`, textTransform: "none" }}
+                          >📋</Button>
+                          <Button
                             onClick={(e) => handleDeleteSku(e, r.sku_id)}
-                            style={{ ...btn("ghost", "sm"), padding: "4px 10px", fontSize: 11, color: C.red }}
+                            size="small"
                             title="Delete all purchases for this SKU"
-                          >🗑</button>
-                        </div>
-                      </td>
-                    </tr>
+                            sx={{ minWidth: 0, px: 1.25, py: 0.5, fontSize: 11, color: C.red, border: `1.5px solid ${C.gray200}`, textTransform: "none" }}
+                          >🗑</Button>
+                        </Box>
+                      </TableCell>
+                    </TableRow>
                   );
                 })}
                 {filtered.length === 0 && (
-                  <tr>
-                    <td colSpan={9} style={{ ...S.td, textAlign: "center", padding: 52, color: C.gray400 }}>
+                  <TableRow>
+                    <TableCell colSpan={9} sx={{ textAlign: "center", py: 6.5, color: C.gray400, fontSize: 13 }}>
                       {search ? "No SKUs match your search." : "No inventory data yet — add purchases first."}
-                    </td>
-                  </tr>
+                    </TableCell>
+                  </TableRow>
                 )}
-              </tbody>
+              </TableBody>
               {filtered.length > 0 && (
-                <tfoot>
-                  <tr style={{ background: "#FFF0EA" }}>
-                    <td style={{ ...S.td, fontWeight: 700 }}>Total</td>
-                    <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", fontWeight: 700 }}>{filtered.reduce((s, r) => s + r.purchased_qty, 0)}</td>
-                    <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", fontWeight: 700, color: C.red }}>{filtered.reduce((s, r) => s + r.sold_qty, 0)}</td>
-                    <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", fontWeight: 700, color: C.green }}>{filtered.reduce((s, r) => s + r.rto_qty, 0)}</td>
-                    <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", fontWeight: 800, fontSize: 15, color: C.orange }}>{filtered.reduce((s, r) => s + r.current_stock, 0)}</td>
-                    <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", fontWeight: 700, color: C.orange }}>
+                <TableFooter>
+                  <TableRow sx={{ background: "#FFF0EA" }}>
+                    <TableCell sx={{ fontWeight: 700, fontSize: 13, color: C.gray700 }}>Total</TableCell>
+                    <TableCell align="right" sx={{ fontFamily: "monospace", fontWeight: 700, fontSize: 13, color: C.gray700 }}>{filtered.reduce((s, r) => s + r.purchased_qty, 0)}</TableCell>
+                    <TableCell align="right" sx={{ fontFamily: "monospace", fontWeight: 700, fontSize: 13, color: C.red }}>{filtered.reduce((s, r) => s + r.sold_qty, 0)}</TableCell>
+                    <TableCell align="right" sx={{ fontFamily: "monospace", fontWeight: 700, fontSize: 13, color: C.green }}>{filtered.reduce((s, r) => s + r.rto_qty, 0)}</TableCell>
+                    <TableCell align="right" sx={{ fontFamily: "monospace", fontWeight: 800, fontSize: 15, color: C.orange }}>{filtered.reduce((s, r) => s + r.current_stock, 0)}</TableCell>
+                    <TableCell align="right" sx={{ fontFamily: "monospace", fontWeight: 700, color: C.orange, fontSize: 13 }}>
                       {`₹${filtered.reduce((s, r) => s + parseFloat(r.purchase_value || 0), 0).toLocaleString("en-IN", { minimumFractionDigits: 2 })}`}
-                    </td>
-                    <td colSpan={3} style={S.td} />
-                  </tr>
-                </tfoot>
+                    </TableCell>
+                    <TableCell colSpan={3} />
+                  </TableRow>
+                </TableFooter>
               )}
-            </table>
-          </div>
+            </Table>
+          </TableContainer>
         )}
-      </div>
+      </Paper>
 
       {/* Legend */}
-      <div style={{ ...S.card, padding: "14px 20px" }}>
-        <p style={{ fontSize: 11, fontWeight: 700, color: C.gray400, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 10 }}>How stock is calculated</p>
-        <div style={{ display: "flex", gap: 28, flexWrap: "wrap" }}>
+      <Paper elevation={1} sx={{ borderRadius: 3, border: `1px solid ${C.border}`, px: 2.5, py: 1.75 }}>
+        <Typography sx={{ fontSize: 11, fontWeight: 700, color: C.gray400, textTransform: "uppercase", letterSpacing: "0.06em", mb: 1.25 }}>
+          How stock is calculated
+        </Typography>
+        <Box sx={{ display: "flex", gap: 3.5, flexWrap: "wrap" }}>
           {[
             { icon: "🛒", label: "Purchased", desc: "Sum of non-exchange purchase items" },
             { icon: "✅", label: "Sold (−)",  desc: "DELIVERED Meesho orders" },
             { icon: "↩",  label: "RTO (+)",   desc: "RTO_COMPLETE orders — item returned" },
           ].map(l => (
-            <div key={l.label} style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
-              <span style={{ fontSize: 16 }}>{l.icon}</span>
-              <div>
-                <p style={{ fontSize: 12, fontWeight: 700, color: C.gray700 }}>{l.label}</p>
-                <p style={{ fontSize: 11, color: C.gray400 }}>{l.desc}</p>
-              </div>
-            </div>
+            <Box key={l.label} sx={{ display: "flex", alignItems: "flex-start", gap: 1 }}>
+              <Typography sx={{ fontSize: 16 }}>{l.icon}</Typography>
+              <Box>
+                <Typography sx={{ fontSize: 12, fontWeight: 700, color: C.gray700 }}>{l.label}</Typography>
+                <Typography sx={{ fontSize: 11, color: C.gray400 }}>{l.desc}</Typography>
+              </Box>
+            </Box>
           ))}
-        </div>
-      </div>
-    </div>
+        </Box>
+      </Paper>
+    </Box>
   );
 }

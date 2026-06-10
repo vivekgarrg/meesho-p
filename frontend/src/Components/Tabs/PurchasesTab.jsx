@@ -1,7 +1,36 @@
-import React, { useState, useEffect, useCallback, useRef } from "react";
-import { API, C, S, fmt, btn, Tag, SectionHeader, Pagination } from "../../App";
+import React, { useState, useEffect, useCallback } from "react";
+import { API, C, fmt } from "../../App";
 
-const PAGE_SIZE = 20;
+// MUI core
+import {
+  Box,
+  Button,
+  Card,
+  CardContent,
+  Chip,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  FormControlLabel,
+  Checkbox,
+  IconButton,
+  MenuItem,
+  Paper,
+  Select,
+  TextField,
+  Typography,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableRow,
+  Pagination,
+  Alert,
+} from "@mui/material";
+
+// MUI DataGrid
+import { DataGrid } from "@mui/x-data-grid";
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 const today = () => new Date().toISOString().slice(0, 10);
@@ -27,28 +56,20 @@ function fmtDate(d) {
 
 // ── Bill Form Modal ───────────────────────────────────────────────────────────
 function BillModal({ initial, parentSkus, onSave, onClose }) {
-  const [date,       setDate]       = useState(initial?.date       || today());
-  const [seller,     setSeller]     = useState(initial?.seller_name || "");
-  const [billNo,     setBillNo]     = useState(initial?.bill_number || "");
-  const [notes,      setNotes]      = useState(initial?.notes      || "");
-  const [items,      setItems]      = useState(
+  const [date,    setDate]    = useState(initial?.date       || today());
+  const [seller,  setSeller]  = useState(initial?.seller_name || "");
+  const [billNo,  setBillNo]  = useState(initial?.bill_number || "");
+  const [notes,   setNotes]   = useState(initial?.notes      || "");
+  const [items,   setItems]   = useState(
     initial?.items?.length ? initial.items.map(i => ({ ...i })) : [emptyItem()]
   );
   const [saving, setSaving] = useState(false);
   const [error,  setError]  = useState("");
 
-  // close on Escape, lock body scroll
-  useEffect(() => {
-    const onKey = (e) => e.key === "Escape" && onClose();
-    document.addEventListener("keydown", onKey);
-    document.body.style.overflow = "hidden";
-    return () => { document.removeEventListener("keydown", onKey); document.body.style.overflow = ""; };
-  }, [onClose]);
-
   const setItem = (idx, field, value) =>
     setItems(prev => prev.map((it, i) => i === idx ? { ...it, [field]: value } : it));
 
-  const addItem   = () => setItems(prev => [...prev, emptyItem()]);
+  const addItem    = () => setItems(prev => [...prev, emptyItem()]);
   const removeItem = (idx) => setItems(prev => prev.filter((_, i) => i !== idx));
 
   const grandTotal = calcTotal(items);
@@ -79,225 +100,278 @@ function BillModal({ initial, parentSkus, onSave, onClose }) {
     }
   };
 
-  const skuOptions = parentSkus.map(p => (
-    <option key={p.item_id} value={p.item_id}>{p.item_id}</option>
-  ));
-
   return (
-    <div style={{
-      position: "fixed", inset: 0, zIndex: 1000,
-      background: "rgba(0,0,0,0.45)", display: "flex", alignItems: "flex-start", justifyContent: "center",
-      padding: "28px 16px", overflowY: "auto",
-    }} onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div style={{
-        background: C.white, borderRadius: 16, width: "100%", maxWidth: 840,
-        boxShadow: "0 20px 60px rgba(0,0,0,0.2)", display: "flex", flexDirection: "column", gap: 0,
-      }}>
-        {/* Header */}
-        <div style={{ padding: "20px 28px 16px", borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <div>
-            <h2 style={{ fontSize: 17, fontWeight: 800, color: C.gray800, marginBottom: 2 }}>
+    <Dialog open onClose={onClose} maxWidth="md" fullWidth PaperProps={{ sx: { borderRadius: 3 } }}>
+      <DialogTitle sx={{ pb: 1, borderBottom: `1px solid ${C.border}` }}>
+        <Box display="flex" alignItems="center" justifyContent="space-between">
+          <Box>
+            <Typography variant="h6" fontWeight={800} color={C.gray800}>
               {initial?.id ? "Edit Purchase Bill" : "New Purchase Bill"}
-            </h2>
-            <p style={{ fontSize: 12, color: C.gray400 }}>All data is preserved and reflected in inventory.</p>
-          </div>
-          <button onClick={onClose} style={{ ...btn("ghost", "sm"), padding: "6px 10px", fontSize: 16, lineHeight: 1 }}>✕</button>
-        </div>
+            </Typography>
+            <Typography variant="caption" color={C.gray400}>
+              All data is preserved and reflected in inventory.
+            </Typography>
+          </Box>
+          <IconButton size="small" onClick={onClose}>✕</IconButton>
+        </Box>
+      </DialogTitle>
 
-        {/* Body */}
-        <div style={{ padding: "20px 28px", display: "flex", flexDirection: "column", gap: 16 }}>
-          {/* Row 1 */}
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14 }}>
-            <div>
-              <label style={S.label}>Date *</label>
-              <input type="date" value={date} onChange={e => setDate(e.target.value)} style={S.inp} />
-            </div>
-            <div>
-              <label style={S.label}>Seller / Vendor *</label>
-              <input value={seller} onChange={e => setSeller(e.target.value)} placeholder="e.g. Raj Textiles" style={S.inp} />
-            </div>
-            <div>
-              <label style={S.label}>Bill / Invoice No.</label>
-              <input value={billNo} onChange={e => setBillNo(e.target.value)} placeholder="e.g. INV-001" style={S.inp} />
-            </div>
-          </div>
-          <div>
-            <label style={S.label}>Notes</label>
-            <input value={notes} onChange={e => setNotes(e.target.value)} placeholder="Optional notes…" style={S.inp} />
-          </div>
+      <DialogContent sx={{ pt: 2, display: "flex", flexDirection: "column", gap: 2 }}>
+        {/* Row 1 — Date / Seller / Bill No */}
+        <Box display="grid" gridTemplateColumns="1fr 1fr 1fr" gap={2}>
+          <TextField
+            label="Date *"
+            type="date"
+            size="small"
+            value={date}
+            onChange={e => setDate(e.target.value)}
+            InputLabelProps={{ shrink: true }}
+          />
+          <TextField
+            label="Seller / Vendor *"
+            size="small"
+            value={seller}
+            onChange={e => setSeller(e.target.value)}
+            placeholder="e.g. Raj Textiles"
+          />
+          <TextField
+            label="Bill / Invoice No."
+            size="small"
+            value={billNo}
+            onChange={e => setBillNo(e.target.value)}
+            placeholder="e.g. INV-001"
+          />
+        </Box>
 
-          {/* Items */}
-          <div>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-              <p style={{ fontSize: 12, fontWeight: 700, color: C.gray600, textTransform: "uppercase", letterSpacing: "0.05em" }}>
-                Items
-              </p>
-              <button onClick={addItem} style={{ ...btn("ghostOrange", "sm") }}>+ Add Item</button>
-            </div>
+        {/* Notes */}
+        <TextField
+          label="Notes"
+          size="small"
+          value={notes}
+          onChange={e => setNotes(e.target.value)}
+          placeholder="Optional notes…"
+          fullWidth
+        />
 
-            {/* Table header */}
-            <div style={{ display: "grid", gridTemplateColumns: "1.6fr 2fr 0.7fr 1.1fr 1fr 0.6fr 0.4fr", gap: 8, marginBottom: 6, padding: "0 4px" }}>
-              {["SKU", "Description", "Qty", "Price/Unit (₹)", "Total", "Exchange?", ""].map(h => (
-                <span key={h} style={{ fontSize: 10, fontWeight: 700, color: C.gray400, textTransform: "uppercase", letterSpacing: "0.05em" }}>{h}</span>
-              ))}
-            </div>
+        {/* Items section */}
+        <Box>
+          <Box display="flex" alignItems="center" justifyContent="space-between" mb={1}>
+            <Typography variant="subtitle2" sx={{ fontSize: 11, fontWeight: 700, color: C.gray600, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+              Items
+            </Typography>
+            <Button size="small" variant="outlined" onClick={addItem}
+              sx={{ borderColor: C.orange, color: C.orange, "&:hover": { borderColor: C.orange, background: C.orangeLight } }}>
+              + Add Item
+            </Button>
+          </Box>
 
-            {items.map((it, idx) => {
-              const lineTotal = it.is_exchange ? 0 : (parseInt(it.quantity, 10) || 0) * (parseFloat(it.price_per_unit) || 0);
-              return (
-                <div key={idx} style={{
-                  display: "grid", gridTemplateColumns: "1.6fr 2fr 0.7fr 1.1fr 1fr 0.6fr 0.4fr",
-                  gap: 8, marginBottom: 8, alignItems: "center",
+          {/* Column headers */}
+          <Box display="grid" sx={{ gridTemplateColumns: "1.6fr 2fr 0.7fr 1.1fr 1fr 0.6fr 0.4fr", gap: 1, mb: 0.5, px: 0.5 }}>
+            {["SKU", "Description", "Qty", "Price/Unit (₹)", "Total", "Exchange?", ""].map(h => (
+              <Typography key={h} sx={{ fontSize: 10, fontWeight: 700, color: C.gray400, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                {h}
+              </Typography>
+            ))}
+          </Box>
+
+          {/* Item rows */}
+          {items.map((it, idx) => {
+            const lineTotal = it.is_exchange ? 0 : (parseInt(it.quantity, 10) || 0) * (parseFloat(it.price_per_unit) || 0);
+            return (
+              <Box key={idx} display="grid"
+                sx={{
+                  gridTemplateColumns: "1.6fr 2fr 0.7fr 1.1fr 1fr 0.6fr 0.4fr",
+                  gap: 1, mb: 1, alignItems: "center",
                   background: it.is_exchange ? "#FFFBEB" : C.gray50,
-                  borderRadius: 8, padding: "8px 10px",
+                  borderRadius: 2, p: "8px 10px",
                   border: `1px solid ${it.is_exchange ? "#FDE68A" : C.border}`,
                 }}>
-                  <select
-                    value={it.parent_sku_id}
-                    onChange={e => setItem(idx, "parent_sku_id", e.target.value)}
-                    style={{ ...S.inp, fontSize: 12, padding: "7px 8px" }}
-                  >
-                    <option value="">— Select SKU —</option>
-                    {skuOptions}
-                  </select>
-                  <input
-                    value={it.product_description}
-                    onChange={e => setItem(idx, "product_description", e.target.value)}
-                    placeholder="Description…"
-                    style={{ ...S.inp, fontSize: 12 }}
-                  />
-                  <input
-                    type="number" min="1" value={it.quantity}
-                    onChange={e => setItem(idx, "quantity", e.target.value)}
-                    style={{ ...S.inp, fontSize: 12 }}
-                  />
-                  <input
-                    type="number" min="0" step="0.01" value={it.price_per_unit}
-                    onChange={e => setItem(idx, "price_per_unit", e.target.value)}
-                    placeholder="0.00"
-                    disabled={it.is_exchange}
-                    style={{ ...S.inp, fontSize: 12, opacity: it.is_exchange ? 0.4 : 1 }}
-                  />
-                  <span style={{ fontFamily: "monospace", fontSize: 13, fontWeight: 600, color: it.is_exchange ? C.gray300 : C.green, textAlign: "right" }}>
-                    {it.is_exchange ? "—" : `₹${lineTotal.toFixed(2)}`}
-                  </span>
-                  <div style={{ display: "flex", alignItems: "center", justifyContent: "center" }}>
-                    <label style={{ display: "flex", alignItems: "center", gap: 5, cursor: "pointer" }}>
-                      <input
-                        type="checkbox" checked={it.is_exchange}
+                {/* SKU select */}
+                <Select
+                  size="small"
+                  value={it.parent_sku_id}
+                  onChange={e => setItem(idx, "parent_sku_id", e.target.value)}
+                  displayEmpty
+                  sx={{ fontSize: 12 }}
+                >
+                  <MenuItem value=""><em>— Select SKU —</em></MenuItem>
+                  {parentSkus.map(p => (
+                    <MenuItem key={p.item_id} value={p.item_id} sx={{ fontSize: 12 }}>{p.item_id}</MenuItem>
+                  ))}
+                </Select>
+
+                <TextField
+                  size="small"
+                  value={it.product_description}
+                  onChange={e => setItem(idx, "product_description", e.target.value)}
+                  placeholder="Description…"
+                  inputProps={{ style: { fontSize: 12 } }}
+                />
+
+                <TextField
+                  size="small"
+                  type="number"
+                  inputProps={{ min: 1, style: { fontSize: 12 } }}
+                  value={it.quantity}
+                  onChange={e => setItem(idx, "quantity", e.target.value)}
+                />
+
+                <TextField
+                  size="small"
+                  type="number"
+                  inputProps={{ min: 0, step: "0.01", style: { fontSize: 12 } }}
+                  value={it.price_per_unit}
+                  onChange={e => setItem(idx, "price_per_unit", e.target.value)}
+                  placeholder="0.00"
+                  disabled={it.is_exchange}
+                  sx={{ opacity: it.is_exchange ? 0.4 : 1 }}
+                />
+
+                <Typography sx={{ fontFamily: "monospace", fontSize: 13, fontWeight: 600, color: it.is_exchange ? C.gray300 : C.green, textAlign: "right" }}>
+                  {it.is_exchange ? "—" : `₹${lineTotal.toFixed(2)}`}
+                </Typography>
+
+                <Box display="flex" alignItems="center" justifyContent="center">
+                  <FormControlLabel
+                    control={
+                      <Checkbox
+                        checked={it.is_exchange}
                         onChange={e => setItem(idx, "is_exchange", e.target.checked)}
-                        style={{ accentColor: C.amber, width: 15, height: 15 }}
+                        size="small"
+                        sx={{ color: C.amber, "&.Mui-checked": { color: C.amber } }}
                       />
-                      <span style={{ fontSize: 10, color: C.amber, fontWeight: 600 }}>Exch</span>
-                    </label>
-                  </div>
-                  <button
-                    onClick={() => removeItem(idx)}
-                    disabled={items.length === 1}
-                    style={{ ...btn("ghost", "sm"), padding: "4px 8px", color: C.red, borderColor: "transparent", opacity: items.length === 1 ? 0.3 : 1 }}
-                  >✕</button>
-                </div>
-              );
-            })}
+                    }
+                    label={<Typography sx={{ fontSize: 10, color: C.amber, fontWeight: 600 }}>Exch</Typography>}
+                    sx={{ m: 0 }}
+                  />
+                </Box>
 
-            {/* Grand total bar */}
-            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 4, padding: "10px 10px 0", borderTop: `1px solid ${C.border}` }}>
-              <span style={{ fontSize: 14, fontWeight: 700, color: C.gray700 }}>
-                Grand Total:&nbsp;
-                <span style={{ fontFamily: "monospace", color: C.orange, fontSize: 17 }}>
-                  ₹{grandTotal.toFixed(2)}
-                </span>
-                &nbsp;<span style={{ fontSize: 11, color: C.gray400 }}>(excl. exchanges)</span>
-              </span>
-            </div>
-          </div>
+                <IconButton
+                  size="small"
+                  onClick={() => removeItem(idx)}
+                  disabled={items.length === 1}
+                  sx={{ color: C.red, opacity: items.length === 1 ? 0.3 : 1 }}
+                >✕</IconButton>
+              </Box>
+            );
+          })}
 
-          {error && (
-            <div style={{ background: C.redLight, border: `1px solid ${C.redBorder}`, borderRadius: 8, padding: "10px 14px", color: C.red, fontSize: 13 }}>
-              {error}
-            </div>
-          )}
-        </div>
+          {/* Grand total */}
+          <Box display="flex" justifyContent="flex-end" mt={0.5} pt={1.5} sx={{ borderTop: `1px solid ${C.border}` }}>
+            <Typography sx={{ fontSize: 14, fontWeight: 700, color: C.gray700 }}>
+              Grand Total:&nbsp;
+              <Box component="span" sx={{ fontFamily: "monospace", color: C.orange, fontSize: 17 }}>
+                ₹{grandTotal.toFixed(2)}
+              </Box>
+              &nbsp;<Box component="span" sx={{ fontSize: 11, color: C.gray400 }}>(excl. exchanges)</Box>
+            </Typography>
+          </Box>
+        </Box>
 
-        {/* Footer */}
-        <div style={{ padding: "14px 28px 20px", borderTop: `1px solid ${C.border}`, display: "flex", gap: 10, justifyContent: "flex-end" }}>
-          <button onClick={onClose} style={btn("ghost")}>Cancel</button>
-          <button onClick={handleSave} disabled={saving} style={{ ...btn("primary"), opacity: saving ? 0.6 : 1 }}>
-            {saving ? "Saving…" : initial?.id ? "Save Changes" : "Create Bill"}
-          </button>
-        </div>
-      </div>
-    </div>
+        {error && (
+          <Alert severity="error" sx={{ fontSize: 13 }}>{error}</Alert>
+        )}
+      </DialogContent>
+
+      <DialogActions sx={{ px: 3, pb: 2.5, pt: 1.5, borderTop: `1px solid ${C.border}`, gap: 1 }}>
+        <Button variant="outlined" onClick={onClose} sx={{ color: C.gray600, borderColor: C.gray200 }}>
+          Cancel
+        </Button>
+        <Button
+          variant="contained"
+          onClick={handleSave}
+          disabled={saving}
+          sx={{ background: C.orange, "&:hover": { background: "#5B21B6" }, fontWeight: 700 }}
+        >
+          {saving ? "Saving…" : initial?.id ? "Save Changes" : "Create Bill"}
+        </Button>
+      </DialogActions>
+    </Dialog>
   );
 }
 
 // ── View Modal (read-only bill detail) ────────────────────────────────────────
 function BillViewModal({ bill, onClose, onEdit, onDownloadPdf }) {
-  useEffect(() => {
-    const onKey = (e) => e.key === "Escape" && onClose();
-    document.addEventListener("keydown", onKey);
-    document.body.style.overflow = "hidden";
-    return () => { document.removeEventListener("keydown", onKey); document.body.style.overflow = ""; };
-  }, [onClose]);
-
   return (
-    <div style={{ position: "fixed", inset: 0, zIndex: 1000, background: "rgba(0,0,0,0.45)", display: "flex", alignItems: "flex-start", justifyContent: "center", padding: "28px 16px", overflowY: "auto" }}
-      onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div style={{ background: C.white, borderRadius: 16, width: "100%", maxWidth: 700, boxShadow: "0 20px 60px rgba(0,0,0,0.2)" }}>
-        <div style={{ padding: "20px 28px 16px", borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <div>
-            <h2 style={{ fontSize: 17, fontWeight: 800, color: C.gray800 }}>
+    <Dialog open onClose={onClose} maxWidth="md" fullWidth PaperProps={{ sx: { borderRadius: 3 } }}>
+      <DialogTitle sx={{ pb: 1, borderBottom: `1px solid ${C.border}` }}>
+        <Box display="flex" alignItems="center" justifyContent="space-between">
+          <Box>
+            <Typography variant="h6" fontWeight={800} color={C.gray800}>
               Bill #{bill.bill_number || bill.id}
-            </h2>
-            <p style={{ fontSize: 12, color: C.gray400 }}>
+            </Typography>
+            <Typography variant="caption" color={C.gray400}>
               {fmtDate(bill.date)} &middot; {bill.seller_name}
-            </p>
-          </div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button onClick={() => onDownloadPdf(bill.id)} style={{ ...btn("ghost", "sm") }}>⬇ PDF</button>
-            <button onClick={() => onEdit(bill)}           style={{ ...btn("ghostOrange", "sm") }}>✏ Edit</button>
-            <button onClick={onClose}                      style={{ ...btn("ghost", "sm"), padding: "6px 10px", fontSize: 16, lineHeight: 1 }}>✕</button>
-          </div>
-        </div>
-        <div style={{ padding: "20px 28px" }}>
-          {bill.notes && (
-            <p style={{ fontSize: 13, color: C.gray500, marginBottom: 14, fontStyle: "italic" }}>{bill.notes}</p>
-          )}
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-            <thead>
-              <tr>
-                {["SKU", "Description", "Qty", "Price/Unit", "Total", "Exchange"].map(h => (
-                  <th key={h} style={{ ...S.th, textAlign: ["Qty", "Price/Unit", "Total"].includes(h) ? "right" : "left" }}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {bill.items.map((it, i) => (
-                <tr key={it.id} style={{ background: i % 2 === 0 ? C.white : C.gray50 }}>
-                  <td style={{ ...S.td, fontFamily: "monospace", fontWeight: 600, color: C.orange, fontSize: 12 }}>{it.parent_sku_id || "—"}</td>
-                  <td style={S.td}>{it.product_description || "—"}</td>
-                  <td style={{ ...S.td, textAlign: "right" }}>{it.quantity}</td>
-                  <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace" }}>{fmt(it.price_per_unit)}</td>
-                  <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", fontWeight: 600 }}>
-                    {it.is_exchange ? <span style={{ color: C.gray300 }}>—</span> : fmt(it.total_amount)}
-                  </td>
-                  <td style={{ ...S.td, textAlign: "center" }}>
-                    {it.is_exchange ? <Tag variant="amber">Exchange</Tag> : <span style={{ color: C.gray300 }}>—</span>}
-                  </td>
-                </tr>
+            </Typography>
+          </Box>
+          <Box display="flex" gap={1}>
+            <Button size="small" variant="outlined" onClick={() => onDownloadPdf(bill.id)}
+              sx={{ fontSize: 12, borderColor: C.gray200, color: C.gray600 }}>
+              ⬇ PDF
+            </Button>
+            <Button size="small" variant="outlined" onClick={() => onEdit(bill)}
+              sx={{ fontSize: 12, borderColor: C.orange, color: C.orange, background: C.orangeLight, "&:hover": { background: C.orangeLight } }}>
+              ✏ Edit
+            </Button>
+            <IconButton size="small" onClick={onClose}>✕</IconButton>
+          </Box>
+        </Box>
+      </DialogTitle>
+
+      <DialogContent sx={{ pt: 2 }}>
+        {bill.notes && (
+          <Typography sx={{ fontSize: 13, color: C.gray500, mb: 2, fontStyle: "italic" }}>
+            {bill.notes}
+          </Typography>
+        )}
+
+        <Table size="small" sx={{ fontSize: 13 }}>
+          <TableHead>
+            <TableRow>
+              {["SKU", "Description", "Qty", "Price/Unit", "Total", "Exchange"].map(h => (
+                <TableCell key={h} align={["Qty", "Price/Unit", "Total"].includes(h) ? "right" : "left"}
+                  sx={{ fontWeight: 700, fontSize: 11, textTransform: "uppercase", color: C.gray500, letterSpacing: "0.06em", background: C.gray50, borderBottom: `1px solid ${C.border}` }}>
+                  {h}
+                </TableCell>
               ))}
-            </tbody>
-            <tfoot>
-              <tr style={{ background: "#FFF0EA" }}>
-                <td colSpan={4} style={{ ...S.td, fontWeight: 700 }}>Grand Total (excl. exchanges)</td>
-                <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", fontWeight: 800, fontSize: 15, color: C.orange }}>{fmt(bill.total_amount)}</td>
-                <td style={S.td} />
-              </tr>
-            </tfoot>
-          </table>
-        </div>
-      </div>
-    </div>
+            </TableRow>
+          </TableHead>
+          <TableBody>
+            {bill.items.map((it, i) => (
+              <TableRow key={it.id} sx={{ background: i % 2 === 0 ? "#FFFFFF" : C.gray50 }}>
+                <TableCell sx={{ fontFamily: "monospace", fontWeight: 600, color: C.orange, fontSize: 12 }}>
+                  {it.parent_sku_id || "—"}
+                </TableCell>
+                <TableCell sx={{ color: C.gray700 }}>{it.product_description || "—"}</TableCell>
+                <TableCell align="right" sx={{ color: C.gray700 }}>{it.quantity}</TableCell>
+                <TableCell align="right" sx={{ fontFamily: "monospace", color: C.gray700 }}>{fmt(it.price_per_unit)}</TableCell>
+                <TableCell align="right" sx={{ fontFamily: "monospace", fontWeight: 600, color: C.gray700 }}>
+                  {it.is_exchange
+                    ? <Box component="span" sx={{ color: C.gray300 }}>—</Box>
+                    : fmt(it.total_amount)}
+                </TableCell>
+                <TableCell align="center">
+                  {it.is_exchange
+                    ? <Chip label="Exchange" size="small" sx={{ fontSize: 10, fontWeight: 600, background: C.amberLight, color: C.amber, border: `1px solid #FDE68A`, height: 22 }} />
+                    : <Box component="span" sx={{ color: C.gray300 }}>—</Box>}
+                </TableCell>
+              </TableRow>
+            ))}
+
+            {/* Grand total footer row */}
+            <TableRow sx={{ background: "#FFF0EA" }}>
+              <TableCell colSpan={4} sx={{ fontWeight: 700, color: C.gray700 }}>
+                Grand Total (excl. exchanges)
+              </TableCell>
+              <TableCell align="right" sx={{ fontFamily: "monospace", fontWeight: 800, fontSize: 15, color: C.orange }}>
+                {fmt(bill.total_amount)}
+              </TableCell>
+              <TableCell />
+            </TableRow>
+          </TableBody>
+        </Table>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -305,14 +379,13 @@ function BillViewModal({ bill, onClose, onEdit, onDownloadPdf }) {
 export function PurchasesTab() {
   const [bills,      setBills]      = useState([]);
   const [total,      setTotal]      = useState(0);
-  const [page,       setPage]       = useState(1);
   const [loading,    setLoading]    = useState(false);
   const [dateFrom,   setDateFrom]   = useState("");
   const [dateTo,     setDateTo]     = useState("");
   const [sellerQ,    setSellerQ]    = useState("");
   const [parentSkus, setParentSkus] = useState([]);
   const [showForm,   setShowForm]   = useState(false);
-  const [editBill,   setEditBill]   = useState(null);  // bill object or null
+  const [editBill,   setEditBill]   = useState(null);
   const [viewBill,   setViewBill]   = useState(null);
   const [deleting,   setDeleting]   = useState(null);
 
@@ -341,13 +414,12 @@ export function PurchasesTab() {
     } finally { setLoading(false); }
   }, [dateFrom, dateTo, sellerQ]);
 
-  useEffect(() => { load(); setPage(1); }, [load]);
+  useEffect(() => { load(); }, [load]);
 
   const handleSaved = (saved) => {
     setShowForm(false);
     setEditBill(null);
     load();
-    // If we were viewing the bill, refresh it
     if (viewBill && viewBill.id === saved.id) setViewBill(saved);
   };
 
@@ -372,16 +444,111 @@ export function PurchasesTab() {
     URL.revokeObjectURL(url);
   };
 
-  // Paginate locally (bills already loaded with filters)
-  const pageBills = bills.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
-
   // Summary KPIs
-  const totalSpend   = bills.reduce((s, b) => s + parseFloat(b.total_amount || 0), 0);
-  const totalItems   = bills.reduce((s, b) => s + b.items.length, 0);
+  const totalSpend    = bills.reduce((s, b) => s + parseFloat(b.total_amount || 0), 0);
+  const totalItems    = bills.reduce((s, b) => s + b.items.length, 0);
   const uniqueSellers = [...new Set(bills.map(b => b.seller_name))].length;
 
+  // DataGrid columns
+  const columns = [
+    {
+      field: "date",
+      headerName: "Date",
+      width: 110,
+      renderCell: ({ value }) => (
+        <Typography sx={{ fontSize: 13, fontWeight: 600, color: C.gray700 }}>{fmtDate(value)}</Typography>
+      ),
+    },
+    {
+      field: "bill_number",
+      headerName: "Bill No.",
+      width: 130,
+      renderCell: ({ row }) => (
+        <Typography sx={{ fontFamily: "monospace", fontSize: 12, color: C.blue }}>
+          {row.bill_number || `#${row.id}`}
+        </Typography>
+      ),
+    },
+    {
+      field: "seller_name",
+      headerName: "Seller",
+      flex: 1,
+      minWidth: 150,
+      renderCell: ({ value }) => (
+        <Typography sx={{ fontSize: 13, fontWeight: 600, color: C.gray700 }}>{value}</Typography>
+      ),
+    },
+    {
+      field: "items",
+      headerName: "Items",
+      width: 160,
+      sortable: false,
+      renderCell: ({ row }) => {
+        const exchangeCount = row.items.filter(it => it.is_exchange).length;
+        return (
+          <Box display="flex" alignItems="center" gap={0.75}>
+            <Typography sx={{ fontSize: 13, color: C.gray700 }}>
+              {row.items.length} line{row.items.length !== 1 ? "s" : ""}
+            </Typography>
+            {exchangeCount > 0 && (
+              <Chip
+                label={`${exchangeCount} exchange${exchangeCount > 1 ? "s" : ""}`}
+                size="small"
+                sx={{ fontSize: 10, fontWeight: 600, background: C.amberLight, color: C.amber, border: `1px solid #FDE68A`, height: 20 }}
+              />
+            )}
+          </Box>
+        );
+      },
+    },
+    {
+      field: "total_amount",
+      headerName: "Total Amount",
+      width: 140,
+      align: "right",
+      headerAlign: "right",
+      renderCell: ({ value }) => (
+        <Typography sx={{ fontFamily: "monospace", fontWeight: 700, color: C.orange, fontSize: 13 }}>
+          {fmt(value)}
+        </Typography>
+      ),
+    },
+    {
+      field: "actions",
+      headerName: "Actions",
+      width: 160,
+      sortable: false,
+      renderCell: ({ row }) => (
+        <Box display="flex" gap={0.75} onClick={e => e.stopPropagation()}>
+          <Button
+            size="small"
+            variant="outlined"
+            onClick={() => handleDownloadPdf(row.id)}
+            sx={{ fontSize: 11, px: 1, py: 0.25, minWidth: 0, borderColor: C.gray200, color: C.gray600 }}
+            title="Download PDF"
+          >⬇ PDF</Button>
+          <Button
+            size="small"
+            variant="outlined"
+            onClick={() => setEditBill(row)}
+            sx={{ fontSize: 11, px: 1, py: 0.25, minWidth: 0, borderColor: C.orange, color: C.orange, background: C.orangeLight, "&:hover": { background: C.orangeLight } }}
+            title="Edit"
+          >✏</Button>
+          <Button
+            size="small"
+            variant="outlined"
+            onClick={() => handleDelete(row.id)}
+            disabled={deleting === row.id}
+            sx={{ fontSize: 11, px: 1, py: 0.25, minWidth: 0, borderColor: "transparent", color: C.red }}
+            title="Delete"
+          >{deleting === row.id ? "…" : "✕"}</Button>
+        </Box>
+      ),
+    },
+  ];
+
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+    <Box display="flex" flexDirection="column" gap={2.5}>
 
       {/* Modals */}
       {(showForm || editBill) && (
@@ -402,128 +569,143 @@ export function PurchasesTab() {
       )}
 
       {/* Header row */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
-        <div>
-          <h1 style={{ fontSize: 20, fontWeight: 800, color: C.gray800, marginBottom: 3 }}>🛒 Purchases</h1>
-          <p style={{ fontSize: 13, color: C.gray400 }}>Track every stock purchase; PDF bills on demand.</p>
-        </div>
-        <button onClick={() => setShowForm(true)} style={{ ...btn("primary") }}>+ New Purchase Bill</button>
-      </div>
+      <Box display="flex" alignItems="center" justifyContent="space-between" flexWrap="wrap" gap={1.5}>
+        <Box>
+          <Typography variant="h5" fontWeight={800} color={C.gray800} mb={0.25}>
+            🛒 Purchases
+          </Typography>
+          <Typography variant="body2" color={C.gray400}>
+            Track every stock purchase; PDF bills on demand.
+          </Typography>
+        </Box>
+        <Button
+          variant="contained"
+          onClick={() => setShowForm(true)}
+          sx={{ background: C.orange, "&:hover": { background: "#5B21B6" }, fontWeight: 700, borderRadius: 2 }}
+        >
+          + New Purchase Bill
+        </Button>
+      </Box>
 
       {/* KPI strip */}
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 14 }}>
+      <Box display="flex" flexWrap="wrap" gap={1.75}>
         {[
-          { label: "Total Spend",    value: `₹${totalSpend.toLocaleString("en-IN", { minimumFractionDigits: 2 })}`, accent: C.orange, icon: "💸" },
-          { label: "Bills Recorded", value: `${total}`,          accent: C.blue,  icon: "🧾" },
-          { label: "Total SKU Lines", value: `${totalItems}`,     accent: C.green, icon: "📦" },
-          { label: "Unique Sellers", value: `${uniqueSellers}`,  accent: C.amber, icon: "🏪" },
+          { label: "Total Spend",     value: `₹${totalSpend.toLocaleString("en-IN", { minimumFractionDigits: 2 })}`, accent: C.orange, icon: "💸" },
+          { label: "Bills Recorded",  value: `${total}`,        accent: C.blue,  icon: "🧾" },
+          { label: "Total SKU Lines", value: `${totalItems}`,   accent: C.green, icon: "📦" },
+          { label: "Unique Sellers",  value: `${uniqueSellers}`, accent: C.amber, icon: "🏪" },
         ].map(k => (
-          <div key={k.label} style={{ ...S.card, borderTop: `3px solid ${k.accent}`, minWidth: "max-content" }}>
-            <p style={{ fontSize: 11, fontWeight: 700, color: C.gray400, letterSpacing: "0.07em", textTransform: "uppercase", marginBottom: 8, whiteSpace: "nowrap" }}>
+          <Paper key={k.label} elevation={1} sx={{
+            borderTop: `3px solid ${k.accent}`, borderRadius: 2, p: 3,
+            minWidth: "max-content",
+          }}>
+            <Typography sx={{ fontSize: 11, fontWeight: 700, color: C.gray400, letterSpacing: "0.07em", textTransform: "uppercase", mb: 1, whiteSpace: "nowrap" }}>
               {k.icon} {k.label}
-            </p>
-            <p style={{ fontSize: 22, fontWeight: 800, fontFamily: "'DM Mono', monospace", color: k.accent, whiteSpace: "nowrap" }}>{k.value}</p>
-          </div>
+            </Typography>
+            <Typography sx={{ fontSize: 22, fontWeight: 800, fontFamily: "'DM Mono', monospace", color: k.accent, whiteSpace: "nowrap" }}>
+              {k.value}
+            </Typography>
+          </Paper>
         ))}
-      </div>
+      </Box>
 
       {/* Filter bar */}
-      <div style={{ ...S.card, padding: "14px 20px", display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
-        <span style={{ fontSize: 12, fontWeight: 700, color: C.gray400, textTransform: "uppercase", letterSpacing: "0.06em" }}>Filter</span>
-        <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)} style={{ ...S.inp, width: 150, fontSize: 12 }} />
-        <span style={{ color: C.gray300 }}>→</span>
-        <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)} style={{ ...S.inp, width: 150, fontSize: 12 }} />
-        <div style={{ width: 1, height: 24, background: C.gray200 }} />
-        <input
-          value={sellerQ} onChange={e => setSellerQ(e.target.value)}
+      <Paper elevation={1} sx={{ borderRadius: 2, px: 2.5, py: 1.75, display: "flex", gap: 1.5, flexWrap: "wrap", alignItems: "center" }}>
+        <Typography sx={{ fontSize: 12, fontWeight: 700, color: C.gray400, textTransform: "uppercase", letterSpacing: "0.06em" }}>
+          Filter
+        </Typography>
+        <TextField
+          type="date"
+          size="small"
+          value={dateFrom}
+          onChange={e => setDateFrom(e.target.value)}
+          InputLabelProps={{ shrink: true }}
+          sx={{ width: 155 }}
+        />
+        <Typography sx={{ color: C.gray300 }}>→</Typography>
+        <TextField
+          type="date"
+          size="small"
+          value={dateTo}
+          onChange={e => setDateTo(e.target.value)}
+          InputLabelProps={{ shrink: true }}
+          sx={{ width: 155 }}
+        />
+        <Box sx={{ width: 1, height: 24, background: C.gray200 }} />
+        <TextField
+          size="small"
+          value={sellerQ}
+          onChange={e => setSellerQ(e.target.value)}
           placeholder="🔍 Seller name…"
-          style={{ ...S.inp, width: 200, fontSize: 12 }}
+          sx={{ width: 210 }}
         />
         {(dateFrom || dateTo || sellerQ) && (
-          <button
+          <Button
+            size="small"
+            variant="outlined"
             onClick={() => { setDateFrom(""); setDateTo(""); setSellerQ(""); }}
-            style={{ ...btn("ghost", "sm"), color: C.red }}
-          >✕ Clear</button>
+            sx={{ fontSize: 12, color: C.red, borderColor: C.gray200 }}
+          >
+            ✕ Clear
+          </Button>
         )}
-      </div>
+      </Paper>
 
-      {/* Bills table */}
-      <div style={S.card}>
-        <SectionHeader
-          title="Purchase Bills"
-          count={total}
-          actions={loading ? <span style={{ fontSize: 12, color: C.gray400 }}>Loading…</span> : null}
-        />
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr>
-                {["Date", "Bill No.", "Seller", "Items", "Total Amount", "Actions"].map(h => (
-                  <th key={h} style={{ ...S.th, textAlign: h === "Total Amount" ? "right" : "left" }}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {pageBills.map((bill, i) => {
-                const rowBg = i % 2 === 0 ? C.white : C.gray50;
-                const exchangeCount = bill.items.filter(it => it.is_exchange).length;
-                return (
-                  <tr key={bill.id} style={{ background: rowBg, cursor: "pointer" }}
-                    onMouseEnter={e => (e.currentTarget.style.background = "#F0F7FF")}
-                    onMouseLeave={e => (e.currentTarget.style.background = rowBg)}
-                    onClick={() => setViewBill(bill)}
-                  >
-                    <td style={{ ...S.td, whiteSpace: "nowrap", fontWeight: 600, color: C.gray700 }}>{fmtDate(bill.date)}</td>
-                    <td style={{ ...S.td, fontFamily: "monospace", fontSize: 12, color: C.blue }}>
-                      {bill.bill_number || `#${bill.id}`}
-                    </td>
-                    <td style={{ ...S.td, fontWeight: 600 }}>{bill.seller_name}</td>
-                    <td style={S.td}>
-                      <span style={{ color: C.gray700 }}>{bill.items.length} line{bill.items.length !== 1 ? "s" : ""}</span>
-                      {exchangeCount > 0 && (
-                        <Tag variant="amber" fontSize={10}>&nbsp;{exchangeCount} exchange{exchangeCount > 1 ? "s" : ""}</Tag>
-                      )}
-                    </td>
-                    <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", fontWeight: 700, color: C.orange }}>
-                      {fmt(bill.total_amount)}
-                    </td>
-                    <td style={{ ...S.td }} onClick={e => e.stopPropagation()}>
-                      <div style={{ display: "flex", gap: 6 }}>
-                        <button
-                          onClick={() => handleDownloadPdf(bill.id)}
-                          style={{ ...btn("ghost", "sm"), padding: "4px 10px", fontSize: 11 }}
-                          title="Download PDF"
-                        >⬇ PDF</button>
-                        <button
-                          onClick={() => setEditBill(bill)}
-                          style={{ ...btn("ghostOrange", "sm"), padding: "4px 10px", fontSize: 11 }}
-                          title="Edit"
-                        >✏</button>
-                        <button
-                          onClick={() => handleDelete(bill.id)}
-                          disabled={deleting === bill.id}
-                          style={{ ...btn("ghost", "sm"), padding: "4px 10px", fontSize: 11, color: C.red, borderColor: "transparent" }}
-                          title="Delete"
-                        >{deleting === bill.id ? "…" : "✕"}</button>
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
-              {!loading && bills.length === 0 && (
-                <tr>
-                  <td colSpan={6} style={{ ...S.td, textAlign: "center", padding: 48, color: C.gray400 }}>
-                    No purchase bills yet — click <strong>+ New Purchase Bill</strong> to get started.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-        {total > PAGE_SIZE && (
-          <Pagination page={page} total={total} pageSize={PAGE_SIZE} onChange={setPage} />
-        )}
-      </div>
-    </div>
+      {/* Bills DataGrid */}
+      <Paper elevation={1} sx={{ borderRadius: 2, overflow: "hidden" }}>
+        {/* Section header */}
+        <Box display="flex" alignItems="center" justifyContent="space-between" px={3} pt={2.5} pb={1.5}>
+          <Box display="flex" alignItems="center" gap={1.25}>
+            <Typography variant="subtitle1" fontWeight={700} color={C.gray800}>
+              Purchase Bills
+            </Typography>
+            <Chip
+              label={total}
+              size="small"
+              sx={{ fontSize: 11, fontWeight: 700, background: C.gray100, color: C.gray500, border: `1px solid ${C.gray200}`, height: 22 }}
+            />
+          </Box>
+          {loading && (
+            <Typography sx={{ fontSize: 12, color: C.gray400 }}>Loading…</Typography>
+          )}
+        </Box>
+
+        <Box sx={{ height: bills.length === 0 ? 200 : Math.min(bills.length * 52 + 110, 600), width: "100%" }}>
+          <DataGrid
+            rows={bills}
+            columns={columns}
+            getRowId={r => r.id}
+            loading={loading}
+            initialState={{ pagination: { paginationModel: { pageSize: 20 } } }}
+            pageSizeOptions={[20, 50]}
+            rowHeight={52}
+            disableRowSelectionOnClick
+            onRowClick={({ row }) => setViewBill(row)}
+            sx={{
+              border: "none",
+              "& .MuiDataGrid-columnHeaders": {
+                background: C.gray50,
+                fontSize: 11,
+                fontWeight: 700,
+                textTransform: "uppercase",
+                letterSpacing: "0.06em",
+                color: C.gray500,
+                borderBottom: `1px solid ${C.border}`,
+              },
+              "& .MuiDataGrid-cell": {
+                borderBottom: `1px solid ${C.gray100}`,
+                cursor: "pointer",
+              },
+              "& .MuiDataGrid-row:hover": {
+                background: "#F0F7FF",
+              },
+              "& .MuiDataGrid-footerContainer": {
+                borderTop: `1px solid ${C.gray100}`,
+              },
+            }}
+          />
+        </Box>
+      </Paper>
+    </Box>
   );
 }

@@ -1,48 +1,67 @@
 import React, { useState, useEffect, useCallback } from "react";
-import { API, C, S, btn, Tag, SectionHeader } from "../../App";
+import { API, C } from "../../App";
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-function RiskBadge({ level }) {
-  const cfg = {
-    high:   { bg: C.redLight,   fg: C.red,    border: C.redBorder,   label: "⚠ High Risk" },
-    medium: { bg: C.amberLight, fg: C.amber,  border: "#FDE68A",     label: "⚡ Medium"   },
-    low:    { bg: C.greenLight, fg: C.green,  border: C.greenBorder, label: "✓ Low"       },
-  };
-  const c = cfg[level] || cfg.low;
-  return (
-    <span style={{
-      padding: "3px 10px", borderRadius: 20, fontSize: 11, fontWeight: 700,
-      background: c.bg, color: c.fg, border: `1px solid ${c.border}`, whiteSpace: "nowrap",
-    }}>{c.label}</span>
-  );
-}
+import {
+  Box,
+  Button,
+  Card,
+  CardContent,
+  Chip,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  LinearProgress,
+  TextField,
+  ToggleButton,
+  ToggleButtonGroup,
+  Typography,
+  Select,
+  MenuItem,
+  FormControl,
+  InputLabel,
+  Paper,
+} from "@mui/material";
+import { DataGrid } from "@mui/x-data-grid";
+import BlockIcon from "@mui/icons-material/Block";
+import CheckCircleOutlineIcon from "@mui/icons-material/CheckCircleOutlined";
+import SearchIcon from "@mui/icons-material/Search";
+import InputAdornment from "@mui/material/InputAdornment";
 
+// ── RateMeter using LinearProgress ───────────────────────────────────────────
 function RateMeter({ rate }) {
-  const pct   = Math.round(rate * 100);
-  const color = rate >= 0.75 ? C.red : rate >= 0.40 ? C.amber : C.green;
+  const pct = Math.round(rate * 100);
+  const color = rate >= 0.75 ? "error" : rate >= 0.40 ? "warning" : "success";
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 7, minWidth: 110 }}>
-      <div style={{ flex: 1, height: 6, background: C.gray200, borderRadius: 4, overflow: "hidden" }}>
-        <div style={{ width: `${pct}%`, height: "100%", background: color, borderRadius: 4, transition: "width 0.3s" }} />
-      </div>
-      <span style={{ fontSize: 12, fontWeight: 700, color, minWidth: 36, textAlign: "right", fontFamily: "monospace" }}>
+    <Box sx={{ display: "flex", alignItems: "center", gap: 1, minWidth: 110, width: "100%" }}>
+      <Box sx={{ flex: 1 }}>
+        <LinearProgress
+          variant="determinate"
+          value={pct}
+          color={color}
+          sx={{ height: 6, borderRadius: 4 }}
+        />
+      </Box>
+      <Typography
+        variant="caption"
+        sx={{
+          fontFamily: "monospace",
+          fontWeight: 700,
+          minWidth: 36,
+          textAlign: "right",
+          color: rate >= 0.75 ? "error.main" : rate >= 0.40 ? "warning.main" : "success.main",
+        }}
+      >
         {pct}%
-      </span>
-    </div>
+      </Typography>
+    </Box>
   );
 }
 
-// ── Block / Unblock confirmation modal ───────────────────────────────────────
+// ── BlockModal using MUI Dialog ───────────────────────────────────────────────
 function BlockModal({ customer, onConfirm, onClose }) {
   const [reason, setReason] = useState("");
   const [saving, setSaving] = useState(false);
-
-  useEffect(() => {
-    const onKey = (e) => e.key === "Escape" && onClose();
-    document.addEventListener("keydown", onKey);
-    document.body.style.overflow = "hidden";
-    return () => { document.removeEventListener("keydown", onKey); document.body.style.overflow = ""; };
-  }, [onClose]);
 
   const handleConfirm = async () => {
     setSaving(true);
@@ -51,51 +70,62 @@ function BlockModal({ customer, onConfirm, onClose }) {
   };
 
   return (
-    <div style={{ position: "fixed", inset: 0, zIndex: 1000, background: "rgba(0,0,0,0.45)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}
-      onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div style={{ background: C.white, borderRadius: 16, width: "100%", maxWidth: 440, boxShadow: "0 20px 60px rgba(0,0,0,0.2)", overflow: "hidden" }}>
-        <div style={{ padding: "18px 24px 14px", background: C.redLight, borderBottom: `1px solid ${C.redBorder}` }}>
-          <h3 style={{ fontSize: 16, fontWeight: 800, color: C.red }}>🚫 Block Customer</h3>
-          <p style={{ fontSize: 12, color: "#B91C1C", marginTop: 3 }}>
-            This customer will be flagged every time their label is parsed.
-          </p>
-        </div>
-        <div style={{ padding: "18px 24px" }}>
-          <p style={{ fontSize: 14, fontWeight: 600, color: C.gray700, marginBottom: 4 }}>{customer.customer_name}</p>
-          <p style={{ fontSize: 12, color: C.gray400, marginBottom: 16 }}>
-            {[customer.customer_city, customer.customer_state, customer.customer_pincode].filter(Boolean).join(", ")}
-          </p>
-          <label style={S.label}>Reason for blocking (optional)</label>
-          <textarea
-            value={reason}
-            onChange={e => setReason(e.target.value)}
-            placeholder="e.g. High RTO rate, suspected fraud…"
-            rows={3}
-            style={{ ...S.inp, resize: "vertical", fontFamily: "inherit" }}
-          />
-        </div>
-        <div style={{ padding: "10px 24px 18px", display: "flex", gap: 10, justifyContent: "flex-end" }}>
-          <button onClick={onClose} style={btn("ghost")}>Cancel</button>
-          <button onClick={handleConfirm} disabled={saving}
-            style={{ ...btn("danger"), opacity: saving ? 0.6 : 1 }}>
-            {saving ? "Blocking…" : "Confirm Block"}
-          </button>
-        </div>
-      </div>
-    </div>
+    <Dialog open={!!customer} onClose={onClose} maxWidth="xs" fullWidth>
+      <DialogTitle sx={{ bgcolor: "error.light", color: "error.dark", fontWeight: 800 }}>
+        Block Customer
+      </DialogTitle>
+      <DialogContent sx={{ pt: 2 }}>
+        <Typography variant="subtitle2" sx={{ fontWeight: 700, color: "text.primary", mt: 1 }}>
+          {customer?.customer_name}
+        </Typography>
+        <Typography variant="caption" sx={{ color: "text.secondary", display: "block", mb: 2 }}>
+          {[customer?.customer_city, customer?.customer_state, customer?.customer_pincode]
+            .filter(Boolean)
+            .join(", ")}
+        </Typography>
+        <Typography variant="caption" sx={{ color: "text.secondary", display: "block", mb: 1 }}>
+          This customer will be flagged every time their label is parsed.
+        </Typography>
+        <TextField
+          label="Reason for blocking (optional)"
+          multiline
+          rows={3}
+          fullWidth
+          value={reason}
+          onChange={(e) => setReason(e.target.value)}
+          placeholder="e.g. High RTO rate, suspected fraud…"
+          size="small"
+          sx={{ mt: 1 }}
+        />
+      </DialogContent>
+      <DialogActions sx={{ px: 3, pb: 2, gap: 1 }}>
+        <Button onClick={onClose} variant="outlined" color="inherit">
+          Cancel
+        </Button>
+        <Button
+          onClick={handleConfirm}
+          disabled={saving}
+          variant="contained"
+          color="error"
+          startIcon={<BlockIcon />}
+        >
+          {saving ? "Blocking…" : "Confirm Block"}
+        </Button>
+      </DialogActions>
+    </Dialog>
   );
 }
 
 // ── Main Tab ─────────────────────────────────────────────────────────────────
 export function FraudCustomersTab() {
-  const [suspects,    setSuspects]    = useState([]);
-  const [blocked,     setBlocked]     = useState([]);
-  const [loading,     setLoading]     = useState(false);
-  const [riskFilter,  setRiskFilter]  = useState("all");
-  const [searchQ,     setSearchQ]     = useState("");
-  const [minOrders,   setMinOrders]   = useState(2);
-  const [blockTarget, setBlockTarget] = useState(null); // customer row to block
-  const [activeView,  setActiveView]  = useState("suspects"); // "suspects" | "blocked"
+  const [suspects, setSuspects] = useState([]);
+  const [blocked, setBlocked] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [riskFilter, setRiskFilter] = useState("all");
+  const [searchQ, setSearchQ] = useState("");
+  const [minOrders, setMinOrders] = useState(2);
+  const [blockTarget, setBlockTarget] = useState(null);
+  const [activeView, setActiveView] = useState("suspects");
 
   const loadSuspects = useCallback(async () => {
     setLoading(true);
@@ -118,15 +148,14 @@ export function FraudCustomersTab() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        customer_name:    customer.customer_name,
+        customer_name: customer.customer_name,
         customer_pincode: customer.customer_pincode,
-        customer_city:    customer.customer_city,
-        customer_state:   customer.customer_state,
+        customer_city: customer.customer_city,
+        customer_state: customer.customer_state,
         reason,
       }),
     });
     setBlockTarget(null);
-    // Refresh both lists
     await Promise.all([loadSuspects(), loadBlocked()]);
   };
 
@@ -136,276 +165,442 @@ export function FraudCustomersTab() {
     await Promise.all([loadSuspects(), loadBlocked()]);
   };
 
-  const filtered = suspects.filter(s => {
+  const filtered = suspects.filter((s) => {
     if (!searchQ) return true;
     const q = searchQ.toLowerCase();
-    return s.customer_name.toLowerCase().includes(q) ||
-           s.customer_pincode.includes(q) ||
-           s.customer_city?.toLowerCase().includes(q);
+    return (
+      s.customer_name.toLowerCase().includes(q) ||
+      s.customer_pincode.includes(q) ||
+      s.customer_city?.toLowerCase().includes(q)
+    );
   });
 
-  // KPI counts
-  const highCount   = suspects.filter(s => s.risk_level === "high").length;
-  const medCount    = suspects.filter(s => s.risk_level === "medium").length;
+  const highCount = suspects.filter((s) => s.risk_level === "high").length;
+  const medCount = suspects.filter((s) => s.risk_level === "medium").length;
   const blockedCount = blocked.length;
 
-  const TabBtn = ({ id, label }) => (
-    <button onClick={() => setActiveView(id)} style={{
-      padding: "7px 18px", borderRadius: 8, border: "none", cursor: "pointer",
-      fontFamily: "inherit", fontSize: 13, fontWeight: activeView === id ? 700 : 500,
-      background: activeView === id ? C.orangeLight : "transparent",
-      color: activeView === id ? C.orange : C.gray500,
-      transition: "all 0.15s",
-    }}>{label}</button>
-  );
+  // ── DataGrid columns — Suspects ──────────────────────────────────────────
+  const suspectColumns = [
+    {
+      field: "customer_name",
+      headerName: "Customer Name",
+      flex: 1.4,
+      minWidth: 160,
+      renderCell: ({ row }) => (
+        <Box sx={{ display: "flex", flexDirection: "column", justifyContent: "center", gap: 0.5, height: "100%" }}>
+          <Typography variant="body2" sx={{ fontWeight: 700, color: C.gray800, lineHeight: 1.2 }}>
+            {row.customer_name}
+          </Typography>
+          {row.is_blocked && (
+            <Chip label="BLOCKED" color="error" size="small" sx={{ width: "fit-content", height: 18, fontSize: 10, fontWeight: 700 }} />
+          )}
+        </Box>
+      ),
+    },
+    {
+      field: "customer_city",
+      headerName: "Location",
+      flex: 1.2,
+      minWidth: 140,
+      renderCell: ({ row }) => (
+        <Box sx={{ display: "flex", flexDirection: "column", justifyContent: "center", height: "100%" }}>
+          <Typography variant="body2" sx={{ color: C.gray600, fontSize: 12 }}>{row.customer_city || "—"}</Typography>
+          <Typography variant="caption" sx={{ color: C.gray400 }}>
+            {row.customer_state} {row.customer_pincode}
+          </Typography>
+        </Box>
+      ),
+    },
+    {
+      field: "total_orders",
+      headerName: "Orders",
+      width: 80,
+      type: "number",
+      renderCell: ({ value }) => (
+        <Typography sx={{ fontFamily: "monospace", fontWeight: 700, fontSize: 13 }}>{value}</Typography>
+      ),
+    },
+    {
+      field: "delivered",
+      headerName: "Delivered",
+      width: 90,
+      type: "number",
+      renderCell: ({ value }) => (
+        <Typography sx={{ fontFamily: "monospace", color: "success.main", fontSize: 13 }}>{value}</Typography>
+      ),
+    },
+    {
+      field: "rto",
+      headerName: "RTO",
+      width: 70,
+      type: "number",
+      renderCell: ({ value }) => (
+        <Typography sx={{ fontFamily: "monospace", fontWeight: value > 0 ? 700 : 400, color: value > 0 ? "error.main" : C.gray300, fontSize: 13 }}>
+          {value}
+        </Typography>
+      ),
+    },
+    {
+      field: "rto_rate",
+      headerName: "RTO Rate",
+      flex: 1,
+      minWidth: 130,
+      renderCell: ({ value }) => <RateMeter rate={value} />,
+    },
+    {
+      field: "claim_count",
+      headerName: "Claims",
+      width: 80,
+      type: "number",
+      renderCell: ({ value }) =>
+        value > 0 ? (
+          <Chip
+            label={value}
+            color="error"
+            size="small"
+            sx={{ fontFamily: "monospace", fontWeight: 700, height: 22 }}
+          />
+        ) : (
+          <Typography sx={{ fontFamily: "monospace", color: C.gray300, fontSize: 13 }}>0</Typography>
+        ),
+    },
+    {
+      field: "risk_level",
+      headerName: "Risk",
+      width: 120,
+      renderCell: ({ value }) => {
+        const colorMap = { high: "error", medium: "warning", low: "success" };
+        const labelMap = { high: "High Risk", medium: "Medium", low: "Low" };
+        return (
+          <Chip
+            label={labelMap[value] || value}
+            color={colorMap[value] || "default"}
+            size="small"
+            sx={{ fontWeight: 700 }}
+          />
+        );
+      },
+    },
+    {
+      field: "action",
+      headerName: "Action",
+      width: 110,
+      sortable: false,
+      renderCell: ({ row }) =>
+        row.is_blocked ? (
+          <Typography variant="caption" sx={{ color: C.gray400, fontStyle: "italic" }}>
+            Blocked
+          </Typography>
+        ) : (
+          <Button
+            size="small"
+            variant="contained"
+            color="error"
+            startIcon={<BlockIcon />}
+            onClick={() => setBlockTarget(row)}
+            sx={{ fontSize: 11, px: 1.5 }}
+          >
+            Block
+          </Button>
+        ),
+    },
+  ];
+
+  // ── DataGrid columns — Blocked customers ────────────────────────────────
+  const blockedColumns = [
+    {
+      field: "customer_name",
+      headerName: "Customer",
+      flex: 1.2,
+      minWidth: 150,
+      renderCell: ({ value }) => (
+        <Typography variant="body2" sx={{ fontWeight: 700, color: C.gray800 }}>{value}</Typography>
+      ),
+    },
+    {
+      field: "customer_city",
+      headerName: "Location",
+      flex: 1,
+      minWidth: 130,
+      renderCell: ({ row }) => (
+        <Typography variant="body2" sx={{ color: C.gray500, fontSize: 12 }}>
+          {[row.customer_city, row.customer_state].filter(Boolean).join(", ") || "—"}
+        </Typography>
+      ),
+    },
+    {
+      field: "customer_pincode",
+      headerName: "Pincode",
+      width: 100,
+      renderCell: ({ value }) => (
+        <Typography sx={{ fontFamily: "monospace", fontSize: 12 }}>{value}</Typography>
+      ),
+    },
+    {
+      field: "reason",
+      headerName: "Reason",
+      flex: 1.5,
+      minWidth: 180,
+      renderCell: ({ value }) =>
+        value ? (
+          <Typography variant="body2" sx={{ color: C.gray500, fontSize: 12 }}>{value}</Typography>
+        ) : (
+          <Typography variant="body2" sx={{ color: C.gray300, fontStyle: "italic", fontSize: 12 }}>No reason given</Typography>
+        ),
+    },
+    {
+      field: "blocked_at",
+      headerName: "Blocked On",
+      width: 120,
+      renderCell: ({ value }) => (
+        <Typography variant="body2" sx={{ color: C.gray500, fontSize: 12, whiteSpace: "nowrap" }}>
+          {new Date(value).toLocaleDateString("en-IN")}
+        </Typography>
+      ),
+    },
+    {
+      field: "id",
+      headerName: "Action",
+      width: 110,
+      sortable: false,
+      renderCell: ({ value }) => (
+        <Button
+          size="small"
+          variant="outlined"
+          color="success"
+          startIcon={<CheckCircleOutlineIcon />}
+          onClick={() => handleUnblock(value)}
+          sx={{ fontSize: 11, px: 1.5 }}
+        >
+          Unblock
+        </Button>
+      ),
+    },
+  ];
+
+  const kpiCards = [
+    { label: "High Risk", value: highCount, color: "error.main", borderColor: "error.main" },
+    { label: "Medium Risk", value: medCount, color: "warning.main", borderColor: "warning.main" },
+    { label: "Total Suspects", value: suspects.length, color: "info.main", borderColor: "info.main" },
+    { label: "Blocked", value: blockedCount, color: "text.primary", borderColor: "text.secondary" },
+  ];
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+    <Box sx={{ display: "flex", flexDirection: "column", gap: 2.5 }}>
 
-      {blockTarget && (
-        <BlockModal
-          customer={blockTarget}
-          onConfirm={(reason) => handleBlock(blockTarget, reason)}
-          onClose={() => setBlockTarget(null)}
-        />
-      )}
+      <BlockModal
+        customer={blockTarget}
+        onConfirm={(reason) => handleBlock(blockTarget, reason)}
+        onClose={() => setBlockTarget(null)}
+      />
 
       {/* Header */}
-      <div>
-        <h1 style={{ fontSize: 20, fontWeight: 800, color: C.gray800, marginBottom: 3 }}>🚨 Fraud Customers</h1>
-        <p style={{ fontSize: 13, color: C.gray400 }}>
+      <Box>
+        <Typography variant="h6" sx={{ fontWeight: 800, color: C.gray800, mb: 0.5 }}>
+          Fraud Customers
+        </Typography>
+        <Typography variant="body2" sx={{ color: C.gray400 }}>
           Customers with high RTO rates or claims. Block them to get a warning on future label uploads.
-        </p>
-      </div>
+        </Typography>
+      </Box>
 
       {/* KPI strip */}
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 14 }}>
-        {[
-          { label: "High Risk",      value: highCount,    accent: C.red,   icon: "⚠" },
-          { label: "Medium Risk",    value: medCount,     accent: C.amber, icon: "⚡" },
-          { label: "Total Suspects", value: suspects.length, accent: C.blue, icon: "👥" },
-          { label: "Blocked",        value: blockedCount, accent: C.gray700, icon: "🚫" },
-        ].map(k => (
-          <div key={k.label} style={{ ...S.card, borderTop: `3px solid ${k.accent}`, minWidth: "max-content" }}>
-            <p style={{ fontSize: 11, fontWeight: 700, color: C.gray400, letterSpacing: "0.07em", textTransform: "uppercase", marginBottom: 8, whiteSpace: "nowrap" }}>
-              {k.icon} {k.label}
-            </p>
-            <p style={{ fontSize: 22, fontWeight: 800, fontFamily: "'DM Mono', monospace", color: k.accent, whiteSpace: "nowrap" }}>
-              {k.value}
-            </p>
-          </div>
+      <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1.75 }}>
+        {kpiCards.map((k) => (
+          <Card
+            key={k.label}
+            variant="outlined"
+            sx={{ minWidth: 140, borderTop: `3px solid`, borderTopColor: k.borderColor, flex: "1 1 140px" }}
+          >
+            <CardContent sx={{ pb: "16px !important" }}>
+              <Typography variant="caption" sx={{ fontWeight: 700, color: "text.secondary", textTransform: "uppercase", letterSpacing: "0.07em", display: "block", mb: 1 }}>
+                {k.label}
+              </Typography>
+              <Typography sx={{ fontSize: 22, fontWeight: 800, fontFamily: "monospace", color: k.color }}>
+                {k.value}
+              </Typography>
+            </CardContent>
+          </Card>
         ))}
-      </div>
+      </Box>
 
       {/* View toggle */}
-      <div style={{ display: "flex", background: C.gray100, borderRadius: 10, padding: 3, width: "fit-content" }}>
-        <TabBtn id="suspects" label="🔍 Suspect Analysis" />
-        <TabBtn id="blocked"  label={`🚫 Blocked Customers (${blockedCount})`} />
-      </div>
+      <ToggleButtonGroup
+        value={activeView}
+        exclusive
+        onChange={(_, v) => v && setActiveView(v)}
+        size="small"
+      >
+        <ToggleButton value="suspects" sx={{ textTransform: "none", fontWeight: 600 }}>
+          Suspect Analysis
+        </ToggleButton>
+        <ToggleButton value="blocked" sx={{ textTransform: "none", fontWeight: 600 }}>
+          Blocked Customers ({blockedCount})
+        </ToggleButton>
+      </ToggleButtonGroup>
 
       {/* ── Suspects view ── */}
       {activeView === "suspects" && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <Box sx={{ display: "flex", flexDirection: "column", gap: 1.75 }}>
+
           {/* Filter bar */}
-          <div style={{ ...S.card, padding: "14px 20px", display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
-            <input
-              value={searchQ} onChange={e => setSearchQ(e.target.value)}
-              placeholder="🔍 Search name, pincode, city…"
-              style={{ ...S.inp, width: 240, fontSize: 12 }}
+          <Paper variant="outlined" sx={{ p: "14px 20px", display: "flex", gap: 1.5, flexWrap: "wrap", alignItems: "center", borderRadius: 2 }}>
+            <TextField
+              value={searchQ}
+              onChange={(e) => setSearchQ(e.target.value)}
+              placeholder="Search name, pincode, city…"
+              size="small"
+              sx={{ width: 240 }}
+              InputProps={{
+                startAdornment: (
+                  <InputAdornment position="start">
+                    <SearchIcon fontSize="small" sx={{ color: "text.disabled" }} />
+                  </InputAdornment>
+                ),
+              }}
             />
-            <div style={{ width: 1, height: 24, background: C.gray200 }} />
-            <span style={{ fontSize: 12, color: C.gray500, fontWeight: 600 }}>Risk:</span>
-            {["all", "high", "medium", "low"].map(r => (
-              <button key={r} onClick={() => setRiskFilter(r)} style={{
-                padding: "5px 14px", borderRadius: 20, fontSize: 12, cursor: "pointer",
-                fontWeight: riskFilter === r ? 700 : 400, fontFamily: "inherit",
-                background: riskFilter === r
-                  ? r === "all" ? C.gray700 : r === "high" ? C.red : r === "medium" ? C.amber : C.green
-                  : C.white,
-                color: riskFilter === r ? C.white : C.gray600,
-                border: `1px solid ${riskFilter === r
-                  ? r === "all" ? C.gray700 : r === "high" ? C.red : r === "medium" ? C.amber : C.green
-                  : C.gray300}`,
-              }}>
-                {r.charAt(0).toUpperCase() + r.slice(1)}
-              </button>
-            ))}
-            <div style={{ width: 1, height: 24, background: C.gray200 }} />
-            <label style={{ fontSize: 12, color: C.gray500, fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}>
-              Min orders:
-              <select value={minOrders} onChange={e => setMinOrders(Number(e.target.value))}
-                style={{ ...S.inp, width: 70, fontSize: 12, padding: "5px 8px" }}>
-                {[1, 2, 3, 5, 10].map(n => <option key={n} value={n}>{n}</option>)}
-              </select>
-            </label>
-            {loading && <span style={{ fontSize: 12, color: C.gray400 }}>Calculating…</span>}
-          </div>
 
-          {/* Risk scoring legend */}
-          <div style={{ ...S.card, padding: "12px 18px", background: "#FFFBEB", borderColor: "#FDE68A" }}>
-            <p style={{ fontSize: 11, fontWeight: 700, color: C.amber, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 8 }}>
+            <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+              <Typography variant="caption" sx={{ fontWeight: 700, color: "text.secondary" }}>Risk:</Typography>
+              {["all", "high", "medium", "low"].map((r) => (
+                <Button
+                  key={r}
+                  size="small"
+                  variant={riskFilter === r ? "contained" : "outlined"}
+                  color={r === "high" ? "error" : r === "medium" ? "warning" : r === "low" ? "success" : "inherit"}
+                  onClick={() => setRiskFilter(r)}
+                  sx={{ textTransform: "capitalize", minWidth: 56, fontWeight: riskFilter === r ? 700 : 500 }}
+                >
+                  {r.charAt(0).toUpperCase() + r.slice(1)}
+                </Button>
+              ))}
+            </Box>
+
+            <FormControl size="small" sx={{ minWidth: 110 }}>
+              <InputLabel>Min orders</InputLabel>
+              <Select
+                value={minOrders}
+                label="Min orders"
+                onChange={(e) => setMinOrders(Number(e.target.value))}
+              >
+                {[1, 2, 3, 5, 10].map((n) => (
+                  <MenuItem key={n} value={n}>{n}</MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+
+            {loading && (
+              <Typography variant="caption" sx={{ color: "text.disabled" }}>Calculating…</Typography>
+            )}
+          </Paper>
+
+          {/* Risk legend */}
+          <Paper variant="outlined" sx={{ p: "12px 18px", bgcolor: "#FFFBEB", borderColor: "#FDE68A", borderRadius: 2 }}>
+            <Typography variant="caption" sx={{ fontWeight: 700, color: "warning.main", textTransform: "uppercase", letterSpacing: "0.06em", display: "block", mb: 1 }}>
               How risk is calculated
-            </p>
-            <div style={{ display: "flex", gap: 24, flexWrap: "wrap", fontSize: 12, color: C.gray600 }}>
-              <span><strong style={{ color: C.red }}>High Risk</strong> — RTO rate ≥ 75% OR ≥ 3 claims</span>
-              <span><strong style={{ color: C.amber }}>Medium Risk</strong> — RTO rate ≥ 40% OR ≥ 1 claim</span>
-              <span><strong style={{ color: C.green }}>Low Risk</strong> — below thresholds</span>
-              <span style={{ color: C.gray400 }}>Only customers with ≥ {minOrders} orders are shown</span>
-            </div>
-          </div>
+            </Typography>
+            <Box sx={{ display: "flex", gap: 3, flexWrap: "wrap" }}>
+              <Typography variant="caption" sx={{ color: "text.secondary" }}>
+                <strong style={{ color: C.red }}>High Risk</strong> — RTO rate ≥ 75% OR ≥ 3 claims
+              </Typography>
+              <Typography variant="caption" sx={{ color: "text.secondary" }}>
+                <strong style={{ color: C.amber }}>Medium Risk</strong> — RTO rate ≥ 40% OR ≥ 1 claim
+              </Typography>
+              <Typography variant="caption" sx={{ color: "text.secondary" }}>
+                <strong style={{ color: C.green }}>Low Risk</strong> — below thresholds
+              </Typography>
+              <Typography variant="caption" sx={{ color: "text.disabled" }}>
+                Only customers with ≥ {minOrders} orders are shown
+              </Typography>
+            </Box>
+          </Paper>
 
-          {/* Suspects table */}
-          <div style={S.card}>
-            <SectionHeader title="Customer Risk Analysis" count={filtered.length} />
-            <div style={{ overflowX: "auto" }}>
-              <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                <thead>
-                  <tr>
-                    {["Customer", "Location", "Orders", "Delivered", "RTO", "RTO Rate", "Claims", "Risk", "Action"].map(h => (
-                      <th key={h} style={{ ...S.th, textAlign: ["Orders", "Delivered", "RTO", "Claims"].includes(h) ? "right" : "left" }}>{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {filtered.map((s, i) => {
-                    const rowBg = s.is_blocked
-                      ? "#FFF5F5"
-                      : s.risk_level === "high"
-                        ? "#FFF8F8"
-                        : i % 2 === 0 ? C.white : C.gray50;
-                    return (
-                      <tr key={`${s.customer_name}-${s.customer_pincode}`}
-                        style={{ background: rowBg }}
-                        onMouseEnter={e => (e.currentTarget.style.background = "#F8F0FF")}
-                        onMouseLeave={e => (e.currentTarget.style.background = rowBg)}
-                      >
-                        <td style={S.td}>
-                          <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-                            <span style={{ fontWeight: 700, color: C.gray800, fontSize: 13 }}>{s.customer_name}</span>
-                            {s.is_blocked && (
-                              <span style={{ fontSize: 10, fontWeight: 700, color: C.red, background: C.redLight, padding: "1px 7px", borderRadius: 20, width: "fit-content" }}>
-                                🚫 BLOCKED
-                              </span>
-                            )}
-                          </div>
-                        </td>
-                        <td style={{ ...S.td, fontSize: 12 }}>
-                          <div style={{ color: C.gray600 }}>{s.customer_city || "—"}</div>
-                          <div style={{ color: C.gray400, fontSize: 11 }}>{s.customer_state} {s.customer_pincode}</div>
-                        </td>
-                        <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", fontWeight: 700 }}>{s.total_orders}</td>
-                        <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", color: C.green }}>{s.delivered}</td>
-                        <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", color: s.rto > 0 ? C.red : C.gray300, fontWeight: s.rto > 0 ? 700 : 400 }}>{s.rto}</td>
-                        <td style={S.td}><RateMeter rate={s.rto_rate} /></td>
-                        <td style={{ ...S.td, textAlign: "right" }}>
-                          {s.claim_count > 0
-                            ? <span style={{ fontFamily: "monospace", fontWeight: 700, color: C.red, background: C.redLight, padding: "2px 8px", borderRadius: 12 }}>{s.claim_count}</span>
-                            : <span style={{ color: C.gray300, fontFamily: "monospace" }}>0</span>}
-                        </td>
-                        <td style={S.td}><RiskBadge level={s.risk_level} /></td>
-                        <td style={S.td}>
-                          {s.is_blocked ? (
-                            <span style={{ fontSize: 12, color: C.gray400, fontStyle: "italic" }}>Blocked</span>
-                          ) : (
-                            <button
-                              onClick={() => setBlockTarget(s)}
-                              style={{ ...btn("danger", "sm"), padding: "4px 12px", fontSize: 11 }}
-                            >🚫 Block</button>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                  {!loading && filtered.length === 0 && (
-                    <tr>
-                      <td colSpan={9} style={{ ...S.td, textAlign: "center", padding: 52, color: C.gray400 }}>
-                        {suspects.length === 0
-                          ? "No customer data yet — upload labels first to track order history."
-                          : "No customers match the current filter."}
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </div>
+          {/* Suspects DataGrid */}
+          <Paper variant="outlined" sx={{ borderRadius: 2, overflow: "hidden" }}>
+            <Box sx={{ p: "14px 20px 10px", display: "flex", alignItems: "center", gap: 1.5 }}>
+              <Typography variant="subtitle2" sx={{ fontWeight: 700, color: C.gray800 }}>
+                Customer Risk Analysis
+              </Typography>
+              <Chip label={filtered.length} size="small" sx={{ fontWeight: 700 }} />
+            </Box>
+            <DataGrid
+              rows={filtered}
+              columns={suspectColumns}
+              getRowId={(row) => `${row.customer_name}-${row.customer_pincode}`}
+              rowHeight={64}
+              loading={loading}
+              autoHeight
+              disableRowSelectionOnClick
+              pageSizeOptions={[25, 50, 100]}
+              initialState={{ pagination: { paginationModel: { pageSize: 25 } } }}
+              sx={{
+                border: 0,
+                borderTop: `1px solid ${C.border}`,
+                "& .MuiDataGrid-columnHeaders": { bgcolor: C.gray50 },
+                "& .MuiDataGrid-cell": { alignItems: "center" },
+              }}
+            />
+          </Paper>
+        </Box>
       )}
 
       {/* ── Blocked customers view ── */}
       {activeView === "blocked" && (
-        <div style={S.card}>
-          <SectionHeader title="Blocked Customers" count={blocked.length} />
+        <Paper variant="outlined" sx={{ borderRadius: 2, overflow: "hidden" }}>
+          <Box sx={{ p: "14px 20px 10px", display: "flex", alignItems: "center", gap: 1.5 }}>
+            <Typography variant="subtitle2" sx={{ fontWeight: 700, color: C.gray800 }}>
+              Blocked Customers
+            </Typography>
+            <Chip label={blocked.length} size="small" color="error" sx={{ fontWeight: 700 }} />
+          </Box>
 
           {blocked.length === 0 ? (
-            <div style={{ textAlign: "center", padding: 52, color: C.gray400 }}>
-              <div style={{ fontSize: 32, marginBottom: 10 }}>✅</div>
-              <p>No blocked customers. Block a customer from the Suspect Analysis tab.</p>
-            </div>
+            <Box sx={{ textAlign: "center", py: 7, color: "text.disabled" }}>
+              <Typography variant="h4" sx={{ mb: 1 }}>✅</Typography>
+              <Typography variant="body2">
+                No blocked customers. Block a customer from the Suspect Analysis tab.
+              </Typography>
+            </Box>
           ) : (
-            <div style={{ overflowX: "auto" }}>
-              <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                <thead>
-                  <tr>
-                    {["Customer", "Location", "Pincode", "Reason", "Blocked On", "Action"].map(h => (
-                      <th key={h} style={S.th}>{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {blocked.map((bc, i) => {
-                    const rowBg = i % 2 === 0 ? C.white : C.gray50;
-                    return (
-                      <tr key={bc.id} style={{ background: rowBg }}
-                        onMouseEnter={e => (e.currentTarget.style.background = "#FFF5F5")}
-                        onMouseLeave={e => (e.currentTarget.style.background = rowBg)}
-                      >
-                        <td style={{ ...S.td, fontWeight: 700, color: C.gray800 }}>{bc.customer_name}</td>
-                        <td style={{ ...S.td, fontSize: 12, color: C.gray500 }}>
-                          {[bc.customer_city, bc.customer_state].filter(Boolean).join(", ") || "—"}
-                        </td>
-                        <td style={{ ...S.td, fontFamily: "monospace", fontSize: 12 }}>{bc.customer_pincode}</td>
-                        <td style={{ ...S.td, fontSize: 12, color: C.gray500, maxWidth: 240 }}>
-                          {bc.reason || <span style={{ color: C.gray300, fontStyle: "italic" }}>No reason given</span>}
-                        </td>
-                        <td style={{ ...S.td, fontSize: 12, color: C.gray500, whiteSpace: "nowrap" }}>
-                          {new Date(bc.blocked_at).toLocaleDateString("en-IN")}
-                        </td>
-                        <td style={S.td}>
-                          <button
-                            onClick={() => handleUnblock(bc.id)}
-                            style={{ ...btn("ghost", "sm"), padding: "4px 12px", fontSize: 11, color: C.green, borderColor: C.greenBorder }}
-                          >✓ Unblock</button>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
+            <DataGrid
+              rows={blocked}
+              columns={blockedColumns}
+              getRowId={(row) => row.id}
+              rowHeight={64}
+              autoHeight
+              disableRowSelectionOnClick
+              pageSizeOptions={[25, 50, 100]}
+              initialState={{ pagination: { paginationModel: { pageSize: 25 } } }}
+              sx={{
+                border: 0,
+                borderTop: `1px solid ${C.border}`,
+                "& .MuiDataGrid-columnHeaders": { bgcolor: C.gray50 },
+                "& .MuiDataGrid-cell": { alignItems: "center" },
+              }}
+            />
           )}
-        </div>
+        </Paper>
       )}
 
       {/* Info callout */}
-      <div style={{ ...S.card, padding: "14px 20px", background: C.gray50 }}>
-        <p style={{ fontSize: 11, fontWeight: 700, color: C.gray500, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 10 }}>
+      <Paper variant="outlined" sx={{ p: "14px 20px", bgcolor: C.gray50, borderRadius: 2 }}>
+        <Typography variant="caption" sx={{ fontWeight: 700, color: "text.secondary", textTransform: "uppercase", letterSpacing: "0.06em", display: "block", mb: 1 }}>
           How blocking works
-        </p>
-        <div style={{ display: "flex", gap: 28, flexWrap: "wrap", fontSize: 12, color: C.gray600 }}>
+        </Typography>
+        <Box sx={{ display: "flex", gap: 3.5, flexWrap: "wrap" }}>
           {[
             { icon: "📋", text: "Customer identity = Name + Pincode (as printed on Meesho labels)" },
             { icon: "🏷", text: "When you upload a labels PDF, any blocked customer in that batch is flagged immediately" },
             { icon: "📦", text: "Label Orders table shows a red BLOCKED badge on their rows" },
-            { icon: "✓",  text: "Unblocking is reversible — the customer goes back to normal" },
-          ].map(item => (
-            <div key={item.text} style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
-              <span style={{ fontSize: 16 }}>{item.icon}</span>
-              <span>{item.text}</span>
-            </div>
+            { icon: "✓", text: "Unblocking is reversible — the customer goes back to normal" },
+          ].map((item) => (
+            <Box key={item.text} sx={{ display: "flex", gap: 1, alignItems: "flex-start" }}>
+              <Typography sx={{ fontSize: 16 }}>{item.icon}</Typography>
+              <Typography variant="body2" sx={{ color: "text.secondary" }}>{item.text}</Typography>
+            </Box>
           ))}
-        </div>
-      </div>
-    </div>
+        </Box>
+      </Paper>
+    </Box>
   );
 }
