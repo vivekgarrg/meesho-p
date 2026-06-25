@@ -1,38 +1,23 @@
 import React, { useState, useEffect, useMemo } from "react";
+import { useSearchParams } from "react-router-dom";
 import { API, C, fmt } from "../../App";
 import { PAGE_SIZE as pageSize } from "../../lib/helper";
+import { FilterBar, fmtMonth, monthToRange } from "../shared/FilterBar";
 
 import {
   Box,
-  Button,
   Card,
   CardContent,
   Chip,
-  FormControl,
   InputAdornment,
-  InputLabel,
-  MenuItem,
   Paper,
-  Select,
   TextField,
   Typography,
 } from "@mui/material";
 import { DataGrid } from "@mui/x-data-grid";
 import SearchIcon from "@mui/icons-material/Search";
-import CalendarTodayIcon from "@mui/icons-material/CalendarToday";
 
 const PAGE_SIZE = pageSize;
-
-function fmtMonth(ym) {
-  const [y, m] = ym.split("-").map(Number);
-  return new Date(y, m - 1, 1).toLocaleString("en-IN", { month: "long", year: "numeric" });
-}
-
-function monthToRange(ym) {
-  const [y, m] = ym.split("-").map(Number);
-  const last = new Date(y, m, 0).getDate();
-  return { date_from: `${ym}-01`, date_to: `${ym}-${String(last).padStart(2, "0")}` };
-}
 
 const STATUS_CHIP_COLOR = {
   DELIVERED:    "success",
@@ -40,106 +25,17 @@ const STATUS_CHIP_COLOR = {
   CANCELLED:    "default",
 };
 
-// ── Filter bar ────────────────────────────────────────────────────────────────
-function FilterBar({ mode, setMode, selectedMonth, setSelectedMonth, months,
-                     customFrom, setCustomFrom, customTo, setCustomTo, onApply }) {
-  return (
-    <Paper
-      variant="outlined"
-      sx={{ p: "14px 20px", display: "flex", alignItems: "center", gap: 1.5, flexWrap: "wrap", borderRadius: 2 }}
-    >
-      <Box sx={{ display: "flex", alignItems: "center", gap: 0.5, mr: 0.5 }}>
-        <CalendarTodayIcon fontSize="small" sx={{ color: "text.secondary" }} />
-        <Typography variant="caption" sx={{ fontWeight: 700, color: "text.secondary", textTransform: "uppercase", letterSpacing: "0.06em" }}>
-          Filter
-        </Typography>
-      </Box>
-
-      {/* All time */}
-      <Button
-        size="small"
-        variant={mode === "all" ? "contained" : "outlined"}
-        color="primary"
-        onClick={() => { setMode("all"); onApply({}); }}
-        sx={{ textTransform: "none", fontWeight: mode === "all" ? 700 : 500 }}
-      >
-        All Time
-      </Button>
-
-      {/* Month select */}
-      <FormControl size="small" sx={{ minWidth: 180 }}>
-        <InputLabel>Select month</InputLabel>
-        <Select
-          value={mode === "month" ? selectedMonth : ""}
-          label="Select month"
-          onChange={(e) => {
-            const m = e.target.value;
-            if (!m) return;
-            setMode("month");
-            setSelectedMonth(m);
-            onApply(monthToRange(m));
-          }}
-          sx={{
-            bgcolor: mode === "month" ? "#F5F3FF" : undefined,
-            "& .MuiOutlinedInput-notchedOutline": {
-              borderColor: mode === "month" ? C.orange : undefined,
-            },
-          }}
-        >
-          <MenuItem value=""><em>Select month…</em></MenuItem>
-          {months.map((m) => (
-            <MenuItem key={m} value={m}>{fmtMonth(m)}</MenuItem>
-          ))}
-        </Select>
-      </FormControl>
-
-      <Box sx={{ width: "1px", height: 32, bgcolor: "divider" }} />
-
-      {/* Custom range */}
-      <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-        <Typography variant="caption" sx={{ fontWeight: 600, color: "text.secondary" }}>Custom:</Typography>
-        <TextField
-          type="date"
-          size="small"
-          value={customFrom}
-          onChange={(e) => setCustomFrom(e.target.value)}
-          sx={{ width: 150 }}
-          InputLabelProps={{ shrink: true }}
-        />
-        <Typography variant="body2" sx={{ color: "text.disabled" }}>→</Typography>
-        <TextField
-          type="date"
-          size="small"
-          value={customTo}
-          onChange={(e) => setCustomTo(e.target.value)}
-          sx={{ width: 150 }}
-          InputLabelProps={{ shrink: true }}
-        />
-        <Button
-          size="small"
-          variant={mode === "custom" ? "contained" : "outlined"}
-          disabled={!customFrom || !customTo}
-          onClick={() => {
-            if (!customFrom || !customTo) return;
-            setMode("custom");
-            onApply({ date_from: customFrom, date_to: customTo });
-          }}
-          sx={{ textTransform: "none" }}
-        >
-          Apply
-        </Button>
-      </Box>
-    </Paper>
-  );
-}
-
 // ── Main Tab ─────────────────────────────────────────────────────────────────
 export function UnsettledOrdersTab({ initialMonth }) {
+  const [searchParams] = useSearchParams();
+  const urlDateFrom = searchParams.get("date_from") || "";
+  const urlDateTo   = searchParams.get("date_to")   || "";
+
   const [months,   setMonths]   = useState([]);
   const [mode,     setMode]     = useState("all");
   const [selMonth, setSelMonth] = useState("");
-  const [custFrom, setCustFrom] = useState("");
-  const [custTo,   setCustTo]   = useState("");
+  const [custFrom, setCustFrom] = useState(urlDateFrom);
+  const [custTo,   setCustTo]   = useState(urlDateTo);
 
   const [activeRange, setActiveRange] = useState(null); // null = waiting
   const [page,    setPage]    = useState(0);            // DataGrid is 0-indexed
@@ -147,19 +43,27 @@ export function UnsettledOrdersTab({ initialMonth }) {
   const [data,    setData]    = useState(null);
   const [loading, setLoading] = useState(true);
 
-  // Load available months; use initialMonth if provided
+  // Load available months; use URL date range if provided, else initialMonth
   useEffect(() => {
     fetch(`${API}/profit/available-months/`)
       .then((r) => r.json())
       .then((ms) => {
         setMonths(ms);
-        const target = (initialMonth && ms.includes(initialMonth)) ? initialMonth : (ms[0] || null);
-        if (target) {
-          setMode("month");
-          setSelMonth(target);
-          setActiveRange(monthToRange(target));
+        if (urlDateFrom && urlDateTo) {
+          // Pre-set custom range from URL params
+          setMode("custom");
+          setCustFrom(urlDateFrom);
+          setCustTo(urlDateTo);
+          setActiveRange({ date_from: urlDateFrom, date_to: urlDateTo });
         } else {
-          setActiveRange({});
+          const target = (initialMonth && ms.includes(initialMonth)) ? initialMonth : (ms[0] || null);
+          if (target) {
+            setMode("month");
+            setSelMonth(target);
+            setActiveRange(monthToRange(target));
+          } else {
+            setActiveRange({});
+          }
         }
       })
       .catch(() => setActiveRange({}));
@@ -311,13 +215,13 @@ export function UnsettledOrdersTab({ initialMonth }) {
         </Typography>
       </Box>
 
-      {/* Filter bar */}
+      {/* Shared filter bar */}
       <FilterBar
-        mode={mode}       setMode={setMode}
-        selectedMonth={selMonth} setSelectedMonth={setSelMonth}
         months={months}
-        customFrom={custFrom} setCustomFrom={setCustFrom}
-        customTo={custTo}   setCustomTo={setCustTo}
+        mode={mode}           setMode={setMode}
+        selectedMonth={selMonth}   setSelectedMonth={setSelMonth}
+        customFrom={custFrom}      setCustomFrom={setCustFrom}
+        customTo={custTo}          setCustomTo={setCustTo}
         onApply={(range) => setActiveRange(range)}
       />
 

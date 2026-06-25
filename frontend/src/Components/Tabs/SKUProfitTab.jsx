@@ -7,7 +7,6 @@ import Paper from "@mui/material/Paper";
 import Button from "@mui/material/Button";
 import ButtonGroup from "@mui/material/ButtonGroup";
 import Chip from "@mui/material/Chip";
-import Grid from "@mui/material/Grid";
 import LinearProgress from "@mui/material/LinearProgress";
 import CircularProgress from "@mui/material/CircularProgress";
 import TextField from "@mui/material/TextField";
@@ -81,10 +80,11 @@ function MetricsPanel({ data, filterLabel }) {
   const delPft = data.reduce((a, s) => a + (s.delivered_profit || 0), 0);
   const retLoss = data.reduce((a, s) => a + (s.return_loss || 0), 0);
   const rtoLoss = data.reduce((a, s) => a + (s.rto_loss || 0), 0);
-  const claims = data.reduce((a, s) => a + (s.claims_total || 0), 0);
+  const otherNet = data.reduce((a, s) => a + (s.other_net || 0), 0);
   const nDel = data.reduce((a, s) => a + (s.delivered_count || 0), 0);
   const nRet = data.reduce((a, s) => a + (s.return_count || 0), 0);
   const nRTO = data.reduce((a, s) => a + (s.rto_count || 0), 0);
+  const nOther = data.reduce((a, s) => a + (s.other_count || 0), 0);
   const nTotal = nDel + nRet + nRTO;
   const nProfit = data.filter(s => s.net_profit > 0).length;
   const nLoss = data.filter(s => s.net_profit < 0).length;
@@ -94,58 +94,93 @@ function MetricsPanel({ data, filterLabel }) {
     <Card elevation={1} sx={{ overflow: "hidden" }}>
       <Box sx={{ height: 3, background: `linear-gradient(90deg, ${pos ? C.green : C.red}, ${C.orange})` }} />
       <CardContent>
-        <Grid container spacing={2} alignItems="flex-start">
+        <Box sx={{ display: "flex", gap: 3, flexWrap: "wrap", alignItems: "flex-start" }}>
+
           {/* Net P&L hero */}
-          <Grid item xs={12} md="auto">
-            <Box sx={{ pr: { md: 3 }, borderRight: { md: "1px solid" }, borderColor: "divider", mr: { md: 2 } }}>
-              <Typography variant="subtitle2" sx={{ mb: 0.5 }}>Net P&L · {filterLabel}</Typography>
-              <Typography variant="h3" sx={{ fontFamily: "monospace", fontWeight: 900, color: pos ? C.green : C.red, lineHeight: 1.1 }}>
-                {pos ? "+" : ""}{fmt(netPL)}
-              </Typography>
-              <Box sx={{ display: "flex", gap: 1, mt: 1, flexWrap: "wrap" }}>
-                {nProfit > 0 && <Chip label={`${nProfit} profitable`} color="success" size="small" />}
-                {nLoss > 0 && <Chip label={`${nLoss} in loss`} color="error" size="small" />}
-              </Box>
+          <Box sx={{ pr: 3, borderRight: `1px solid #E2E8F0`, minWidth: 160 }}>
+            <Typography variant="subtitle2" sx={{ mb: 0.5 }}>Net P&L · {filterLabel}</Typography>
+            <Typography variant="h3" sx={{ fontFamily: "monospace", fontWeight: 900, color: pos ? C.green : C.red, lineHeight: 1.1 }}>
+              {pos ? "+" : ""}{fmt(netPL)}
+            </Typography>
+            <Box sx={{ display: "flex", gap: 1, mt: 1, flexWrap: "wrap" }}>
+              {nProfit > 0 && <Chip label={`${nProfit} profitable`} color="success" size="small" />}
+              {nLoss > 0 && <Chip label={`${nLoss} in loss`} color="error" size="small" />}
             </Box>
-          </Grid>
+          </Box>
 
-          {/* Breakdown */}
-          <Grid item xs={12} md>
-            <Grid container spacing={2}>
-              {[
-                { label: "Delivered Profit", value: fmt(delPft), color: C.green, sub: `${nDel} orders` },
-                { label: "Return Loss", value: fmt(retLoss), color: C.red, sub: `${nRet} returns` },
-                { label: "RTO Loss", value: fmt(rtoLoss), color: C.amber, sub: `${nRTO} RTOs` },
-                ...(claims !== 0 ? [{ label: "Claims", value: fmt(claims), color: C.blue, sub: `${data.reduce((a, s) => a + (s.claims_count || 0), 0)} claims` }] : []),
-              ].map(m => (
-                <Grid item key={m.label}>
-                  <Typography variant="subtitle2" sx={{ mb: 0.25 }}>{m.label}</Typography>
-                  <Typography variant="h6" sx={{ fontFamily: "monospace", fontWeight: 800, color: m.color }}>{m.value}</Typography>
-                  <Typography variant="caption">{m.sub}</Typography>
-                </Grid>
-              ))}
+          {/* Breakdown amounts */}
+          <Box sx={{ display: "flex", gap: 2.5, flexWrap: "wrap", flex: 1 }}>
+            {[
+              { label: "Delivered Profit", value: fmt(delPft), color: C.green, sub: `${nDel} orders` },
+              { label: "Return Loss", value: fmt(retLoss), color: C.red, sub: `${nRet} returns` },
+              { label: "RTO Loss", value: fmt(rtoLoss), color: C.amber, sub: `${nRTO} RTOs` },
+              ...(otherNet !== 0 ? [{ label: "Other ±", value: fmt(otherNet), color: otherNet >= 0 ? C.gray600 : C.red, sub: `${nOther} orders (cancelled/adj)` }] : []),
+            ].map(m => (
+              <Box key={m.label} sx={{ minWidth: 110 }}>
+                <Typography variant="subtitle2" sx={{ mb: 0.25, fontSize: 11 }}>{m.label}</Typography>
+                <Typography variant="h6" sx={{ fontFamily: "monospace", fontWeight: 800, color: m.color }}>{m.value}</Typography>
+                <Typography variant="caption">{m.sub}</Typography>
+              </Box>
+            ))}
+          </Box>
 
-              {/* Rate bars */}
-              <Grid item xs={12} md="auto" sx={{ minWidth: 200 }}>
-                <Typography variant="subtitle2" sx={{ mb: 1 }}>Order Rates ({nTotal} total)</Typography>
+          {/* Rate bars */}
+          <Box sx={{ minWidth: 200 }}>
+            <Typography variant="subtitle2" sx={{ mb: 1, fontSize: 11 }}>Order Rates ({nTotal} total)</Typography>
+            {[
+              { label: "Delivered", p: pct(nDel, nTotal), color: C.green },
+              { label: "Returns", p: pct(nRet, nTotal), color: C.red },
+              { label: "RTO", p: pct(nRTO, nTotal), color: C.amber },
+            ].map(r => (
+              <Box key={r.label} sx={{ mb: 0.75 }}>
+                <Box sx={{ display: "flex", justifyContent: "space-between", mb: 0.25 }}>
+                  <Typography variant="caption">{r.label}</Typography>
+                  <Typography variant="caption" sx={{ fontWeight: 700, color: r.color }}>{r.p}%</Typography>
+                </Box>
+                <LinearProgress variant="determinate" value={r.p}
+                  sx={{ height: 5, borderRadius: 99, bgcolor: "grey.100", "& .MuiLinearProgress-bar": { bgcolor: r.color } }} />
+              </Box>
+            ))}
+          </Box>
+
+        </Box>
+
+        {/* ── P&L Reconciliation ─────────────────────────────────────────── */}
+        {(() => {
+          const computed = delPft + retLoss + rtoLoss + otherNet;
+          const diff = Math.abs(netPL - computed);
+          const match = diff < 0.01;
+          return (
+            <Box sx={{ mt: 2, pt: 1.5, borderTop: "1px dashed #E2E8F0", display: "flex", gap: 3, flexWrap: "wrap", alignItems: "center" }}>
+              <Typography variant="caption" color="text.disabled" sx={{ fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                P&L Check
+              </Typography>
+              <Box sx={{ display: "flex", gap: 2, flexWrap: "wrap", flex: 1 }}>
                 {[
-                  { label: "Delivered", p: pct(nDel, nTotal), color: C.green },
-                  { label: "Returns", p: pct(nRet, nTotal), color: C.red },
-                  { label: "RTO", p: pct(nRTO, nTotal), color: C.amber },
-                ].map(r => (
-                  <Box key={r.label} sx={{ mb: 0.75 }}>
-                    <Box sx={{ display: "flex", justifyContent: "space-between", mb: 0.25 }}>
-                      <Typography variant="caption">{r.label}</Typography>
-                      <Typography variant="caption" sx={{ fontWeight: 700, color: r.color }}>{r.p}%</Typography>
-                    </Box>
-                    <LinearProgress variant="determinate" value={r.p}
-                      sx={{ height: 5, borderRadius: 99, bgcolor: "grey.100", "& .MuiLinearProgress-bar": { bgcolor: r.color } }} />
+                  { label: "Σ net_profit (backend)", value: netPL },
+                  { label: "Delivered", value: delPft },
+                  { label: "+ Return", value: retLoss },
+                  { label: "+ RTO", value: rtoLoss },
+                  { label: "+ Other", value: otherNet },
+                  { label: "= Computed total", value: computed },
+                ].map(({ label, value }) => (
+                  <Box key={label}>
+                    <Typography variant="caption" color="text.disabled" display="block">{label}</Typography>
+                    <Typography variant="body2" sx={{ fontFamily: "monospace", fontWeight: 700, color: value >= 0 ? C.green : C.red }}>
+                      {value >= 0 ? "+" : ""}{fmt(value)}
+                    </Typography>
                   </Box>
                 ))}
-              </Grid>
-            </Grid>
-          </Grid>
-        </Grid>
+              </Box>
+              <Chip
+                label={match ? `✅ Match` : `⚠️ Off by ${fmt(diff)}`}
+                size="small"
+                color={match ? "success" : "warning"}
+                sx={{ fontWeight: 700 }}
+              />
+            </Box>
+          );
+        })()}
       </CardContent>
     </Card>
   );
@@ -190,23 +225,40 @@ function SKUDataTable({ data, onRowClick }) {
     },
     {
       field: "one_unit_price", headerName: "Cost", width: 120, type: "number",
-      valueFormatter: ({ value }) => fmt(value),
+      valueFormatter: value => fmt(value),
       renderCell: p => <Typography variant="body2" sx={{ fontFamily: "monospace", color: "text.secondary" }}>{fmt(p.value)}</Typography>,
     },
     {
+      field: "avg_profit_per_piece", headerName: "Avg Profit/pc", width: 130, type: "number",
+      valueFormatter: value => value != null ? fmt(value) : "—",
+      renderCell: p => {
+        if (p.value == null) return <span style={{ color: "#CBD5E1" }}>—</span>;
+        const pos = p.value >= 0;
+        return (
+          <Typography variant="body2" sx={{ fontFamily: "monospace", fontWeight: 700, color: pos ? C.green : C.red }}>
+            {pos ? "+" : ""}{fmt(p.value)}
+          </Typography>
+        );
+      },
+    },
+    {
       field: "delivered_profit", headerName: "Delivered +", width: 130, type: "number",
-      valueFormatter: ({ value }) => fmt(value),
+      valueFormatter: value => fmt(value),
       renderCell: p => p.value ? <Typography variant="body2" sx={{ fontFamily: "monospace", color: C.green, fontWeight: 600 }}>+{fmt(p.value)}</Typography> : <span style={{ color: "#CBD5E1" }}>—</span>,
     },
     {
-      field: "total_loss", headerName: "Loss −", width: 120, type: "number",
-      valueGetter: p => (p?.row?.return_loss || 0) + (p?.row?.rto_loss || 0),
-      valueFormatter: ({ value }) => fmt(value),
-      renderCell: p => p.value ? <Typography variant="body2" sx={{ fontFamily: "monospace", color: C.red, fontWeight: 600 }}>{fmt(p.value)}</Typography> : <span style={{ color: "#CBD5E1" }}>—</span>,
+      field: "claims_total", headerName: "Claims ₹", width: 110, type: "number",
+      valueFormatter: value => fmt(value),
+      renderCell: p => {
+        const n = Number(p.value || 0);
+        return n > 0
+          ? <Typography variant="body2" sx={{ fontFamily: "monospace", color: C.blue, fontWeight: 600 }}>+{fmt(n)}</Typography>
+          : <span style={{ color: "#CBD5E1" }}>—</span>;
+      },
     },
     {
       field: "net_profit", headerName: "Net P&L", width: 150, type: "number",
-      valueFormatter: ({ value }) => fmt(value),
+      valueFormatter: value => fmt(value),
       renderCell: p => {
         const pos = p.value >= 0;
         return (
@@ -268,20 +320,35 @@ function SKUDetailModal({ sku, months, onClose }) {
           del_pft: Number(raw.delivered_profit || 0),
           ret_loss: Number(raw.return_loss || 0),
           rto_loss: Number(raw.rto_loss || 0),
-          claims: Number(raw.claims_total || 0),
-          del: raw.delivered_count || 0, ret: raw.return_count || 0,
-          rto: raw.rto_count || 0, ord: raw.order_count || 0,
+          other_net: Number(raw.other_net || 0),
+          pkg_cost: Number(raw.total_packaging_cost || 0),
+          tax_cost: Number(raw.total_tax_cost || 0),
+          del: raw.delivered_count || 0,
+          ret: raw.return_count || 0,
+          rto: raw.rto_count || 0,
+          other: raw.other_count || 0,
+          ord: raw.order_count || 0,
         };
       }).catch(() => ({ month: m, net: 0, del_pft: 0, ret_loss: 0, rto_loss: 0, claims: 0, del: 0, ret: 0, rto: 0, ord: 0 }))
     )).then(res => { setMonthly(res.sort((a, b) => a.month.localeCompare(b.month))); setLoading(false); });
   }, []); // eslint-disable-line
 
   const tot = monthly.reduce((acc, m) => ({
-    net: acc.net + m.net, del_pft: acc.del_pft + m.del_pft,
-    ret_loss: acc.ret_loss + m.ret_loss, rto_loss: acc.rto_loss + m.rto_loss,
-    claims: acc.claims + m.claims, del: acc.del + m.del,
-    ret: acc.ret + m.ret, rto: acc.rto + m.rto, ord: acc.ord + m.ord,
-  }), { net: 0, del_pft: 0, ret_loss: 0, rto_loss: 0, claims: 0, del: 0, ret: 0, rto: 0, ord: 0 });
+    net: acc.net + m.net,
+    del_pft: acc.del_pft + m.del_pft,
+    ret_loss: acc.ret_loss + m.ret_loss,
+    rto_loss: acc.rto_loss + m.rto_loss,
+    other_net: acc.other_net + m.other_net,
+    pkg_cost: acc.pkg_cost + m.pkg_cost,
+    tax_cost: acc.tax_cost + m.tax_cost,
+    del: acc.del + m.del, ret: acc.ret + m.ret,
+    rto: acc.rto + m.rto, other: acc.other + m.other, ord: acc.ord + m.ord,
+  }), { net: 0, del_pft: 0, ret_loss: 0, rto_loss: 0, other_net: 0, pkg_cost: 0, tax_cost: 0, del: 0, ret: 0, rto: 0, other: 0, ord: 0 });
+
+  const totOrds = tot.del + tot.ret + tot.rto;
+  const delRate = totOrds > 0 ? Math.round(tot.del / totOrds * 100) : 0;
+  const retRate = totOrds > 0 ? Math.round(tot.ret / totOrds * 100) : 0;
+  const rtoRate = totOrds > 0 ? Math.round(tot.rto / totOrds * 100) : 0;
 
   const chartData = monthly.map(m => ({
     month: fmtShort(m.month),
@@ -316,28 +383,66 @@ function SKUDetailModal({ sku, months, onClose }) {
           </Box>
         ) : (
           <Box sx={{ display: "flex", flexDirection: "column", gap: 3 }}>
-            {/* Summary grid */}
-            <Grid container spacing={1.5}>
+            {/* Summary cards */}
+            <Box sx={{ display: "flex", gap: 1.5, flexWrap: "wrap" }}>
               {[
                 { label: "Net P&L", value: tot.net, color: tot.net >= 0 ? C.green : C.red, sub: `${tot.ord} orders` },
                 { label: "Delivered Profit", value: tot.del_pft, color: C.green, sub: `${tot.del} delivered` },
                 { label: "Return Loss", value: tot.ret_loss, color: C.red, sub: `${tot.ret} returns` },
                 { label: "RTO Loss", value: tot.rto_loss, color: C.amber, sub: `${tot.rto} RTOs` },
-                { label: "Claims", value: tot.claims, color: C.blue, sub: "net received" },
+                { label: "Other ±", value: tot.other_net, color: tot.other_net >= 0 ? C.gray600 : C.red, sub: `${tot.other} orders (cancelled/adj)` },
+                { label: "Packaging Cost", value: -tot.pkg_cost, color: C.red, sub: "total packaging paid" },
+                { label: "Tax (GST) Cost", value: -tot.tax_cost, color: C.amber, sub: "GST on item price" },
               ].map(({ label, value, color, sub }) => (
-                <Grid item xs={6} md="auto" key={label} sx={{ minWidth: 140 }}>
-                  <Paper variant="outlined" sx={{ p: 1.5, bgcolor: "grey.50" }}>
-                    <Typography variant="subtitle2" sx={{ mb: 0.25, fontSize: 10 }}>{label}</Typography>
-                    <Typography variant="h6" sx={{ fontFamily: "monospace", fontWeight: 800, color }}>{fmt(value)}</Typography>
-                    <Typography variant="caption">{sub}</Typography>
-                  </Paper>
-                </Grid>
+                <Paper key={label} variant="outlined" sx={{ p: 1.5, bgcolor: "grey.50", flex: "1 1 130px" }}>
+                  <Typography variant="subtitle2" sx={{ mb: 0.25, fontSize: 10 }}>{label}</Typography>
+                  <Typography variant="h6" sx={{ fontFamily: "monospace", fontWeight: 800, color }}>{fmt(value)}</Typography>
+                  <Typography variant="caption">{sub}</Typography>
+                </Paper>
               ))}
-            </Grid>
+            </Box>
+
+            {/* Outcome rates + return/rto loss detail */}
+            <Box sx={{ display: "flex", gap: 1.5, flexWrap: "wrap" }}>
+              <Paper variant="outlined" sx={{ p: 1.5, bgcolor: "grey.50", flex: "1 1 180px" }}>
+                <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.5 }}>
+                  Order Outcome Rates ({totOrds} orders)
+                </Typography>
+                {[
+                  { label: "Delivery", p: delRate, color: C.green },
+                  { label: "Return %", p: retRate, color: C.red },
+                  { label: "RTO %", p: rtoRate, color: C.amber },
+                ].map(r => (
+                  <Box key={r.label} sx={{ mb: 0.75 }}>
+                    <Box sx={{ display: "flex", justifyContent: "space-between", mb: 0.25 }}>
+                      <Typography variant="caption">{r.label}</Typography>
+                      <Typography variant="caption" sx={{ fontWeight: 800, color: r.color }}>{r.p}%</Typography>
+                    </Box>
+                    <LinearProgress variant="determinate" value={r.p}
+                      sx={{ height: 6, borderRadius: 99, bgcolor: "grey.200", "& .MuiLinearProgress-bar": { bgcolor: r.color } }} />
+                  </Box>
+                ))}
+              </Paper>
+              <Paper variant="outlined" sx={{ p: 1.5, bgcolor: "grey.50", flex: "1 1 130px" }}>
+                <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.5 }}>Return Loss</Typography>
+                <Typography variant="h6" sx={{ fontFamily: "monospace", color: C.red, fontWeight: 800 }}>{fmt(tot.ret_loss)}</Typography>
+                <Typography variant="caption">{tot.ret} returns · {retRate}% rate</Typography>
+              </Paper>
+              <Paper variant="outlined" sx={{ p: 1.5, bgcolor: "grey.50", flex: "1 1 130px" }}>
+                <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.5 }}>RTO Loss</Typography>
+                <Typography variant="h6" sx={{ fontFamily: "monospace", color: C.amber, fontWeight: 800 }}>{fmt(tot.rto_loss)}</Typography>
+                <Typography variant="caption">{tot.rto} RTOs · {rtoRate}% rate</Typography>
+              </Paper>
+            </Box>
 
             {/* P&L bar chart */}
             <Paper variant="outlined" sx={{ p: 2, bgcolor: "grey.50" }}>
-              <Typography variant="subtitle2" sx={{ mb: 1 }}>Monthly Financial Breakdown</Typography>
+              <Typography variant="subtitle2" sx={{ mb: 0.5 }}>Monthly Financial Breakdown</Typography>
+              <Typography variant="caption" sx={{ display: "block", mb: 1, color: "text.secondary" }}>
+                Return rate: <strong style={{ color: C.red }}>{retRate}%</strong>
+                &nbsp;·&nbsp; RTO rate: <strong style={{ color: C.amber }}>{rtoRate}%</strong>
+                &nbsp;·&nbsp; Delivery rate: <strong style={{ color: C.green }}>{delRate}%</strong>
+              </Typography>
               <BarChart
                 dataset={chartData}
                 xAxis={[{ scaleType: "band", dataKey: "month" }]}
@@ -356,8 +461,8 @@ function SKUDetailModal({ sku, months, onClose }) {
               <Table size="small">
                 <TableHead>
                   <TableRow>
-                    {["Month", "✅ Del.", "↩ Ret.", "🔄 RTO", "Profit +", "Loss −", "Net P&L"].map(h => (
-                      <TableCell key={h}>{h}</TableCell>
+                    {["Month", "✅ Del.", "↩ Ret.", "🔄 RTO", "Profit +", "Loss −", "Other ±", "Packaging", "Tax (GST)", "Net P&L"].map(h => (
+                      <TableCell key={h} sx={{ fontWeight: 700, fontSize: 11 }}>{h}</TableCell>
                     ))}
                   </TableRow>
                 </TableHead>
@@ -372,6 +477,15 @@ function SKUDetailModal({ sku, months, onClose }) {
                         <TableCell sx={{ color: C.amber, fontFamily: "monospace" }}>{m.rto || "—"}</TableCell>
                         <TableCell sx={{ color: C.green, fontFamily: "monospace" }}>{m.del_pft !== 0 ? `+${fmt(m.del_pft)}` : "—"}</TableCell>
                         <TableCell sx={{ color: C.red, fontFamily: "monospace" }}>{loss !== 0 ? fmt(loss) : "—"}</TableCell>
+                        <TableCell sx={{ color: m.other_net >= 0 ? C.gray600 : C.red, fontFamily: "monospace" }}>
+                          {m.other_net !== 0 ? `${m.other_net >= 0 ? "+" : ""}${fmt(m.other_net)}` : "—"}
+                        </TableCell>
+                        <TableCell sx={{ color: C.red, fontFamily: "monospace" }}>
+                          {m.pkg_cost > 0 ? `−${fmt(m.pkg_cost)}` : "—"}
+                        </TableCell>
+                        <TableCell sx={{ color: C.amber, fontFamily: "monospace" }}>
+                          {m.tax_cost > 0 ? `−${fmt(m.tax_cost)}` : "—"}
+                        </TableCell>
                         <TableCell>
                           <Chip label={`${m.net >= 0 ? "+" : ""}${fmt(m.net)}`} size="small"
                             sx={{
@@ -394,6 +508,170 @@ function SKUDetailModal({ sku, months, onClose }) {
   );
 }
 
+// ── Low Margin Analysis Panel ─────────────────────────────────────────────────
+const THRESHOLDS = [20, 30, 40, 50, 100];
+
+function LowMarginPanel({ rows, threshold, setThreshold, onRowClick }) {
+  const totalProfit = rows.reduce((a, s) => a + (s.delivered_profit || 0), 0);
+  const totalQty = rows.reduce((a, s) => a + (s.delivered_quantity || 0), 0);
+  const totalNetPL = rows.reduce((a, s) => a + s.net_profit, 0);
+
+  return (
+    <Box sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
+      {/* Threshold selector */}
+      <Paper elevation={1} sx={{ p: 2 }}>
+        <Typography variant="subtitle2" sx={{ mb: 1.5 }}>
+          Show SKUs where avg profit per piece is less than:
+        </Typography>
+        <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap", alignItems: "center" }}>
+          {THRESHOLDS.map(t => (
+            <Button key={t} size="small"
+              variant={threshold === t ? "contained" : "outlined"} disableElevation
+              color="warning"
+              onClick={() => setThreshold(t)}
+              sx={{ borderRadius: 20, fontWeight: threshold === t ? 700 : 400, minWidth: 64, fontFamily: "monospace" }}>
+              &lt; ₹{t}
+            </Button>
+          ))}
+          <Typography variant="caption" color="text.secondary" sx={{ ml: 1 }}>
+            Formula: delivered_profit ÷ units_delivered
+          </Typography>
+        </Box>
+      </Paper>
+
+      {/* Summary strip */}
+      <Box sx={{ display: "flex", gap: 1.5, flexWrap: "wrap" }}>
+        {[
+          { label: `SKUs flagged (< ₹${threshold}/piece)`, value: rows.length, color: "#D97706" },
+          { label: "Total units delivered", value: totalQty.toLocaleString("en-IN"), color: "#2563EB" },
+          { label: "Combined delivered profit", value: fmt(totalProfit), color: totalProfit >= 0 ? "#059669" : "#E11D48" },
+          { label: "Net P&L (incl. returns)", value: fmt(totalNetPL), color: totalNetPL >= 0 ? "#059669" : "#E11D48" },
+        ].map(item => (
+          <Paper key={item.label} variant="outlined" sx={{ p: 1.5, flex: "1 1 150px", bgcolor: "grey.50" }}>
+            <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.5 }}>{item.label}</Typography>
+            <Typography variant="h6" sx={{ fontFamily: "monospace", fontWeight: 800, color: item.color }}>{item.value}</Typography>
+          </Paper>
+        ))}
+      </Box>
+
+      {rows.length === 0 ? (
+        <Paper elevation={1} sx={{ textAlign: "center", py: 6 }}>
+          <Typography variant="h4" sx={{ mb: 1 }}>✅</Typography>
+          <Typography variant="h6" fontWeight={700}>No SKUs below ₹{threshold}/piece</Typography>
+          <Typography variant="body2" color="text.secondary">All SKUs with delivered orders are earning more than ₹{threshold} per piece.</Typography>
+        </Paper>
+      ) : (
+        <Paper elevation={1} sx={{ overflow: "hidden" }}>
+          {/* Table header */}
+          <Box sx={{ display: "flex", bgcolor: "grey.100", borderBottom: "1px solid #E2E8F0", px: 2, py: 1, gap: 1 }}>
+            {["SKU", "Unit Cost (₹)", "Avg Settle/Pc", "Avg Profit/Pc", "Units Sold", "Del. Profit", "Return Rate", "Net P&L"].map((h, i) => (
+              <Typography key={h} variant="caption" sx={{
+                fontWeight: 700, color: "text.secondary", textTransform: "uppercase", letterSpacing: "0.05em",
+                flex: i === 0 ? "1 1 140px" : i === 3 ? "0 0 130px" : "1 1 90px",
+                textAlign: i >= 1 ? "right" : "left",
+              }}>{h}</Typography>
+            ))}
+            <Box sx={{ width: 36 }} />
+          </Box>
+
+          {/* Rows */}
+          {rows.map((s) => {
+            const avg = s.avg_profit_per_piece;
+            const avgs = s.avg_settlement_per_piece;
+            const cost = Number(s.one_unit_price || 0);
+            const qty = Number(s.delivered_quantity || 0);
+            const dPft = Number(s.delivered_profit || 0);
+            const nDel = Number(s.delivered_count || 0);
+            const nRet = Number(s.return_count || 0);
+            const nRTO = Number(s.rto_count || 0);
+            const tot = nDel + nRet + nRTO;
+            const retRt = tot > 0 ? Math.round((nRet + nRTO) / tot * 100) : 0;
+            const netPL = s.net_profit;
+            // Gap to ₹50 threshold (for visual)
+            const gap = threshold - avg;
+            // Color scale based on how far below threshold
+            const pctOfThresh = avg / threshold;
+            const rowColor = pctOfThresh < 0.4 ? "#FFF1F2" : pctOfThresh < 0.7 ? "#FFFBEB" : "#F0FDF4";
+
+            return (
+              <Box key={s.sku_id} onClick={() => onRowClick(s)}
+                sx={{
+                  display: "flex", alignItems: "center", px: 2, py: 1.25, gap: 1,
+                  bgcolor: rowColor,
+                  borderBottom: "1px solid #F1F5F9",
+                  cursor: "pointer", "&:hover": { filter: "brightness(0.96)" },
+                  transition: "filter 0.15s",
+                }}>
+                {/* SKU */}
+                <Box sx={{ flex: "1 1 140px" }}>
+                  <Chip label={s.sku_id} size="small"
+                    sx={{ fontFamily: "monospace", fontWeight: 700, bgcolor: "#F5F3FF", color: "#6D28D9", border: "1px solid #C4B5FD", maxWidth: "100%" }} />
+                  <Typography variant="caption" sx={{ display: "block", color: "text.disabled", mt: 0.25 }}>{nDel} del orders</Typography>
+                </Box>
+
+                {/* Unit cost */}
+                <Typography variant="body2" sx={{ fontFamily: "monospace", flex: "1 1 90px", textAlign: "right", color: "#64748B" }}>
+                  {fmt(cost)}
+                </Typography>
+
+                {/* Avg settlement / piece */}
+                <Typography variant="body2" sx={{ fontFamily: "monospace", flex: "1 1 90px", textAlign: "right", color: "#2563EB" }}>
+                  {avgs !== null ? fmt(avgs) : "—"}
+                </Typography>
+
+                {/* Avg profit / piece — KEY COLUMN */}
+                <Box sx={{ flex: "0 0 130px", textAlign: "right" }}>
+                  <Typography variant="body2" sx={{
+                    fontFamily: "monospace", fontWeight: 800, fontSize: 14,
+                    color: avg < 0 ? "#E11D48" : avg < threshold * 0.5 ? "#D97706" : "#059669",
+                  }}>
+                    {avg < 0 ? "" : "+"}{fmt(avg)}
+                  </Typography>
+                  <Typography variant="caption" sx={{ color: "#94A3B8" }}>
+                    ₹{gap.toFixed(0)} below ₹{threshold}
+                  </Typography>
+                </Box>
+
+                {/* Units sold */}
+                <Typography variant="body2" sx={{ fontFamily: "monospace", flex: "1 1 90px", textAlign: "right" }}>
+                  {qty}
+                </Typography>
+
+                {/* Delivered profit */}
+                <Typography variant="body2" sx={{ fontFamily: "monospace", flex: "1 1 90px", textAlign: "right", color: dPft >= 0 ? "#059669" : "#E11D48" }}>
+                  {fmt(dPft)}
+                </Typography>
+
+                {/* Return rate */}
+                <Box sx={{ flex: "1 1 90px", textAlign: "right" }}>
+                  <Typography variant="body2" sx={{ fontFamily: "monospace", color: retRt > 30 ? "#E11D48" : retRt > 15 ? "#D97706" : "#64748B" }}>
+                    {retRt}%
+                  </Typography>
+                  <Typography variant="caption" color="text.disabled">{nRet + nRTO} back</Typography>
+                </Box>
+
+                {/* Net P&L */}
+                <Chip label={`${netPL >= 0 ? "+" : ""}${fmt(netPL)}`} size="small"
+                  sx={{
+                    flex: "1 1 90px", fontFamily: "monospace", fontWeight: 700, fontSize: 12,
+                    bgcolor: netPL >= 0 ? "#ECFDF5" : "#FFF1F2",
+                    color: netPL >= 0 ? "#059669" : "#E11D48",
+                    border: `1px solid ${netPL >= 0 ? "#A7F3D0" : "#FECDD3"}`,
+                  }} />
+
+                {/* Detail button */}
+                <Tooltip title="Monthly breakdown">
+                  <IconButton size="small" sx={{ color: "#2563EB", width: 36 }}>📊</IconButton>
+                </Tooltip>
+              </Box>
+            );
+          })}
+        </Paper>
+      )}
+    </Box>
+  );
+}
+
 // ── Main tab ──────────────────────────────────────────────────────────────────
 export function SKUAnalysisTab() {
   const [allData, setAllData] = useState([]);
@@ -404,6 +682,7 @@ export function SKUAnalysisTab() {
   const [selMonth, setSelMonth] = useState(null);
   const [range, setRange] = useState(null);
   const [label, setLabel] = useState("All time");
+  const [marginThreshold, setMarginThreshold] = useState(50);
 
   useEffect(() => {
     fetch(`${API}/profit/available-months/`).then(r => r.json()).then(ms => {
@@ -423,9 +702,18 @@ export function SKUAnalysisTab() {
       const raw = d.sku_wise_profit || {};
       const prepared = Object.keys(raw).map(key => {
         const r = raw[key];
+        const delPft = Number(r.delivered_profit || 0);
+        const delQty = Number(r.delivered_quantity || 0);
+        const delCost = Number(r.delivered_purchase_cost || 0);
+        // avg profit per delivered unit: (settlement - purchase_cost) / qty
+        const avg_profit_per_piece = delQty > 0 ? delPft / delQty : null;
+        // avg settlement per unit (gross, before deducting item cost)
+        const avg_settlement_per_piece = delQty > 0 ? (delPft + delCost) / delQty : null;
         return {
           sku_id: key, ...r,
-          net_profit: Number(r.net_profit ?? (Number(r.delivered_profit || 0) + Number(r.return_loss || 0) + Number(r.rto_loss || 0))),
+          net_profit: Number(r.net_profit ?? (delPft + Number(r.return_loss || 0) + Number(r.rto_loss || 0))),
+          avg_profit_per_piece,
+          avg_settlement_per_piece,
         };
       }).sort((a, b) => b.net_profit - a.net_profit);
       setAllData(prepared); setLoading(false);
@@ -434,7 +722,14 @@ export function SKUAnalysisTab() {
 
   const profitRows = allData.filter(s => s.net_profit > 0);
   const lossRows = allData.filter(s => s.net_profit < 0).reverse();
-  const viewData = view === "profit" ? profitRows : view === "loss" ? lossRows : allData;
+  const lowMarginRows = allData
+    .filter(s => s.avg_profit_per_piece !== null && s.avg_profit_per_piece < marginThreshold && (s.delivered_quantity || 0) > 0)
+    .sort((a, b) => a.avg_profit_per_piece - b.avg_profit_per_piece);
+
+  const viewData = view === "profit" ? profitRows
+    : view === "loss" ? lossRows
+      : view === "low-margin" ? lowMarginRows
+        : allData;
 
   const chartData = [...allData].sort((a, b) => Math.abs(b.net_profit) - Math.abs(a.net_profit)).slice(0, 12);
 
@@ -444,9 +739,10 @@ export function SKUAnalysisTab() {
   };
 
   const VIEWS = [
-    { id: "all", label: "All", count: allData.length },
-    { id: "profit", label: "Profitable", count: profitRows.length },
-    { id: "loss", label: "Loss", count: lossRows.length },
+    { id: "all", label: "All", count: allData.length, color: "primary" },
+    { id: "profit", label: "Profitable", count: profitRows.length, color: "success" },
+    { id: "loss", label: "Loss", count: lossRows.length, color: "error" },
+    { id: "low-margin", label: "Low Margin", count: lowMarginRows.length, color: "warning" },
   ];
 
   return (
@@ -458,10 +754,9 @@ export function SKUAnalysisTab() {
           <Typography variant="body2" color="text.secondary">Settled orders · {label}</Typography>
         </Box>
         <ButtonGroup size="small" variant="outlined">
-          {VIEWS.map(({ id, label: l, count }) => (
+          {VIEWS.map(({ id, label: l, count, color }) => (
             <Button key={id} onClick={() => setView(id)}
-              variant={view === id ? "contained" : "outlined"} disableElevation
-              color={id === "loss" ? "error" : id === "profit" ? "success" : "primary"}
+              variant={view === id ? "contained" : "outlined"} disableElevation color={color}
               sx={{ fontWeight: view === id ? 700 : 500 }}>
               {l} <Chip label={count} size="small" sx={{ ml: 0.75, height: 18, fontSize: 10, bgcolor: "rgba(255,255,255,0.3)", color: "inherit" }} />
             </Button>
@@ -517,15 +812,27 @@ export function SKUAnalysisTab() {
           </Card>
         )}
 
-        {/* SKU DataGrid */}
-        <Card elevation={1}>
-          <CardContent sx={{ pb: 0 }}>
-            <Typography variant="subtitle2" sx={{ mb: 1 }}>
-              {viewData.length} SKUs · click any row for monthly breakdown
-            </Typography>
-          </CardContent>
-          <SKUDataTable data={viewData} onRowClick={setSelSKU} />
-        </Card>
+        {/* Low Margin Panel */}
+        {view === "low-margin" && (
+          <LowMarginPanel
+            rows={lowMarginRows}
+            threshold={marginThreshold}
+            setThreshold={setMarginThreshold}
+            onRowClick={setSelSKU}
+          />
+        )}
+
+        {/* SKU DataGrid (for all / profit / loss views) */}
+        {view !== "low-margin" && (
+          <Card elevation={1}>
+            <CardContent sx={{ pb: 0 }}>
+              <Typography variant="subtitle2" sx={{ mb: 1 }}>
+                {viewData.length} SKUs · click any row for monthly breakdown
+              </Typography>
+            </CardContent>
+            <SKUDataTable data={viewData} onRowClick={setSelSKU} />
+          </Card>
+        )}
       </>}
 
       {selSKU && <SKUDetailModal sku={selSKU} months={months} onClose={() => setSelSKU(null)} />}

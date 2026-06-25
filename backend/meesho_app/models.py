@@ -306,6 +306,36 @@ class PurchaseItem(models.Model):
         return f"{self.parent_sku_id} x{self.quantity} ({'exchange' if self.is_exchange else 'purchase'})"
 
 
+class InventoryAdjustment(models.Model):
+    """Manual stock correction — damaged, found, miscounted, etc."""
+    REASON_CHOICES = [
+        ("DAMAGED",    "Damaged / Written Off"),
+        ("FOUND",      "Stock Found / Recount"),
+        ("CORRECTION", "Inventory Correction"),
+        ("LOST",       "Lost / Stolen"),
+        ("RETURN",     "Customer Return (non-Meesho)"),
+        ("OTHER",      "Other"),
+    ]
+    parent_sku = models.ForeignKey(
+        ParentItemPrice, on_delete=models.CASCADE,
+        related_name="inventory_adjustments", db_column="parent_sku_id",
+    )
+    quantity   = models.IntegerField()  # positive = add stock, negative = remove stock
+    reason     = models.CharField(max_length=50, choices=REASON_CHOICES, default="OTHER")
+    notes      = models.TextField(blank=True)
+    date       = models.DateField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "inventory_adjustments"
+        ordering = ["-date", "-created_at"]
+
+    def __str__(self):
+        sign = "+" if self.quantity >= 0 else ""
+        return f"{self.parent_sku_id} {sign}{self.quantity} ({self.reason}) on {self.date}"
+
+
 class LabelOrder(models.Model):
     """
     One row per label (= one shipping order) parsed from an uploaded Meesho labels PDF.

@@ -15,11 +15,14 @@ import { PurchasesTab } from "./Components/Tabs/PurchasesTab";
 import { InventoryTab } from "./Components/Tabs/InventoryTab";
 import { FraudCustomersTab } from "./Components/Tabs/FraudCustomersTab";
 import { ProductPhotosTab } from "./Components/Tabs/ProductPhotosTab";
+import { MismatchTab } from "./Components/Tabs/MismatchTab";
+import { ReturnClaimsTab } from "./Components/Tabs/ReturnClaimsTab";
+import { ClaimedOrdersTab } from "./Components/Tabs/ClaimedOrdersTab";
 import { SKU_PAGE_SIZE as skuPageSize } from "./lib/helper";
 import TableData from "./Components/Table/TableData";
 
 // ── API base (re-exported for tabs that import directly from App) ───────────
-export const API = "http://localhost:8000/api";
+export const API = "/api";
 
 // ── Formatters ─────────────────────────────────────────────────────────────────
 export const fmt = (n) =>
@@ -139,7 +142,7 @@ export function Tag({ children, variant = "gray", fontSize }) {
     amber: { bg: C.amberLight, color: C.amber, border: "#FDE68A" },
   };
   C.colorsSet.map((color, index) => {
-    vars[set[index]] = { bg: color, color: C.white, border: color - 304 }
+    vars[set[index]] = { bg: color, color: C.white, border: color }
   });
   const v = vars[variant] || vars.gray;
   return (
@@ -272,6 +275,7 @@ export function SKUTable({ data, mode, onRowClick }) {
               <th style={S.th}>#</th>
               <th style={S.th}>SKU ID</th>
               <th style={thR}>Unit Price</th>
+              <th style={thR}>Avg Profit/pc</th>
               <th style={thR}>Deliveries</th>
               <th style={thR}>Returns</th>
               <th style={thR}>RTO</th>
@@ -309,6 +313,16 @@ export function SKUTable({ data, mode, onRowClick }) {
                     {fmt(s.one_unit_price)}
                   </td>
 
+                  {/* Avg Profit per piece */}
+                  <td style={{ ...S.td, textAlign: "right" }}>
+                    {s.avg_profit_per_piece != null
+                      ? <span style={{
+                          fontFamily: "monospace", fontWeight: 700, fontSize: 12,
+                          color: s.avg_profit_per_piece >= 0 ? C.green : C.red,
+                        }}>{s.avg_profit_per_piece >= 0 ? "+" : ""}{fmt(s.avg_profit_per_piece)}</span>
+                      : <span style={{ color: C.gray300 }}>—</span>}
+                  </td>
+
                   <TableData showTotalData={showTotalData} mainKey={delCount} data={s} dataKey="delivered" color="green" profit />
                   <TableData showTotalData={showTotalData} mainKey={retCount} data={s} dataKey="return" color="red" />
                   <TableData showTotalData={showTotalData} mainKey={rtoCount} data={s} dataKey="rto" />
@@ -339,7 +353,7 @@ export function SKUTable({ data, mode, onRowClick }) {
               );
             })}
             {visible.length === 0 && (
-              <tr><td colSpan={9} style={{ ...S.td, textAlign: "center", padding: 40, color: C.gray400 }}>
+              <tr><td colSpan={10} style={{ ...S.td, textAlign: "center", padding: 40, color: C.gray400 }}>
                 {data.length === 0 ? "No data — upload Meesho report and add SKU pricing first" : "No results matching search"}
               </td></tr>
             )}
@@ -367,9 +381,13 @@ const NAV_GROUPS = [
     label: "Operations",
     color: "#34D399",
     items: [
-      { path: "/orders",   label: "Orders",   icon: "⊡" },
-      { path: "/payments", label: "Payments", icon: "◎" },
-      { path: "/labels",   label: "Labels",   icon: "⊟" },
+      { path: "/orders",        label: "Orders",          icon: "⊡" },
+      { path: "/payments",      label: "Payments",        icon: "◎" },
+      { path: "/unsettled",     label: "Unsettled",       icon: "⚡" },
+      { path: "/return-claims", label: "Returns & Claims", icon: "↩" },
+      { path: "/claimed",       label: "Claimed Orders",  icon: "✦" },
+      { path: "/mismatch",      label: "Pay Mismatch",    icon: "⊝" },
+      { path: "/labels",        label: "Labels",          icon: "⊟" },
     ],
   },
   {
@@ -592,8 +610,11 @@ export default function App() {
           <Routes>
             <Route path="/"               element={<OverviewTab />} />
             <Route path="/orders"         element={<OrdersTab />} />
-            <Route path="/unsettled"      element={<UnsettledOrdersTab />} />
-            <Route path="/payments"       element={<PaymentsTab />} />
+            <Route path="/unsettled"       element={<UnsettledOrdersTab />} />
+            <Route path="/payments"        element={<PaymentsTab />} />
+            <Route path="/mismatch"        element={<MismatchTab />} />
+            <Route path="/return-claims"   element={<ReturnClaimsTab />} />
+            <Route path="/claimed"         element={<ClaimedOrdersTab />} />
             <Route path="/sku-analysis"   element={<SKUAnalysisTab />} />
             <Route path="/pricing"        element={<PricingTab />} />
             <Route path="/upload"         element={<UploadTab />} />

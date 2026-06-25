@@ -15,7 +15,7 @@ import io
 import concurrent.futures
 from PIL import Image
 
-from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, PurchaseBill, PurchaseItem, BlockedCustomer
+from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, PurchaseBill, PurchaseItem, BlockedCustomer, InventoryAdjustment
 from .serializers import (
     OrderPaymentSerializer, AdsCostSerializer,
     ReferralPaymentSerializer, CompensationRecoverySerializer,
@@ -278,202 +278,364 @@ def _inc(d, key, value=None):
         d[key] += 1
 
 
-# ── Per-order profit formula ───────────────────────────────────────────────────
+# ── Order status constants ─────────────────────────────────────────────────────
 
-def compute_order_net(payment_rows, sku_final_price, sku_packaging_price, quantity):
-    """
-    Pure helper — no DB access, no side effects.
+# Statuses where the item was SOLD / DELIVERED → deduct item cost from settlement.
+# EXCHANGE / EXCHANGED = item sold and exchanged; CLAIM = Meesho compensated for item.
+# Both "Exchange" (payments sheet) and "Exchanged" (order summary) are accepted.
+_DELIVERED_STATUSES = frozenset(["DELIVERED", "EXCHANGE", "EXCHANGED", "CLAIM"])
 
-    Takes ALL OrderPayment rows for a single sub_order_no and returns a result dict.
+# Statuses where the item came BACK → no item cost deduction.
+# Both "Return" (payments sheet) and "Returned" (order summary) are accepted.
+_RETURN_STATUSES  = frozenset([
+    "RETURN", "RETURNED", "RTO", "RTO_COMPLETE", "PREMIUM_RETURN", "CANCELLED",
+])
 
-    Formulas:
-      Delivered : net = total_settlement - (sku_price - affiliate_fees)
-      Return/RTO: net = total_settlement - (sku_price - return_shipping - affiliate_fees)
+# Both "Shipped" (payments sheet) and "In Transit" (order summary) are in-transit.
+_SHIPPED_STATUSES = frozenset(["SHIPPED", "IN TRANSIT"])
 
-    Definitions:
-      total_settlement = sum of final_settlement_amount across ALL rows (main + adj)
-      affiliate_fees   = sum of final_settlement_amount for blank-status rows,
-                         forced negative (they are always cost deductions)
-      return_shipping  = return_shipping_charge from the primary status row
-      sku_price        = sku_final_price × quantity  (our purchase cost)
-    """
-    ZERO = Decimal("0")
-
-    main_rows = [p for p in payment_rows if p.live_order_status]
-    adj_rows  = [p for p in payment_rows if not p.live_order_status]
-
-    total_settlement = sum(Decimal(p.final_settlement_amount) for p in payment_rows)
-    
-    raw_aff          = sum(Decimal(p.final_settlement_amount) for p in adj_rows if p.recovery_reason == 'Affiliate Fee')
-    affiliate_fees   = Decimal(raw_aff) if raw_aff else ZERO
-
-    purchase_cost = sku_final_price * Decimal(str(quantity))
-    packaging_cost = sku_packaging_price * Decimal(str(quantity))
-    sub_order_no = payment_rows[0].sub_order_no
-
-    # Pure adjustment order (no delivery status row at all)
-    if not main_rows:
-        return {
-            "net":              affiliate_fees,
-            "status":           None,
-            "is_delivered":     False,
-            "has_claim":        False,
-            "claims":           ZERO,
-            "return_shipping":  ZERO,
-            "affiliate_fees":   affiliate_fees,
-            "total_settlement": total_settlement,
-            "is_adjustment_only": True,
-            "recovery_reason":  None,
-            "purchase_cost": None,
-            "packaging_cost": None,
-            "quantity": ZERO
-        }
-
-    net = 0
-    status = ""
-    is_delivered = False
-    has_claim = False
-    return_shipping = 0
-    claims = 0
-    for primary in main_rows:
-        status          = primary.live_order_status or ""
-        is_delivered    = status.upper() == "DELIVERED"
-        returned_item    = status.upper() == "RTO" or status.upper() == "CANCELLED" or status.upper() == "RETURN"
-        
-        return_shipping = Decimal(primary.return_shipping_charge) or ZERO
-
-        if returned_item:
-            net = Decimal(total_settlement or "0.00")
-        else:
-            # Delivered : seller spent purchase_cost either way
-            net = Decimal(total_settlement) - Decimal(purchase_cost)
-    
-    for secondary in adj_rows or []:
-        claims          = Decimal(secondary.claims) or ZERO
-        has_claim       = secondary.claims != ZERO 
-        
-        if has_claim:
-             net = Decimal(total_settlement) - Decimal(purchase_cost)
-
-    return {
-        "net":              Decimal(net),
-        "status":           primary.live_order_status,
-        "is_delivered":     is_delivered,
-        "has_claim":        has_claim,
-        "claims":           Decimal(claims),
-        "return_shipping":  Decimal(return_shipping),
-        "affiliate_fees":   Decimal(affiliate_fees),
-        "total_settlement": Decimal(total_settlement),
-        "is_adjustment_only": False,
-        "recovery_reason":  primary.recovery_reason,
-        "purchase_cost": Decimal(purchase_cost),
-        "packaging_cost": Decimal(packaging_cost),
-        "quantity": Decimal(str(quantity)),
-        "sub_order_no": sub_order_no
-    }
-    
-# Maps DB live_order_status values (lowercased) to canonical accumulator keys.
-# "RTO_COMPLETE" → "rto" so the frontend always sees rto_count / rto_loss.
+# Canonical accumulator key mapping (DB value → frontend-visible bucket key)
 _STATUS_KEY_NORM = {
-    "rto_complete": "rto",
+    "rto_complete":   "rto",
     "premium_return": "return",
+    "returned":       "return",      # order summary uses "Returned"; payments sheet uses "Return"
+    "exchanged":      "exchange",    # order summary uses "Exchanged"; payments sheet uses "Exchange"
+    "in transit":     "shipped",     # order summary uses "In Transit"; payments sheet uses "Shipped"
 }
 
 def _norm_key(raw_lower):
     return _STATUS_KEY_NORM.get(raw_lower, raw_lower)
 
 
-def key_maker(sku, key, loss_ya_profit) :
-    
-    if sku.get(f"{key}_{loss_ya_profit}") is None:
-        sku[f"{key}_{loss_ya_profit}"] = 0
-        sku[f"{key}_purchase_cost"] = 0
-        sku[f"{key}_packaging_cost"] = 0
-        sku[f"{key}_count"] = 0
-        sku[f"{key}_quantity"] = 0
+# ── Row-level helpers ──────────────────────────────────────────────────────────
+
+def _payment_date_key(row):
+    """Sort key: payment_date asc, fallback to order_date, fallback to epoch."""
+    import datetime as _dt
+    pd = row.payment_date
+    if pd is not None:
+        return pd
+    od = row.order_date
+    return od.date() if od else _dt.date.min
 
 
-def initialize_keys(sku, unique_statuses):
-    seen = set()
-    for status in unique_statuses:
-        if status:
-            key = _norm_key(status.lower())
-            if key in seen:
-                continue
-            seen.add(key)
-            if key in ("rto", "return"):
-                key_maker(sku, key, "loss")
-            else:
-                key_maker(sku, key, "profit")
-    key_maker(sku, "claims", "profit")
+def _classify_rows(payment_rows):
+    """
+    Split and categorise payment rows for one sub_order_no.
+
+    Key behaviours:
+      • Rows are sorted by payment_date ascending.
+      • Status rows are de-duplicated by status — if Meesho sends two DELIVERED
+        rows for the same order only the most-recent one is kept, preventing
+        double-counting of settlement amounts.
+      • adj rows (no live_order_status) are kept as-is — multiple claims
+        payments for one order are all legitimate.
+
+    Groups returned:
+      main          — rows that carry a live_order_status (after dedup)
+      adj           — rows without a status (claims, affiliate fees)
+      shipped       — SHIPPED rows (excluded from P&L)
+      non_shipped   — main rows that are NOT SHIPPED
+      return_rows   — non_shipped where status is a return-type
+      delivered_rows— non_shipped where status is a delivered-type
+                      (DELIVERED, EXCHANGE, CLAIM)
+    """
+    rows = sorted(payment_rows, key=_payment_date_key)
+    main_all = [r for r in rows if r.live_order_status]
+    adj      = [r for r in rows if not r.live_order_status]
+
+    # Deduplicate status rows: keep only the most-recent row per unique status.
+    # (rows already sorted asc → last occurrence per status = most recent)
+    _seen: dict = {}
+    for r in main_all:
+        _seen[r.live_order_status.upper()] = r
+    main = list(_seen.values())
+
+    shipped        = [r for r in main if r.live_order_status.upper() in _SHIPPED_STATUSES]
+    non_shipped    = [r for r in main if r.live_order_status.upper() not in _SHIPPED_STATUSES]
+    return_rows    = [r for r in non_shipped if r.live_order_status.upper() in _RETURN_STATUSES]
+    delivered_rows = [r for r in non_shipped if r.live_order_status.upper() in _DELIVERED_STATUSES]
+
+    return {
+        "rows":           rows,
+        "main":           main,
+        "adj":            adj,
+        "shipped":        shipped,
+        "non_shipped":    non_shipped,
+        "return_rows":    return_rows,
+        "delivered_rows": delivered_rows,
+        "is_shipped_only": bool(main) and not non_shipped,
+    }
 
 
-def inject_cost(sku, result, net, key):
-    key = _norm_key(key)
-    is_loss_or_profit = "loss" if key in ("return", "rto") else "profit"
-    _inc(sku, f"{key}_{is_loss_or_profit}", net)
-    _inc(sku, f"{key}_purchase_cost", result["purchase_cost"])
-    _inc(sku, f"{key}_packaging_cost", result["packaging_cost"])
-    _inc(sku, f"{key}_count")
-    _inc(sku, f"{key}_quantity", result["quantity"])
+def _pick_settlement_rows(c):
+    """
+    Settlement precedence (status-based):
+      1. Any RETURN/RTO/CANCELLED → use only return rows  (item came back)
+      2. DELIVERED/EXCHANGE/CLAIM, no return → use delivered rows  (item sold)
+      3. Fallback → all non-shipped rows
+
+    Returns (settlement_rows, is_delivered).
+    is_delivered=True means item cost must be deducted from settlement.
+    """
+    if c["return_rows"]:
+        return c["return_rows"], False
+    if c["delivered_rows"]:
+        return c["delivered_rows"], True
+    return c["non_shipped"], False
+
+
+def _sum_settlement(rows):
+    """Sum final_settlement_amount from status rows only.
+    Adj rows (claims / affiliate) are tracked in separate fields and must NOT
+    be included here — their final_settlement_amount would double-count."""
+    return sum(Decimal(r.final_settlement_amount or 0) for r in rows)
+
+
+def _extract_claims(adj_rows):
+    """Total claims money credited from Meesho (info-only, not in P&L)."""
+    total = Decimal("0")
+    for r in adj_rows:
+        total += Decimal(r.claims or 0)
+    return total
+
+
+def _affiliate_total(adj_rows):
+    raw = sum(Decimal(r.final_settlement_amount or 0)
+              for r in adj_rows if r.recovery_reason == "Affiliate Fee")
+    return raw if raw else Decimal("0")
+
+
+# ── Per-order profit formula ───────────────────────────────────────────────────
+
+def compute_order_net(payment_rows, sku_final_price, sku_packaging_price, quantity,
+                      sku_item_price=None, sku_tax_percent=None):
+    """
+    Pure function — no DB access.
+
+    P&L rules:
+      • DELIVERED / EXCHANGE / CLAIM status:  net = settlement − item_price × qty
+      • Any adj row with claims > 0:          net = settlement − item_price × qty
+        (Meesho paid a claim → seller lost the product regardless of order status)
+      • RETURN / RTO with no claims:          net = return_settlement only
+      • Shipped-only:                         excluded from P&L; tracked as in-transit
+    """
+    ZERO = Decimal("0")
+    qty  = Decimal(str(quantity))
+
+    purchase_cost  = Decimal(str(sku_item_price or 0)) * qty
+    packaging_cost = Decimal(str(sku_packaging_price or 0))          # fixed per order, not × qty
+    tax_cost       = purchase_cost * Decimal(str(sku_tax_percent or 0)) / Decimal("100")  # item_price × qty × tax%
+
+    c             = _classify_rows(payment_rows)
+    adj_rows      = c["adj"]
+    affiliate_fees = _affiliate_total(adj_rows)
+    claims         = _extract_claims(adj_rows)
+    sub_order_no   = payment_rows[0].sub_order_no
+
+    # ── Case 1: pure adjustment order (no status rows at all) ──────────────────
+    if not c["main"]:
+        adj_settlement    = sum(Decimal(r.final_settlement_amount or 0) for r in adj_rows)
+        has_claim_payment = claims > ZERO
+        if has_claim_payment:
+            # Meesho paid a claim with no delivery status — item was lost; deduct cost
+            net_val        = adj_settlement - purchase_cost
+            ret_cost       = purchase_cost
+            ret_pkg        = packaging_cost
+            ret_qty        = qty
+        else:
+            net_val  = affiliate_fees
+            ret_cost = ZERO
+            ret_pkg  = ZERO
+            ret_qty  = ZERO
+        return {
+            "net": net_val, "status": None,
+            "is_delivered": has_claim_payment, "is_shipped_only": False, "is_adjustment_only": True,
+            "has_claim": has_claim_payment, "claims": claims,
+            "affiliate_fees": affiliate_fees, "total_settlement": adj_settlement,
+            "return_shipping": ZERO, "recovery_reason": None,
+            "purchase_cost": ret_cost, "packaging_cost": ret_pkg,
+            "tax_cost": tax_cost if has_claim_payment else ZERO,
+            "quantity": ret_qty,
+            "shipped_row_settlement": ZERO, "shipped_row_sale": ZERO,
+            "sub_order_no": sub_order_no,
+        }
+
+    # ── Case 2: shipped-only (in transit) — excluded from P&L ─────────────────
+    if c["is_shipped_only"]:
+        shipped_settlement = sum(Decimal(r.final_settlement_amount or 0) for r in c["shipped"])
+        shipped_sale       = sum(Decimal(r.total_sale_amount       or 0) for r in c["shipped"])
+        expected_profit    = shipped_settlement - purchase_cost
+        last_shipped       = c["shipped"][-1]
+        return {
+            "net": ZERO, "status": last_shipped.live_order_status,
+            "is_delivered": False, "is_shipped_only": True, "is_adjustment_only": False,
+            "has_claim": False, "claims": ZERO,
+            "affiliate_fees": ZERO, "total_settlement": ZERO,
+            "return_shipping": ZERO, "recovery_reason": last_shipped.recovery_reason,
+            "purchase_cost": purchase_cost, "packaging_cost": packaging_cost,
+            "tax_cost": tax_cost,
+            "quantity": qty,
+            "shipped_row_settlement": shipped_settlement,
+            "shipped_row_sale":       shipped_sale,
+            "shipped_expected_profit": expected_profit,
+            "sub_order_no": sub_order_no,
+        }
+
+    # ── Case 3: order has a final status ──────────────────────────────────────
+    settlement_rows, is_delivered = _pick_settlement_rows(c)
+    primary        = settlement_rows[-1]
+    return_shipping = Decimal(primary.return_shipping_charge or 0)
+
+    # Total settlement = status rows + ALL adj rows (claims are real money for the order)
+    adj_total  = sum(Decimal(r.final_settlement_amount or 0) for r in adj_rows)
+    settlement = _sum_settlement(settlement_rows) + adj_total
+
+    # Deduct item cost if DELIVERED/EXCHANGE/CLAIM status OR if any adj row has a claim
+    # (claim payment = Meesho compensated seller for the item, so cost applies regardless of status)
+    has_claim_payment = claims > ZERO
+    deduct_cost       = is_delivered or has_claim_payment
+    net = (settlement - purchase_cost) if deduct_cost else settlement
+
+    return {
+        "net": Decimal(net), "status": primary.live_order_status,
+        "is_delivered": is_delivered, "is_shipped_only": False, "is_adjustment_only": False,
+        "has_claim": claims > ZERO, "claims": claims,
+        "affiliate_fees": affiliate_fees, "total_settlement": settlement,
+        "return_shipping": return_shipping, "recovery_reason": primary.recovery_reason,
+        "purchase_cost": purchase_cost,
+        "packaging_cost": packaging_cost if deduct_cost else ZERO,
+        "tax_cost":       tax_cost       if deduct_cost else ZERO,
+        "quantity": qty,
+        "shipped_row_settlement": ZERO, "shipped_row_sale": ZERO,
+        "sub_order_no": sub_order_no,
+    }
+
+
+# ── SKU accumulator helpers ────────────────────────────────────────────────────
+
+def _init_sku_bucket(key, loss_or_profit, sku):
+    """Zero-initialise a status bucket (delivered/return/rto) if not yet seen."""
+    field = f"{key}_{loss_or_profit}"
+    if sku.get(field) is None:
+        sku[field]                    = 0
+        sku[f"{key}_purchase_cost"]   = 0
+        sku[f"{key}_packaging_cost"]  = 0
+        sku[f"{key}_count"]           = 0
+        sku[f"{key}_quantity"]        = 0
+
+
+def _ensure_status_buckets(sku, _unique_statuses):
+    """Pre-initialise the three main buckets + other_net so no KeyError later."""
+    _init_sku_bucket("delivered", "profit", sku)
+    _init_sku_bucket("return",    "loss",   sku)
+    _init_sku_bucket("rto",       "loss",   sku)
+    if sku.get("other_net") is None:
+        sku["other_net"]   = 0
+        sku["other_count"] = 0
+
+
+def _inject_order_into_bucket(sku, result, net):
+    """Write one order's financials into its status bucket."""
+    status_upper = result["status"].upper() if result["status"] else ""
+    raw = _norm_key(result["status"].lower())
+
+    if status_upper in _DELIVERED_STATUSES:
+        # DELIVERED, EXCHANGE, CLAIM — item was sold, cost was deducted
+        _inc(sku, "delivered_profit",         net)
+        _inc(sku, "delivered_purchase_cost",  result["purchase_cost"])
+        _inc(sku, "delivered_packaging_cost", result["packaging_cost"])
+        _inc(sku, "delivered_count")
+        _inc(sku, "delivered_quantity",       result["quantity"])
+    elif raw in ("return", "rto"):
+        # RETURN, RTO, RTO_COMPLETE, PREMIUM_RETURN — item came back
+        _inc(sku, f"{raw}_loss",              net)
+        _inc(sku, f"{raw}_purchase_cost",     result["purchase_cost"])
+        _inc(sku, f"{raw}_packaging_cost",    result["packaging_cost"])
+        _inc(sku, f"{raw}_count")
+        _inc(sku, f"{raw}_quantity",          result["quantity"])
+    else:
+        # CANCELLED or anything else → other
+        _inc(sku, "other_net",   net)
+        _inc(sku, "other_count")
 
 
 # ── Per-SKU accumulator ────────────────────────────────────────────────────────
 
 def accumulate_sku_profit(sku_id, obj, result, price_map, packaging_map, unique_statuses):
     """
-    Merge a compute_order_net result into the sku_wise_profit dict.
-    Called once per unique sub_order_no (not per payment row).
+    Merge one order's compute_order_net result into the sku_wise_profit dict.
+    Called once per unique sub_order_no.
     """
     if sku_id not in obj:
         obj[sku_id] = {
-            "order_count": 0,
+            "order_count":    0,
             "one_unit_price": price_map[sku_id],
-            "total_purchase_cost": 0,
-            "settled_amount": 0,
-            "claims_total": 0,
-            "claims_count": 0,
-            "affiliate_adj": 0,
+            "total_purchase_cost":  0,
+            "settled_amount":       0,
+            "affiliate_adj":        0,
+            "shipped_count":        0,
+            "shipped_settlement":   0,
+            "shipped_sale":         0,
+            "shipped_expected_profit": 0,
         }
 
     sku = obj[sku_id]
     net = result["net"]
 
     _inc(sku, "affiliate_adj", result["affiliate_fees"])
-    initialize_keys(sku, unique_statuses)
+    _ensure_status_buckets(sku, unique_statuses)
+    _inc(sku, "order_count")
 
-
-    if result["is_adjustment_only"]:
-        _inc(sku, "loss", net)
-        _inc(sku, "order_count")
+    # ── Shipped-only: in-transit banner, excluded from P&L ────────────────────
+    if result["is_shipped_only"]:
+        _inc(sku, "shipped_count")
+        _inc(sku, "shipped_settlement",      result["shipped_row_settlement"])
+        _inc(sku, "shipped_sale",            result["shipped_row_sale"])
+        _inc(sku, "shipped_expected_profit", result.get("shipped_expected_profit", 0))
         return
 
-    #claimed orders only not included in profit or loss
-    if result["has_claim"]:
-        inject_cost(sku, result, net, "claims")
-    else:
-        inject_cost(sku, result, net, result["status"].lower())
-        
-        
+    # ── Pure-adjustment rows (no status at all) → "other" ─────────────────────
+    if result["is_adjustment_only"]:
+        _inc(sku, "other_net",      net)
+        _inc(sku, "other_count")
+        if result.get("has_claim"):
+            _inc(sku, "claims_total", result["claims"])
+            _inc(sku, "claims_count")
+            _inc(sku, "total_packaging_cost", result["packaging_cost"])
+            _inc(sku, "total_tax_cost",       result.get("tax_cost", 0))
+            # net = adj_settlement - purchase_cost here; track the deducted cost for reconciliation
+            _inc(sku, "total_deducted_cost",  result["purchase_cost"])
+        return
+
+    # ── Settled order: route to status bucket ────────────────────────────────
+    _inject_order_into_bucket(sku, result, net)
     _inc(sku, "settled_amount", result["total_settlement"])
-    _inc(sku, _norm_key(result["status"].lower()) if result["status"] else "unknown")
     _inc(sku, result["recovery_reason"])
-    _inc(sku, "order_count")
-    _inc(sku, "claims_settled", result["claims"])
+    _inc(sku, "total_packaging_cost", result["packaging_cost"])
+    _inc(sku, "total_tax_cost",       result.get("tax_cost", 0))
+    if result.get("has_claim"):
+        _inc(sku, "claims_total", result["claims"])
+        _inc(sku, "claims_count")
+
+    # Track purchase cost that was ACTUALLY DEDUCTED from settlement (delivered + claimed).
+    # This includes Return/RTO+claim orders where purchase_cost was subtracted from return_loss.
+    # Pure returns (no claim) never deduct cost — item came back — so exclude them.
+    deduct_cost = result.get("is_delivered") or result.get("has_claim")
+    if deduct_cost:
+        _inc(sku, "total_deducted_cost", result["purchase_cost"])
+
+    # ── Roll up SKU-level totals ──────────────────────────────────────────────
     sku["net_profit"] = (
         Decimal(sku.get("delivered_profit", 0)) +
-        Decimal(sku.get("return_loss", 0)) +
-        Decimal(sku.get("rto_loss", 0))
+        Decimal(sku.get("return_loss",      0)) +
+        Decimal(sku.get("rto_loss",         0)) +
+        Decimal(sku.get("other_net",        0))
     )
-    sku["total_purchase_cost"] = (
-        Decimal(sku.get("claims_purchase_cost", 0)) +
-        Decimal(sku.get("delivered_purchase_cost", 0))
-    )
-    sku["total_packaging_cost"] = (
-        Decimal(sku.get("claims_packaging_cost", 0)) +
-        Decimal(sku.get("delivered_packaging_cost", 0))
-    )
-    sku["claims_total"] = Decimal(sku.get("claims_profit", 0))
+    # total_purchase_cost = DELIVERED-only costs.
+    # Used by the frontend settlement table: delGross = total_profit + total_purchase_cost.
+    # (Return/RTO+claim costs are tracked in total_deducted_cost for settlement reconciliation.)
+    sku["total_purchase_cost"] = Decimal(sku.get("delivered_purchase_cost", 0))
     
     
     
@@ -519,7 +681,12 @@ def unsettled_orders(request):
     settled_nos = set(OrderPayment.objects.values_list("sub_order_no", flat=True).distinct())
     # Deduplicate to latest status per sub_order_no before listing
     latest_qs    = Order.latest_per_order(base_qs=order_qs)
-    unsettled_qs = latest_qs.exclude(sub_order_no__in=settled_nos).order_by("-order_date")
+    unsettled_qs = (
+        latest_qs
+        .exclude(sub_order_no__in=settled_nos)
+        .exclude(reason_for_credit_entry__iexact="cancelled")
+        .order_by("-order_date")
+    )
 
     total       = unsettled_qs.count()
     total_value = unsettled_qs.aggregate(v=Sum("supplier_discounted_price"))["v"] or 0
@@ -532,6 +699,380 @@ def unsettled_orders(request):
         "page": page,
         "page_size": page_size,
         "results": OrderSerializer(items, many=True).data,
+    })
+
+
+@api_view(["GET"])
+def payment_mismatch(request):
+    """
+    Bi-directional mismatch:
+      - orders_no_payment: Orders in Order table with no matching OrderPayment row
+      - payments_no_order: OrderPayment rows whose sub_order_no has no Order row
+    """
+    from collections import defaultdict
+
+    date_from = request.GET.get("date_from", "")
+    date_to   = request.GET.get("date_to",   "")
+    page      = int(request.GET.get("page",      1))
+    page_size = int(request.GET.get("page_size", 50))
+    view      = request.GET.get("view", "orders")  # "orders" | "payments"
+
+    # ── Orders with no payment ────────────────────────────────────────────────
+    order_qs = Order.objects.all()
+    if date_from:
+        order_qs = order_qs.filter(order_date__gte=date_from)
+    if date_to:
+        order_qs = order_qs.filter(order_date__lte=date_to)
+
+    payment_sub_nos = set(OrderPayment.objects.values_list("sub_order_no", flat=True).distinct())
+    latest_orders   = Order.latest_per_order(base_qs=order_qs)
+    orders_no_pay   = (
+        latest_orders
+        .exclude(sub_order_no__in=payment_sub_nos)
+        .exclude(reason_for_credit_entry__iexact="cancelled")
+        .order_by("-order_date")
+    )
+    onp_agg = orders_no_pay.aggregate(count=Count("sub_order_no"), total_value=Sum("supplier_discounted_price"))
+
+    # ── Payments with no order ────────────────────────────────────────────────
+    pay_qs = OrderPayment.objects.all()
+    if date_from:
+        pay_qs = pay_qs.filter(order_date__date__gte=date_from)
+    if date_to:
+        pay_qs = pay_qs.filter(order_date__date__lte=date_to)
+
+    order_sub_nos = set(Order.objects.values_list("sub_order_no", flat=True).distinct())
+    orphan_pays   = pay_qs.exclude(sub_order_no__in=order_sub_nos).order_by("-order_date")
+    pno_agg       = orphan_pays.aggregate(
+        count=Count("sub_order_no", distinct=True),
+        total_settlement=Sum("final_settlement_amount"),
+    )
+
+    summary = {
+        "orders_no_payment": {
+            "count":       onp_agg["count"] or 0,
+            "total_value": float(onp_agg["total_value"] or 0),
+        },
+        "payments_no_order": {
+            "count":            pno_agg["count"] or 0,
+            "total_settlement": float(pno_agg["total_settlement"] or 0),
+        },
+    }
+
+    start = (page - 1) * page_size
+    if view == "payments":
+        total   = pno_agg["count"] or 0
+        items   = orphan_pays[start: start + page_size]
+        results = OrderPaymentSerializer(items, many=True).data
+    else:
+        total   = onp_agg["count"] or 0
+        items   = orders_no_pay[start: start + page_size]
+        results = OrderSerializer(items, many=True).data
+
+    return Response({
+        **summary,
+        "view":      view,
+        "total":     total,
+        "page":      page,
+        "page_size": page_size,
+        "results":   results,
+    })
+
+
+@api_view(["GET"])
+def return_claims_detail(request):
+    """
+    Grouped view of all RETURN / RTO / CLAIM orders.
+    Returns one summary row per sub_order_no + all sub-payment rows.
+    """
+    from collections import defaultdict
+
+    date_from     = request.GET.get("date_from",  "")
+    date_to       = request.GET.get("date_to",    "")
+    page          = int(request.GET.get("page",      1))
+    page_size     = int(request.GET.get("page_size", 30))
+    search        = request.GET.get("search",    "")
+    status_filter = request.GET.get("status",    "")
+
+    RETURN_STATUSES = ["RETURN", "RETURNED", "RTO", "RTO_COMPLETE"]
+
+    base_qs = OrderPayment.objects.all()
+    if date_from:
+        base_qs = base_qs.filter(order_date__date__gte=date_from)
+    if date_to:
+        base_qs = base_qs.filter(order_date__date__lte=date_to)
+
+    # Find qualifying sub_order_nos (have a return/RTO status OR a claims row)
+    qualifying_ids = (
+        base_qs
+        .filter(DQ(live_order_status__in=RETURN_STATUSES) | DQ(claims__gt=0))
+        .values_list("sub_order_no", flat=True)
+        .distinct()
+    )
+
+    if search:
+        qualifying_ids = (
+            OrderPayment.objects
+            .filter(
+                sub_order_no__in=qualifying_ids,
+            )
+            .filter(
+                DQ(sub_order_no__icontains=search) |
+                DQ(supplier_sku__icontains=search) |
+                DQ(product_name__icontains=search)
+            )
+            .values_list("sub_order_no", flat=True)
+            .distinct()
+        )
+
+    if status_filter == "return":
+        qualifying_ids = (
+            OrderPayment.objects
+            .filter(sub_order_no__in=qualifying_ids, live_order_status__iregex=r"^returned?$")
+            .values_list("sub_order_no", flat=True).distinct()
+        )
+    elif status_filter == "rto":
+        qualifying_ids = (
+            OrderPayment.objects
+            .filter(sub_order_no__in=qualifying_ids, live_order_status__in=["RTO", "RTO_COMPLETE"])
+            .values_list("sub_order_no", flat=True).distinct()
+        )
+    elif status_filter == "claim":
+        qualifying_ids = (
+            OrderPayment.objects
+            .filter(sub_order_no__in=qualifying_ids, claims__gt=0)
+            .values_list("sub_order_no", flat=True).distinct()
+        )
+
+    qualifying_list = list(qualifying_ids)
+    total = len(qualifying_list)
+
+    # Paginate sub_order_nos
+    start          = (page - 1) * page_size
+    page_sub_orders = qualifying_list[start: start + page_size]
+
+    # Fetch all payment rows for this page's orders
+    all_rows = (
+        OrderPayment.objects
+        .filter(sub_order_no__in=page_sub_orders)
+        # payment_date sorts ascending so the Return row (latest payment) is last
+        .order_by("sub_order_no", "payment_date", "live_order_status")
+    )
+
+    groups: dict = defaultdict(list)
+    for row in all_rows:
+        groups[row.sub_order_no].append(row)
+
+    results = []
+    for sub_order_no in page_sub_orders:
+        rows = groups.get(sub_order_no, [])
+
+        # Use the same status-based precedence as compute_order_net
+        c = _classify_rows(rows)
+        settlement_rows, _ = _pick_settlement_rows(c)
+        # Total settlement = status rows + adj rows (claims are now in P&L for all types)
+        net_settlement = sum(float(r.final_settlement_amount or 0) for r in settlement_rows + c["adj"])
+        total_claims     = sum(float(r.claims or 0) for r in rows)
+        total_commission = sum(float(r.meesho_commission_incl_gst or 0) for r in rows)
+        total_tcs        = sum(float(r.tcs or 0) for r in rows)
+        total_tds        = sum(float(r.tds or 0) for r in rows)
+        total_shipping   = sum(float(r.shipping_charge_incl_gst or 0) for r in rows)
+
+        latest_status = (settlement_rows[-1].live_order_status
+                         if settlement_rows else None)
+        first = rows[0] if rows else None
+
+        results.append({
+            "sub_order_no":    sub_order_no,
+            "sku":             first.supplier_sku if first else None,
+            "product_name":    first.product_name if first else None,
+            "order_date":      str(first.order_date.date()) if first and first.order_date else None,
+            "latest_status":   latest_status,
+            "net_settlement":  round(net_settlement,   2),
+            "total_claims":    round(total_claims,     2),
+            "total_commission": round(total_commission, 2),
+            "total_tcs":       round(total_tcs,        2),
+            "total_tds":       round(total_tds,        2),
+            "total_shipping":  round(total_shipping,   2),
+            "payment_count":   len(rows),
+            "rows":            OrderPaymentSerializer(rows, many=True).data,
+        })
+
+    return Response({
+        "total":     total,
+        "page":      page,
+        "page_size": page_size,
+        "results":   results,
+    })
+
+
+@api_view(["GET"])
+def claimed_orders(request):
+    """
+    Orders where Meesho paid a claim (claims > 0 in any payment row).
+    Supports: date_from, date_to, page, page_size,
+              status (all/return/rto), sku, view (orders/sku)
+    """
+    from collections import defaultdict
+
+    date_from     = request.GET.get("date_from",  "")
+    date_to       = request.GET.get("date_to",    "")
+    page          = int(request.GET.get("page",      1))
+    page_size     = int(request.GET.get("page_size", 30))
+    status_filter = request.GET.get("status", "")   # "" / "return" / "rto"
+    sku_filter    = request.GET.get("sku",    "")
+    view_mode     = request.GET.get("view",   "orders")  # "orders" / "sku"
+
+    RETURN_STATUSES = ["RETURN", "RETURNED", "RTO", "RTO_COMPLETE", "PREMIUM_RETURN"]
+
+    base_qs = OrderPayment.objects.all()
+    if date_from:
+        base_qs = base_qs.filter(order_date__date__gte=date_from)
+    if date_to:
+        base_qs = base_qs.filter(order_date__date__lte=date_to)
+
+    # All sub_order_nos that have at least one claims > 0 row
+    claimed_qs = base_qs.filter(claims__gt=0).values_list("sub_order_no", flat=True).distinct()
+
+    # Status filter: narrow to orders that also have the matching status row
+    if status_filter == "return":
+        claimed_qs = (
+            OrderPayment.objects
+            .filter(sub_order_no__in=claimed_qs, live_order_status__iregex=r"^returned?$")
+            .values_list("sub_order_no", flat=True).distinct()
+        )
+    elif status_filter == "rto":
+        claimed_qs = (
+            OrderPayment.objects
+            .filter(sub_order_no__in=claimed_qs, live_order_status__in=["RTO", "RTO_COMPLETE"])
+            .values_list("sub_order_no", flat=True).distinct()
+        )
+
+    # SKU filter
+    if sku_filter:
+        claimed_qs = (
+            OrderPayment.objects
+            .filter(sub_order_no__in=claimed_qs, supplier_sku__icontains=sku_filter)
+            .values_list("sub_order_no", flat=True).distinct()
+        )
+
+    claimed_list = list(claimed_qs)
+    total = len(claimed_list)
+
+    # Summary stats across ALL matching orders (not just this page)
+    all_rows_qs = OrderPayment.objects.filter(sub_order_no__in=claimed_list)
+    total_claim_amount = float(
+        all_rows_qs.aggregate(t=Sum("claims"))["t"] or 0
+    )
+    return_count = (
+        OrderPayment.objects
+        .filter(sub_order_no__in=claimed_list, live_order_status__iregex=r"^returned?$")
+        .values("sub_order_no").distinct().count()
+    )
+    rto_count = (
+        OrderPayment.objects
+        .filter(sub_order_no__in=claimed_list, live_order_status__in=["RTO", "RTO_COMPLETE"])
+        .values("sub_order_no").distinct().count()
+    )
+
+    # ── SKU-wise view ─────────────────────────────────────────────────────────
+    if view_mode == "sku":
+        sku_map: dict = defaultdict(lambda: {
+            "sku": None, "product_name": None,
+            "total_claims": 0.0, "order_count": 0,
+            "return_count": 0, "rto_count": 0, "other_count": 0,
+        })
+        # Aggregate per (sub_order_no, sku) then roll up to sku
+        rows_for_agg = (
+            all_rows_qs
+            .values("sub_order_no", "supplier_sku", "product_name", "live_order_status", "claims")
+        )
+        order_sku: dict = {}   # sub_order_no → sku
+        order_claims: dict = defaultdict(float)
+        order_status: dict = {}  # sub_order_no → primary status
+        for r in rows_for_agg:
+            so = r["sub_order_no"]
+            if so not in order_sku:
+                order_sku[so] = r["supplier_sku"]
+                sku_map[r["supplier_sku"]]["sku"] = r["supplier_sku"]
+                sku_map[r["supplier_sku"]]["product_name"] = r["product_name"]
+            if r["claims"]:
+                order_claims[so] += float(r["claims"])
+            st = (r["live_order_status"] or "").upper()
+            if st in ("RETURN",):
+                order_status[so] = "return"
+            elif st in ("RTO", "RTO_COMPLETE"):
+                if order_status.get(so) != "return":
+                    order_status[so] = "rto"
+            elif st and order_status.get(so) not in ("return", "rto"):
+                order_status[so] = "other"
+
+        for so, sku in order_sku.items():
+            b = sku_map[sku]
+            b["order_count"] += 1
+            b["total_claims"] = round(b["total_claims"] + order_claims.get(so, 0), 2)
+            st = order_status.get(so, "other")
+            b[f"{st}_count"] += 1
+
+        sku_rows = sorted(sku_map.values(), key=lambda x: -x["total_claims"])
+        start = (page - 1) * page_size
+        return Response({
+            "total": len(sku_rows), "page": page, "page_size": page_size,
+            "total_claim_amount": round(total_claim_amount, 2),
+            "return_count": return_count, "rto_count": rto_count,
+            "results": sku_rows[start: start + page_size],
+        })
+
+    # ── Order-by-order view ───────────────────────────────────────────────────
+    start           = (page - 1) * page_size
+    page_sub_orders = claimed_list[start: start + page_size]
+
+    page_rows = (
+        OrderPayment.objects
+        .filter(sub_order_no__in=page_sub_orders)
+        .order_by("sub_order_no", "payment_date", "live_order_status")
+    )
+    groups: dict = defaultdict(list)
+    for row in page_rows:
+        groups[row.sub_order_no].append(row)
+
+    results = []
+    for so in page_sub_orders:
+        rows = groups.get(so, [])
+        c = _classify_rows(rows)
+        settlement_rows, _ = _pick_settlement_rows(c)
+        net_settlement = sum(float(r.final_settlement_amount or 0) for r in settlement_rows + c["adj"])
+        order_claims_total = sum(float(r.claims or 0) for r in rows)
+        first = rows[0] if rows else None
+
+        statuses = [r.live_order_status for r in rows if r.live_order_status]
+        _STATUS_PREF = {"RETURN": 0, "RTO": 1, "RTO_COMPLETE": 1, "PREMIUM_RETURN": 2,
+                        "DELIVERED": 3, "EXCHANGE": 4, "CLAIM": 5, "CANCELLED": 6}
+        primary_status = (
+            min(statuses, key=lambda s: _STATUS_PREF.get(s.upper(), 99))
+            if statuses else None
+        )
+
+        results.append({
+            "sub_order_no":    so,
+            "sku":             first.supplier_sku if first else None,
+            "product_name":    first.product_name if first else None,
+            "order_date":      str(first.order_date.date()) if first and first.order_date else None,
+            "primary_status":  primary_status,
+            "net_settlement":  round(net_settlement, 2),
+            "total_claims":    round(order_claims_total, 2),
+            "quantity":        first.quantity if first else None,
+            "rows":            OrderPaymentSerializer(rows, many=True).data,
+        })
+
+    return Response({
+        "total":              total,
+        "page":               page,
+        "page_size":          page_size,
+        "total_claim_amount": round(total_claim_amount, 2),
+        "return_count":       return_count,
+        "rto_count":          rto_count,
+        "results":            results,
     })
 
 
@@ -564,48 +1105,57 @@ def profit_summary(request):
             if date_to:
                 qs = qs.filter(order_date__date__lte=date_to)
 
-    # Load pricing once
-    _fp_all       = list(FinalPrice.objects.only("sku_id", "final_price", "packaging_cost", "parent_id"))
-    price_map     = {fp.sku_id: fp.final_price    or Decimal("0") for fp in _fp_all}
-    packaging_map = {fp.sku_id: fp.packaging_cost or Decimal("0") for fp in _fp_all}
+    # Load pricing once (include item_price + tax_percent for tax cost calculation)
+    _fp_all        = list(FinalPrice.objects.only("sku_id", "final_price", "packaging_cost", "parent_id", "item_price", "tax_percent"))
+    price_map      = {fp.sku_id: fp.final_price    or Decimal("0") for fp in _fp_all}
+    packaging_map  = {fp.sku_id: fp.packaging_cost or Decimal("0") for fp in _fp_all}
+    item_price_map = {fp.sku_id: fp.item_price     or Decimal("0") for fp in _fp_all}
+    tax_map        = {fp.sku_id: fp.tax_percent    or 0            for fp in _fp_all}
     sku_parent_map = {fp.sku_id: fp.parent_id for fp in _fp_all if fp.parent_id}
 
-    # Build date-effective price history: {parent_id: [(effective_from, final_price, packaging_cost), ...]}
-    # Sorted ascending so we can binary-search or simply scan backwards.
+    # Build date-effective price history: {parent_id: [(effective_from, final_price, packaging_cost, item_price, tax_percent), ...]}
     from collections import defaultdict
     _hist = list(
         ParentPriceHistory.objects
-        .values("parent_id", "effective_from", "final_price", "packaging_cost")
+        .values("parent_id", "effective_from", "final_price", "packaging_cost", "item_price", "tax_percent")
         .order_by("effective_from")
     )
     _parent_histories = defaultdict(list)
     for h in _hist:
-        _parent_histories[h["parent_id"]].append(
-            (h["effective_from"], h["final_price"] or Decimal("0"), h["packaging_cost"] or Decimal("0"))
-        )
+        _parent_histories[h["parent_id"]].append((
+            h["effective_from"],
+            h["final_price"]    or Decimal("0"),
+            h["packaging_cost"] or Decimal("0"),
+            h["item_price"]     or Decimal("0"),
+            h["tax_percent"]    or 0,
+        ))
 
     def get_eff_price(sku_id, order_date):
-        """Return (final_price, packaging_cost) effective on order_date, falling back to flat price_map."""
+        """Return (final_price, packaging_cost, item_price, tax_percent) effective on order_date."""
         if order_date:
             if hasattr(order_date, "date"):
                 order_date = order_date.date()
             pid = sku_parent_map.get(sku_id)
             if pid:
-                applicable = [(d, fp, pkg) for d, fp, pkg in _parent_histories[pid] if d <= order_date]
+                applicable = [(d, fp, pkg, ip, tax) for d, fp, pkg, ip, tax in _parent_histories[pid] if d <= order_date]
                 if applicable:
-                    _, fp, pkg = applicable[-1]  # last entry = most recent before order_date
-                    return fp, pkg
-        return price_map.get(sku_id, Decimal("0")), packaging_map.get(sku_id, Decimal("0"))
+                    _, fp, pkg, ip, tax = applicable[-1]
+                    return fp, pkg, ip, tax
+        return (
+            price_map.get(sku_id,      Decimal("0")),
+            packaging_map.get(sku_id,  Decimal("0")),
+            item_price_map.get(sku_id, Decimal("0")),
+            tax_map.get(sku_id, 0),
+        )
 
-    # Pre-fetch distinct statuses ONCE — passed into per-order accumulator to
-    # avoid an N+1 DB query (initialize_keys was previously querying DB per order)
+    # Pre-fetch distinct statuses ONCE so _ensure_status_buckets can pre-initialise keys
     unique_statuses = list(["Cancelled", "Delivered", "Return", "RTO", "Shipped", "Exchange"])
 
     _FIELDS = (
         "sub_order_no", "supplier_sku", "quantity",
         "final_settlement_amount", "live_order_status",
         "recovery_reason", "claims", "return_shipping_charge",
-        "order_date",
+        "order_date", "payment_date",
     )
 
     # Group ALL payment rows by sub_order_no
@@ -628,17 +1178,41 @@ def profit_summary(request):
             orders_missing_price += 1
             continue
 
-        eff_price, eff_pkg = get_eff_price(sku, primary.order_date)
-        result = compute_order_net(payments, eff_price, eff_pkg, qty)
+        eff_price, eff_pkg, eff_item_price, eff_tax_pct = get_eff_price(sku, primary.order_date)
+        result = compute_order_net(payments, eff_price, eff_pkg, qty, eff_item_price, eff_tax_pct)
         accumulate_sku_profit(sku, order_wise_profit, result, price_map, packaging_map, unique_statuses)
         orders_with_price += 1
 
 
     missing_sku          = list(set(missing_sku))
-    total_profit         = sum(v["delivered_profit"]        for v in order_wise_profit.values())
-    total_loss           = sum(v["return_loss"]          for v in order_wise_profit.values())
-    total_purchase_cost  = sum(v["total_purchase_cost"] for v in order_wise_profit.values())
-    total_packaging_cost = sum(v["total_packaging_cost"] for v in order_wise_profit.values())
+    total_profit         = sum(Decimal(str(v.get("delivered_profit", 0) or 0)) for v in order_wise_profit.values())
+    total_loss           = sum(Decimal(str(v.get("return_loss",      0) or 0)) for v in order_wise_profit.values())
+    total_rto_loss       = sum(Decimal(str(v.get("rto_loss",         0) or 0)) for v in order_wise_profit.values())
+    total_other          = sum(Decimal(str(v.get("other_net",        0) or 0)) for v in order_wise_profit.values())
+    # total_purchase_cost: DELIVERED-only item costs.
+    # The frontend settlement table uses: delGross = total_profit + total_purchase_cost
+    # so this must be delivered-only to correctly back out the gross delivered settlement.
+    total_purchase_cost  = sum(Decimal(str(v.get("delivered_purchase_cost",  0) or 0)) for v in order_wise_profit.values())
+
+    # total_deducted_cost: ALL costs actually subtracted from any settlement
+    # (delivered + return-with-claim + rto-with-claim + adj-only-claim orders).
+    # Used for net_settlement_revenue: the true Meesho payout = order_net_pl + total_deducted_cost.
+    total_deducted_cost  = sum(Decimal(str(v.get("total_deducted_cost",      0) or 0)) for v in order_wise_profit.values())
+
+    total_packaging_cost = sum(Decimal(str(v.get("total_packaging_cost", 0) or 0)) for v in order_wise_profit.values())
+    total_tax_cost       = sum(Decimal(str(v.get("total_tax_cost",       0) or 0)) for v in order_wise_profit.values())
+
+    # Counts per outcome (for rate calculations)
+    total_delivered_count = sum(v.get("delivered_count", 0) for v in order_wise_profit.values())
+    total_return_count    = sum(v.get("return_count",    0) for v in order_wise_profit.values())
+    total_rto_count       = sum(v.get("rto_count",       0) for v in order_wise_profit.values())
+    total_other_count     = sum(v.get("other_count",     0) for v in order_wise_profit.values())
+
+    # Shipped-only orders — in-transit, excluded from P&L; tracked via per-order accumulation
+    total_shipped_count          = sum(v.get("shipped_count",          0) for v in order_wise_profit.values())
+    total_shipped_profit         = sum(Decimal(str(v.get("shipped_expected_profit", 0) or 0)) for v in order_wise_profit.values())
+    total_shipped_settlement_exp = sum(Decimal(str(v.get("shipped_settlement",      0) or 0)) for v in order_wise_profit.values())
+    total_shipped_sale_exp       = sum(Decimal(str(v.get("shipped_sale",            0) or 0)) for v in order_wise_profit.values())
 
     # Aggregate affiliate fees — blank-status rows, forced negative (always a cost)
     adj_qs = qs.filter(
@@ -658,7 +1232,11 @@ def profit_summary(request):
         ads_qs = ads_qs.filter(deduction_date__gte=date_from)
     if date_to:
         ads_qs = ads_qs.filter(deduction_date__lte=date_to)
-    ads = ads_qs.aggregate(total=Sum("total_ads_cost"))["total"] or Decimal("0")
+    raw_ads = ads_qs.aggregate(total=Sum("total_ads_cost"))["total"] or Decimal("0")
+    # Ads cost is always a deduction from seller earnings. Meesho's Excel stores it
+    # as a positive spend amount. Force negative so the formula: order_net_pl + ads
+    # always subtracts the ad spend regardless of how it's stored.
+    ads = -abs(raw_ads)
 
     ref_qs = ReferralPayment.objects.all()
     if date_from:
@@ -674,15 +1252,18 @@ def profit_summary(request):
         comp_qs = comp_qs.filter(date__lte=date_to)
     comp_recovery = comp_qs.aggregate(total=Sum("amount_incl_gst"))["total"] or Decimal("0")
 
-    gross_revenue    = qs.aggregate(total=Sum("total_sale_amount"))["total"] or Decimal("0")
-    total_commission = qs.aggregate(total=Sum("meesho_commission_incl_gst"))["total"] or Decimal("0")
-    total_tcs        = qs.aggregate(total=Sum("tcs"))["total"] or Decimal("0")
-    total_tds        = qs.aggregate(total=Sum("tds"))["total"] or Decimal("0")
-    total_shipping   = qs.aggregate(total=Sum("shipping_charge_incl_gst"))["total"] or Decimal("0")
-    # revenue =  qs.aggregate(total=Sum("final_settlement_amount"))["total"] or Decimal("0")
+    # SHIPPED rows are PROVISIONAL — exclude them from ALL financial aggregates.
+    # Rationale:
+    #   • Shipped-only orders: still in transit, payment not yet earned.
+    #   • Orders that progressed SHIPPED → DELIVERED/RETURN/RTO: the final
+    #     status row has the actual settlement; SHIPPED row was just a preview.
+    # Adjustment rows (live_order_status NULL/empty) are claims/affiliate fees
+    # and must be INCLUDED — Django's exclude() leaves NULLs in.
+    settled_qs = qs.exclude(
+        DQ(live_order_status__iexact="shipped") | DQ(live_order_status__iexact="in transit")
+    )
 
-    # Combine 6 aggregates into a single DB round-trip (was 6 separate queries)
-    agg = qs.aggregate(
+    agg = settled_qs.aggregate(
         revenue=Sum("final_settlement_amount"),
         gross_revenue=Sum("total_sale_amount"),
         total_commission=Sum("meesho_commission_incl_gst"),
@@ -690,7 +1271,7 @@ def profit_summary(request):
         total_tds=Sum("tds"),
         total_shipping=Sum("shipping_charge_incl_gst"),
     )
-    
+
     revenue          = agg["revenue"]          or Decimal("0")
     gross_revenue    = agg["gross_revenue"]    or Decimal("0")
     total_commission = agg["total_commission"] or Decimal("0")
@@ -698,37 +1279,100 @@ def profit_summary(request):
     total_tds        = agg["total_tds"]        or Decimal("0")
     total_shipping   = agg["total_shipping"]   or Decimal("0")
 
-    net_revenue = revenue - total_purchase_cost + ads + comp_recovery + referral
+    # Compute P&L from per-order SKU numbers.
+    # Claims are now included in settlement for all order types, so these numbers
+    # already reflect the full settlement (status rows + adj rows) per order.
+    #
+    # total_profit    = sum of (full_settlement − item_cost)   for DELIVERED orders
+    # total_loss      = sum of full_settlement                  for RETURN orders
+    # total_rto_loss  = sum of full_settlement                  for RTO orders
+    # total_other     = CANCELLED / EXCHANGE / adj-only orders
+    order_net_pl = total_profit + total_loss + total_rto_loss + total_other
+
+    # net_settlement_revenue = total money Meesho actually paid across all settled orders.
+    #
+    # Proof: for each order, settlement = net + deducted_cost
+    #   DELIVERED:        settlement = (settlement - cost) + cost           = net + cost ✓
+    #   RETURN (no claim): settlement = net + 0                             = net ✓
+    #   RETURN+CLAIM:      settlement = (settlement - cost) + cost          = net + cost ✓
+    #   ADJ-only claim:    settlement = (settlement - cost) + cost          = net + cost ✓
+    #
+    # Summing over all orders: Σsettlement = order_net_pl + total_deducted_cost
+    # total_purchase_cost is DELIVERED-only (for the settlement table), so use total_deducted_cost here.
+    net_settlement_revenue = order_net_pl + total_deducted_cost
+
+    # Full Net P&L = order P&L + other income/costs
+    # NOTE: item_price already includes packaging and tax as an all-in purchase cost.
+    # total_packaging_cost and total_tax_cost are BREAKDOWN DISPLAYS only — they are
+    # already embedded in purchase_cost (item_price × qty) and must NOT be subtracted again.
+    # ads is forced negative above to guarantee it always reduces profit.
+    net_revenue = order_net_pl + ads + comp_recovery + referral
+
+    # Keep raw DB aggregate as informational (includes claims adj rows) — NOT used in P&L
+    raw_settlement = revenue
+
+    # Tax summary — what % of gross revenue was withheld as tax
+    total_tax_withheld = total_tcs + total_tds
+    tax_rate_pct = round(float(total_tax_withheld / gross_revenue * 100), 2) if gross_revenue else 0.0
+    commission_rate_pct = round(float(total_commission / gross_revenue * 100), 2) if gross_revenue else 0.0
+    total_deduction_rate_pct = round(float((total_tax_withheld + total_commission) / gross_revenue * 100), 2) if gross_revenue else 0.0
+
+    settled_order_count = total_delivered_count + total_return_count + total_rto_count + total_other_count
 
     return Response({
-        "gross_revenue": round(gross_revenue, 2),
-        "net_settlement_revenue": round(revenue, 2),
-        "total_purchase_cost": round(total_purchase_cost, 2),
-        "total_profit": round(total_profit, 2),
-        "total_loss": round(total_loss, 2),
-        "net_revenue": round(net_revenue, 2),
-        "sku_wise_profit": order_wise_profit,
-        "orders_with_price": orders_with_price,
-        "orders_missing_price": orders_missing_price,
-        "orders_missing_sku": len(missing_sku),
-        "missing_sku": missing_sku,
-        "total_packaging_cost": total_packaging_cost,
-        "total_ads_cost": round(ads, 2),
-        "total_referral_income": round(referral, 2),
-        "total_compensation_recovery": round(comp_recovery, 2),
-        "total_commission_paid": round(total_commission, 2),
-        "total_tcs": round(total_tcs, 2),
-        "total_tds": round(total_tds, 2),
-        "total_shipping_cost": round(total_shipping, 2),
-        "total_claims": round(total_claims, 2),
-        "total_affiliate_fee": round(total_affiliate_fee, 2),
-        "total_claimed_orders": sum(v.get("claims_count", 0) for v in order_wise_profit.values()),
-        "total_pure_returns":   sum(v.get("return_count",  0) for v in order_wise_profit.values()),
-        "order_count": len(order_groups),
-        "adjustment_count": adj_qs.count(),
-        "ads_campaigns": ads_qs.count(),
-        "referral_count": ref_qs.count(),
-        "compensation_recovery_count": comp_qs.count(),
+        "gross_revenue":          round(gross_revenue, 2),
+        "net_settlement_revenue": round(net_settlement_revenue, 2),
+        "raw_settlement":         round(raw_settlement, 2),
+        "total_purchase_cost":    round(total_purchase_cost, 2),
+        "total_packaging_cost":   round(total_packaging_cost, 2),
+        "total_tax_cost":         round(total_tax_cost, 2),
+        "total_profit":           round(total_profit, 2),
+        "total_loss":             round(total_loss, 2),
+        "total_rto_loss":         round(total_rto_loss, 2),
+        "total_other":            round(total_other, 2),
+        "order_net_pl":           round(order_net_pl, 2),
+        "net_revenue":            round(net_revenue, 2),
+        "sku_wise_profit":        order_wise_profit,
+        "orders_with_price":      orders_with_price,
+        "orders_missing_price":   orders_missing_price,
+        "orders_missing_sku":     len(missing_sku),
+        "missing_sku":            missing_sku,
+        "total_ads_cost":               round(ads, 2),
+        "total_referral_income":        round(referral, 2),
+        "total_compensation_recovery":  round(comp_recovery, 2),
+        "total_commission_paid":        round(total_commission, 2),
+        "total_tcs":                    round(total_tcs, 2),
+        "total_tds":                    round(total_tds, 2),
+        "total_shipping_cost":          round(total_shipping, 2),
+        "total_claims":                 round(total_claims, 2),
+        "total_affiliate_fee":          round(total_affiliate_fee, 2),
+        "total_pure_returns":           total_return_count,
+        "total_other_count":            total_other_count,
+        "total_claimed_orders":         qs.filter(claims__gt=0).values("sub_order_no").distinct().count(),
+        "order_count":                  len(order_groups),
+        "adjustment_count":             adj_qs.count(),
+        "ads_campaigns":                ads_qs.count(),
+        "referral_count":               ref_qs.count(),
+        "compensation_recovery_count":  comp_qs.count(),
+        # Outcome counts for rate calculation
+        "total_delivered_count": total_delivered_count,
+        "total_return_count":    total_return_count,
+        "total_rto_count":       total_rto_count,
+        "settled_order_count":   settled_order_count,
+        # In-transit shipped-only orders (excluded from P&L)
+        "shipped_summary": {
+            "count":           total_shipped_count,
+            "expected_profit": round(float(total_shipped_profit), 2),
+            "settlement_paid": round(float(total_shipped_settlement_exp), 2),
+            "expected_sale":   round(float(total_shipped_sale_exp), 2),
+        },
+        # Tax / deduction rates (% of gross revenue)
+        "tax_summary": {
+            "total_tax_withheld":       round(float(total_tax_withheld), 2),
+            "tax_rate_pct":             tax_rate_pct,
+            "commission_rate_pct":      commission_rate_pct,
+            "total_deduction_rate_pct": total_deduction_rate_pct,
+        },
     })
 
 
@@ -2332,7 +2976,8 @@ def purchase_pdf(request, bill_id):
 def inventory_view(request):
     """
     Compute current stock per parent SKU:
-      current_stock = purchased_qty (non-exchange) - sold_qty (DELIVERED) + rto_qty (RTO_COMPLETE)
+      current_stock = purchased_qty (non-exchange) - sold_qty (DELIVERED) + rto_qty (RTO_COMPLETE) + net_adjustments
+    Also returns parent SKUs that have only adjustments (no purchases) so manual-only SKUs appear.
     """
     from django.db.models import ExpressionWrapper, F, DecimalField as DField
 
@@ -2352,17 +2997,28 @@ def inventory_view(request):
         r["parent_sku_id"]: {"qty": r["purchased_qty"], "value": r["purchase_value"]}
         for r in purchase_agg
     }
-    if not purchased_by_parent:
+
+    # 2. Manual adjustments per parent SKU
+    adj_agg = (
+        InventoryAdjustment.objects
+        .values("parent_sku_id")
+        .annotate(net_adj=Sum("quantity"))
+    )
+    adj_by_parent = {r["parent_sku_id"]: r["net_adj"] for r in adj_agg}
+
+    # Merge: all parent SKUs that appear in either purchases or adjustments
+    all_parent_ids = set(purchased_by_parent.keys()) | set(adj_by_parent.keys())
+    if not all_parent_ids:
         return Response({"results": [], "total": 0})
 
-    # 2. Map child SKU → parent SKU
+    # 3. Map child SKU → parent SKU
     sku_to_parent = dict(
         FinalPrice.objects
-        .filter(parent_id__in=purchased_by_parent.keys())
+        .filter(parent_id__in=all_parent_ids)
         .values_list("sku_id", "parent_id")
     )
 
-    # 3. Sold qty (DELIVERED) and returned qty (RTO_COMPLETE) per child SKU
+    # 4. Sold qty (DELIVERED) and returned qty (RTO_COMPLETE) per child SKU
     child_skus = list(sku_to_parent.keys())
     delivered_by_sku = dict(
         Order.objects
@@ -2379,7 +3035,7 @@ def inventory_view(request):
         .values_list("sku", "qty")
     )
 
-    # 4. Roll up child → parent
+    # 5. Roll up child → parent
     sold_by_parent = {}
     rto_by_parent  = {}
     for sku, qty in delivered_by_sku.items():
@@ -2391,32 +3047,166 @@ def inventory_view(request):
         if parent:
             rto_by_parent[parent] = rto_by_parent.get(parent, 0) + qty
 
-    # 5. Last purchase date per parent SKU
+    # 6. Last purchase date per parent SKU
     last_purchase = dict(
         PurchaseItem.objects
-        .filter(parent_sku_id__in=purchased_by_parent.keys())
+        .filter(parent_sku_id__in=all_parent_ids)
         .values("parent_sku_id")
         .annotate(last=Max("bill__date"))
         .values_list("parent_sku_id", "last")
     )
 
     results = []
-    for parent_id, pdata in purchased_by_parent.items():
+    for parent_id in all_parent_ids:
+        pdata    = purchased_by_parent.get(parent_id, {"qty": 0, "value": Decimal("0")})
         purchased = pdata["qty"]
         sold      = sold_by_parent.get(parent_id, 0)
         rto       = rto_by_parent.get(parent_id, 0)
+        net_adj   = adj_by_parent.get(parent_id, 0)
         results.append({
             "sku_id":          parent_id,
             "purchased_qty":   purchased,
             "sold_qty":        sold,
             "rto_qty":         rto,
-            "current_stock":   purchased - sold + rto,
+            "adjustment_qty":  net_adj,
+            "current_stock":   purchased - sold + rto + net_adj,
             "purchase_value":  str(pdata["value"] or 0),
             "last_purchase":   str(last_purchase.get(parent_id, "")),
         })
 
     results.sort(key=lambda r: r["current_stock"])
     return Response({"results": results, "total": len(results)})
+
+
+@api_view(["GET", "POST"])
+def inventory_adjustment_list(request):
+    """List or create manual inventory adjustments for a parent SKU."""
+    parent_sku_id = request.GET.get("parent_sku", "").strip() if request.method == "GET" else request.data.get("parent_sku_id", "").strip()
+
+    if request.method == "GET":
+        if not parent_sku_id:
+            return Response({"error": "parent_sku required"}, status=400)
+        adjs = InventoryAdjustment.objects.filter(parent_sku_id=parent_sku_id).order_by("-date", "-created_at")
+        results = [{
+            "id":         a.id,
+            "quantity":   a.quantity,
+            "reason":     a.reason,
+            "reason_display": dict(InventoryAdjustment.REASON_CHOICES).get(a.reason, a.reason),
+            "notes":      a.notes,
+            "date":       str(a.date),
+            "created_at": a.created_at.isoformat(),
+        } for a in adjs]
+        return Response({"results": results, "total": len(results)})
+
+    # POST
+    data = request.data
+    parent_sku_id = data.get("parent_sku_id", "").strip()
+    if not parent_sku_id:
+        return Response({"error": "parent_sku_id required"}, status=400)
+    try:
+        qty = int(data.get("quantity", 0))
+    except (TypeError, ValueError):
+        return Response({"error": "quantity must be an integer"}, status=400)
+    if qty == 0:
+        return Response({"error": "quantity cannot be zero"}, status=400)
+
+    parent = ParentItemPrice.objects.filter(pk=parent_sku_id).first()
+    if not parent:
+        return Response({"error": f"Parent SKU '{parent_sku_id}' not found"}, status=404)
+
+    adj = InventoryAdjustment.objects.create(
+        parent_sku=parent,
+        quantity=qty,
+        reason=data.get("reason", "OTHER"),
+        notes=data.get("notes", ""),
+        date=data.get("date"),
+    )
+    return Response({
+        "id":         adj.id,
+        "quantity":   adj.quantity,
+        "reason":     adj.reason,
+        "reason_display": dict(InventoryAdjustment.REASON_CHOICES).get(adj.reason, adj.reason),
+        "notes":      adj.notes,
+        "date":       str(adj.date),
+        "created_at": adj.created_at.isoformat(),
+    }, status=201)
+
+
+@api_view(["PUT", "DELETE"])
+def inventory_adjustment_detail(request, adj_id):
+    """Update or delete a single inventory adjustment."""
+    try:
+        adj = InventoryAdjustment.objects.get(pk=adj_id)
+    except InventoryAdjustment.DoesNotExist:
+        return Response({"error": "Not found"}, status=404)
+
+    if request.method == "PUT":
+        data = request.data
+        try:
+            qty = int(data.get("quantity", adj.quantity))
+        except (TypeError, ValueError):
+            return Response({"error": "quantity must be an integer"}, status=400)
+        if qty == 0:
+            return Response({"error": "quantity cannot be zero"}, status=400)
+        adj.quantity = qty
+        adj.reason   = data.get("reason", adj.reason)
+        adj.notes    = data.get("notes", adj.notes)
+        if data.get("date"):
+            adj.date = data["date"]
+        adj.save()
+        return Response({
+            "id":           adj.id,
+            "quantity":     adj.quantity,
+            "reason":       adj.reason,
+            "reason_display": dict(InventoryAdjustment.REASON_CHOICES).get(adj.reason, adj.reason),
+            "notes":        adj.notes,
+            "date":         str(adj.date),
+            "created_at":   adj.created_at.isoformat(),
+        })
+
+    # DELETE
+    adj.delete()
+    return Response({"message": "Deleted"})
+
+
+@api_view(["POST"])
+def inventory_create_sku(request):
+    """Create a new Parent SKU directly from the inventory screen."""
+    data = request.data
+    sku_id = (data.get("sku_id") or "").strip()
+    if not sku_id:
+        return Response({"error": "sku_id is required"}, status=400)
+    if ParentItemPrice.objects.filter(pk=sku_id).exists():
+        return Response({"error": f"Parent SKU '{sku_id}' already exists"}, status=409)
+
+    with transaction.atomic():
+        parent = ParentItemPrice.objects.create(
+            item_id=sku_id,
+            item_price=data.get("item_price") or None,
+            tax_percent=data.get("tax_percent") or None,
+            packaging_cost=data.get("packaging_cost") or None,
+            final_price=data.get("final_price") or None,
+        )
+        # Optional: add initial stock as a purchase bill
+        init_qty = int(data.get("initial_qty") or 0)
+        if init_qty > 0:
+            price_per_unit = Decimal(str(data.get("initial_price") or "0"))
+            bill = PurchaseBill.objects.create(
+                date=data.get("initial_date") or timezone.now().date(),
+                seller_name=data.get("initial_seller") or "Opening Stock",
+                bill_number="",
+                notes="Initial stock — created from Inventory",
+            )
+            PurchaseItem.objects.create(
+                bill=bill,
+                parent_sku=parent,
+                product_description="Opening stock",
+                quantity=init_qty,
+                price_per_unit=price_per_unit,
+                is_exchange=False,
+            )
+
+    return Response({"sku_id": parent.item_id, "message": "Created"}, status=201)
 
 
 # ── Purchase item-level CRUD ──────────────────────────────────────────────────

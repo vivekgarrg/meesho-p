@@ -94,7 +94,7 @@ pip install -r requirements.txt
 export DB_ENGINE=mysql
 export DB_NAME=meesho_profit
 export DB_USER=meesho
-export DB_PASSWORD=yourpassword
+export DB_PASSWORD=root
 export DB_HOST=localhost
 export DB_PORT=3306
 
