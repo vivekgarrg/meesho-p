@@ -144,7 +144,7 @@ function OutcomeCard({ icon, label, count, rate, rateColor, netLabel, net, netCo
   return (
     <div style={{
       ...T.card, flex: "1 1 180px", padding: "16px 18px",
-      borderLeft: `4px solid ${rateColor}`,
+      borderLeft: `4px solid ${rateColor}`
     }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
         <div>
@@ -302,49 +302,73 @@ export function OverviewTab() {
   }, [activeRange]);
 
   // ── Derived values ────────────────────────────────────────────────────────
-  const netProfit   = Number(profit?.net_revenue ?? 0);
-  const pos         = netProfit >= 0;
+  const netProfit = Number(profit?.net_revenue ?? 0);
+  const pos = netProfit >= 0;
   const { order_stats, payment_stats, join_stats, unsettled } = dash || {};
 
-  const matchRate   = join_stats?.match_rate ?? 0;
-  const netSettle   = payment_stats?.total_settlement ?? 0;
-  const totalSale   = payment_stats?.total_sale ?? 0;
-  const settleEff   = totalSale > 0 ? ((netSettle / totalSale) * 100).toFixed(1) : "—";
+  const matchRate = join_stats?.match_rate ?? 0;
+  const netSettle = payment_stats?.total_settlement ?? 0;
+  const totalSale = payment_stats?.total_sale ?? 0;
+  const settleEff = totalSale > 0 ? ((netSettle / totalSale) * 100).toFixed(1) : "—";
 
   const filterLabel = mode === "month" ? fmtMonth(selectedMonth)
     : mode === "custom" ? `${customFrom} → ${customTo}` : "All Time";
 
-  const nDel   = profit?.total_delivered_count ?? 0;
-  const nRet   = profit?.total_return_count    ?? 0;
-  const nRTO   = profit?.total_rto_count       ?? 0;
-  const nOther = profit?.total_other_count     ?? 0;
-  const nTotal = profit?.settled_order_count   ?? (nDel + nRet + nRTO);
+
+  const returnSummary = profit?.order_summary?.return_summary;
+  const deliveredSummary = profit?.order_summary?.delivered_summary
+  const rtoSummary = profit?.order_summary?.rto_summary
+  const otherSummary = profit?.order_summary?.unknown_summary
+  const exchangedSummary = profit?.order_summary?.exchanged_summary
+  const claimSummary = profit?.order_summary?.claim_summary
+
+  const claimNet = Number(claimSummary?.total_settlement);
+  const exchangeNet = Number(exchangedSummary?.total_settlement ?? 0);
+  const nTotal = profit?.order_count
+
+  const nDel = deliveredSummary?.order_count ?? 0
+  const nRet = returnSummary?.order_count ?? 0
+  const nRTO = rtoSummary?.order_count ?? 0
+  const nExchange = exchangedSummary?.order_count ?? 0
+  const nClaim = claimSummary?.order_count ?? 0
+  const nOther = otherSummary?.order_count ?? 0
+
+  const nDelProfitLoss = deliveredSummary?.net_profit_loss ?? 0
+  const nRetProfitLoss = returnSummary?.net_profit_loss ?? 0
+  const nRTOProfitLoss = rtoSummary?.net_profit_loss ?? 0
+  const nExchangeProfitLoss = exchangedSummary?.net_profit_loss ?? 0
+  const nClaimProfitLoss = claimSummary?.net_profit_loss ?? 0
+  const nOtherProfitLoss = otherSummary?.net_profit_loss ?? 0
+
   const delRate = pct2(nDel, nTotal);
   const retRate = pct2(nRet, nTotal);
   const rtoRate = pct2(nRTO, nTotal);
+  const exchangeRate = pct2(nExchange, nTotal);
+  const claimRate = pct2(nClaim, nTotal);
+  const otherRate = pct2(nOther, nTotal);
 
-  const shipped      = profit?.shipped_summary ?? {};
-  const taxSummary   = profit?.tax_summary ?? {};
-  const grossRev     = profit?.gross_revenue ?? 0;
-  const tcsAmt       = profit?.total_tcs ?? 0;
-  const tdsAmt       = profit?.total_tds ?? 0;
-  const commAmt      = profit?.total_commission_paid ?? 0;
-  const tcsPct       = pct2(tcsAmt, grossRev);
-  const tdsPct       = pct2(tdsAmt, grossRev);
-  const commPct      = pct2(commAmt, grossRev);
+  const shipped = profit?.shipped_summary ?? {};
+  const taxSummary = profit?.tax_summary ?? {};
+  const grossRev = profit?.gross_revenue ?? 0;
+  const tcsAmt = profit?.total_tcs ?? 0;
+  const tdsAmt = profit?.total_tds ?? 0;
+  const commAmt = profit?.total_commission_paid ?? 0;
+  const tcsPct = pct2(tcsAmt, grossRev);
+  const tdsPct = pct2(tdsAmt, grossRev);
+  const commPct = pct2(commAmt, grossRev);
   const totalDeductPct = taxSummary.total_deduction_rate_pct?.toFixed(2) ?? "0.00";
 
   const matchPieData = [
-    { id: 0, value: join_stats?.matched_count   ?? 0, label: "Matched",   color: C.green },
+    { id: 0, value: join_stats?.matched_count ?? 0, label: "Matched", color: C.green },
     { id: 1, value: join_stats?.unmatched_count ?? 0, label: "Unmatched", color: C.amber },
   ].filter(d => d.value > 0);
 
   const deductionPieData = [
-    { label: "Commission",  value: Math.abs(Number(commAmt)) },
-    { label: "Ads Cost",    value: Math.abs(Number(profit?.total_ads_cost)) },
-    { label: "TCS",         value: Math.abs(Number(tcsAmt)) },
-    { label: "TDS",         value: Math.abs(Number(tdsAmt)) },
-    { label: "Shipping",    value: Math.abs(Number(profit?.total_shipping_cost)) },
+    { label: "Commission", value: Math.abs(Number(commAmt)) },
+    { label: "Ads Cost", value: Math.abs(Number(profit?.total_ads_cost)) },
+    { label: "TCS", value: Math.abs(Number(tcsAmt)) },
+    { label: "TDS", value: Math.abs(Number(tdsAmt)) },
+    { label: "Shipping", value: Math.abs(Number(profit?.total_shipping_cost)) },
   ].filter(d => d.value > 0.01).map((d, i) => ({ ...d, id: i, color: CHART_COLORS[i % CHART_COLORS.length] }));
 
   const timelineData = (() => {
@@ -363,20 +387,50 @@ export function OverviewTab() {
     return Object.values(map).sort((a, b) => a.date > b.date ? 1 : -1);
   })();
 
+
+
+
   // Derived amounts for settlement table
-  const delGross   = Number(profit?.total_profit || 0) + Number(profit?.total_purchase_cost || 0);
-  const delCost    = -Number(profit?.total_purchase_cost || 0);
-  const retNet     = Number(profit?.total_loss || 0);
-  const rtoNet     = Number(profit?.total_rto_loss || 0);
-  const otherNet   = Number(profit?.total_other || 0);
-  const totalGross = delGross + retNet + rtoNet + otherNet;
+  const delGross = Number(deliveredSummary?.total_settlement || 0)
+  const delCost = -Number(deliveredSummary?.final_item_cost || 0);
+  const retNet = Number(returnSummary?.total_settlement || 0);
+  const rtoNet = Number(rtoSummary?.total_settlement || 0);
+  const otherNet = Number(otherSummary?.total_settlement || 0);
+
+  // RETURN/RTO: net = settlement − packaging; gross = settlement = net + packaging
+  const retPkgCost = Number(returnSummary?.packaging_cost || 0);
+  const rtoPkgCost = Number(rtoSummary?.packaging_cost || 0);
+  const retGross = retNet;   // = Meesho return settlement before deduction
+  const rtoGross = rtoNet;   // = Meesho RTO settlement before deduction
+  // EXCHANGE: net = settlement − 2×packaging; gross = settlement = net + 2×pkg
+  const exchPkgCost = -Number(exchangedSummary?.final_item_cost || 0);
+  const exchGross = exchangeNet;
+  // CLAIM: net = settlement − item_cost; packaging NOT deducted
+  const claimCost = -Number(claimSummary?.final_item_cost || 0);
+  const claimGross = claimNet;  // = settlement
+
+  const totalGross = delGross + retGross + rtoGross + exchGross + claimGross + otherNet;
+  const totalCost = delCost + exchPkgCost + claimCost;
 
   const settlementRows = [
-    { icon: "✅", label: "Delivered", count: nDel, gross: delGross,  cost: delCost, net: Number(profit?.total_profit || 0), netColor: C.green },
-    { icon: "↩",  label: "Return",    count: nRet, gross: retNet,    cost: 0,       net: retNet, netColor: retNet >= 0 ? C.gray600 : C.red },
-    { icon: "🔄", label: "RTO",       count: nRTO, gross: rtoNet,    cost: 0,       net: rtoNet, netColor: rtoNet >= 0 ? C.gray600 : C.amber },
-    { icon: "⊘",  label: "Other",     count: nOther, gross: otherNet, cost: 0,      net: otherNet, netColor: otherNet >= 0 ? C.gray600 : C.red },
+    { icon: "✅", label: "Delivered", count: nDel, gross: delGross, cost: delCost, rate: delRate, net: deliveredSummary?.net_profit_loss, netColor: C.green },
+    { icon: "↩", label: "Return", count: nRet, gross: retGross, cost: 0, net: returnSummary?.net_profit_loss, rate: retRate, netColor: returnSummary?.net_profit_loss >= 0 ? C.gray600 : C.red },
+    { icon: "🔄", label: "RTO", count: nRTO, gross: rtoGross, cost: 0, net: rtoNet, rate: rtoRate, netColor: rtoNet >= 0 ? C.gray600 : C.amber },
+    { icon: "🔁", label: "Exchanged", count: nExchange, gross: exchGross, cost: exchPkgCost, rate: exchangeRate, net: exchangeNet, netColor: exchangeNet >= 0 ? C.gray600 : C.blue },
+    { icon: "⚠", label: "Claim", count: nClaim, gross: claimGross, cost: claimCost, net: claimNet, rate: claimRate, netColor: claimNet >= 0 ? C.gray600 : "#7C3AED" },
+    { icon: "⊘", label: "Unknown", count: nOther, gross: otherNet, cost: 0, net: otherNet, rate: otherRate, netColor: otherNet >= 0 ? C.gray600 : C.red },
   ];
+
+  const statusIcons = {
+    DELIVERED: { icon: "✅", color: C.green },
+    RETURN: { icon: "↩", color: C.red },
+    RTO: { icon: "🔄", color: C.orange },
+    EXCHANGED: { icon: "🔁", color: C.amber },
+    CLAIM: { icon: "⚠", color: C.blue },
+    UNKNOWN: { icon: "⊘", color: C.gray400 }
+  }
+
+  const orders_summary_cards_data = profit?.order_summary;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
@@ -430,9 +484,9 @@ export function OverviewTab() {
           {/* Right: key secondary metrics */}
           <div style={{ display: "flex", gap: 28, flexWrap: "wrap" }}>
             {[
-              { label: "Gross Revenue",      value: fmt(profit.gross_revenue),          color: C.gray800 },
-              { label: "Net Settlement",     value: fmt(profit.net_settlement_revenue),  color: C.green },
-              { label: "Order Net P&L",      value: fmt(profit.order_net_pl),            color: Number(profit.order_net_pl) >= 0 ? C.green : C.red },
+              { label: "Gross Revenue", value: fmt(profit.gross_revenue), color: C.gray800 },
+              { label: "Net Settlement", value: fmt(profit.total_settled), color: C.green },
+              { label: "Order Net P&L", value: fmt(profit?.net_profit_loss), color: Number(profit?.net_profit_loss) >= 0 ? C.green : C.red },
             ].map(({ label, value, color }) => (
               <div key={label} style={{ textAlign: "right" }}>
                 <p style={{ fontSize: 10, fontWeight: 700, color: C.gray400, letterSpacing: "0.07em", textTransform: "uppercase", marginBottom: 5 }}>{label}</p>
@@ -463,33 +517,29 @@ export function OverviewTab() {
           </div>
         )}
 
-        {/* ── 4. Order outcome cards ──────────────────────────────────────── */}
-        <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
-          <OutcomeCard
-            icon="✅" label="Delivered" count={nDel} rate={delRate} rateColor={C.green}
-            netLabel="Net Profit" net={Number(profit.total_profit || 0)} netColor={C.green}
-            subStats={[
-              { label: "Gross settlement", value: fmt(delGross) },
-              { label: "Item cost (all-in)", value: fmt(delCost), color: C.red },
-              { label: "  └ incl. pkg", value: fmt(profit.total_packaging_cost ?? 0), color: C.gray400 },
-              { label: "  └ incl. GST", value: fmt(profit.total_tax_cost ?? 0), color: C.gray400 },
-            ]}
-          />
-          <OutcomeCard
-            icon="↩" label="Returns" count={nRet} rate={retRate} rateColor={C.red}
-            netLabel="Net Settlement" net={retNet} netColor={retNet >= 0 ? C.gray600 : C.red}
-            subStats={[{ label: "incl. claim credits", value: "see claims tab" }]}
-          />
-          <OutcomeCard
-            icon="🔄" label="RTO" count={nRTO} rate={rtoRate} rateColor={C.amber}
-            netLabel="Net Settlement" net={rtoNet} netColor={rtoNet >= 0 ? C.gray600 : C.amber}
-            subStats={[{ label: "item came back", value: "no item cost" }]}
-          />
-          <OutcomeCard
-            icon="⊘" label="Other" count={nOther} rate={pct2(nOther, nTotal)} rateColor={C.gray400}
-            netLabel="Net" net={otherNet} netColor={otherNet >= 0 ? C.gray600 : C.red}
-            subStats={[{ label: "cancelled / adj / exchange", value: "" }]}
-          />
+        <div style={{ display: "flex", gap: 18, flexWrap: "wrap" }}>
+          {
+            Object.keys(orders_summary_cards_data)?.map(key => {
+              const title = key.split("_")[0].toLocaleUpperCase();
+              const data = orders_summary_cards_data[key];
+              const color = data.net_profit_loss > 0 ? C.green : C.red
+              const row = settlementRows.find(obj => obj.label.toLowerCase() === title.toLocaleLowerCase())
+              const cardColor = row?.netColor;
+              return (
+                <OutcomeCard
+                  icon={row?.icon} label={title} count={data.order_count} rate={row?.rate} rateColor={cardColor}
+                  netLabel="Net Profit" net={Number(data.net_profit_loss || 0)} netColor={color}
+                  subStats={[
+                    { label: "Gross settlement", value: fmt(data.total_settlement ?? 0) },
+                    { label: "Item cost (all-in)", value: fmt(data.final_item_cost ?? 0), color: C.red },
+                    { label: "  └ incl. purchase", value: fmt(data.purchase_cost ?? 0), color: C.gray400 },
+                    { label: "  └ incl. pkg", value: fmt(data.packaging_cost ?? 0), color: C.gray400 },
+                    { label: "  └ incl. GST", value: fmt(data.tax_cost ?? 0), color: C.gray400 },
+                  ]}
+                />
+              )
+            })
+          }
         </div>
 
         {/* ── 5. Two-column: Profit Formula + P&L Summary ──────────────────── */}
@@ -500,21 +550,19 @@ export function OverviewTab() {
             <p style={{ fontSize: 11, color: C.gray400, marginBottom: 14, lineHeight: 1.7 }}>
               Commission / TCS / TDS / Shipping are already deducted by Meesho inside the settlement — not subtracted again here.
             </p>
-            <FormulaStep sign="+" label={`Delivered Profit — ${nDel} orders`} value={profit.total_profit} color={C.green}
-              note="settlement − item_price × qty" />
-            <FormulaStep sign="±" label={`Return Net — ${nRet} orders`} value={profit.total_loss}
-              color={Number(profit.total_loss) >= 0 ? C.gray600 : C.red}
-              note="return settlement incl. claims; item came back" />
-            <FormulaStep sign="±" label={`RTO Net — ${nRTO} orders`} value={profit.total_rto_loss}
-              color={Number(profit.total_rto_loss) >= 0 ? C.gray600 : C.amber}
-              note="RTO settlement incl. claims; item came back" />
+            <FormulaStep sign="+" label={`Net Settlement`} value={profit.total_settled} color={C.green}
+              note="Total Settlement" />
+
+            <FormulaStep sign="-" label={`Purchase Cost`} value={profit.total_purchase_cost} color={C.red}
+              note="total items purchased with gst and packaging cost included" />
+
             {Number(profit.total_other || 0) !== 0 && (
               <FormulaStep sign="±" label={`Other — ${nOther} orders`} value={profit.total_other}
                 color={Number(profit.total_other) >= 0 ? C.gray600 : C.red}
-                note="cancelled, exchange, adj-only rows" />
+                note="cancelled / affiliate fee / manual pickup" />
             )}
-            <FormulaStep sign="=" label="Order Net P&L" value={profit.order_net_pl}
-              color={Number(profit.order_net_pl) >= 0 ? C.green : C.red} bold divider />
+            <FormulaStep sign="=" label="Order Net P&L" value={profit.net_profit_loss}
+              color={Number(profit.net_profit_loss) >= 0 ? C.green : C.red} bold divider />
             <FormulaStep sign="−" label="Ads Spend" value={profit.total_ads_cost} color={C.orange}
               note="ad campaigns — always a cost" />
             <FormulaStep sign="±" label="Compensation / Recovery" value={profit.total_compensation_recovery}
@@ -522,25 +570,9 @@ export function OverviewTab() {
             <FormulaStep sign="+" label="Referral Income" value={profit.total_referral_income} color={C.green} />
             <FormulaStep sign="=" label="NET P&L (Final)" value={netProfit}
               color={pos ? C.green : C.red} bold divider />
-            {/* Reconciliation — confirms frontend math equals backend net_revenue */}
-            {(() => {
-              const computed = Number(profit.order_net_pl)
-                + Number(profit.total_ads_cost ?? 0)
-                + Number(profit.total_compensation_recovery ?? 0)
-                + Number(profit.total_referral_income ?? 0);
-              const diff = Math.abs(netProfit - computed);
-              const match = diff < 0.05;
-              return (
-                <div style={{ marginTop: 8, padding: "8px 10px", borderRadius: 8,
-                  background: match ? "#ECFDF5" : "#FFF7ED",
-                  border: `1px solid ${match ? C.greenBorder : C.amberBorder}` }}>
-                  <span style={{ fontSize: 11, fontWeight: 700, color: match ? C.green : C.amber }}>
-                    {match ? "✅ P&L reconciled — all components match" : `⚠️ Off by ₹${diff.toFixed(2)} — check data`}
-                  </span>
-                </div>
-              );
-            })()}
-            {/* Informational breakdown — packaging & tax are already inside item_price */}
+
+
+
             <div style={{ marginTop: 12, padding: "10px 12px", borderRadius: 8, background: "#F8FAFC", border: "1px dashed #E2E8F0" }}>
               <p style={{ fontSize: 9, fontWeight: 700, color: C.gray300, textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 8 }}>
                 Cost Breakdown (already inside item_price — info only)
@@ -567,20 +599,12 @@ export function OverviewTab() {
 
             {/* Order P&L Breakdown */}
             <SectionCard title="Order P&L Breakdown">
-              <StatRow label={`✅ Delivered Profit (${nDel})`} value={fmt(profit.total_profit)} color={C.green} sub="settlement − item_price×qty (all-in cost)" />
-              <StatRow label={`↩ Return Net (${nRet}) · ${retRate}%`} value={fmt(profit.total_loss)} color={retNet >= 0 ? C.gray600 : C.red} sub="return settlement incl. claims" />
-              <StatRow label={`🔄 RTO Net (${nRTO}) · ${rtoRate}%`} value={fmt(profit.total_rto_loss)} color={rtoNet >= 0 ? C.gray600 : C.amber} sub="RTO settlement incl. claims" />
-              <StatRow label={`⊘ Other · ${nOther} orders`} value={fmt(profit.total_other || 0)} color={otherNet >= 0 ? C.gray600 : C.red} sub="cancelled, exchange, adj-only" />
-              <StatRow label="= Order Net P&L" value={fmt(profit.order_net_pl)} color={Number(profit.order_net_pl) >= 0 ? C.green : C.red} bold borderless />
-            </SectionCard>
-
-            {/* Full P&L bridge to Net */}
-            <SectionCard title="Full P&L Bridge → Net Profit">
-              <StatRow label="Order Net P&L" value={fmt(profit.order_net_pl)} color={Number(profit.order_net_pl) >= 0 ? C.green : C.red} sub="item_price (all-in) already deducted" />
-              <StatRow label="Ads Spend" value={fmt(profit.total_ads_cost)} color={C.orange} sub="ad campaigns cost" />
-              <StatRow label="Compensation / Recovery" value={fmt(profit.total_compensation_recovery)} color={Number(profit.total_compensation_recovery) >= 0 ? C.blue : C.red} />
-              <StatRow label="Referral Income" value={fmt(profit.total_referral_income)} color={C.green} />
-              <StatRow label="= NET P&L (Final)" value={`${pos ? "+" : ""}${fmt(netProfit)}`} color={pos ? C.green : C.red} bold borderless />
+              <StatRow label={`✅ Delivered (${nDel})`} value={fmt(nDelProfitLoss)} color={C.green} sub="settlement − item_cost×qty" />
+              <StatRow label={`↩ Return pure (${nRet}) · ${retRate}%`} value={fmt(nRetProfitLoss)} color={retNet >= 0 ? C.gray600 : C.red} sub="settlement − packaging (item back, no claim)" />
+              <StatRow label={`🔄 RTO pure (${nRTO}) · ${rtoRate}%`} value={fmt(nRTOProfitLoss)} color={rtoNet >= 0 ? C.gray600 : C.amber} sub="settlement − packaging (item back, no claim)" />
+              {nExchange > 0 && <StatRow label={`🔁 Exchange (${nExchange}) · ${exchangeRate}%`} value={fmt(nExchangeProfitLoss)} color={exchangeNet >= 0 ? C.gray600 : C.blue} sub="settlement − 2×packaging" />}
+              <StatRow label={`⚠ Claim (${nClaim}) · ${claimRate}%`} value={fmt(nClaimProfitLoss)} color={nClaimProfitLoss >= 0 ? C.gray600 : "#7C3AED"} sub="settlement − item_cost (claim-first)" />
+              <StatRow label={`⊘ Other · ${nOther} orders`} value={fmt(profit.nOtherProfitLoss || 0)} color={nOtherProfitLoss >= 0 ? C.gray600 : C.red} sub="cancelled / affiliate fee / manual pickup" />
             </SectionCard>
           </div>
         </div>
@@ -589,7 +613,7 @@ export function OverviewTab() {
         <SectionCard title="Settlement by Order Status">
           <SettlementTable
             rows={settlementRows}
-            total={{ count: nDel + nRet + nRTO + nOther, gross: totalGross, cost: delCost, net: Number(profit.order_net_pl) }}
+            total={{ count: nDel + nRet + nRTO + nExchange + nClaim + nOther, gross: totalGross, cost: totalCost, net: Number(profit.net_profit_loss) }}
           />
         </SectionCard>
 
@@ -597,12 +621,12 @@ export function OverviewTab() {
         <SectionCard title="Meesho Deductions (already reflected in net settlement)">
           <div style={{ display: "flex", gap: 18, flexWrap: "wrap" }}>
             <div style={{ flex: "1 1 280px" }}>
-              <DeductionRow label="Commission incl. GST"        value={commAmt}                     pct={commPct} color={C.orange} />
-              <DeductionRow label="TCS — Tax Collected at Source" value={tcsAmt}                    pct={tcsPct}  color={C.gray500} />
-              <DeductionRow label="TDS — Tax Deducted at Source"  value={tdsAmt}                    pct={tdsPct}  color={C.gray500} />
-              <DeductionRow label="Shipping Charges"             value={profit.total_shipping_cost}               color={C.amber} />
-              <DeductionRow label="Ads Cost"                     value={profit.total_ads_cost}                    color={C.red} />
-              <DeductionRow label="Affiliate Fee"                value={profit.total_affiliate_fee}               color={C.red} />
+              <DeductionRow label="Commission incl. GST" value={commAmt} pct={commPct} color={C.orange} />
+              <DeductionRow label="TCS — Tax Collected at Source" value={tcsAmt} pct={tcsPct} color={C.gray500} />
+              <DeductionRow label="TDS — Tax Deducted at Source" value={tdsAmt} pct={tdsPct} color={C.gray500} />
+              <DeductionRow label="Shipping Charges" value={profit.total_shipping_cost} color={C.amber} />
+              <DeductionRow label="Ads Cost" value={profit.total_ads_cost} color={C.red} />
+              <DeductionRow label="Affiliate Fee" value={profit.total_affiliate_fee} color={C.red} />
               <div style={{ borderTop: "2px solid #E2E8F0", paddingTop: 10, marginTop: 4 }}>
                 <DeductionRow label="Total (Comm + TCS + TDS)" value={Number(commAmt) + Number(tcsAmt) + Number(tdsAmt)} pct={totalDeductPct} color={C.red} />
               </div>
@@ -616,10 +640,11 @@ export function OverviewTab() {
                   <br />→ Net Settlement <strong style={{ fontFamily: "monospace", color: C.green }}>{fmt(profit.net_settlement_revenue)}</strong>
                 </p>
               </div>
-              <div style={{ background: "#FFFBEB", borderRadius: 12, padding: "14px 16px" }}>
-                <p style={{ fontSize: 10, fontWeight: 700, color: C.amber, textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 6 }}>Claims Received</p>
-                <p style={{ fontSize: 18, fontWeight: 800, fontFamily: "monospace", color: C.amber }}>{fmt(profit.total_claims ?? 0)}</p>
-                <p style={{ fontSize: 11, color: C.gray400, marginTop: 3 }}>{(profit.total_claimed_orders ?? 0).toLocaleString()} claimed orders</p>
+              <div style={{ background: "#F5F3FF", borderRadius: 12, padding: "14px 16px", border: "1px solid #DDD6FE" }}>
+                <p style={{ fontSize: 10, fontWeight: 700, color: "#7C3AED", textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 6 }}>Claim Orders (net P&L)</p>
+                <p style={{ fontSize: 18, fontWeight: 800, fontFamily: "monospace", color: claimNet >= 0 ? "#059669" : "#7C3AED" }}>{fmt(claimNet)}</p>
+                <p style={{ fontSize: 11, color: C.gray400, marginTop: 3 }}>{nClaim.toLocaleString()} orders · {claimRate}% of settled</p>
+                <p style={{ fontSize: 11, color: C.gray400 }}>Cost deducted: {fmt(Math.abs(claimCost))}</p>
               </div>
             </div>
           </div>
@@ -631,10 +656,12 @@ export function OverviewTab() {
           {/* Order outcome rates */}
           <SectionCard title="Order Outcome Rates" style={{ flex: "1 1 260px" }}>
             <RateBar label="✅ Delivery Rate" pct={delRate} count={nDel} color={C.green} />
-            <RateBar label="↩ Return Rate"   pct={retRate} count={nRet} color={C.red} />
-            <RateBar label="🔄 RTO Rate"      pct={rtoRate} count={nRTO} color={C.amber} />
+            <RateBar label="↩ Pure Return Rate" pct={retRate} count={nRet} color={C.red} />
+            <RateBar label="🔄 Pure RTO Rate" pct={rtoRate} count={nRTO} color={C.amber} />
+            {nExchange > 0 && <RateBar label="🔁 Exchange Rate" pct={exchangeRate} count={nExchange} color={C.blue} />}
+            <RateBar label="⚠ Claim Rate" pct={claimRate} count={nClaim} color="#7C3AED" />
             <p style={{ fontSize: 11, color: C.gray400, marginTop: 6, lineHeight: 1.6 }}>
-              Based on {nTotal.toLocaleString()} settled orders. Returns/RTO bring the item back.
+              Based on {nTotal.toLocaleString()} settled orders. Claim-first: any order with a claim payment is classified as CLAIM, not return/RTO.
             </p>
           </SectionCard>
 
@@ -642,12 +669,12 @@ export function OverviewTab() {
           <SectionCard title="Operations" style={{ flex: "1 1 340px" }}>
             <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
               {[
-                { label: "Orders Settled",  value: (profit.order_count ?? 0).toLocaleString(),          sub: `${profit.orders_with_price ?? 0} with price`, accent: C.blue },
-                { label: "Missing Price",   value: (profit.orders_missing_price ?? 0).toLocaleString(), sub: "SKUs without pricing",    accent: C.amber },
-                { label: "Pure Returns",    value: (profit.total_pure_returns ?? 0).toLocaleString(),   sub: "return-only orders",     accent: C.red },
-                { label: "Claimed Orders",  value: (profit.total_claimed_orders ?? 0).toLocaleString(), sub: fmt(profit.total_claims ?? 0), accent: C.orange },
-                { label: "Ad Campaigns",    value: (profit.ads_campaigns ?? 0).toLocaleString(),        sub: `${profit.adjustment_count ?? 0} adj. rows`, accent: C.orange },
-                { label: "Referral Count",  value: (profit.referral_count ?? 0).toLocaleString(),       sub: fmt(profit.total_referral_income ?? 0), accent: C.green },
+                { label: "Orders Settled", value: (profit.order_count ?? 0).toLocaleString(), sub: `${profit.orders_with_price ?? 0} with price`, accent: C.blue },
+                { label: "Missing Price", value: (profit.orders_missing_price ?? 0).toLocaleString(), sub: "SKUs without pricing", accent: C.amber },
+                { label: "Pure Returns", value: nRet.toLocaleString(), sub: "no claim taken", accent: C.red },
+                { label: "Claim Orders", value: nClaim.toLocaleString(), sub: fmt(claimNet), accent: "#7C3AED" },
+                { label: "Ad Campaigns", value: (profit.ads_campaigns ?? 0).toLocaleString(), sub: `${profit.adjustment_count ?? 0} adj. rows`, accent: C.orange },
+                { label: "Referral Count", value: (profit.referral_count ?? 0).toLocaleString(), sub: fmt(profit.total_referral_income ?? 0), accent: C.green },
               ].map(({ label, value, sub, accent }) => (
                 <div key={label} style={{ flex: "1 1 130px", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 10, padding: "12px 14px", borderLeft: `3px solid ${accent}` }}>
                   <p style={{ fontSize: 10, fontWeight: 700, color: C.gray400, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6 }}>{label}</p>
@@ -679,11 +706,11 @@ export function OverviewTab() {
             <SectionCard title="Payment Deductions Breakdown" style={{ flex: "1 1 300px" }}>
               <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                 {[
-                  { label: "Total Sale Amount",    value: payment_stats?.total_sale,       color: C.green },
-                  { label: "Net Settlement",        value: payment_stats?.total_settlement, color: netSettle >= 0 ? C.green : C.red },
+                  { label: "Total Sale Amount", value: payment_stats?.total_sale, color: C.green },
+                  { label: "Net Settlement", value: payment_stats?.total_settlement, color: netSettle >= 0 ? C.green : C.red },
                   { label: "Commission (incl. GST)", value: payment_stats?.total_commission, color: C.orange },
-                  { label: "TCS Deducted",           value: payment_stats?.total_tcs,       color: C.gray500 },
-                  { label: "TDS Deducted",           value: payment_stats?.total_tds,       color: C.gray500 },
+                  { label: "TCS Deducted", value: payment_stats?.total_tcs, color: C.gray500 },
+                  { label: "TDS Deducted", value: payment_stats?.total_tds, color: C.gray500 },
                 ].map(({ label, value, color }) => (
                   <div key={label} style={{ flex: "1 1 140px", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 10, padding: "12px 14px" }}>
                     <p style={{ fontSize: 11, color: C.gray400, marginBottom: 5 }}>{label}</p>
@@ -695,10 +722,10 @@ export function OverviewTab() {
 
             {/* Data health KPIs */}
             <SectionCard title="Data Health" style={{ flex: "0 0 220px" }}>
-              <StatRow label="Settled Payments"      value={(payment_stats?.total ?? 0).toLocaleString()} sub="payment rows" />
-              <StatRow label="Orders Tracked"        value={(order_stats?.total ?? 0).toLocaleString()}   sub="order records" />
-              <StatRow label="Unmatched Payments"    value={(join_stats?.unmatched_count ?? 0).toLocaleString()} color={C.amber} />
-              <StatRow label="Net Settlement"        value={fmt(netSettle)}  color={netSettle >= 0 ? C.green : C.red} />
+              <StatRow label="Settled Payments" value={(payment_stats?.total ?? 0).toLocaleString()} sub="payment rows" />
+              <StatRow label="Orders Tracked" value={(order_stats?.total ?? 0).toLocaleString()} sub="order records" />
+              <StatRow label="Unmatched Payments" value={(join_stats?.unmatched_count ?? 0).toLocaleString()} color={C.amber} />
+              <StatRow label="Net Settlement" value={fmt(netSettle)} color={netSettle >= 0 ? C.green : C.red} />
               <StatRow label="Settlement Efficiency" value={`${settleEff}%`} color={C.orange} sub="settlement ÷ sale" borderless />
             </SectionCard>
           </div>
@@ -710,7 +737,7 @@ export function OverviewTab() {
             onClick={() => {
               const params = new URLSearchParams();
               if (activeRange?.date_from) params.set("date_from", activeRange.date_from);
-              if (activeRange?.date_to)   params.set("date_to",   activeRange.date_to);
+              if (activeRange?.date_to) params.set("date_to", activeRange.date_to);
               navigate(`/unsettled?${params.toString()}`);
             }}
             style={{
@@ -773,6 +800,59 @@ export function OverviewTab() {
                 slotProps={{ legend: { hidden: true } }} />
             </SectionCard>
           </div>
+        )}
+
+        {/* ── 13. Payout CSV Reconciliation ──────────────────────────────── */}
+        {profit?.payout_breakdown?.length > 0 && (
+          <SectionCard title="Payout Reconciliation — compare with Meesho payout summary CSV">
+            <p style={{ fontSize: 11, color: C.gray400, marginBottom: 12, lineHeight: 1.7 }}>
+              Raw per-status settlement amounts from your uploaded payment data for this period.
+              Compare these numbers directly to your Meesho payout summary CSV.
+              If counts or amounts differ, upload the missing payment Excel files for this month.
+            </p>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+              <thead>
+                <tr style={{ background: "#F8FAFC" }}>
+                  {["Type", "Orders in DB", "Settlement (DB)", "Return Shipping", "Note"].map((h, i) => (
+                    <th key={h} style={{
+                      padding: "7px 12px", textAlign: i <= 1 ? "left" : "right",
+                      fontSize: 10, fontWeight: 700, color: C.gray500, textTransform: "uppercase",
+                      letterSpacing: "0.05em", borderBottom: "2px solid #E2E8F0",
+                    }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {profit.payout_breakdown.map((row, i) => {
+                  const isAdj = row.type.startsWith("Adj:");
+                  const isClaim = row.type === "Claims Accepted";
+                  const color = isClaim ? "#7C3AED" : isAdj ? C.amber : C.gray700;
+                  return (
+                    <tr key={row.type} style={{ borderBottom: "1px solid #F1F5F9", background: isClaim ? "#F5F3FF" : isAdj ? "#FFFBEB" : "white" }}>
+                      <td style={{ padding: "8px 12px", fontWeight: 600, color }}>{row.type}</td>
+                      <td style={{ padding: "8px 12px", fontFamily: "monospace", color: C.gray600 }}>{(row.count || 0).toLocaleString()}</td>
+                      <td style={{ padding: "8px 12px", textAlign: "right", fontFamily: "monospace", fontWeight: 700, color: row.settlement >= 0 ? C.gray700 : C.red }}>{fmt(row.settlement)}</td>
+                      <td style={{ padding: "8px 12px", textAlign: "right", fontFamily: "monospace", color: (row.return_shipping || 0) < 0 ? C.red : C.gray300 }}>
+                        {row.return_shipping ? fmt(row.return_shipping) : "—"}
+                      </td>
+                      <td style={{ padding: "8px 12px", textAlign: "right", fontSize: 11, color: C.gray400 }}>
+                        {isClaim ? `Claims amount: ${fmt(row.claims_amount)}` : ""}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            <div style={{ marginTop: 12, padding: "10px 14px", borderRadius: 8, background: "#FFF7ED", border: "1px solid #FDE68A" }}>
+              <p style={{ fontSize: 11, fontWeight: 700, color: C.amber, marginBottom: 4 }}>
+                If your Meesho CSV shows higher claim counts or missing charges (MANUAL_PICKUP, Affiliate Fee):
+              </p>
+              <p style={{ fontSize: 11, color: C.gray600, lineHeight: 1.7 }}>
+                Upload the complete payment Excel for this period — Meesho often processes claim payments in batches across multiple weeks.
+                Each weekly Excel file may contain rows not yet in your DB.
+              </p>
+            </div>
+          </SectionCard>
         )}
 
       </>}

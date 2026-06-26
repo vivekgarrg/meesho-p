@@ -336,6 +336,116 @@ class InventoryAdjustment(models.Model):
         return f"{self.parent_sku_id} {sign}{self.quantity} ({self.reason}) on {self.date}"
 
 
+class ConsumableItem(models.Model):
+    """Master list of operational consumables: polythene bags, bubble wrap, stationery, etc."""
+    CATEGORY_CHOICES = [
+        ("POLYTHENE",   "Polythene / Plastic Bags"),
+        ("BUBBLE_WRAP", "Bubble Wrap"),
+        ("STATIONARY",  "Stationery"),
+        ("LABELS",      "Shipping Labels / Tape"),
+        ("BOX",         "Boxes / Packaging"),
+        ("OTHER",       "Other"),
+    ]
+    UNIT_CHOICES = [
+        ("pieces", "Pieces"),
+        ("rolls",  "Rolls"),
+        ("meters", "Meters"),
+        ("grams",  "Grams"),
+        ("kgs",    "Kilograms"),
+        ("packs",  "Packs"),
+        ("boxes",  "Boxes"),
+    ]
+    name       = models.CharField(max_length=255)
+    category   = models.CharField(max_length=20, choices=CATEGORY_CHOICES, default="OTHER")
+    unit       = models.CharField(max_length=20, choices=UNIT_CHOICES, default="pieces")
+    notes      = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "consumable_items"
+        ordering = ["category", "name"]
+
+    def __str__(self):
+        return f"{self.name} ({self.get_category_display()})"
+
+
+class ConsumablePurchase(models.Model):
+    """Restocking of a consumable item from a supplier."""
+    item           = models.ForeignKey(ConsumableItem, on_delete=models.CASCADE, related_name="purchases")
+    date           = models.DateField()
+    quantity       = models.DecimalField(max_digits=10, decimal_places=2)
+    price_per_unit = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    seller_name    = models.CharField(max_length=255, blank=True)
+    notes          = models.TextField(blank=True)
+    created_at     = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "consumable_purchases"
+        ordering = ["-date", "-created_at"]
+
+    def __str__(self):
+        return f"{self.item.name} ×{self.quantity} on {self.date}"
+
+
+class ConsumableUsage(models.Model):
+    """Usage event or 'opening a new package' of a consumable item."""
+    EVENT_TYPES = [
+        ("USE",   "Used / Consumed"),
+        ("OPEN",  "Opened New Package"),
+        ("WASTE", "Damaged / Wasted"),
+    ]
+    item       = models.ForeignKey(ConsumableItem, on_delete=models.CASCADE, related_name="usages")
+    date       = models.DateField()
+    event_type = models.CharField(max_length=10, choices=EVENT_TYPES, default="USE")
+    quantity   = models.DecimalField(max_digits=10, decimal_places=2, default=1)
+    notes      = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "consumable_usages"
+        ordering = ["-date", "-created_at"]
+
+    def __str__(self):
+        return f"{self.item.name} — {self.get_event_type_display()} ×{self.quantity} on {self.date}"
+
+
+class InventoryLog(models.Model):
+    """Immutable audit trail: every inventory-related create / update / delete."""
+    ACTION_CHOICES = [
+        ("CREATE", "Created"),
+        ("UPDATE", "Updated"),
+        ("DELETE", "Deleted"),
+    ]
+    ENTITY_CHOICES = [
+        ("PURCHASE",            "Purchase Item"),
+        ("ADJUSTMENT",          "Stock Adjustment"),
+        ("SKU",                 "Parent SKU"),
+        ("CONSUMABLE_PURCHASE", "Consumable Purchase"),
+        ("CONSUMABLE_USAGE",    "Consumable Usage"),
+        ("CONSUMABLE_ITEM",     "Consumable Item"),
+    ]
+    entity_type     = models.CharField(max_length=25, choices=ENTITY_CHOICES)
+    entity_id       = models.CharField(max_length=50, blank=True)
+    action          = models.CharField(max_length=10, choices=ACTION_CHOICES)
+    parent_sku_id   = models.CharField(max_length=200, blank=True, db_index=True)
+    quantity_change = models.IntegerField(null=True, blank=True)
+    description     = models.TextField()
+    metadata        = models.JSONField(default=dict, blank=True)
+    created_at      = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "inventory_logs"
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["parent_sku_id", "-created_at"]),
+            models.Index(fields=["entity_type", "-created_at"]),
+        ]
+
+    def __str__(self):
+        return f"{self.entity_type} {self.action}: {self.description[:60]}"
+
+
 class LabelOrder(models.Model):
     """
     One row per label (= one shipping order) parsed from an uploaded Meesho labels PDF.

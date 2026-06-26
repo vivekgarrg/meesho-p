@@ -76,16 +76,20 @@ function MonthFilter({ months, selMonth, onSelect }) {
 
 // ── Unified metrics panel ─────────────────────────────────────────────────────
 function MetricsPanel({ data, filterLabel }) {
-  const netPL = data.reduce((a, s) => a + s.net_profit, 0);
-  const delPft = data.reduce((a, s) => a + (s.delivered_profit || 0), 0);
-  const retLoss = data.reduce((a, s) => a + (s.return_loss || 0), 0);
-  const rtoLoss = data.reduce((a, s) => a + (s.rto_loss || 0), 0);
-  const otherNet = data.reduce((a, s) => a + (s.other_net || 0), 0);
-  const nDel = data.reduce((a, s) => a + (s.delivered_count || 0), 0);
-  const nRet = data.reduce((a, s) => a + (s.return_count || 0), 0);
-  const nRTO = data.reduce((a, s) => a + (s.rto_count || 0), 0);
-  const nOther = data.reduce((a, s) => a + (s.other_count || 0), 0);
-  const nTotal = nDel + nRet + nRTO;
+  const netPL     = data.reduce((a, s) => a + s.net_profit, 0);
+  const delPft    = data.reduce((a, s) => a + (s.delivered_profit || 0), 0);
+  const retLoss   = data.reduce((a, s) => a + (s.return_loss      || 0), 0);
+  const rtoLoss   = data.reduce((a, s) => a + (s.rto_loss         || 0), 0);
+  const exchNet   = data.reduce((a, s) => a + (s.exchange_net     || 0), 0);
+  const claimLoss = data.reduce((a, s) => a + (s.claim_loss       || 0), 0);
+  const otherNet  = data.reduce((a, s) => a + (s.other_net        || 0), 0);
+  const nDel      = data.reduce((a, s) => a + (s.delivered_count  || 0), 0);
+  const nRet      = data.reduce((a, s) => a + (s.return_count     || 0), 0);
+  const nRTO      = data.reduce((a, s) => a + (s.rto_count        || 0), 0);
+  const nExchange = data.reduce((a, s) => a + (s.exchange_count   || 0), 0);
+  const nClaim    = data.reduce((a, s) => a + (s.claim_count      || 0), 0);
+  const nOther    = data.reduce((a, s) => a + (s.other_count      || 0), 0);
+  const nTotal    = nDel + nRet + nRTO + nExchange + nClaim;
   const nProfit = data.filter(s => s.net_profit > 0).length;
   const nLoss = data.filter(s => s.net_profit < 0).length;
   const pos = netPL >= 0;
@@ -111,10 +115,12 @@ function MetricsPanel({ data, filterLabel }) {
           {/* Breakdown amounts */}
           <Box sx={{ display: "flex", gap: 2.5, flexWrap: "wrap", flex: 1 }}>
             {[
-              { label: "Delivered Profit", value: fmt(delPft), color: C.green, sub: `${nDel} orders` },
-              { label: "Return Loss", value: fmt(retLoss), color: C.red, sub: `${nRet} returns` },
-              { label: "RTO Loss", value: fmt(rtoLoss), color: C.amber, sub: `${nRTO} RTOs` },
-              ...(otherNet !== 0 ? [{ label: "Other ±", value: fmt(otherNet), color: otherNet >= 0 ? C.gray600 : C.red, sub: `${nOther} orders (cancelled/adj)` }] : []),
+              { label: "Delivered",   value: fmt(delPft),    color: C.green,   sub: `${nDel} orders` },
+              { label: "Return",      value: fmt(retLoss),   color: C.red,     sub: `${nRet} pure (−pkg)` },
+              { label: "RTO",         value: fmt(rtoLoss),   color: C.amber,   sub: `${nRTO} pure (−pkg)` },
+              ...(nExchange > 0 ? [{ label: "Exchange",  value: fmt(exchNet),   color: C.blue,    sub: `${nExchange} (−2×pkg)` }] : []),
+              { label: "Claim",       value: fmt(claimLoss), color: "#7C3AED", sub: `${nClaim} (−item cost)` },
+              ...(otherNet !== 0 ? [{ label: "Other ±",  value: fmt(otherNet), color: otherNet >= 0 ? C.gray600 : C.red, sub: `${nOther} cancelled/adj` }] : []),
             ].map(m => (
               <Box key={m.label} sx={{ minWidth: 110 }}>
                 <Typography variant="subtitle2" sx={{ mb: 0.25, fontSize: 11 }}>{m.label}</Typography>
@@ -128,9 +134,11 @@ function MetricsPanel({ data, filterLabel }) {
           <Box sx={{ minWidth: 200 }}>
             <Typography variant="subtitle2" sx={{ mb: 1, fontSize: 11 }}>Order Rates ({nTotal} total)</Typography>
             {[
-              { label: "Delivered", p: pct(nDel, nTotal), color: C.green },
-              { label: "Returns", p: pct(nRet, nTotal), color: C.red },
-              { label: "RTO", p: pct(nRTO, nTotal), color: C.amber },
+              { label: "Delivered", p: pct(nDel,      nTotal), color: C.green },
+              { label: "Pure Returns", p: pct(nRet,   nTotal), color: C.red },
+              { label: "Pure RTO",  p: pct(nRTO,      nTotal), color: C.amber },
+              ...(nExchange > 0 ? [{ label: "Exchange", p: pct(nExchange, nTotal), color: C.blue }] : []),
+              { label: "Claims",    p: pct(nClaim,    nTotal), color: "#7C3AED" },
             ].map(r => (
               <Box key={r.label} sx={{ mb: 0.75 }}>
                 <Box sx={{ display: "flex", justifyContent: "space-between", mb: 0.25 }}>
@@ -147,22 +155,23 @@ function MetricsPanel({ data, filterLabel }) {
 
         {/* ── P&L Reconciliation ─────────────────────────────────────────── */}
         {(() => {
-          const computed = delPft + retLoss + rtoLoss + otherNet;
+          const computed = delPft + retLoss + rtoLoss + exchNet + claimLoss;
           const diff = Math.abs(netPL - computed);
           const match = diff < 0.01;
           return (
             <Box sx={{ mt: 2, pt: 1.5, borderTop: "1px dashed #E2E8F0", display: "flex", gap: 3, flexWrap: "wrap", alignItems: "center" }}>
               <Typography variant="caption" color="text.disabled" sx={{ fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em" }}>
-                P&L Check
+                SKU P&L Check
               </Typography>
               <Box sx={{ display: "flex", gap: 2, flexWrap: "wrap", flex: 1 }}>
                 {[
                   { label: "Σ net_profit (backend)", value: netPL },
                   { label: "Delivered", value: delPft },
-                  { label: "+ Return", value: retLoss },
-                  { label: "+ RTO", value: rtoLoss },
-                  { label: "+ Other", value: otherNet },
-                  { label: "= Computed total", value: computed },
+                  { label: "+ Return",  value: retLoss },
+                  { label: "+ RTO",     value: rtoLoss },
+                  ...(nExchange > 0 ? [{ label: "+ Exchange", value: exchNet }] : []),
+                  { label: "+ Claim",   value: claimLoss },
+                  { label: "= Computed", value: computed },
                 ].map(({ label, value }) => (
                   <Box key={label}>
                     <Typography variant="caption" color="text.disabled" display="block">{label}</Typography>
@@ -202,15 +211,17 @@ function SKUDataTable({ data, onRowClick }) {
       field: "health", headerName: "Volume & Health", width: 200, sortable: false,
       renderCell: p => {
         const s = p.row;
-        const del = s.delivered_count || 0, ret = s.return_count || 0, rto = s.rto_count || 0, can = s.cancelled_count || 0;
-        const total = del + ret + rto + can;
+        const del = s.delivered_count || 0, ret = s.return_count || 0, rto = s.rto_count || 0;
+        const claim = s.claim_count || 0, can = s.cancelled_count || 0;
+        const total = del + ret + rto + claim + can;
         const dr = pct(del, total);
         return (
           <Box sx={{ py: 0.5, width: "100%" }}>
             <Box sx={{ display: "flex", gap: 1, fontSize: 12, mb: 0.5, flexWrap: "wrap" }}>
-              {del > 0 && <span style={{ color: C.green, fontWeight: 600 }}>✅ {del}</span>}
-              {ret > 0 && <span style={{ color: C.red, fontWeight: 600 }}>↩ {ret}</span>}
-              {rto > 0 && <span style={{ color: C.amber, fontWeight: 600 }}>🔄 {rto}</span>}
+              {del   > 0 && <span style={{ color: C.green,    fontWeight: 600 }}>✅ {del}</span>}
+              {ret   > 0 && <span style={{ color: C.red,      fontWeight: 600 }}>↩ {ret}</span>}
+              {rto   > 0 && <span style={{ color: C.amber,    fontWeight: 600 }}>🔄 {rto}</span>}
+              {claim > 0 && <span style={{ color: "#7C3AED",  fontWeight: 700, background: "#F5F3FF", padding: "0 5px", borderRadius: 6 }}>⚠ {claim} claim</span>}
             </Box>
             <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
               <LinearProgress variant="determinate" value={dr} sx={{
@@ -711,7 +722,7 @@ export function SKUAnalysisTab() {
         const avg_settlement_per_piece = delQty > 0 ? (delPft + delCost) / delQty : null;
         return {
           sku_id: key, ...r,
-          net_profit: Number(r.net_profit ?? (delPft + Number(r.return_loss || 0) + Number(r.rto_loss || 0))),
+          net_profit: Number(r.net_profit ?? (delPft + Number(r.return_loss || 0) + Number(r.rto_loss || 0) + Number(r.exchange_net || 0) + Number(r.claim_loss || 0))),
           avg_profit_per_piece,
           avg_settlement_per_piece,
         };

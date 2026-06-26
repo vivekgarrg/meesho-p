@@ -1,24 +1,30 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { BarChart } from "@mui/x-charts/BarChart";
+import { PieChart } from "@mui/x-charts/PieChart";
+import { LineChart } from "@mui/x-charts/LineChart";
 import {
-  Box, Button, Card, CardContent, Chip, Dialog, DialogActions,
-  DialogContent, DialogTitle, FormControlLabel, Checkbox,
-  MenuItem, Paper, Select, Stack, Table, TableBody, TableCell,
-  TableContainer, TableFooter, TableHead, TableRow, TextField,
-  Typography, CircularProgress, Collapse, IconButton, InputLabel,
-  FormControl, Divider,
+  Autocomplete, Box, Button, Card, CardContent, Chip, CircularProgress,
+  Dialog, DialogActions, DialogContent, DialogTitle, Divider,
+  FormControl, IconButton, InputAdornment, InputLabel, MenuItem,
+  Paper, Select, Stack, Tab, Table, TableBody, TableCell,
+  TableContainer, TableHead, TableRow, Tabs, TextField, Tooltip,
+  Typography, Alert, Snackbar, Badge,
 } from "@mui/material";
+import AddIcon from "@mui/icons-material/Add";
+import DeleteIcon from "@mui/icons-material/Delete";
+import EditIcon from "@mui/icons-material/Edit";
+import DownloadIcon from "@mui/icons-material/Download";
+import HistoryIcon from "@mui/icons-material/History";
+import InventoryIcon from "@mui/icons-material/Inventory";
+import LocalShippingIcon from "@mui/icons-material/LocalShipping";
+import SearchIcon from "@mui/icons-material/Search";
+import TuneIcon from "@mui/icons-material/Tune";
+import WarningAmberIcon from "@mui/icons-material/WarningAmber";
+import CheckCircleOutlinedIcon from "@mui/icons-material/CheckCircleOutlined";
+import RefreshIcon from "@mui/icons-material/Refresh";
 import { API, C, fmt } from "../../App";
 
-// ── helpers ───────────────────────────────────────────────────────────────────
-function StockBadge({ stock }) {
-  if (stock <= 0)
-    return <Chip label="Out of Stock" size="small" sx={{ background: C.redLight, color: C.red, border: `1px solid ${C.redBorder}`, fontWeight: 700, fontSize: 12 }} />;
-  if (stock <= 3)
-    return <Chip label={`Low (${stock})`} size="small" sx={{ background: C.amberLight, color: C.amber, border: "1px solid #FDE68A", fontWeight: 700, fontSize: 12 }} />;
-  return <Chip label={`${stock} units`} size="small" sx={{ background: C.greenLight, color: C.green, border: `1px solid ${C.greenBorder}`, fontWeight: 700, fontSize: 12 }} />;
-}
-
+// ── Constants ─────────────────────────────────────────────────────────────────
 const ADJUSTMENT_REASONS = [
   { value: "DAMAGED",    label: "Damaged / Written Off" },
   { value: "FOUND",      label: "Stock Found / Recount" },
@@ -28,1431 +34,1135 @@ const ADJUSTMENT_REASONS = [
   { value: "OTHER",      label: "Other" },
 ];
 
-// ── New SKU Modal ─────────────────────────────────────────────────────────────
-function NewSKUModal({ onSave, onClose }) {
-  const today = new Date().toISOString().slice(0, 10);
-  const [skuId,    setSkuId]    = useState("");
-  const [initQty,  setInitQty]  = useState("");
-  const [initPrice, setInitPrice] = useState("");
-  const [initSeller, setInitSeller] = useState("");
-  const [initDate, setInitDate] = useState(today);
-  const [itemPrice, setItemPrice] = useState("");
-  const [saving,   setSaving]   = useState(false);
-  const [err,      setErr]      = useState("");
+const CONSUMABLE_CATEGORIES = [
+  { value: "POLYTHENE",    label: "Polythene Bags" },
+  { value: "BUBBLE_WRAP",  label: "Bubble Wrap" },
+  { value: "STATIONARY",   label: "Stationery" },
+  { value: "LABELS",       label: "Labels" },
+  { value: "BOX",          label: "Boxes" },
+  { value: "OTHER",        label: "Other" },
+];
+
+const CONSUMABLE_UNITS = [
+  { value: "pieces", label: "Pieces" },
+  { value: "rolls",  label: "Rolls" },
+  { value: "meters", label: "Meters" },
+  { value: "grams",  label: "Grams" },
+  { value: "kgs",    label: "Kgs" },
+  { value: "packs",  label: "Packs" },
+  { value: "boxes",  label: "Boxes" },
+];
+
+const CAT_COLORS = {
+  POLYTHENE:   "#6D28D9",
+  BUBBLE_WRAP: "#2563EB",
+  STATIONARY:  "#059669",
+  LABELS:      "#D97706",
+  BOX:         "#E11D48",
+  OTHER:       "#64748B",
+};
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function StockBadge({ stock }) {
+  if (stock <= 0)
+    return <Chip label="Out" size="small" sx={{ bgcolor: "#FFF1F2", color: C.red, border: `1px solid #FECDD3`, fontWeight: 700, fontSize: 11 }} />;
+  if (stock <= 5)
+    return <Chip label={`Low · ${stock}`} size="small" sx={{ bgcolor: "#FFFBEB", color: C.amber, border: "1px solid #FDE68A", fontWeight: 700, fontSize: 11 }} />;
+  return <Chip label={`${stock} units`} size="small" sx={{ bgcolor: "#ECFDF5", color: C.green, border: `1px solid #A7F3D0`, fontWeight: 700, fontSize: 11 }} />;
+}
+
+function KpiCard({ label, value, sub, icon, color = C.orange }) {
+  return (
+    <Card variant="outlined" sx={{ flex: 1, minWidth: 160, borderRadius: 3, borderColor: "#E2E8F0" }}>
+      <CardContent sx={{ p: 2.5, "&:last-child": { pb: 2.5 } }}>
+        <Stack direction="row" alignItems="center" justifyContent="space-between" mb={1}>
+          <Typography variant="caption" color="text.secondary" fontWeight={600} textTransform="uppercase" letterSpacing={0.5}>
+            {label}
+          </Typography>
+          <Box sx={{ color, opacity: 0.7 }}>{icon}</Box>
+        </Stack>
+        <Typography variant="h5" fontWeight={800} color="text.primary">{value}</Typography>
+        {sub && <Typography variant="caption" color="text.secondary" mt={0.5}>{sub}</Typography>}
+      </CardContent>
+    </Card>
+  );
+}
+
+function SectionLoader() {
+  return (
+    <Box display="flex" justifyContent="center" alignItems="center" py={8}>
+      <CircularProgress size={36} sx={{ color: C.orange }} />
+    </Box>
+  );
+}
+
+const today = () => new Date().toISOString().slice(0, 10);
+
+// ── Add Stock / Purchase Modal (with SKU Autocomplete + PDF) ──────────────────
+function AddStockModal({ open, onClose, onSaved }) {
+  const [skuOptions, setSkuOptions] = useState([]);
+  const [skuInput,   setSkuInput]   = useState("");
+  const [skuValue,   setSkuValue]   = useState(null);
+  const [loadingSku, setLoadingSku] = useState(false);
+  const [sellerName, setSellerName] = useState("");
+  const [date,       setDate]       = useState(today());
+  const [items,      setItems]      = useState([{ sku_id: "", qty: "", price: "" }]);
+  const [notes,      setNotes]      = useState("");
+  const [saving,     setSaving]     = useState(false);
+  const [err,        setErr]        = useState("");
+  const [savedBillId, setSavedBillId] = useState(null);
+  const debounceRef = useRef(null);
+
+  const reset = () => {
+    setSkuInput(""); setSkuValue(null); setSellerName(""); setDate(today());
+    setItems([{ sku_id: "", qty: "", price: "" }]); setNotes("");
+    setSaving(false); setErr(""); setSavedBillId(null);
+  };
+
+  const handleClose = () => { reset(); onClose(); };
+
+  // Debounced SKU search
+  useEffect(() => {
+    if (!skuInput || skuInput.length < 2) { setSkuOptions([]); return; }
+    clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(async () => {
+      setLoadingSku(true);
+      try {
+        const r = await fetch(`${API}/parent-prices/?search=${encodeURIComponent(skuInput)}&page_size=20`);
+        const d = await r.json();
+        setSkuOptions((d.results || d).map(p => ({ label: p.item_id, id: p.item_id, price: p.cost_price })));
+      } catch { setSkuOptions([]); }
+      setLoadingSku(false);
+    }, 300);
+  }, [skuInput]);
+
+  const setItem = (i, field, val) => {
+    setItems(prev => prev.map((it, idx) => idx === i ? { ...it, [field]: val } : it));
+  };
+
+  const addItemRow = () => setItems(prev => [...prev, { sku_id: "", qty: "", price: "" }]);
+  const removeItemRow = (i) => setItems(prev => prev.filter((_, idx) => idx !== i));
 
   const save = async () => {
-    if (!skuId.trim()) { setErr("Parent SKU ID is required."); return; }
-    const qty = parseInt(initQty, 10);
-    if (initQty && (isNaN(qty) || qty < 1)) { setErr("Initial qty must be ≥ 1."); return; }
-    if (initQty && qty > 0 && !initSeller.trim()) { setErr("Seller name required when adding initial stock."); return; }
+    const parentSku = skuValue?.id || skuInput.trim();
+    if (!parentSku) { setErr("Select or type a Parent SKU."); return; }
+    if (!sellerName.trim()) { setErr("Seller / Supplier name is required."); return; }
+    const validItems = items.filter(it => it.sku_id.trim() && it.qty && it.price);
+    if (!validItems.length) { setErr("Add at least one item with SKU, qty and price."); return; }
     setSaving(true); setErr("");
-    const res = await fetch(`${API}/inventory/new-sku/`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        sku_id:          skuId.trim(),
-        item_price:      itemPrice || null,
-        initial_qty:     qty || 0,
-        initial_price:   initPrice || "0",
-        initial_seller:  initSeller.trim() || "Opening Stock",
-        initial_date:    initDate,
-      }),
-    });
-    if (res.ok) {
-      onSave();
-    } else {
-      const d = await res.json().catch(() => ({}));
-      setErr(d.error || "Failed to create SKU.");
-      setSaving(false);
-    }
+    try {
+      const res = await fetch(`${API}/purchases/`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          parent_sku_id: parentSku,
+          seller_name: sellerName,
+          purchase_date: date,
+          notes,
+          items: validItems.map(it => ({
+            sku_id: it.sku_id.trim(),
+            quantity: parseInt(it.qty, 10),
+            price_per_unit: parseFloat(it.price),
+          })),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) { setErr(data.error || JSON.stringify(data)); setSaving(false); return; }
+      setSavedBillId(data.id);
+      onSaved();
+    } catch (e) { setErr(e.message); }
+    setSaving(false);
   };
 
   return (
-    <Dialog open onClose={onClose} maxWidth="sm" fullWidth>
-      <DialogTitle sx={{ fontWeight: 800, fontSize: 15, color: C.gray800, pb: 1, borderBottom: `1px solid ${C.border}` }}>
-        + New Parent SKU
-        <Typography variant="caption" display="block" sx={{ color: C.gray400, mt: 0.5, fontWeight: 400 }}>
-          Creates a new parent SKU and optionally adds opening stock.
-        </Typography>
+    <Dialog open={open} onClose={handleClose} maxWidth="md" fullWidth PaperProps={{ sx: { borderRadius: 3 } }}>
+      <DialogTitle sx={{ fontWeight: 800, borderBottom: "1px solid #F1F5F9", pb: 2 }}>
+        {savedBillId ? "Purchase Saved" : "Add Stock Purchase"}
       </DialogTitle>
-      <DialogContent sx={{ pt: 2 }}>
-        <Stack spacing={2} sx={{ mt: 1 }}>
-          <TextField
-            label="Parent SKU ID *"
-            size="small"
-            value={skuId}
-            onChange={e => setSkuId(e.target.value)}
-            placeholder="e.g. KURTA-SET-001"
-            fullWidth
-            autoFocus
-          />
-          <TextField
-            label="Purchase Cost / Unit (₹) — optional"
-            type="number"
-            size="small"
-            inputProps={{ min: 0, step: 0.01 }}
-            value={itemPrice}
-            onChange={e => setItemPrice(e.target.value)}
-            placeholder="Used for profit calculations"
-            fullWidth
-          />
-          <Divider sx={{ color: C.gray400, fontSize: 12 }}>Opening Stock (optional)</Divider>
-          <Box sx={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 1.5 }}>
-            <TextField
-              label="Initial Quantity"
-              type="number"
-              size="small"
-              inputProps={{ min: 0 }}
-              value={initQty}
-              onChange={e => setInitQty(e.target.value)}
-              placeholder="0"
-              fullWidth
+      <DialogContent sx={{ pt: 3 }}>
+        {savedBillId ? (
+          <Stack spacing={3} alignItems="center" py={4}>
+            <CheckCircleOutlineIcon sx={{ fontSize: 64, color: C.green }} />
+            <Typography variant="h6" fontWeight={700}>Purchase #{savedBillId} saved!</Typography>
+            <Stack direction="row" spacing={2}>
+              <Button variant="contained" startIcon={<DownloadIcon />}
+                href={`${API}/purchases/${savedBillId}/pdf/`} target="_blank"
+                sx={{ bgcolor: C.orange, "&:hover": { bgcolor: "#5B21B6" } }}>
+                Download Bill PDF
+              </Button>
+              <Button variant="outlined" onClick={() => { reset(); }}>
+                Add Another
+              </Button>
+            </Stack>
+          </Stack>
+        ) : (
+          <Stack spacing={2.5}>
+            {err && <Alert severity="error" sx={{ borderRadius: 2 }}>{err}</Alert>}
+            <Autocomplete
+              freeSolo
+              options={skuOptions}
+              value={skuValue}
+              inputValue={skuInput}
+              loading={loadingSku}
+              onInputChange={(_, v) => setSkuInput(v)}
+              onChange={(_, v) => setSkuValue(v)}
+              getOptionLabel={o => (typeof o === "string" ? o : o.label)}
+              renderInput={(params) => (
+                <TextField {...params} label="Parent SKU *" placeholder="Type to search or enter new SKU"
+                  InputProps={{ ...(params.InputProps ?? {}),
+                    endAdornment: <>{loadingSku && <CircularProgress size={16} />}{params.InputProps?.endAdornment}</>
+                  }}
+                />
+              )}
             />
-            <TextField
-              label="Price / Unit (₹)"
-              type="number"
-              size="small"
-              inputProps={{ min: 0, step: 0.01 }}
-              value={initPrice}
-              onChange={e => setInitPrice(e.target.value)}
-              placeholder="0.00"
-              fullWidth
-            />
-          </Box>
-          <Box sx={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 1.5 }}>
-            <TextField
-              label="Seller Name"
-              size="small"
-              value={initSeller}
-              onChange={e => setInitSeller(e.target.value)}
-              placeholder="e.g. Anand Traders"
-              fullWidth
-            />
-            <TextField
-              label="Date"
-              type="date"
-              size="small"
-              value={initDate}
-              onChange={e => setInitDate(e.target.value)}
-              InputLabelProps={{ shrink: true }}
-              fullWidth
-            />
-          </Box>
-          {err && <Typography variant="caption" sx={{ color: C.red }}>{err}</Typography>}
-        </Stack>
+            <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
+              <TextField label="Seller / Supplier *" value={sellerName} onChange={e => setSellerName(e.target.value)} fullWidth />
+              <TextField label="Purchase Date" type="date" value={date} onChange={e => setDate(e.target.value)}
+                InputLabelProps={{ shrink: true }} sx={{ minWidth: 160 }} />
+            </Stack>
+            <Divider><Typography variant="caption" color="text.secondary">Items</Typography></Divider>
+            {items.map((it, i) => (
+              <Stack key={i} direction="row" spacing={1} alignItems="center">
+                <TextField label="Child SKU / Variant" value={it.sku_id} onChange={e => setItem(i, "sku_id", e.target.value)} sx={{ flex: 2 }} size="small" />
+                <TextField label="Qty" type="number" value={it.qty} onChange={e => setItem(i, "qty", e.target.value)} sx={{ flex: 1 }} size="small" />
+                <TextField label="Price/unit ₹" type="number" value={it.price} onChange={e => setItem(i, "price", e.target.value)} sx={{ flex: 1 }} size="small" />
+                {items.length > 1 && (
+                  <IconButton size="small" onClick={() => removeItemRow(i)} sx={{ color: C.red }}>
+                    <DeleteIcon fontSize="small" />
+                  </IconButton>
+                )}
+              </Stack>
+            ))}
+            <Button size="small" onClick={addItemRow} startIcon={<AddIcon />} sx={{ alignSelf: "flex-start", color: C.orange }}>
+              Add Row
+            </Button>
+            <TextField label="Notes (optional)" value={notes} onChange={e => setNotes(e.target.value)} multiline rows={2} />
+          </Stack>
+        )}
       </DialogContent>
-      <DialogActions sx={{ px: 3, pb: 2 }}>
-        <Button onClick={onClose} variant="outlined" size="small" sx={{ color: C.gray600, borderColor: C.gray200 }}>
-          Cancel
-        </Button>
-        <Button
-          onClick={save}
-          disabled={saving}
-          variant="contained"
-          size="small"
-          sx={{ background: C.orange, "&:hover": { background: C.orange }, opacity: saving ? 0.6 : 1 }}
-        >
-          {saving ? "Creating…" : "Create SKU"}
-        </Button>
-      </DialogActions>
+      {!savedBillId && (
+        <DialogActions sx={{ px: 3, py: 2, borderTop: "1px solid #F1F5F9" }}>
+          <Button onClick={handleClose}>Cancel</Button>
+          <Button variant="contained" onClick={save} disabled={saving}
+            sx={{ bgcolor: C.orange, "&:hover": { bgcolor: "#5B21B6" } }}>
+            {saving ? <CircularProgress size={18} color="inherit" /> : "Save Purchase"}
+          </Button>
+        </DialogActions>
+      )}
     </Dialog>
   );
 }
 
 // ── Adjustment Modal ──────────────────────────────────────────────────────────
-function AdjustmentModal({ skuId, adjustment, onSave, onClose }) {
-  const today = new Date().toISOString().slice(0, 10);
-  const isEdit = !!adjustment;
-  const [dir,    setDir]    = useState(isEdit ? (adjustment.quantity < 0 ? "remove" : "add") : "add");
-  const [qty,    setQty]    = useState(isEdit ? String(Math.abs(adjustment.quantity)) : "");
-  const [reason, setReason] = useState(isEdit ? adjustment.reason : "CORRECTION");
-  const [notes,  setNotes]  = useState(isEdit ? adjustment.notes : "");
-  const [date,   setDate]   = useState(isEdit ? adjustment.date : today);
+function AdjustmentModal({ open, sku, onClose, onSaved }) {
+  const [qty,    setQty]    = useState("");
+  const [reason, setReason] = useState("CORRECTION");
+  const [notes,  setNotes]  = useState("");
   const [saving, setSaving] = useState(false);
   const [err,    setErr]    = useState("");
 
-  const save = async () => {
-    const qtyNum = parseInt(qty, 10);
-    if (isNaN(qtyNum) || qtyNum < 1) { setErr("Quantity must be ≥ 1."); return; }
-    setSaving(true); setErr("");
-    const finalQty = dir === "remove" ? -qtyNum : qtyNum;
-    const url    = isEdit ? `${API}/inventory/adjustments/${adjustment.id}/` : `${API}/inventory/adjustments/`;
-    const method = isEdit ? "PUT" : "POST";
-    const body   = isEdit
-      ? { quantity: finalQty, reason, notes, date }
-      : { parent_sku_id: skuId, quantity: finalQty, reason, notes, date };
+  const reset = () => { setQty(""); setReason("CORRECTION"); setNotes(""); setSaving(false); setErr(""); };
 
-    const res = await fetch(url, {
-      method,
+  const save = async () => {
+    const q = parseInt(qty, 10);
+    if (!qty || isNaN(q) || q === 0) { setErr("Enter a non-zero quantity (negative to remove stock)."); return; }
+    setSaving(true); setErr("");
+    const res = await fetch(`${API}/inventory/adjustments/`, {
+      method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ parent_sku_id: sku, quantity: q, reason, notes }),
     });
-    if (res.ok) onSave();
-    else { const d = await res.json().catch(() => ({})); setErr(d.error || "Save failed."); setSaving(false); }
+    const data = await res.json();
+    if (!res.ok) { setErr(data.error || "Failed"); setSaving(false); return; }
+    reset(); onSaved();
   };
 
   return (
-    <Dialog open onClose={onClose} maxWidth="sm" fullWidth>
-      <DialogTitle sx={{ fontWeight: 800, fontSize: 15, color: C.gray800, pb: 1, borderBottom: `1px solid ${C.border}` }}>
-        {isEdit ? "Edit Adjustment" : "Manual Stock Adjustment"}
-        <Typography variant="caption" display="block" sx={{ fontFamily: "monospace", color: C.gray400, mt: 0.5 }}>
-          {skuId || adjustment?.parent_sku_id}
-        </Typography>
+    <Dialog open={open} onClose={() => { reset(); onClose(); }} maxWidth="xs" fullWidth PaperProps={{ sx: { borderRadius: 3 } }}>
+      <DialogTitle sx={{ fontWeight: 800, borderBottom: "1px solid #F1F5F9" }}>
+        Adjust Stock — {sku}
       </DialogTitle>
-      <DialogContent sx={{ pt: 2 }}>
-        <Stack spacing={2} sx={{ mt: 1 }}>
-          {/* Direction toggle */}
-          <Box sx={{ display: "flex", gap: 1 }}>
-            {[
-              { id: "add",    label: "+ Add Stock",    color: C.green },
-              { id: "remove", label: "− Remove Stock", color: C.red },
-            ].map(opt => (
-              <Button
-                key={opt.id}
-                onClick={() => setDir(opt.id)}
-                variant={dir === opt.id ? "contained" : "outlined"}
-                size="small"
-                sx={{
-                  flex: 1, fontWeight: 700,
-                  background: dir === opt.id ? opt.color : "transparent",
-                  borderColor: opt.color,
-                  color: dir === opt.id ? C.white : opt.color,
-                  "&:hover": { background: dir === opt.id ? opt.color : "transparent", opacity: 0.85 },
-                  textTransform: "none",
-                }}
-              >
-                {opt.label}
-              </Button>
-            ))}
-          </Box>
-
-          <Box sx={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 1.5 }}>
-            <TextField
-              label="Quantity *"
-              type="number"
-              size="small"
-              inputProps={{ min: 1 }}
-              value={qty}
-              onChange={e => setQty(e.target.value)}
-              placeholder="e.g. 5"
-              fullWidth
-            />
-            <TextField
-              label="Date"
-              type="date"
-              size="small"
-              value={date}
-              onChange={e => setDate(e.target.value)}
-              InputLabelProps={{ shrink: true }}
-              fullWidth
-            />
-          </Box>
-
-          <FormControl size="small" fullWidth>
+      <DialogContent sx={{ pt: 3 }}>
+        <Stack spacing={2.5}>
+          {err && <Alert severity="error">{err}</Alert>}
+          <TextField label="Quantity (+add / −remove)" type="number" value={qty}
+            onChange={e => setQty(e.target.value)} helperText="Use negative to remove stock" fullWidth />
+          <FormControl fullWidth>
             <InputLabel>Reason</InputLabel>
-            <Select
-              label="Reason"
-              value={reason}
-              onChange={e => setReason(e.target.value)}
-            >
-              {ADJUSTMENT_REASONS.map(r => (
-                <MenuItem key={r.value} value={r.value}>{r.label}</MenuItem>
-              ))}
+            <Select value={reason} label="Reason" onChange={e => setReason(e.target.value)}>
+              {ADJUSTMENT_REASONS.map(r => <MenuItem key={r.value} value={r.value}>{r.label}</MenuItem>)}
             </Select>
           </FormControl>
-
-          <TextField
-            label="Notes (optional)"
-            size="small"
-            value={notes}
-            onChange={e => setNotes(e.target.value)}
-            placeholder="e.g. Found 3 units in back room during recount"
-            fullWidth
-            multiline
-            rows={2}
-          />
-          {err && <Typography variant="caption" sx={{ color: C.red }}>{err}</Typography>}
+          <TextField label="Notes" value={notes} onChange={e => setNotes(e.target.value)} multiline rows={2} />
         </Stack>
       </DialogContent>
-      <DialogActions sx={{ px: 3, pb: 2 }}>
-        <Button onClick={onClose} variant="outlined" size="small" sx={{ color: C.gray600, borderColor: C.gray200 }}>
-          Cancel
-        </Button>
-        <Button
-          onClick={save}
-          disabled={saving}
-          variant="contained"
-          size="small"
-          sx={{ background: C.orange, "&:hover": { background: C.orange }, opacity: saving ? 0.6 : 1 }}
-        >
-          {saving ? "Saving…" : isEdit ? "Update" : "Save Adjustment"}
+      <DialogActions sx={{ px: 3, py: 2, borderTop: "1px solid #F1F5F9" }}>
+        <Button onClick={() => { reset(); onClose(); }}>Cancel</Button>
+        <Button variant="contained" onClick={save} disabled={saving}
+          sx={{ bgcolor: C.orange, "&:hover": { bgcolor: "#5B21B6" } }}>
+          {saving ? <CircularProgress size={18} color="inherit" /> : "Save"}
         </Button>
       </DialogActions>
     </Dialog>
   );
 }
 
-// ── Add Stock Modal ───────────────────────────────────────────────────────────
-function AddStockModal({ skuId, onSave, onClose }) {
-  const today = new Date().toISOString().slice(0, 10);
-  const [date,   setDate]   = useState(today);
-  const [seller, setSeller] = useState("");
-  const [qty,    setQty]    = useState("1");
-  const [price,  setPrice]  = useState("");
-  const [desc,   setDesc]   = useState("");
-  const [exch,   setExch]   = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [err,    setErr]    = useState("");
+// ── New SKU Modal ─────────────────────────────────────────────────────────────
+function NewSKUModal({ onSave, onClose }) {
+  const [skuId,      setSkuId]      = useState("");
+  const [initQty,    setInitQty]    = useState("");
+  const [initPrice,  setInitPrice]  = useState("");
+  const [initSeller, setInitSeller] = useState("");
+  const [initDate,   setInitDate]   = useState(today());
+  const [itemPrice,  setItemPrice]  = useState("");
+  const [saving,     setSaving]     = useState(false);
+  const [err,        setErr]        = useState("");
 
   const save = async () => {
-    if (!seller.trim())                         { setErr("Enter a seller name."); return; }
-    if (!(parseInt(qty, 10) > 0))              { setErr("Quantity must be ≥ 1."); return; }
-    if (!exch && !(parseFloat(price) > 0))     { setErr("Enter a valid price."); return; }
+    if (!skuId.trim()) { setErr("Parent SKU ID is required."); return; }
+    const qty = parseInt(initQty, 10);
+    if (initQty && (isNaN(qty) || qty < 1)) { setErr("Initial qty must be ≥ 1."); return; }
     setSaving(true); setErr("");
-    const res = await fetch(`${API}/purchases/`, {
+    const res = await fetch(`${API}/inventory/new-sku/`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        date,
-        seller_name: seller.trim(),
-        bill_number: "",
-        notes: "",
-        items: [{
-          parent_sku_id: skuId,
-          product_description: desc,
-          quantity: parseInt(qty, 10),
-          price_per_unit: exch ? "0" : price,
-          is_exchange: exch,
-        }],
+        sku_id: skuId.trim().toUpperCase(),
+        cost_price: itemPrice ? parseFloat(itemPrice) : null,
+        initial_quantity: qty || 0,
+        initial_price_per_unit: initPrice ? parseFloat(initPrice) : null,
+        seller_name: initSeller.trim() || null,
+        purchase_date: initDate,
       }),
     });
-    if (res.ok) onSave();
-    else { setErr("Save failed. Please try again."); setSaving(false); }
+    const data = await res.json();
+    if (!res.ok) { setErr(data.error || JSON.stringify(data)); setSaving(false); return; }
+    onSave();
   };
 
   return (
-    <Dialog open onClose={onClose} maxWidth="sm" fullWidth>
-      <DialogTitle sx={{ fontWeight: 800, fontSize: 15, color: C.gray800, pb: 1, borderBottom: `1px solid ${C.border}` }}>
-        + Add Purchase Stock
-        <Typography variant="caption" display="block" sx={{ fontFamily: "monospace", color: C.gray400, mt: 0.5 }}>
-          {skuId}
-        </Typography>
-      </DialogTitle>
-      <DialogContent sx={{ pt: 2 }}>
-        <Stack spacing={2} sx={{ mt: 1 }}>
-          <Box sx={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 1.5 }}>
-            <TextField
-              label="Date"
-              type="date"
-              size="small"
-              value={date}
-              onChange={e => setDate(e.target.value)}
-              InputLabelProps={{ shrink: true }}
-              fullWidth
-            />
-            <TextField
-              label="Seller Name"
-              size="small"
-              value={seller}
-              onChange={e => setSeller(e.target.value)}
-              placeholder="e.g. Anand Traders"
-              fullWidth
-            />
-          </Box>
-          <TextField
-            label="Description (optional)"
-            size="small"
-            value={desc}
-            onChange={e => setDesc(e.target.value)}
-            placeholder="e.g. Cotton kurta set"
-            fullWidth
-          />
-          <Box sx={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 1.5 }}>
-            <TextField
-              label="Quantity"
-              type="number"
-              size="small"
-              inputProps={{ min: 1 }}
-              value={qty}
-              onChange={e => setQty(e.target.value)}
-              fullWidth
-            />
-            <TextField
-              label="Price / Unit (₹)"
-              type="number"
-              size="small"
-              inputProps={{ min: 0, step: 0.01 }}
-              value={price}
-              onChange={e => setPrice(e.target.value)}
-              disabled={exch}
-              placeholder="0.00"
-              fullWidth
-            />
-          </Box>
-          <FormControlLabel
-            control={
-              <Checkbox
-                checked={exch}
-                onChange={e => setExch(e.target.checked)}
-                sx={{ color: C.amber, "&.Mui-checked": { color: C.amber } }}
-                size="small"
-              />
-            }
-            label={
-              <Typography variant="body2" sx={{ color: C.gray600 }}>
-                Exchange item (not counted in cost or stock)
-              </Typography>
-            }
-          />
-          {err && <Typography variant="caption" sx={{ color: C.red }}>{err}</Typography>}
+    <Dialog open onClose={onClose} maxWidth="sm" fullWidth PaperProps={{ sx: { borderRadius: 3 } }}>
+      <DialogTitle sx={{ fontWeight: 800, borderBottom: "1px solid #F1F5F9" }}>Create New Parent SKU</DialogTitle>
+      <DialogContent sx={{ pt: 3 }}>
+        <Stack spacing={2.5}>
+          {err && <Alert severity="error">{err}</Alert>}
+          <TextField label="Parent SKU ID *" value={skuId} onChange={e => setSkuId(e.target.value.toUpperCase())}
+            helperText="Unique identifier e.g. PROD-001" />
+          <TextField label="Cost Price per Unit ₹" type="number" value={itemPrice} onChange={e => setItemPrice(e.target.value)} />
+          <Divider><Typography variant="caption" color="text.secondary">Initial Stock (optional)</Typography></Divider>
+          <Stack direction="row" spacing={2}>
+            <TextField label="Qty" type="number" value={initQty} onChange={e => setInitQty(e.target.value)} sx={{ flex: 1 }} />
+            <TextField label="Price/unit ₹" type="number" value={initPrice} onChange={e => setInitPrice(e.target.value)} sx={{ flex: 1 }} />
+          </Stack>
+          <Stack direction="row" spacing={2}>
+            <TextField label="Seller" value={initSeller} onChange={e => setInitSeller(e.target.value)} sx={{ flex: 2 }} />
+            <TextField label="Date" type="date" value={initDate} onChange={e => setInitDate(e.target.value)}
+              InputLabelProps={{ shrink: true }} sx={{ flex: 1 }} />
+          </Stack>
         </Stack>
       </DialogContent>
-      <DialogActions sx={{ px: 3, pb: 2 }}>
-        <Button onClick={onClose} variant="outlined" size="small" sx={{ color: C.gray600, borderColor: C.gray200 }}>
-          Cancel
-        </Button>
-        <Button
-          onClick={save}
-          disabled={saving}
-          variant="contained"
-          size="small"
-          sx={{ background: C.orange, "&:hover": { background: C.orange }, opacity: saving ? 0.6 : 1 }}
-        >
-          {saving ? "Saving…" : "Add Stock"}
+      <DialogActions sx={{ px: 3, py: 2, borderTop: "1px solid #F1F5F9" }}>
+        <Button onClick={onClose}>Cancel</Button>
+        <Button variant="contained" onClick={save} disabled={saving}
+          sx={{ bgcolor: C.orange, "&:hover": { bgcolor: "#5B21B6" } }}>
+          {saving ? <CircularProgress size={18} color="inherit" /> : "Create SKU"}
         </Button>
       </DialogActions>
     </Dialog>
   );
 }
 
-// ── Edit Item Modal ───────────────────────────────────────────────────────────
-function EditItemModal({ item, onSave, onClose }) {
-  const [qty,    setQty]    = useState(String(item.quantity));
-  const [price,  setPrice]  = useState(String(item.price_per_unit));
-  const [desc,   setDesc]   = useState(item.product_description || "");
-  const [exch,   setExch]   = useState(item.is_exchange);
-  const [saving, setSaving] = useState(false);
-  const [err,    setErr]    = useState("");
+// ── Consumable Item Modal ─────────────────────────────────────────────────────
+function ConsumableItemModal({ open, item, onClose, onSaved }) {
+  const [name,     setName]     = useState(item?.name || "");
+  const [category, setCategory] = useState(item?.category || "POLYTHENE");
+  const [unit,     setUnit]     = useState(item?.unit || "pieces");
+  const [notes,    setNotes]    = useState(item?.notes || "");
+  const [saving,   setSaving]   = useState(false);
+  const [err,      setErr]      = useState("");
 
   const save = async () => {
-    if (!exch && !(parseFloat(price) > 0)) { setErr("Enter a valid price."); return; }
-    if (!(parseInt(qty, 10) > 0))          { setErr("Quantity must be ≥ 1."); return; }
+    if (!name.trim()) { setErr("Name is required."); return; }
     setSaving(true); setErr("");
-    const res = await fetch(`${API}/purchases/items/${item.id}/`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ quantity: parseInt(qty, 10), price_per_unit: price, product_description: desc, is_exchange: exch }),
+    const method = item ? "PUT" : "POST";
+    const url = item ? `${API}/consumables/items/${item.id}/` : `${API}/consumables/items/`;
+    const res = await fetch(url, {
+      method, headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: name.trim(), category, unit, notes }),
     });
-    if (res.ok) onSave(await res.json());
-    else { setErr("Save failed."); setSaving(false); }
+    const data = await res.json();
+    if (!res.ok) { setErr(data.error || "Failed"); setSaving(false); return; }
+    onSaved();
   };
 
   return (
-    <Dialog open onClose={onClose} maxWidth="sm" fullWidth>
-      <DialogTitle sx={{ fontWeight: 800, fontSize: 15, color: C.gray800, pb: 1, borderBottom: `1px solid ${C.border}` }}>
-        Edit Purchase Item
-        <Typography variant="caption" display="block" sx={{ color: C.gray400, mt: 0.5 }}>
-          Bill {item.bill_number} · {item.bill_date} · {item.seller_name}
-        </Typography>
+    <Dialog open={open} onClose={onClose} maxWidth="xs" fullWidth PaperProps={{ sx: { borderRadius: 3 } }}>
+      <DialogTitle sx={{ fontWeight: 800, borderBottom: "1px solid #F1F5F9" }}>
+        {item ? "Edit Consumable" : "New Consumable Item"}
       </DialogTitle>
-      <DialogContent sx={{ pt: 2 }}>
-        <Stack spacing={2} sx={{ mt: 1 }}>
-          <TextField label="Description" size="small" value={desc} onChange={e => setDesc(e.target.value)} fullWidth />
-          <Box sx={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 1.5 }}>
-            <TextField
-              label="Quantity"
-              type="number"
-              size="small"
-              inputProps={{ min: 1 }}
-              value={qty}
-              onChange={e => setQty(e.target.value)}
-              fullWidth
-            />
-            <TextField
-              label="Price / Unit (₹)"
-              type="number"
-              size="small"
-              inputProps={{ min: 0, step: 0.01 }}
-              value={price}
-              onChange={e => setPrice(e.target.value)}
-              disabled={exch}
-              fullWidth
-            />
-          </Box>
-          <FormControlLabel
-            control={
-              <Checkbox
-                checked={exch}
-                onChange={e => setExch(e.target.checked)}
-                sx={{ color: C.amber, "&.Mui-checked": { color: C.amber } }}
-                size="small"
-              />
-            }
-            label={<Typography variant="body2" sx={{ color: C.gray600 }}>Exchange item (excluded from cost &amp; stock)</Typography>}
-          />
-          {err && <Typography variant="caption" sx={{ color: C.red }}>{err}</Typography>}
+      <DialogContent sx={{ pt: 3 }}>
+        <Stack spacing={2.5}>
+          {err && <Alert severity="error">{err}</Alert>}
+          <TextField label="Name *" value={name} onChange={e => setName(e.target.value)} />
+          <FormControl fullWidth>
+            <InputLabel>Category</InputLabel>
+            <Select value={category} label="Category" onChange={e => setCategory(e.target.value)}>
+              {CONSUMABLE_CATEGORIES.map(c => <MenuItem key={c.value} value={c.value}>{c.label}</MenuItem>)}
+            </Select>
+          </FormControl>
+          <FormControl fullWidth>
+            <InputLabel>Unit</InputLabel>
+            <Select value={unit} label="Unit" onChange={e => setUnit(e.target.value)}>
+              {CONSUMABLE_UNITS.map(u => <MenuItem key={u.value} value={u.value}>{u.label}</MenuItem>)}
+            </Select>
+          </FormControl>
+          <TextField label="Notes" value={notes} onChange={e => setNotes(e.target.value)} multiline rows={2} />
         </Stack>
       </DialogContent>
-      <DialogActions sx={{ px: 3, pb: 2 }}>
-        <Button onClick={onClose} variant="outlined" size="small" sx={{ color: C.gray600, borderColor: C.gray200 }}>Cancel</Button>
-        <Button
-          onClick={save}
-          disabled={saving}
-          variant="contained"
-          size="small"
-          sx={{ background: C.orange, "&:hover": { background: C.orange }, opacity: saving ? 0.6 : 1 }}
-        >
-          {saving ? "Saving…" : "Save"}
+      <DialogActions sx={{ px: 3, py: 2, borderTop: "1px solid #F1F5F9" }}>
+        <Button onClick={onClose}>Cancel</Button>
+        <Button variant="contained" onClick={save} disabled={saving}
+          sx={{ bgcolor: C.orange, "&:hover": { bgcolor: "#5B21B6" } }}>
+          {saving ? <CircularProgress size={18} color="inherit" /> : "Save"}
         </Button>
       </DialogActions>
     </Dialog>
   );
 }
 
-// ── SKU Detail Drawer ─────────────────────────────────────────────────────────
-function SKUDetailDrawer({ skuId, inventoryRow, onClose, onRefreshInventory }) {
-  const [items,      setItems]      = useState([]);
-  const [monthly,    setMonthly]    = useState([]);
-  const [adjustments, setAdjustments] = useState([]);
-  const [editItem,   setEditItem]   = useState(null);
-  const [editAdj,    setEditAdj]    = useState(null);
-  const [adjModal,   setAdjModal]   = useState(false);
-  const [loading,    setLoading]    = useState(true);
-  const [tab,        setTab]        = useState("history");
+// ── Consumable Purchase Modal ─────────────────────────────────────────────────
+function ConsumablePurchaseModal({ open, item, onClose, onSaved }) {
+  const [date,    setDate]    = useState(today());
+  const [qty,     setQty]     = useState("");
+  const [price,   setPrice]   = useState("");
+  const [seller,  setSeller]  = useState("");
+  const [notes,   setNotes]   = useState("");
+  const [saving,  setSaving]  = useState(false);
+  const [err,     setErr]     = useState("");
 
-  useEffect(() => {
-    const onKey = (e) => e.key === "Escape" && onClose();
-    document.addEventListener("keydown", onKey);
-    document.body.style.overflow = "hidden";
-    return () => { document.removeEventListener("keydown", onKey); document.body.style.overflow = ""; };
-  }, [onClose]);
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    const [itemsRes, monthlyRes, adjRes] = await Promise.all([
-      fetch(`${API}/purchases/sku-items/?parent_sku=${encodeURIComponent(skuId)}`),
-      fetch(`${API}/purchases/sku-monthly/?parent_sku=${encodeURIComponent(skuId)}`),
-      fetch(`${API}/inventory/adjustments/?parent_sku=${encodeURIComponent(skuId)}`),
-    ]);
-    if (itemsRes.ok)   setItems((await itemsRes.json()).results   || []);
-    if (monthlyRes.ok) setMonthly((await monthlyRes.json()).results || []);
-    if (adjRes.ok)     setAdjustments((await adjRes.json()).results || []);
-    setLoading(false);
-  }, [skuId]);
-
-  useEffect(() => { load(); }, [load]);
-
-  const handleDeletePurchase = async (itemId) => {
-    if (!window.confirm("Delete this purchase item? Stock will be reduced.")) return;
-    const res = await fetch(`${API}/purchases/items/${itemId}/`, { method: "DELETE" });
-    if (res.ok) { load(); onRefreshInventory(); }
-  };
-
-  const handleDeleteAdj = async (adjId) => {
-    if (!window.confirm("Delete this adjustment?")) return;
-    const res = await fetch(`${API}/inventory/adjustments/${adjId}/`, { method: "DELETE" });
-    if (res.ok) { load(); onRefreshInventory(); }
-  };
-
-  const handleSaved = () => { setEditItem(null); setEditAdj(null); setAdjModal(false); load(); onRefreshInventory(); };
-
-  const totalPurchased = items.filter(i => !i.is_exchange).reduce((s, i) => s + i.quantity, 0);
-  const totalSpend     = items.filter(i => !i.is_exchange).reduce((s, i) => s + parseFloat(i.total_amount), 0);
-  const exchangeCount  = items.filter(i => i.is_exchange).length;
-  const netAdj         = adjustments.reduce((s, a) => s + a.quantity, 0);
-
-  return (
-    <>
-      {editItem && <EditItemModal item={editItem} onSave={handleSaved} onClose={() => setEditItem(null)} />}
-      {(adjModal || editAdj) && (
-        <AdjustmentModal
-          skuId={skuId}
-          adjustment={editAdj}
-          onSave={handleSaved}
-          onClose={() => { setAdjModal(false); setEditAdj(null); }}
-        />
-      )}
-      <Box
-        onClick={onClose}
-        sx={{ position: "fixed", inset: 0, zIndex: 1000, background: "rgba(15,23,42,0.45)", display: "flex", justifyContent: "flex-end" }}
-      >
-        <Box
-          onClick={e => e.stopPropagation()}
-          sx={{
-            width: "min(760px, 96vw)", height: "100vh",
-            background: C.white, overflowY: "auto",
-            boxShadow: "-12px 0 48px rgba(0,0,0,0.18)",
-            display: "flex", flexDirection: "column",
-          }}
-        >
-          {/* Drawer header */}
-          <Box sx={{ px: 3, pt: 2.5, pb: 2, borderBottom: `1px solid ${C.border}`, background: C.gray50, position: "sticky", top: 0, zIndex: 10 }}>
-            <Box sx={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 1.5 }}>
-              <Box>
-                <Typography sx={{ fontFamily: "monospace", fontSize: 18, fontWeight: 800, color: C.orange }}>{skuId}</Typography>
-                <Box sx={{ display: "flex", gap: 2, mt: 0.5, flexWrap: "wrap" }}>
-                  <Typography variant="caption" sx={{ color: C.gray400 }}>
-                    {totalPurchased} purchased · {fmt(totalSpend)} spend
-                    {exchangeCount > 0 && ` · ${exchangeCount} exchange${exchangeCount > 1 ? "s" : ""}`}
-                  </Typography>
-                  {netAdj !== 0 && (
-                    <Typography variant="caption" sx={{ color: netAdj > 0 ? C.green : C.red, fontWeight: 700 }}>
-                      {netAdj > 0 ? `+${netAdj}` : netAdj} adjustment{adjustments.length !== 1 ? "s" : ""}
-                    </Typography>
-                  )}
-                  {inventoryRow && (
-                    <Typography variant="caption" sx={{ color: C.gray700, fontWeight: 700 }}>
-                      Current stock: {inventoryRow.current_stock}
-                    </Typography>
-                  )}
-                </Box>
-              </Box>
-              <Box sx={{ display: "flex", gap: 1 }}>
-                <Button
-                  onClick={() => setAdjModal(true)}
-                  variant="outlined"
-                  size="small"
-                  sx={{ color: C.blue, borderColor: "#93C5FD", textTransform: "none", fontSize: 12, whiteSpace: "nowrap" }}
-                >
-                  ± Adjust Stock
-                </Button>
-                <Button
-                  onClick={onClose}
-                  variant="outlined"
-                  size="small"
-                  sx={{ minWidth: 36, px: 1, color: C.gray600, borderColor: C.gray200, lineHeight: 1 }}
-                >
-                  ✕
-                </Button>
-              </Box>
-            </Box>
-            {/* Tab bar */}
-            <Box sx={{ display: "flex", gap: 0.5, mt: 1.5, background: C.gray100, borderRadius: 2, p: 0.375, width: "fit-content" }}>
-              {[
-                ["history",     "Purchase History"],
-                ["adjustments", `Adjustments${adjustments.length ? ` (${adjustments.length})` : ""}`],
-                ["monthly",     "Monthly Analysis"],
-              ].map(([id, label]) => (
-                <Button
-                  key={id}
-                  onClick={() => setTab(id)}
-                  size="small"
-                  sx={{
-                    px: 1.75, py: 0.75, borderRadius: 1.5, border: "none",
-                    fontWeight: tab === id ? 700 : 500, fontSize: 12,
-                    background: tab === id ? C.orangeLight : "transparent",
-                    color: tab === id ? C.orange : C.gray500,
-                    textTransform: "none",
-                    "&:hover": { background: tab === id ? C.orangeLight : C.gray200 },
-                  }}
-                >
-                  {label}
-                </Button>
-              ))}
-            </Box>
-          </Box>
-
-          {/* Drawer body */}
-          <Box sx={{ flex: 1, p: 3 }}>
-            {loading ? (
-              <Box sx={{ textAlign: "center", py: 6, color: C.gray400 }}>
-                <CircularProgress size={24} sx={{ color: C.orange }} />
-                <Typography variant="body2" sx={{ mt: 1, color: C.gray400 }}>Loading…</Typography>
-              </Box>
-            ) : (
-              <>
-                {/* ── Purchase History tab ── */}
-                {tab === "history" && (
-                  items.length === 0 ? (
-                    <Typography sx={{ color: C.gray400, textAlign: "center", py: 5 }}>No purchase items found for this SKU.</Typography>
-                  ) : (
-                    <TableContainer component={Paper} elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: 2 }}>
-                      <Table size="small">
-                        <TableHead>
-                          <TableRow sx={{ background: C.gray50 }}>
-                            {["Date", "Bill", "Seller", "Desc", "Qty", "Price/Unit", "Total", "Exch?", ""].map((h, i) => (
-                              <TableCell key={h + i} align={["Qty", "Price/Unit", "Total"].includes(h) ? "right" : "left"}
-                                sx={{ fontSize: 11, fontWeight: 700, color: C.gray500, textTransform: "uppercase", letterSpacing: "0.06em", whiteSpace: "nowrap", borderBottom: `1px solid ${C.border}`, background: C.gray50 }}>
-                                {h}
-                              </TableCell>
-                            ))}
-                          </TableRow>
-                        </TableHead>
-                        <TableBody>
-                          {items.map((it, i) => {
-                            const rowBg = it.is_exchange ? "#FFFBEB" : i % 2 === 0 ? C.white : C.gray50;
-                            return (
-                              <TableRow key={it.id} sx={{ background: rowBg }}>
-                                <TableCell sx={{ whiteSpace: "nowrap", color: C.gray600, fontSize: 13 }}>{it.bill_date}</TableCell>
-                                <TableCell sx={{ fontFamily: "monospace", fontSize: 11, color: C.blue }}>{it.bill_number}</TableCell>
-                                <TableCell sx={{ maxWidth: 100, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 13 }}>{it.seller_name}</TableCell>
-                                <TableCell sx={{ maxWidth: 120, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: C.gray500, fontSize: 12 }}>{it.product_description || "—"}</TableCell>
-                                <TableCell align="right" sx={{ fontFamily: "monospace", fontWeight: 700, fontSize: 13 }}>{it.quantity}</TableCell>
-                                <TableCell align="right" sx={{ fontFamily: "monospace", fontSize: 13 }}>{fmt(it.price_per_unit)}</TableCell>
-                                <TableCell align="right" sx={{ fontFamily: "monospace", fontWeight: 700, color: it.is_exchange ? C.gray300 : C.orange, fontSize: 13 }}>
-                                  {it.is_exchange ? "—" : fmt(it.total_amount)}
-                                </TableCell>
-                                <TableCell align="center">
-                                  {it.is_exchange
-                                    ? <Chip label="Exch" size="small" sx={{ fontSize: 10, background: "#FFFBEB", color: C.amber, border: "1px solid #FDE68A", fontWeight: 700, height: 20 }} />
-                                    : <Typography sx={{ color: C.gray200 }}>—</Typography>}
-                                </TableCell>
-                                <TableCell>
-                                  <Box sx={{ display: "flex", gap: 0.625 }}>
-                                    <Button onClick={() => setEditItem(it)} size="small"
-                                      sx={{ minWidth: 0, px: 1, py: 0.375, fontSize: 11, background: C.orangeLight, color: C.orange, border: `1.5px solid ${C.orangeBorder}`, textTransform: "none" }}>✏</Button>
-                                    <Button onClick={() => handleDeletePurchase(it.id)} size="small"
-                                      sx={{ minWidth: 0, px: 1, py: 0.375, fontSize: 11, color: C.red, border: `1.5px solid ${C.gray200}`, textTransform: "none" }}>✕</Button>
-                                  </Box>
-                                </TableCell>
-                              </TableRow>
-                            );
-                          })}
-                        </TableBody>
-                        <TableFooter>
-                          <TableRow sx={{ background: "#FFF0EA" }}>
-                            <TableCell colSpan={4} sx={{ fontWeight: 700, fontSize: 13, color: C.gray700 }}>Total (excl. exchanges)</TableCell>
-                            <TableCell align="right" sx={{ fontFamily: "monospace", fontWeight: 800, fontSize: 13, color: C.gray700 }}>{totalPurchased}</TableCell>
-                            <TableCell />
-                            <TableCell align="right" sx={{ fontFamily: "monospace", fontWeight: 800, color: C.orange, fontSize: 13 }}>
-                              ₹{totalSpend.toLocaleString("en-IN", { minimumFractionDigits: 2 })}
-                            </TableCell>
-                            <TableCell colSpan={2} />
-                          </TableRow>
-                        </TableFooter>
-                      </Table>
-                    </TableContainer>
-                  )
-                )}
-
-                {/* ── Adjustments tab ── */}
-                {tab === "adjustments" && (
-                  <Stack spacing={2}>
-                    <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                      <Typography sx={{ fontSize: 13, color: C.gray500 }}>
-                        Manual corrections to stock count — damaged goods, recount findings, etc.
-                      </Typography>
-                      <Button
-                        onClick={() => setAdjModal(true)}
-                        variant="contained"
-                        size="small"
-                        sx={{ background: C.orange, "&:hover": { background: C.orange }, textTransform: "none", fontSize: 12 }}
-                      >
-                        + New Adjustment
-                      </Button>
-                    </Box>
-                    {adjustments.length === 0 ? (
-                      <Box sx={{ textAlign: "center", py: 6, border: `1px dashed ${C.gray200}`, borderRadius: 2 }}>
-                        <Typography sx={{ color: C.gray400, mb: 1 }}>No manual adjustments yet.</Typography>
-                        <Button onClick={() => setAdjModal(true)} size="small" variant="outlined"
-                          sx={{ color: C.orange, borderColor: C.orangeBorder, textTransform: "none" }}>
-                          + Add First Adjustment
-                        </Button>
-                      </Box>
-                    ) : (
-                      <>
-                        {/* Summary */}
-                        <Box sx={{ display: "flex", gap: 1.5, flexWrap: "wrap" }}>
-                          {[
-                            { label: "Net Adjustment", value: netAdj > 0 ? `+${netAdj}` : netAdj, color: netAdj >= 0 ? C.green : C.red },
-                            { label: "Entries", value: adjustments.length, color: C.gray700 },
-                            { label: "Added", value: `+${adjustments.filter(a => a.quantity > 0).reduce((s, a) => s + a.quantity, 0)}`, color: C.green },
-                            { label: "Removed", value: adjustments.filter(a => a.quantity < 0).reduce((s, a) => s + a.quantity, 0), color: C.red },
-                          ].map(k => (
-                            <Paper key={k.label} elevation={0} sx={{ background: C.gray50, border: `1px solid ${C.border}`, borderRadius: 2, px: 1.5, py: 1, minWidth: 80 }}>
-                              <Typography sx={{ fontSize: 10, fontWeight: 700, color: C.gray400, textTransform: "uppercase", letterSpacing: "0.05em" }}>{k.label}</Typography>
-                              <Typography sx={{ fontSize: 16, fontWeight: 800, color: k.color, fontFamily: "monospace" }}>{k.value}</Typography>
-                            </Paper>
-                          ))}
-                        </Box>
-
-                        <TableContainer component={Paper} elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: 2 }}>
-                          <Table size="small">
-                            <TableHead>
-                              <TableRow sx={{ background: C.gray50 }}>
-                                {["Date", "Type", "Qty", "Reason", "Notes", ""].map((h, i) => (
-                                  <TableCell key={h + i} sx={{ fontSize: 11, fontWeight: 700, color: C.gray500, textTransform: "uppercase", letterSpacing: "0.06em", borderBottom: `1px solid ${C.border}`, background: C.gray50 }}>
-                                    {h}
-                                  </TableCell>
-                                ))}
-                              </TableRow>
-                            </TableHead>
-                            <TableBody>
-                              {adjustments.map((a, i) => (
-                                <TableRow key={a.id} sx={{ background: i % 2 === 0 ? C.white : C.gray50 }}>
-                                  <TableCell sx={{ whiteSpace: "nowrap", color: C.gray600, fontSize: 13 }}>{a.date}</TableCell>
-                                  <TableCell>
-                                    <Chip
-                                      label={a.quantity >= 0 ? "Add" : "Remove"}
-                                      size="small"
-                                      sx={{
-                                        fontSize: 10, fontWeight: 700, height: 20,
-                                        background: a.quantity >= 0 ? C.greenLight : C.redLight,
-                                        color: a.quantity >= 0 ? C.green : C.red,
-                                        border: `1px solid ${a.quantity >= 0 ? C.greenBorder : C.redBorder}`,
-                                      }}
-                                    />
-                                  </TableCell>
-                                  <TableCell sx={{ fontFamily: "monospace", fontWeight: 800, fontSize: 14, color: a.quantity >= 0 ? C.green : C.red }}>
-                                    {a.quantity >= 0 ? `+${a.quantity}` : a.quantity}
-                                  </TableCell>
-                                  <TableCell sx={{ fontSize: 12, color: C.gray600 }}>{a.reason_display}</TableCell>
-                                  <TableCell sx={{ fontSize: 12, color: C.gray500, maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.notes || "—"}</TableCell>
-                                  <TableCell>
-                                    <Box sx={{ display: "flex", gap: 0.625 }}>
-                                      <Button onClick={() => setEditAdj(a)} size="small"
-                                        sx={{ minWidth: 0, px: 1, py: 0.375, fontSize: 11, background: C.orangeLight, color: C.orange, border: `1.5px solid ${C.orangeBorder}`, textTransform: "none" }}>✏</Button>
-                                      <Button onClick={() => handleDeleteAdj(a.id)} size="small"
-                                        sx={{ minWidth: 0, px: 1, py: 0.375, fontSize: 11, color: C.red, border: `1.5px solid ${C.gray200}`, textTransform: "none" }}>✕</Button>
-                                    </Box>
-                                  </TableCell>
-                                </TableRow>
-                              ))}
-                            </TableBody>
-                          </Table>
-                        </TableContainer>
-                      </>
-                    )}
-                  </Stack>
-                )}
-
-                {/* ── Monthly Analysis tab ── */}
-                {tab === "monthly" && (
-                  monthly.length === 0 ? (
-                    <Typography sx={{ color: C.gray400, textAlign: "center", py: 5 }}>No purchase data for monthly analysis.</Typography>
-                  ) : (
-                    <Stack spacing={2.5}>
-                      <Box>
-                        <Typography sx={{ fontSize: 12, fontWeight: 700, color: C.gray500, textTransform: "uppercase", letterSpacing: "0.05em", mb: 1.25 }}>
-                          Units Purchased per Month
-                        </Typography>
-                        <BarChart
-                          dataset={monthly}
-                          xAxis={[{ scaleType: "band", dataKey: "label" }]}
-                          series={[{ dataKey: "total_qty", label: "Units", color: C.orange }]}
-                          height={220}
-                          borderRadius={4}
-                          margin={{ left: 60, bottom: 60, right: 10, top: 10 }}
-                        />
-                      </Box>
-                      <Box>
-                        <Typography sx={{ fontSize: 12, fontWeight: 700, color: C.gray500, textTransform: "uppercase", letterSpacing: "0.05em", mb: 1.25 }}>
-                          Spend per Month (₹)
-                        </Typography>
-                        <BarChart
-                          dataset={monthly.map(m => ({ ...m, value: parseFloat(m.total_value) }))}
-                          xAxis={[{ scaleType: "band", dataKey: "label" }]}
-                          series={[{ dataKey: "value", label: "Spend (₹)", color: C.green }]}
-                          height={220}
-                          borderRadius={4}
-                          margin={{ left: 60, bottom: 60, right: 10, top: 10 }}
-                        />
-                      </Box>
-                      <TableContainer component={Paper} elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: 2 }}>
-                        <Table size="small">
-                          <TableHead>
-                            <TableRow sx={{ background: C.gray50 }}>
-                              {["Month", "Bills", "Units", "Total Spend"].map(h => (
-                                <TableCell key={h} align={h !== "Month" ? "right" : "left"}
-                                  sx={{ fontSize: 11, fontWeight: 700, color: C.gray500, textTransform: "uppercase", letterSpacing: "0.06em", borderBottom: `1px solid ${C.border}`, background: C.gray50 }}>
-                                  {h}
-                                </TableCell>
-                              ))}
-                            </TableRow>
-                          </TableHead>
-                          <TableBody>
-                            {monthly.map((m, i) => (
-                              <TableRow key={m.month} sx={{ background: i % 2 === 0 ? C.white : C.gray50 }}>
-                                <TableCell sx={{ fontWeight: 600, fontSize: 13, color: C.gray700 }}>{m.label}</TableCell>
-                                <TableCell align="right" sx={{ fontFamily: "monospace", fontSize: 13 }}>{m.bill_count}</TableCell>
-                                <TableCell align="right" sx={{ fontFamily: "monospace", fontWeight: 700, fontSize: 13 }}>{m.total_qty}</TableCell>
-                                <TableCell align="right" sx={{ fontFamily: "monospace", color: C.orange, fontWeight: 700, fontSize: 13 }}>{fmt(m.total_value)}</TableCell>
-                              </TableRow>
-                            ))}
-                          </TableBody>
-                          <TableFooter>
-                            <TableRow sx={{ background: "#FFF0EA" }}>
-                              <TableCell sx={{ fontWeight: 700, fontSize: 13, color: C.gray700 }}>All-time total</TableCell>
-                              <TableCell align="right" sx={{ fontFamily: "monospace", fontWeight: 700, fontSize: 13, color: C.gray700 }}>{monthly.reduce((s, m) => s + m.bill_count, 0)}</TableCell>
-                              <TableCell align="right" sx={{ fontFamily: "monospace", fontWeight: 800, fontSize: 13, color: C.gray700 }}>{monthly.reduce((s, m) => s + m.total_qty, 0)}</TableCell>
-                              <TableCell align="right" sx={{ fontFamily: "monospace", fontWeight: 800, color: C.orange, fontSize: 13 }}>
-                                {fmt(monthly.reduce((s, m) => s + parseFloat(m.total_value), 0))}
-                              </TableCell>
-                            </TableRow>
-                          </TableFooter>
-                        </Table>
-                      </TableContainer>
-                    </Stack>
-                  )
-                )}
-              </>
-            )}
-          </Box>
-        </Box>
-      </Box>
-    </>
-  );
-}
-
-// ── Packing Panel ─────────────────────────────────────────────────────────────
-const COURIER_BG = {
-  Valmo:         { bg: "#EFF6FF", fg: "#2563EB", border: "#BFDBFE" },
-  Shadowfax:     { bg: "#F0FDF4", fg: "#16A34A", border: "#BBF7D0" },
-  Delhivery:     { bg: "#FFF7ED", fg: "#EA580C", border: "#FED7AA" },
-  "Xpress Bees": { bg: "#FAF5FF", fg: "#9333EA", border: "#E9D5FF" },
-  BlueDart:      { bg: "#FFF0EA", fg: "#E8510A", border: "#F5C4AD" },
-  Ekart:         { bg: "#FFFBEB", fg: "#D97706", border: "#FDE68A" },
-};
-function courierStyle(name) {
-  return COURIER_BG[name] || { bg: C.gray100, fg: C.gray600, border: C.gray200 };
-}
-
-function PackingPanel() {
-  const todayStr = () => new Date().toISOString().slice(0, 10);
-  const [date,        setDate]        = useState(todayStr());
-  const [orders,      setOrders]      = useState([]);
-  const [loading,     setLoading]     = useState(false);
-  const [filter,      setFilter]      = useState("all");
-  const [search,      setSearch]      = useState("");
-  const [suggestions, setSuggestions] = useState([]);
-  const [collapsed,   setCollapsed]   = useState(true);
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const r = await fetch(`${API}/labels/orders/?date=${date}&page_size=1000`);
-      if (r.ok) setOrders((await r.json()).results || []);
-    } finally { setLoading(false); }
-  }, [date]);
-
-  useEffect(() => { load(); }, [load]);
-
-  const shiftDate = (days) => {
-    const d = new Date(date);
-    d.setDate(d.getDate() + days);
-    setDate(d.toISOString().slice(0, 10));
-  };
-
-  const togglePacked = async (order_id, current) => {
-    const res = await fetch(`${API}/labels/orders/${encodeURIComponent(order_id)}/pack/`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ packed: !current }),
-    });
-    if (res.ok) {
-      const update = (list) => list.map(o => o.order_id === order_id ? { ...o, is_packed: !current } : o);
-      setOrders(update);
-      setSuggestions(update);
-    }
-  };
-
-  const markAllPacked = async () => {
-    if (!window.confirm(`Mark all ${orders.length} orders as packed?`)) return;
-    const res = await fetch(`${API}/labels/bulk-pack/`, {
+  const save = async () => {
+    if (!qty || parseFloat(qty) <= 0) { setErr("Qty must be positive."); return; }
+    if (!price || parseFloat(price) <= 0) { setErr("Price must be positive."); return; }
+    setSaving(true); setErr("");
+    const res = await fetch(`${API}/consumables/purchases/`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ order_ids: orders.map(o => o.order_id), packed: true }),
+      body: JSON.stringify({ item_id: item.id, date, quantity: parseFloat(qty), price_per_unit: parseFloat(price), seller_name: seller, notes }),
     });
-    if (res.ok) setOrders(prev => prev.map(o => ({ ...o, is_packed: true })));
+    const data = await res.json();
+    if (!res.ok) { setErr(data.error || "Failed"); setSaving(false); return; }
+    onSaved();
   };
-
-  const handleSearch = (val) => {
-    setSearch(val);
-    const v = val.trim();
-    setSuggestions(v.length >= 2 ? orders.filter(o => { const id = String(o.order_id); return id.slice(-4).includes(v) || id.endsWith(v); }).slice(0, 8) : []);
-  };
-
-  const packedCount   = orders.filter(o => o.is_packed).length;
-  const unpackedCount = orders.length - packedCount;
-  const allPacked     = orders.length > 0 && unpackedCount === 0;
-  const totalUnits    = orders.reduce((s, o) => s + (o.qty || 1), 0);
-
-  const displayed = orders.filter(o => {
-    if (filter === "packed")   return o.is_packed;
-    if (filter === "unpacked") return !o.is_packed;
-    return true;
-  });
-
-  const byCourier = displayed.reduce((acc, o) => {
-    const c = o.courier_name || "Unknown";
-    if (!acc[c]) acc[c] = [];
-    acc[c].push(o);
-    return acc;
-  }, {});
 
   return (
-    <Paper elevation={1} sx={{ borderRadius: 3, overflow: "hidden", border: `1px solid ${C.border}` }}>
-      <Box
-        onClick={() => setCollapsed(c => !c)}
-        sx={{ px: 2.5, py: 1.75, display: "flex", alignItems: "center", justifyContent: "space-between", background: C.gray50, borderBottom: collapsed ? "none" : `1px solid ${C.border}`, cursor: "pointer" }}
-      >
-        <Box sx={{ display: "flex", alignItems: "center", gap: 1.25 }}>
-          <Typography sx={{ fontSize: 15, fontWeight: 800, color: C.gray800 }}>📦 Packing Status</Typography>
-          {!collapsed && orders.length > 0 && (
-            allPacked
-              ? <Chip label="✓ All Packed" size="small" sx={{ fontSize: 11, background: C.greenLight, color: C.green, border: `1px solid ${C.greenBorder}`, fontWeight: 700 }} />
-              : <Chip label={`${unpackedCount} Not Packed`} size="small" sx={{ fontSize: 11, background: C.redLight, color: C.red, border: `1px solid ${C.redBorder}`, fontWeight: 700 }} />
-          )}
-        </Box>
-        <Typography sx={{ color: C.gray400, fontSize: 13 }}>{collapsed ? "▼" : "▲"}</Typography>
-      </Box>
-
-      <Collapse in={!collapsed}>
-        <Box sx={{ px: 2.5, py: 2, display: "flex", flexDirection: "column", gap: 1.75 }}>
-          <Box sx={{ display: "flex", alignItems: "center", gap: 1, flexWrap: "wrap" }}>
-            <Button onClick={() => shiftDate(-1)} variant="outlined" size="small" sx={{ color: C.gray600, borderColor: C.gray200, textTransform: "none", px: 1.5 }}>‹ Prev</Button>
-            <TextField type="date" size="small" value={date} onChange={e => setDate(e.target.value)} InputLabelProps={{ shrink: true }} sx={{ width: 160 }} />
-            <Button onClick={() => shiftDate(1)} variant="outlined" size="small" sx={{ color: C.gray600, borderColor: C.gray200, textTransform: "none", px: 1.5 }}>Next ›</Button>
-            <Button onClick={() => setDate(todayStr())} variant="outlined" size="small" sx={{ color: C.orange, borderColor: C.orangeBorder, textTransform: "none", px: 1.5 }}>Today</Button>
-            <Button onClick={load} variant="outlined" size="small" sx={{ color: C.gray600, borderColor: C.gray200, textTransform: "none", px: 1.5 }}>⟳</Button>
-          </Box>
-
-          {loading ? (
-            <Box sx={{ textAlign: "center", py: 3 }}><CircularProgress size={20} sx={{ color: C.orange }} /></Box>
-          ) : orders.length === 0 ? (
-            <Typography sx={{ textAlign: "center", py: 3, color: C.gray400 }}>No labels uploaded for {date}.</Typography>
-          ) : (
-            <>
-              <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1.25 }}>
-                {[
-                  { label: "Total Orders", value: orders.length, color: C.blue },
-                  { label: "Total Units",  value: totalUnits,    color: C.gray700 },
-                  { label: "Packed",       value: packedCount,   color: C.green },
-                  { label: "Not Packed",   value: unpackedCount, color: unpackedCount > 0 ? C.red : C.gray300 },
-                ].map(k => (
-                  <Paper key={k.label} elevation={0} sx={{ background: C.gray50, border: `1px solid ${C.border}`, borderRadius: 2.5, px: 2, py: 1, minWidth: 90 }}>
-                    <Typography sx={{ fontSize: 10, fontWeight: 700, color: C.gray400, textTransform: "uppercase", letterSpacing: "0.06em" }}>{k.label}</Typography>
-                    <Typography sx={{ fontSize: 18, fontWeight: 800, color: k.color, fontFamily: "monospace" }}>{k.value}</Typography>
-                  </Paper>
-                ))}
-                {!allPacked && (
-                  <Button onClick={markAllPacked} variant="contained" size="small"
-                    sx={{ alignSelf: "center", ml: 0.75, background: C.green, "&:hover": { background: C.green }, textTransform: "none" }}>
-                    ✓ Mark All Packed
-                  </Button>
-                )}
-                {allPacked && <Typography sx={{ alignSelf: "center", ml: 0.75, fontSize: 13, fontWeight: 700, color: C.green }}>🎉 All {orders.length} orders packed!</Typography>}
-              </Box>
-
-              <Box sx={{ position: "relative", maxWidth: 320 }}>
-                <Typography variant="caption" sx={{ display: "block", fontWeight: 600, color: C.gray600, mb: 0.5 }}>Quick find by last 4 digits of suborder #</Typography>
-                <TextField size="small" value={search} onChange={e => handleSearch(e.target.value)} placeholder="e.g. 0480" fullWidth />
-                {suggestions.length > 0 && (
-                  <Paper elevation={3} sx={{ position: "absolute", top: "100%", left: 0, right: 0, zIndex: 50, border: `1px solid ${C.border}`, borderRadius: 2, mt: 0.25, overflow: "hidden" }}>
-                    {suggestions.map(o => (
-                      <Box key={o.order_id} sx={{ px: 1.5, py: 1, display: "flex", alignItems: "center", justifyContent: "space-between", borderBottom: `1px solid ${C.gray100}`, cursor: "pointer", background: o.is_packed ? "#F0FDF4" : C.white, "&:hover": { background: C.gray50 } }}>
-                        <Box>
-                          <Typography component="span" sx={{ fontFamily: "monospace", fontSize: 11, color: C.gray500 }}>…{o.order_id.slice(-14)}</Typography>
-                          <Typography component="span" sx={{ ml: 1, fontSize: 12, color: C.gray600 }}>{o.customer_name}</Typography>
-                        </Box>
-                        <Button
-                          onClick={(e) => { e.stopPropagation(); togglePacked(o.order_id, o.is_packed); setSearch(""); setSuggestions([]); }}
-                          size="small"
-                          sx={{ px: 1.25, borderRadius: 10, fontSize: 11, fontWeight: 600, background: o.is_packed ? C.greenLight : "#FEE2E2", color: o.is_packed ? C.green : C.red, textTransform: "none" }}
-                        >
-                          {o.is_packed ? "✓ Packed" : "Not Packed"}
-                        </Button>
-                      </Box>
-                    ))}
-                  </Paper>
-                )}
-              </Box>
-
-              <Box sx={{ display: "flex", gap: 0.5, background: C.gray100, borderRadius: 2, p: 0.375, width: "fit-content" }}>
-                {[["all", "All"], ["packed", "✓ Packed"], ["unpacked", "Not Packed"]].map(([id, label]) => (
-                  <Button key={id} onClick={() => setFilter(id)} size="small"
-                    sx={{ px: 1.75, py: 0.625, borderRadius: 1.5, border: "none", fontWeight: filter === id ? 700 : 500, fontSize: 12, background: filter === id ? C.white : "transparent", color: filter === id ? C.orange : C.gray500, boxShadow: filter === id ? "0 1px 4px rgba(0,0,0,0.08)" : "none", textTransform: "none", "&:hover": { background: filter === id ? C.white : C.gray200 } }}>
-                    {label} {id === "all" ? `(${orders.length})` : id === "packed" ? `(${packedCount})` : `(${unpackedCount})`}
-                  </Button>
-                ))}
-              </Box>
-
-              {displayed.length === 0 ? (
-                <Typography sx={{ color: C.gray400, fontSize: 13, textAlign: "center", py: 2 }}>
-                  {filter === "packed" ? "No packed orders yet." : filter === "unpacked" ? "No unpacked orders — all done! 🎉" : "No orders."}
-                </Typography>
-              ) : (
-                <Stack spacing={1.25}>
-                  {Object.entries(byCourier).sort().map(([courier, rows]) => {
-                    const cs = courierStyle(courier);
-                    const cp = rows.filter(o => o.is_packed).length;
-                    return (
-                      <Box key={courier} sx={{ border: `1px solid ${cs.border}`, borderRadius: 2.5, overflow: "hidden" }}>
-                        <Box sx={{ background: cs.bg, px: 1.75, py: 1, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                          <Typography sx={{ fontWeight: 700, fontSize: 13, color: cs.fg }}>{courier}</Typography>
-                          <Box sx={{ display: "flex", gap: 1, alignItems: "center" }}>
-                            <Typography sx={{ fontSize: 11, color: cs.fg, fontWeight: 600 }}>{rows.length} orders</Typography>
-                            <Chip label={`${cp} packed`} size="small" sx={{ fontSize: 11, background: C.greenLight, color: C.green, border: `1px solid ${C.greenBorder}`, fontWeight: 700, height: 20 }} />
-                            {cp < rows.length && <Chip label={`${rows.length - cp} left`} size="small" sx={{ fontSize: 11, background: C.redLight, color: C.red, border: `1px solid ${C.redBorder}`, fontWeight: 700, height: 20 }} />}
-                          </Box>
-                        </Box>
-                        <Table size="small">
-                          <TableBody>
-                            {rows.map((o, i) => (
-                              <TableRow key={o.order_id} sx={{ background: o.is_packed ? "#F0FDF4" : i % 2 === 0 ? C.white : C.gray50, borderTop: `1px solid ${C.gray100}` }}>
-                                <TableCell sx={{ fontFamily: "monospace", fontSize: 11, color: C.gray400, width: 160 }}>…{o.order_id.slice(-14)}</TableCell>
-                                <TableCell sx={{ fontWeight: 600, color: C.gray700, fontSize: 12 }}>{o.customer_name || "—"}</TableCell>
-                                <TableCell sx={{ color: C.gray500, fontSize: 12 }}>{o.customer_city || "—"}</TableCell>
-                                <TableCell align="center">
-                                  {o.payment_type === "COD"
-                                    ? <Chip label="COD" size="small" sx={{ fontSize: 10, background: "#FFFBEB", color: C.amber, border: "1px solid #FDE68A", fontWeight: 700, height: 20 }} />
-                                    : <Chip label="PP"  size="small" sx={{ fontSize: 10, background: C.greenLight, color: C.green, border: `1px solid ${C.greenBorder}`, fontWeight: 700, height: 20 }} />}
-                                </TableCell>
-                                <TableCell align="right">
-                                  <Button onClick={() => togglePacked(o.order_id, o.is_packed)} size="small"
-                                    sx={{ px: 1.25, borderRadius: 10, fontSize: 11, fontWeight: 600, whiteSpace: "nowrap", background: o.is_packed ? C.greenLight : C.white, color: o.is_packed ? C.green : C.gray400, border: `1px solid ${o.is_packed ? C.greenBorder : C.gray300}`, textTransform: "none" }}>
-                                    {o.is_packed ? "✓ Packed" : "Not Packed"}
-                                  </Button>
-                                </TableCell>
-                              </TableRow>
-                            ))}
-                          </TableBody>
-                        </Table>
-                      </Box>
-                    );
-                  })}
-                </Stack>
-              )}
-            </>
-          )}
-        </Box>
-      </Collapse>
-    </Paper>
+    <Dialog open={open} onClose={onClose} maxWidth="xs" fullWidth PaperProps={{ sx: { borderRadius: 3 } }}>
+      <DialogTitle sx={{ fontWeight: 800, borderBottom: "1px solid #F1F5F9" }}>
+        Restock — {item?.name}
+      </DialogTitle>
+      <DialogContent sx={{ pt: 3 }}>
+        <Stack spacing={2.5}>
+          {err && <Alert severity="error">{err}</Alert>}
+          <Stack direction="row" spacing={2}>
+            <TextField label={`Qty (${item?.unit})`} type="number" value={qty} onChange={e => setQty(e.target.value)} sx={{ flex: 1 }} />
+            <TextField label="Price/unit ₹" type="number" value={price} onChange={e => setPrice(e.target.value)} sx={{ flex: 1 }} />
+          </Stack>
+          <TextField label="Seller / Vendor" value={seller} onChange={e => setSeller(e.target.value)} />
+          <TextField label="Date" type="date" value={date} onChange={e => setDate(e.target.value)} InputLabelProps={{ shrink: true }} />
+          <TextField label="Notes" value={notes} onChange={e => setNotes(e.target.value)} multiline rows={2} />
+        </Stack>
+      </DialogContent>
+      <DialogActions sx={{ px: 3, py: 2, borderTop: "1px solid #F1F5F9" }}>
+        <Button onClick={onClose}>Cancel</Button>
+        <Button variant="contained" onClick={save} disabled={saving}
+          sx={{ bgcolor: C.green, "&:hover": { bgcolor: "#047857" } }}>
+          {saving ? <CircularProgress size={18} color="inherit" /> : "Save Purchase"}
+        </Button>
+      </DialogActions>
+    </Dialog>
   );
 }
 
-// ── Main Inventory Tab ────────────────────────────────────────────────────────
-export function InventoryTab() {
-  const [data,       setData]       = useState([]);
-  const [loading,    setLoading]    = useState(false);
-  const [search,     setSearch]     = useState("");
-  const [sortKey,    setSortKey]    = useState("current_stock");
-  const [sortAsc,    setSortAsc]    = useState(true);
-  const [stockFilter, setStockFilter] = useState("all"); // all | instock | low | out
-  const [detailSku,  setDetailSku]  = useState(null);
-  const [addSku,     setAddSku]     = useState(null);
-  const [adjSku,     setAdjSku]     = useState(null);
-  const [newSkuOpen, setNewSkuOpen] = useState(false);
+// ── Consumable Usage Modal ────────────────────────────────────────────────────
+function ConsumableUsageModal({ open, item, onClose, onSaved }) {
+  const [eventType, setEventType] = useState("USE");
+  const [date,      setDate]      = useState(today());
+  const [qty,       setQty]       = useState("");
+  const [notes,     setNotes]     = useState("");
+  const [saving,    setSaving]    = useState(false);
+  const [err,       setErr]       = useState("");
+
+  const save = async () => {
+    if (!qty || parseFloat(qty) <= 0) { setErr("Qty must be positive."); return; }
+    setSaving(true); setErr("");
+    const res = await fetch(`${API}/consumables/usages/`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ item_id: item.id, event_type: eventType, date, quantity: parseFloat(qty), notes }),
+    });
+    const data = await res.json();
+    if (!res.ok) { setErr(data.error || "Failed"); setSaving(false); return; }
+    onSaved();
+  };
+
+  return (
+    <Dialog open={open} onClose={onClose} maxWidth="xs" fullWidth PaperProps={{ sx: { borderRadius: 3 } }}>
+      <DialogTitle sx={{ fontWeight: 800, borderBottom: "1px solid #F1F5F9" }}>
+        Record Usage — {item?.name}
+      </DialogTitle>
+      <DialogContent sx={{ pt: 3 }}>
+        <Stack spacing={2.5}>
+          {err && <Alert severity="error">{err}</Alert>}
+          <FormControl fullWidth>
+            <InputLabel>Event Type</InputLabel>
+            <Select value={eventType} label="Event Type" onChange={e => setEventType(e.target.value)}>
+              <MenuItem value="USE">Regular Use</MenuItem>
+              <MenuItem value="OPEN">📦 Opened New Package</MenuItem>
+              <MenuItem value="WASTE">Waste / Discarded</MenuItem>
+            </Select>
+          </FormControl>
+          {eventType === "OPEN" && (
+            <Alert severity="info" sx={{ borderRadius: 2 }}>
+              This records that you opened a new package on this date.
+            </Alert>
+          )}
+          <TextField label="Date" type="date" value={date} onChange={e => setDate(e.target.value)} InputLabelProps={{ shrink: true }} />
+          <TextField label={`Qty used (${item?.unit})`} type="number" value={qty} onChange={e => setQty(e.target.value)} />
+          <TextField label="Notes" value={notes} onChange={e => setNotes(e.target.value)} multiline rows={2} />
+        </Stack>
+      </DialogContent>
+      <DialogActions sx={{ px: 3, py: 2, borderTop: "1px solid #F1F5F9" }}>
+        <Button onClick={onClose}>Cancel</Button>
+        <Button variant="contained" onClick={save} disabled={saving}
+          sx={{ bgcolor: eventType === "OPEN" ? C.blue : C.amber, "&:hover": { opacity: 0.9 } }}>
+          {saving ? <CircularProgress size={18} color="inherit" /> : "Record"}
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+
+// ── Overview Section ──────────────────────────────────────────────────────────
+function OverviewSection() {
+  const [data,    setData]    = useState(null);
+  const [loading, setLoading] = useState(true);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const r = await fetch(`${API}/inventory/`);
-      if (r.ok) setData((await r.json()).results || []);
-    } finally { setLoading(false); }
+      const r = await fetch(`${API}/inventory/charts/`);
+      setData(await r.json());
+    } catch {}
+    setLoading(false);
   }, []);
 
   useEffect(() => { load(); }, [load]);
 
-  const handleDeleteSku = async (e, skuId) => {
-    e.stopPropagation();
-    if (!window.confirm(`Delete ALL purchase history for "${skuId}"?\n\nThis removes every purchase entry and cannot be undone.`)) return;
-    const res = await fetch(`${API}/inventory/${encodeURIComponent(skuId)}/`, { method: "DELETE" });
-    if (res.ok) load();
-  };
+  if (loading) return <SectionLoader />;
+  if (!data) return <Alert severity="error">Failed to load chart data.</Alert>;
 
-  const toggle = (key) => {
-    if (sortKey === key) setSortAsc(a => !a);
-    else { setSortKey(key); setSortAsc(true); }
-  };
+  const { stock_by_sku = [], stock_status = {}, monthly_purchases = [], consumable_monthly = [], total_skus, total_stock, total_value, top_by_value = [] } = data;
 
-  const byFilter = {
-    all:     data,
-    instock: data.filter(r => r.current_stock > 3),
-    low:     data.filter(r => r.current_stock > 0 && r.current_stock <= 3),
-    out:     data.filter(r => r.current_stock <= 0),
-  };
+  const pieData = [
+    { id: 0, value: stock_status.instock || 0, label: "In Stock",   color: C.green },
+    { id: 1, value: stock_status.low     || 0, label: "Low Stock",  color: C.amber },
+    { id: 2, value: stock_status.out     || 0, label: "Out of Stock", color: C.red },
+  ].filter(d => d.value > 0);
 
-  const filtered = (byFilter[stockFilter] || data)
-    .filter(r => !search || r.sku_id.toLowerCase().includes(search.toLowerCase()))
-    .sort((a, b) => {
-      const va = typeof a[sortKey] === "string" ? a[sortKey].toLowerCase() : (a[sortKey] || 0);
-      const vb = typeof b[sortKey] === "string" ? b[sortKey].toLowerCase() : (b[sortKey] || 0);
-      if (va < vb) return sortAsc ? -1 : 1;
-      if (va > vb) return sortAsc ? 1 : -1;
-      return 0;
-    });
+  const monthLabels = monthly_purchases.map(m => m.month);
+  const monthQtys   = monthly_purchases.map(m => m.total_qty || 0);
 
-  const totalStock  = data.reduce((s, r) => s + r.current_stock, 0);
-  const outOfStock  = data.filter(r => r.current_stock <= 0).length;
-  const lowStock    = data.filter(r => r.current_stock > 0 && r.current_stock <= 3).length;
-  const inStock     = data.filter(r => r.current_stock > 3).length;
-  const totalValue  = data.reduce((s, r) => s + parseFloat(r.purchase_value || 0), 0);
-
-  const sortInd = (k) => sortKey === k ? (sortAsc ? " ↑" : " ↓") : "";
-  const thSx = (k) => ({
-    fontSize: 11, fontWeight: 700,
-    textTransform: "uppercase", letterSpacing: "0.06em",
-    whiteSpace: "nowrap", cursor: "pointer", userSelect: "none",
-    borderBottom: `1px solid ${C.border}`,
-    background: C.gray50,
-    color: sortKey === k ? C.orange : C.gray500,
-  });
-
-  const FILTER_TABS = [
-    { id: "all",     label: "All SKUs",   count: data.length,  color: C.gray700 },
-    { id: "instock", label: "In Stock",   count: inStock,      color: C.green },
-    { id: "low",     label: "Low Stock",  count: lowStock,     color: C.amber },
-    { id: "out",     label: "Out of Stock", count: outOfStock, color: C.red },
-  ];
+  const catColors = ["#6D28D9","#2563EB","#059669","#D97706","#E11D48","#64748B"];
+  const consCats  = [...new Set(consumable_monthly.map(m => m.category))];
+  const consMonths = [...new Set(consumable_monthly.map(m => m.month))];
 
   return (
-    <Box sx={{ display: "flex", flexDirection: "column", gap: 2.5 }}>
+    <Stack spacing={3}>
+      {/* KPI Row */}
+      <Stack direction={{ xs: "column", sm: "row" }} spacing={2} flexWrap="wrap">
+        <KpiCard label="Total SKUs" value={total_skus || 0} icon={<InventoryIcon />} color={C.orange} />
+        <KpiCard label="Total Stock" value={`${total_stock || 0} units`} icon={<LocalShippingIcon />} color={C.blue} />
+        <KpiCard label="Stock Value" value={fmt(total_value)} icon={<CheckCircleOutlinedIcon />} color={C.green} />
+        <KpiCard label="Low / Out" value={`${stock_status.low || 0} / ${stock_status.out || 0}`}
+          sub="SKUs needing attention" icon={<WarningAmberIcon />} color={C.amber} />
+      </Stack>
 
-      {/* Modals */}
-      {newSkuOpen && (
-        <NewSKUModal
-          onClose={() => setNewSkuOpen(false)}
-          onSave={() => { setNewSkuOpen(false); load(); }}
-        />
-      )}
-      {addSku && (
-        <AddStockModal skuId={addSku} onClose={() => setAddSku(null)} onSave={() => { setAddSku(null); load(); }} />
-      )}
-      {adjSku && (
-        <AdjustmentModal skuId={adjSku} onSave={() => { setAdjSku(null); load(); }} onClose={() => setAdjSku(null)} />
-      )}
+      {/* Charts Row 1 */}
+      <Stack direction={{ xs: "column", md: "row" }} spacing={2}>
+        <Card variant="outlined" sx={{ flex: 2, borderRadius: 3, borderColor: "#E2E8F0" }}>
+          <CardContent>
+            <Typography variant="subtitle2" fontWeight={700} mb={2}>Top SKUs by Stock Level</Typography>
+            {stock_by_sku.length > 0 ? (
+              <BarChart
+                dataset={stock_by_sku.slice(0, 15)}
+                yAxis={[{ scaleType: "band", dataKey: "sku_id" }]}
+                series={[{ dataKey: "stock", label: "Stock", color: C.orange }]}
+                layout="horizontal"
+                height={320}
+                margin={{ left: 100, right: 20, top: 10, bottom: 30 }}
+              />
+            ) : <Box py={4} textAlign="center"><Typography color="text.secondary">No stock data</Typography></Box>}
+          </CardContent>
+        </Card>
+        <Card variant="outlined" sx={{ flex: 1, borderRadius: 3, borderColor: "#E2E8F0" }}>
+          <CardContent>
+            <Typography variant="subtitle2" fontWeight={700} mb={2}>Stock Status Distribution</Typography>
+            {pieData.length > 0 ? (
+              <PieChart
+                series={[{ data: pieData, innerRadius: 55, outerRadius: 100, paddingAngle: 3, cornerRadius: 4 }]}
+                height={280}
+                slotProps={{ legend: { position: { vertical: "bottom", horizontal: "middle" } } }}
+              />
+            ) : <Box py={4} textAlign="center"><Typography color="text.secondary">No data</Typography></Box>}
+          </CardContent>
+        </Card>
+      </Stack>
 
-      {/* Packing Panel */}
-      <PackingPanel />
+      {/* Charts Row 2 */}
+      <Stack direction={{ xs: "column", md: "row" }} spacing={2}>
+        <Card variant="outlined" sx={{ flex: 1, borderRadius: 3, borderColor: "#E2E8F0" }}>
+          <CardContent>
+            <Typography variant="subtitle2" fontWeight={700} mb={2}>Monthly Purchase Trend</Typography>
+            {monthLabels.length > 1 ? (
+              <LineChart
+                xAxis={[{ data: monthLabels, scaleType: "point" }]}
+                series={[{ data: monthQtys, label: "Units Purchased", color: C.blue, area: true }]}
+                height={220}
+                margin={{ left: 50, right: 20, top: 10, bottom: 40 }}
+              />
+            ) : <Box py={4} textAlign="center"><Typography color="text.secondary">Not enough data</Typography></Box>}
+          </CardContent>
+        </Card>
+        <Card variant="outlined" sx={{ flex: 1, borderRadius: 3, borderColor: "#E2E8F0" }}>
+          <CardContent>
+            <Typography variant="subtitle2" fontWeight={700} mb={2}>Top SKUs by Purchase Value</Typography>
+            {top_by_value.length > 0 ? (
+              <BarChart
+                dataset={top_by_value.slice(0, 10)}
+                xAxis={[{ scaleType: "band", dataKey: "sku_id" }]}
+                series={[{ dataKey: "purchase_value", label: "Value ₹", color: C.green }]}
+                height={220}
+                margin={{ left: 60, right: 20, top: 10, bottom: 50 }}
+              />
+            ) : <Box py={4} textAlign="center"><Typography color="text.secondary">No data</Typography></Box>}
+          </CardContent>
+        </Card>
+      </Stack>
+    </Stack>
+  );
+}
 
-      {/* SKU Detail Drawer */}
-      {detailSku && (
-        <SKUDetailDrawer
-          skuId={detailSku}
-          inventoryRow={data.find(r => r.sku_id === detailSku)}
-          onClose={() => setDetailSku(null)}
-          onRefreshInventory={load}
-        />
-      )}
+// ── Stock Section ─────────────────────────────────────────────────────────────
+function StockSection() {
+  const [rows,      setRows]      = useState([]);
+  const [loading,   setLoading]   = useState(true);
+  const [filter,    setFilter]    = useState("all");
+  const [search,    setSearch]    = useState("");
+  const [searchQ,   setSearchQ]   = useState("");
+  const [adjSku,    setAdjSku]    = useState(null);
+  const [showNew,   setShowNew]   = useState(false);
+  const [showStock, setShowStock] = useState(false);
+  const [confirm,   setConfirm]   = useState(null);
+  const debRef = useRef(null);
 
-      {/* Header */}
-      <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 1.5 }}>
-        <Box>
-          <Typography sx={{ fontSize: 20, fontWeight: 800, color: C.gray800, mb: 0.375 }}>Inventory Manager</Typography>
-          <Typography sx={{ fontSize: 13, color: C.gray400 }}>
-            Stock = purchased − sold (delivered) + RTO returns + manual adjustments. Click any row to manage.
-          </Typography>
-        </Box>
-        <Box sx={{ display: "flex", gap: 1 }}>
-          <Button
-            onClick={() => setNewSkuOpen(true)}
-            variant="contained"
-            size="small"
-            sx={{ background: C.orange, "&:hover": { background: C.orange }, textTransform: "none", fontWeight: 700, fontSize: 13 }}
-          >
-            + New SKU
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams();
+      if (searchQ) params.set("search", searchQ);
+      const r = await fetch(`${API}/inventory/?${params}`);
+      const d = await r.json();
+      setRows(d.results || d);
+    } catch {}
+    setLoading(false);
+  }, [searchQ]);
+
+  useEffect(() => { load(); }, [load]);
+
+  useEffect(() => {
+    clearTimeout(debRef.current);
+    debRef.current = setTimeout(() => setSearchQ(search), 350);
+  }, [search]);
+
+  const filtered = rows.filter(r => {
+    if (filter === "instock") return r.current_stock > 5;
+    if (filter === "low")     return r.current_stock > 0 && r.current_stock <= 5;
+    if (filter === "out")     return r.current_stock <= 0;
+    return true;
+  });
+
+  const counts = {
+    all:     rows.length,
+    instock: rows.filter(r => r.current_stock > 5).length,
+    low:     rows.filter(r => r.current_stock > 0 && r.current_stock <= 5).length,
+    out:     rows.filter(r => r.current_stock <= 0).length,
+  };
+
+  const deleteSku = async (skuId) => {
+    const res = await fetch(`${API}/inventory/${skuId}/`, { method: "DELETE" });
+    if (res.ok || res.status === 204) { setConfirm(null); load(); }
+  };
+
+  const tabSx = (active) => ({
+    textTransform: "none", fontWeight: 600, fontSize: 13, minWidth: "auto",
+    px: 2, py: 0.75, borderRadius: 2,
+    color: active ? "#fff" : "text.secondary",
+    bgcolor: active ? C.orange : "transparent",
+    "&:hover": { bgcolor: active ? C.orange : "#F1F5F9" },
+  });
+
+  return (
+    <Stack spacing={2}>
+      <Stack direction={{ xs: "column", sm: "row" }} spacing={2} alignItems={{ sm: "center" }} justifyContent="space-between">
+        <Stack direction="row" spacing={1} flexWrap="wrap">
+          {[["all","All"], ["instock","In Stock"], ["low","Low Stock"], ["out","Out of Stock"]].map(([key, label]) => (
+            <Button key={key} size="small" onClick={() => setFilter(key)} sx={tabSx(filter === key)}>
+              {label} <Box component="span" sx={{ ml: 0.5, fontSize: 11, opacity: 0.8 }}>({counts[key]})</Box>
+            </Button>
+          ))}
+        </Stack>
+        <Stack direction="row" spacing={1}>
+          <TextField size="small" placeholder="Search SKU…" value={search} onChange={e => setSearch(e.target.value)}
+            InputProps={{ startAdornment: <InputAdornment position="start"><SearchIcon fontSize="small" sx={{ color: "text.secondary" }} /></InputAdornment> }}
+            sx={{ width: 200 }} />
+          <Button variant="outlined" size="small" onClick={() => setShowStock(true)}
+            startIcon={<AddIcon />} sx={{ borderColor: C.green, color: C.green, textTransform: "none" }}>
+            Add Stock
           </Button>
-          <Button
-            onClick={load}
-            variant="outlined"
-            size="small"
-            sx={{ color: C.gray600, borderColor: C.border, textTransform: "none", fontSize: 12 }}
-          >
-            ⟳ Refresh
+          <Button variant="contained" size="small" onClick={() => setShowNew(true)}
+            startIcon={<AddIcon />} sx={{ bgcolor: C.orange, "&:hover": { bgcolor: "#5B21B6" }, textTransform: "none" }}>
+            New SKU
           </Button>
-        </Box>
-      </Box>
+        </Stack>
+      </Stack>
 
-      {/* KPI strip */}
-      <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1.75 }}>
-        {[
-          { label: "Total Stock",     value: totalStock.toLocaleString("en-IN"), accent: C.green,  icon: "📦" },
-          { label: "SKUs Tracked",    value: data.length,                         accent: C.blue,   icon: "🏷" },
-          { label: "Out of Stock",    value: outOfStock,                          accent: C.red,    icon: "⛔" },
-          { label: "Low Stock ≤3",    value: lowStock,                            accent: C.amber,  icon: "⚠" },
-          { label: "Purchase Value",  value: `₹${totalValue.toLocaleString("en-IN", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`, accent: C.orange, icon: "💰" },
-        ].map(k => (
-          <Card key={k.label} elevation={1} sx={{ borderTop: `3px solid ${k.accent}`, borderRadius: 3, minWidth: "max-content" }}>
-            <CardContent sx={{ py: 1.5, px: 2, "&:last-child": { pb: 1.5 } }}>
-              <Typography sx={{ fontSize: 11, fontWeight: 700, color: C.gray400, letterSpacing: "0.07em", textTransform: "uppercase", mb: 1, whiteSpace: "nowrap" }}>
-                {k.icon} {k.label}
-              </Typography>
-              <Typography sx={{ fontSize: 22, fontWeight: 800, fontFamily: "'DM Mono', monospace", color: k.accent, whiteSpace: "nowrap" }}>
-                {k.value}
-              </Typography>
-            </CardContent>
-          </Card>
-        ))}
-      </Box>
+      {loading ? <SectionLoader /> : (
+        <TableContainer component={Paper} variant="outlined" sx={{ borderRadius: 3, borderColor: "#E2E8F0" }}>
+          <Table size="small">
+            <TableHead>
+              <TableRow sx={{ bgcolor: "#F8FAFC" }}>
+                {["Parent SKU","Purchase Value","Purchased","Sold","RTO","Adjusted","Current Stock","Actions"].map(h => (
+                  <TableCell key={h} sx={{ fontWeight: 700, fontSize: 12, color: "#64748B", py: 1.5 }}>{h}</TableCell>
+                ))}
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {filtered.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={8} align="center" sx={{ py: 6, color: "text.secondary" }}>
+                    No SKUs found
+                  </TableCell>
+                </TableRow>
+              ) : filtered.map(row => (
+                <TableRow key={row.sku_id} hover sx={{ "&:last-child td": { border: 0 } }}>
+                  <TableCell sx={{ fontWeight: 700, color: C.orange, fontSize: 13 }}>{row.sku_id}</TableCell>
+                  <TableCell>{row.purchase_value ? fmt(row.purchase_value) : "—"}</TableCell>
+                  <TableCell>{row.purchased_qty}</TableCell>
+                  <TableCell sx={{ color: C.red }}>{row.sold_qty}</TableCell>
+                  <TableCell sx={{ color: C.green }}>{row.rto_qty}</TableCell>
+                  <TableCell sx={{ color: row.adjustment_qty >= 0 ? C.green : C.red }}>
+                    {row.adjustment_qty > 0 ? `+${row.adjustment_qty}` : row.adjustment_qty}
+                  </TableCell>
+                  <TableCell><StockBadge stock={row.current_stock} /></TableCell>
+                  <TableCell>
+                    <Stack direction="row" spacing={0.5}>
+                      <Tooltip title="Adjust Stock">
+                        <IconButton size="small" onClick={() => setAdjSku(row.sku_id)}
+                          sx={{ color: C.amber }}>
+                          <TuneIcon fontSize="small" />
+                        </IconButton>
+                      </Tooltip>
+                      <Tooltip title="Delete SKU">
+                        <IconButton size="small" onClick={() => setConfirm(row.sku_id)}
+                          sx={{ color: C.red }}>
+                          <DeleteIcon fontSize="small" />
+                        </IconButton>
+                      </Tooltip>
+                    </Stack>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </TableContainer>
+      )}
 
-      {/* Table */}
-      <Paper elevation={1} sx={{ borderRadius: 3, border: `1px solid ${C.border}`, p: 3 }}>
-        {/* Controls row */}
-        <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 2, flexWrap: "wrap", gap: 1.25 }}>
-          {/* Filter tabs */}
-          <Box sx={{ display: "flex", gap: 0.5, background: C.gray100, borderRadius: 2, p: 0.375 }}>
-            {FILTER_TABS.map(ft => (
-              <Button
-                key={ft.id}
-                onClick={() => setStockFilter(ft.id)}
-                size="small"
-                sx={{
-                  px: 1.75, py: 0.75, borderRadius: 1.5, border: "none",
-                  fontWeight: stockFilter === ft.id ? 700 : 500, fontSize: 12,
-                  background: stockFilter === ft.id ? C.white : "transparent",
-                  color: stockFilter === ft.id ? ft.color : C.gray500,
-                  boxShadow: stockFilter === ft.id ? "0 1px 4px rgba(0,0,0,0.08)" : "none",
-                  textTransform: "none",
-                  "&:hover": { background: stockFilter === ft.id ? C.white : C.gray200 },
-                }}
-              >
-                {ft.label}
-                <Box component="span" sx={{ ml: 0.75, background: stockFilter === ft.id ? ft.color : C.gray300, color: C.white, borderRadius: 10, fontSize: 10, fontWeight: 700, px: 0.75, py: 0.125 }}>
-                  {ft.count}
-                </Box>
-              </Button>
+      {showNew && <NewSKUModal onSave={() => { setShowNew(false); load(); }} onClose={() => setShowNew(false)} />}
+      {showStock && <AddStockModal open={showStock} onClose={() => setShowStock(false)} onSaved={load} />}
+      {adjSku && <AdjustmentModal open sku={adjSku} onClose={() => setAdjSku(null)} onSaved={() => { setAdjSku(null); load(); }} />}
+
+      <Dialog open={!!confirm} onClose={() => setConfirm(null)} PaperProps={{ sx: { borderRadius: 3 } }}>
+        <DialogTitle sx={{ fontWeight: 800 }}>Delete SKU?</DialogTitle>
+        <DialogContent>
+          <Typography>Delete <strong>{confirm}</strong> and all its purchase history? This cannot be undone.</Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setConfirm(null)}>Cancel</Button>
+          <Button variant="contained" color="error" onClick={() => deleteSku(confirm)}>Delete</Button>
+        </DialogActions>
+      </Dialog>
+    </Stack>
+  );
+}
+
+// ── Consumable Card ───────────────────────────────────────────────────────────
+function ConsumableCard({ item, onEdit, onPurchase, onUsage, onDelete }) {
+  const [history, setHistory] = useState([]);
+  const [expanded, setExpanded] = useState(false);
+  const [loadingH, setLoadingH] = useState(false);
+  const catLabel = CONSUMABLE_CATEGORIES.find(c => c.value === item.category)?.label || item.category;
+  const color = CAT_COLORS[item.category] || "#64748B";
+
+  const loadHistory = async () => {
+    if (expanded) { setExpanded(false); return; }
+    setLoadingH(true);
+    try {
+      const [pRes, uRes] = await Promise.all([
+        fetch(`${API}/consumables/purchases/?item_id=${item.id}&page_size=10`),
+        fetch(`${API}/consumables/usages/?item_id=${item.id}&page_size=10`),
+      ]);
+      const [p, u] = await Promise.all([pRes.json(), uRes.json()]);
+      const purchases = (p.results || p).map(x => ({ ...x, _type: "PURCHASE" }));
+      const usages    = (u.results || u).map(x => ({ ...x, _type: "USAGE" }));
+      setHistory([...purchases, ...usages].sort((a, b) => new Date(b.date) - new Date(a.date)));
+    } catch {}
+    setLoadingH(false);
+    setExpanded(true);
+  };
+
+  return (
+    <Card variant="outlined" sx={{ borderRadius: 3, borderColor: "#E2E8F0", overflow: "hidden" }}>
+      <Box sx={{ height: 4, bgcolor: color }} />
+      <CardContent sx={{ pb: "12px !important" }}>
+        <Stack direction="row" justifyContent="space-between" alignItems="flex-start">
+          <Box>
+            <Typography fontWeight={800} fontSize={15}>{item.name}</Typography>
+            <Stack direction="row" spacing={1} mt={0.5}>
+              <Chip label={catLabel} size="small" sx={{ bgcolor: color + "20", color, fontWeight: 600, fontSize: 11 }} />
+              <Chip label={item.unit} size="small" variant="outlined" sx={{ fontSize: 11 }} />
+            </Stack>
+          </Box>
+          <Stack direction="row" spacing={0.5}>
+            <Tooltip title="Edit"><IconButton size="small" onClick={() => onEdit(item)}><EditIcon fontSize="small" /></IconButton></Tooltip>
+            <Tooltip title="Delete"><IconButton size="small" onClick={() => onDelete(item)} sx={{ color: C.red }}><DeleteIcon fontSize="small" /></IconButton></Tooltip>
+          </Stack>
+        </Stack>
+        {item.notes && <Typography variant="caption" color="text.secondary" mt={1} display="block">{item.notes}</Typography>}
+        <Stack direction="row" spacing={1} mt={1.5}>
+          <Button size="small" variant="outlined" onClick={() => onPurchase(item)}
+            sx={{ textTransform: "none", borderColor: C.green, color: C.green, fontSize: 12, py: 0.5 }}>
+            + Restock
+          </Button>
+          <Button size="small" variant="outlined" onClick={() => onUsage(item)}
+            sx={{ textTransform: "none", borderColor: C.blue, color: C.blue, fontSize: 12, py: 0.5 }}>
+            Record Use
+          </Button>
+          <Button size="small" onClick={loadHistory} startIcon={loadingH ? <CircularProgress size={12} /> : <HistoryIcon />}
+            sx={{ textTransform: "none", color: "text.secondary", fontSize: 12, py: 0.5 }}>
+            {expanded ? "Hide" : "History"}
+          </Button>
+        </Stack>
+        {expanded && (
+          <Box mt={2} sx={{ maxHeight: 240, overflowY: "auto" }}>
+            {history.length === 0 ? (
+              <Typography variant="caption" color="text.secondary">No history yet.</Typography>
+            ) : history.map((h, i) => (
+              <Stack key={i} direction="row" justifyContent="space-between" alignItems="center"
+                sx={{ py: 0.75, borderBottom: "1px solid #F1F5F9" }}>
+                <Stack direction="row" spacing={1} alignItems="center">
+                  <Chip
+                    label={h._type === "PURCHASE" ? "Restocked" : (h.event_type === "OPEN" ? "📦 Opened" : h.event_type === "WASTE" ? "Waste" : "Used")}
+                    size="small"
+                    sx={{
+                      bgcolor: h._type === "PURCHASE" ? "#ECFDF5" : h.event_type === "OPEN" ? "#EFF6FF" : "#FFF1F2",
+                      color: h._type === "PURCHASE" ? C.green : h.event_type === "OPEN" ? C.blue : C.red,
+                      fontWeight: 600, fontSize: 10,
+                    }}
+                  />
+                  <Typography variant="caption" color="text.secondary">{h.date}</Typography>
+                  {h.notes && <Typography variant="caption" color="text.secondary" sx={{ maxWidth: 120, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{h.notes}</Typography>}
+                </Stack>
+                <Typography variant="caption" fontWeight={700} color={h._type === "PURCHASE" ? C.green : C.red}>
+                  {h._type === "PURCHASE" ? `+${h.quantity} ${item.unit}` : `-${h.quantity} ${item.unit}`}
+                </Typography>
+              </Stack>
             ))}
           </Box>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
 
-          <TextField
-            size="small"
-            value={search}
-            onChange={e => setSearch(e.target.value)}
-            placeholder="Search SKU…"
-            sx={{ width: 200 }}
-          />
-        </Box>
+// ── Consumables Section ───────────────────────────────────────────────────────
+function ConsumablesSection() {
+  const [items,       setItems]       = useState([]);
+  const [loading,     setLoading]     = useState(true);
+  const [editItem,    setEditItem]    = useState(null);
+  const [showNew,     setShowNew]     = useState(false);
+  const [purchaseFor, setPurchaseFor] = useState(null);
+  const [usageFor,    setUsageFor]    = useState(null);
+  const [deleteFor,   setDeleteFor]   = useState(null);
+  const [catFilter,   setCatFilter]   = useState("ALL");
 
-        {loading ? (
-          <Box sx={{ textAlign: "center", py: 7.5 }}>
-            <CircularProgress size={28} sx={{ color: C.orange }} />
-            <Typography sx={{ color: C.gray400, mt: 1.5 }}>Loading inventory…</Typography>
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const r = await fetch(`${API}/consumables/items/`);
+      const d = await r.json();
+      setItems(d.results || d);
+    } catch {}
+    setLoading(false);
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const deleteItem = async () => {
+    const res = await fetch(`${API}/consumables/items/${deleteFor.id}/`, { method: "DELETE" });
+    if (res.ok || res.status === 204) { setDeleteFor(null); load(); }
+  };
+
+  const filtered = catFilter === "ALL" ? items : items.filter(i => i.category === catFilter);
+
+  return (
+    <Stack spacing={2}>
+      <Stack direction="row" justifyContent="space-between" alignItems="center" flexWrap="wrap" gap={1}>
+        <Stack direction="row" spacing={1} flexWrap="wrap">
+          <Button size="small" onClick={() => setCatFilter("ALL")}
+            sx={{ textTransform: "none", fontWeight: 600, bgcolor: catFilter === "ALL" ? C.orange : "transparent", color: catFilter === "ALL" ? "#fff" : "text.secondary", borderRadius: 2 }}>
+            All
+          </Button>
+          {CONSUMABLE_CATEGORIES.map(c => (
+            <Button key={c.value} size="small" onClick={() => setCatFilter(c.value)}
+              sx={{ textTransform: "none", fontWeight: 600, bgcolor: catFilter === c.value ? CAT_COLORS[c.value] : "transparent", color: catFilter === c.value ? "#fff" : "text.secondary", borderRadius: 2 }}>
+              {c.label}
+            </Button>
+          ))}
+        </Stack>
+        <Button variant="contained" size="small" startIcon={<AddIcon />} onClick={() => setShowNew(true)}
+          sx={{ bgcolor: C.orange, "&:hover": { bgcolor: "#5B21B6" }, textTransform: "none" }}>
+          New Consumable
+        </Button>
+      </Stack>
+
+      {loading ? <SectionLoader /> : (
+        filtered.length === 0 ? (
+          <Box textAlign="center" py={8}>
+            <Typography color="text.secondary">No consumables found. Add one to start tracking.</Typography>
           </Box>
         ) : (
-          <TableContainer sx={{ overflowX: "auto" }}>
-            <Table>
-              <TableHead>
-                <TableRow>
-                  <TableCell onClick={() => toggle("sku_id")}          sx={thSx("sku_id")}>Parent SKU{sortInd("sku_id")}</TableCell>
-                  <TableCell onClick={() => toggle("purchased_qty")}   sx={{ ...thSx("purchased_qty"),  textAlign: "right" }}>Purchased{sortInd("purchased_qty")}</TableCell>
-                  <TableCell onClick={() => toggle("sold_qty")}        sx={{ ...thSx("sold_qty"),        textAlign: "right" }}>Sold{sortInd("sold_qty")}</TableCell>
-                  <TableCell onClick={() => toggle("rto_qty")}         sx={{ ...thSx("rto_qty"),         textAlign: "right" }}>RTO{sortInd("rto_qty")}</TableCell>
-                  <TableCell onClick={() => toggle("adjustment_qty")}  sx={{ ...thSx("adjustment_qty"),  textAlign: "right" }}>Adj{sortInd("adjustment_qty")}</TableCell>
-                  <TableCell onClick={() => toggle("current_stock")}   sx={{ ...thSx("current_stock"),   textAlign: "right" }}>Stock{sortInd("current_stock")}</TableCell>
-                  <TableCell onClick={() => toggle("purchase_value")}  sx={{ ...thSx("purchase_value"),  textAlign: "right" }}>Value{sortInd("purchase_value")}</TableCell>
-                  <TableCell onClick={() => toggle("last_purchase")}   sx={thSx("last_purchase")}>Last Purchase{sortInd("last_purchase")}</TableCell>
-                  <TableCell sx={thSx("_status")}>Status</TableCell>
-                  <TableCell sx={{ ...thSx("_actions"), textAlign: "right" }}>Actions</TableCell>
-                </TableRow>
-              </TableHead>
-              <TableBody>
-                {filtered.map((r, i) => {
-                  const rowBg     = i % 2 === 0 ? C.white : C.gray50;
-                  const stockColor = r.current_stock <= 0 ? C.red : r.current_stock <= 3 ? C.amber : C.green;
-                  return (
-                    <TableRow
-                      key={r.sku_id}
-                      sx={{ background: rowBg, cursor: "pointer", "&:hover": { background: "#F0FFF4" } }}
-                      onClick={() => setDetailSku(r.sku_id)}
-                    >
-                      <TableCell sx={{ fontFamily: "monospace", fontWeight: 700, color: C.orange, fontSize: 13 }}>{r.sku_id}</TableCell>
-                      <TableCell align="right" sx={{ fontFamily: "monospace", fontSize: 13 }}>{r.purchased_qty}</TableCell>
-                      <TableCell align="right" sx={{ fontFamily: "monospace", fontSize: 13, color: C.red }}>{r.sold_qty}</TableCell>
-                      <TableCell align="right" sx={{ fontFamily: "monospace", fontSize: 13, color: C.green }}>{r.rto_qty}</TableCell>
-                      <TableCell align="right" sx={{ fontFamily: "monospace", fontSize: 13, color: (r.adjustment_qty || 0) >= 0 ? C.blue : C.red }}>
-                        {r.adjustment_qty ? (r.adjustment_qty > 0 ? `+${r.adjustment_qty}` : r.adjustment_qty) : "—"}
-                      </TableCell>
-                      <TableCell align="right" sx={{ fontFamily: "monospace", fontWeight: 800, fontSize: 16, color: stockColor }}>{r.current_stock}</TableCell>
-                      <TableCell align="right" sx={{ fontFamily: "monospace", fontSize: 13 }}>{fmt(r.purchase_value)}</TableCell>
-                      <TableCell sx={{ color: C.gray500, whiteSpace: "nowrap", fontSize: 13 }}>{r.last_purchase || "—"}</TableCell>
-                      <TableCell><StockBadge stock={r.current_stock} /></TableCell>
-                      <TableCell onClick={e => e.stopPropagation()}>
-                        <Box sx={{ display: "flex", gap: 0.5, justifyContent: "flex-end" }}>
-                          <Button
-                            onClick={() => setAddSku(r.sku_id)}
-                            size="small"
-                            title="Add purchase stock"
-                            sx={{ minWidth: 0, px: 1.25, py: 0.5, fontSize: 11, background: C.green, color: C.white, textTransform: "none", "&:hover": { background: C.green }, whiteSpace: "nowrap" }}
-                          >
-                            + Stock
-                          </Button>
-                          <Button
-                            onClick={() => setAdjSku(r.sku_id)}
-                            size="small"
-                            title="Manual stock adjustment"
-                            sx={{ minWidth: 0, px: 1.25, py: 0.5, fontSize: 11, background: "#EFF6FF", color: C.blue, border: "1.5px solid #BFDBFE", textTransform: "none" }}
-                          >
-                            ± Adj
-                          </Button>
-                          <Button
-                            onClick={() => setDetailSku(r.sku_id)}
-                            size="small"
-                            title="View / edit history"
-                            sx={{ minWidth: 0, px: 1.25, py: 0.5, fontSize: 11, background: C.orangeLight, color: C.orange, border: `1.5px solid ${C.orangeBorder}`, textTransform: "none" }}
-                          >
-                            Details
-                          </Button>
-                          <Button
-                            onClick={(e) => handleDeleteSku(e, r.sku_id)}
-                            size="small"
-                            title="Delete all purchases for this SKU"
-                            sx={{ minWidth: 0, px: 1, py: 0.5, fontSize: 13, color: C.red, border: `1.5px solid ${C.gray200}`, textTransform: "none" }}
-                          >
-                            🗑
-                          </Button>
-                        </Box>
-                      </TableCell>
-                    </TableRow>
-                  );
-                })}
-                {filtered.length === 0 && (
-                  <TableRow>
-                    <TableCell colSpan={10} sx={{ textAlign: "center", py: 7, color: C.gray400, fontSize: 13 }}>
-                      {search
-                        ? `No SKUs match "${search}".`
-                        : stockFilter !== "all"
-                        ? `No SKUs in "${FILTER_TABS.find(f => f.id === stockFilter)?.label}" category.`
-                        : "No inventory data yet — add a SKU to get started."}
-                    </TableCell>
-                  </TableRow>
-                )}
-              </TableBody>
-              {filtered.length > 0 && (
-                <TableFooter>
-                  <TableRow sx={{ background: "#FFF0EA" }}>
-                    <TableCell sx={{ fontWeight: 700, fontSize: 13, color: C.gray700 }}>Total ({filtered.length} SKUs)</TableCell>
-                    <TableCell align="right" sx={{ fontFamily: "monospace", fontWeight: 700, fontSize: 13, color: C.gray700 }}>{filtered.reduce((s, r) => s + r.purchased_qty, 0)}</TableCell>
-                    <TableCell align="right" sx={{ fontFamily: "monospace", fontWeight: 700, fontSize: 13, color: C.red }}>{filtered.reduce((s, r) => s + r.sold_qty, 0)}</TableCell>
-                    <TableCell align="right" sx={{ fontFamily: "monospace", fontWeight: 700, fontSize: 13, color: C.green }}>{filtered.reduce((s, r) => s + r.rto_qty, 0)}</TableCell>
-                    <TableCell align="right" sx={{ fontFamily: "monospace", fontWeight: 700, fontSize: 13, color: C.blue }}>
-                      {(() => { const s = filtered.reduce((t, r) => t + (r.adjustment_qty || 0), 0); return s === 0 ? "—" : s > 0 ? `+${s}` : s; })()}
-                    </TableCell>
-                    <TableCell align="right" sx={{ fontFamily: "monospace", fontWeight: 800, fontSize: 16, color: C.orange }}>{filtered.reduce((s, r) => s + r.current_stock, 0)}</TableCell>
-                    <TableCell align="right" sx={{ fontFamily: "monospace", fontWeight: 700, color: C.orange, fontSize: 13 }}>
-                      ₹{filtered.reduce((s, r) => s + parseFloat(r.purchase_value || 0), 0).toLocaleString("en-IN", { minimumFractionDigits: 0 })}
-                    </TableCell>
-                    <TableCell colSpan={3} />
-                  </TableRow>
-                </TableFooter>
-              )}
-            </Table>
-          </TableContainer>
-        )}
-      </Paper>
+          <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr", md: "1fr 1fr 1fr" }, gap: 2 }}>
+            {filtered.map(item => (
+              <ConsumableCard key={item.id} item={item}
+                onEdit={i => setEditItem(i)}
+                onPurchase={i => setPurchaseFor(i)}
+                onUsage={i => setUsageFor(i)}
+                onDelete={i => setDeleteFor(i)}
+              />
+            ))}
+          </Box>
+        )
+      )}
 
-      {/* Legend */}
-      <Paper elevation={1} sx={{ borderRadius: 3, border: `1px solid ${C.border}`, px: 2.5, py: 1.75 }}>
-        <Typography sx={{ fontSize: 11, fontWeight: 700, color: C.gray400, textTransform: "uppercase", letterSpacing: "0.06em", mb: 1.25 }}>
-          How stock is calculated
-        </Typography>
-        <Box sx={{ display: "flex", gap: 3.5, flexWrap: "wrap" }}>
-          {[
-            { icon: "🛒", label: "Purchased", desc: "Sum of non-exchange purchase items" },
-            { icon: "✅", label: "Sold (−)",  desc: "DELIVERED Meesho orders (by child SKU → parent)" },
-            { icon: "↩",  label: "RTO (+)",   desc: "RTO_COMPLETE orders — item returned to you" },
-            { icon: "±",  label: "Adj",       desc: "Manual adjustments: damage, recount, corrections" },
-          ].map(l => (
-            <Box key={l.label} sx={{ display: "flex", alignItems: "flex-start", gap: 1 }}>
-              <Typography sx={{ fontSize: 16 }}>{l.icon}</Typography>
-              <Box>
-                <Typography sx={{ fontSize: 12, fontWeight: 700, color: C.gray700 }}>{l.label}</Typography>
-                <Typography sx={{ fontSize: 11, color: C.gray400 }}>{l.desc}</Typography>
-              </Box>
-            </Box>
-          ))}
+      {(showNew || editItem) && (
+        <ConsumableItemModal open item={editItem} onClose={() => { setShowNew(false); setEditItem(null); }}
+          onSaved={() => { setShowNew(false); setEditItem(null); load(); }} />
+      )}
+      {purchaseFor && (
+        <ConsumablePurchaseModal open item={purchaseFor} onClose={() => setPurchaseFor(null)}
+          onSaved={() => { setPurchaseFor(null); load(); }} />
+      )}
+      {usageFor && (
+        <ConsumableUsageModal open item={usageFor} onClose={() => setUsageFor(null)}
+          onSaved={() => { setUsageFor(null); load(); }} />
+      )}
+      <Dialog open={!!deleteFor} onClose={() => setDeleteFor(null)} PaperProps={{ sx: { borderRadius: 3 } }}>
+        <DialogTitle fontWeight={800}>Delete Consumable?</DialogTitle>
+        <DialogContent>
+          <Typography>Delete <strong>{deleteFor?.name}</strong> and all its history? This cannot be undone.</Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setDeleteFor(null)}>Cancel</Button>
+          <Button variant="contained" color="error" onClick={deleteItem}>Delete</Button>
+        </DialogActions>
+      </Dialog>
+    </Stack>
+  );
+}
+
+// ── History Section ───────────────────────────────────────────────────────────
+const ACTION_COLORS = { CREATE: "#059669", UPDATE: "#D97706", DELETE: "#E11D48" };
+const ACTION_BG = { CREATE: "#ECFDF5", UPDATE: "#FFFBEB", DELETE: "#FFF1F2" };
+
+function HistorySection() {
+  const [logs,      setLogs]      = useState([]);
+  const [loading,   setLoading]   = useState(true);
+  const [page,      setPage]      = useState(1);
+  const [total,     setTotal]     = useState(0);
+  const [filters,   setFilters]   = useState({ entity_type: "", action: "", parent_sku: "", date_from: "", date_to: "" });
+
+  const PAGE_SIZE = 25;
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams({ page, page_size: PAGE_SIZE });
+      Object.entries(filters).forEach(([k, v]) => { if (v) params.set(k, v); });
+      const r = await fetch(`${API}/inventory/logs/?${params}`);
+      const d = await r.json();
+      setLogs(d.results || []);
+      setTotal(d.count || 0);
+    } catch {}
+    setLoading(false);
+  }, [page, filters]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const setFilter = (k, v) => { setFilters(f => ({ ...f, [k]: v })); setPage(1); };
+
+  const entityLabel = (type) => {
+    const map = { PURCHASE: "Purchase", ADJUSTMENT: "Adjustment", SKU: "SKU", CONSUMABLE_PURCHASE: "Consumable Purchase", CONSUMABLE_USAGE: "Consumable Usage", CONSUMABLE_ITEM: "Consumable Item" };
+    return map[type] || type;
+  };
+
+  const totalPages = Math.ceil(total / PAGE_SIZE);
+
+  return (
+    <Stack spacing={2}>
+      {/* Filters */}
+      <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} flexWrap="wrap">
+        <TextField label="Parent SKU" size="small" value={filters.parent_sku}
+          onChange={e => setFilter("parent_sku", e.target.value)} sx={{ minWidth: 160 }} />
+        <FormControl size="small" sx={{ minWidth: 160 }}>
+          <InputLabel>Entity Type</InputLabel>
+          <Select value={filters.entity_type} label="Entity Type" onChange={e => setFilter("entity_type", e.target.value)}>
+            <MenuItem value="">All</MenuItem>
+            <MenuItem value="PURCHASE">Purchase</MenuItem>
+            <MenuItem value="ADJUSTMENT">Adjustment</MenuItem>
+            <MenuItem value="SKU">SKU</MenuItem>
+            <MenuItem value="CONSUMABLE_ITEM">Consumable Item</MenuItem>
+            <MenuItem value="CONSUMABLE_PURCHASE">Consumable Purchase</MenuItem>
+            <MenuItem value="CONSUMABLE_USAGE">Consumable Usage</MenuItem>
+          </Select>
+        </FormControl>
+        <FormControl size="small" sx={{ minWidth: 130 }}>
+          <InputLabel>Action</InputLabel>
+          <Select value={filters.action} label="Action" onChange={e => setFilter("action", e.target.value)}>
+            <MenuItem value="">All</MenuItem>
+            <MenuItem value="CREATE">Create</MenuItem>
+            <MenuItem value="UPDATE">Update</MenuItem>
+            <MenuItem value="DELETE">Delete</MenuItem>
+          </Select>
+        </FormControl>
+        <TextField label="From Date" type="date" size="small" value={filters.date_from}
+          onChange={e => setFilter("date_from", e.target.value)} InputLabelProps={{ shrink: true }} sx={{ minWidth: 150 }} />
+        <TextField label="To Date" type="date" size="small" value={filters.date_to}
+          onChange={e => setFilter("date_to", e.target.value)} InputLabelProps={{ shrink: true }} sx={{ minWidth: 150 }} />
+        <IconButton onClick={load} sx={{ alignSelf: "center" }}>
+          <RefreshIcon fontSize="small" />
+        </IconButton>
+      </Stack>
+
+      <Typography variant="caption" color="text.secondary">
+        Showing {logs.length} of {total} audit entries
+      </Typography>
+
+      {loading ? <SectionLoader /> : (
+        <TableContainer component={Paper} variant="outlined" sx={{ borderRadius: 3, borderColor: "#E2E8F0" }}>
+          <Table size="small">
+            <TableHead>
+              <TableRow sx={{ bgcolor: "#F8FAFC" }}>
+                {["Date & Time", "Action", "Entity", "Parent SKU", "Qty Change", "Description"].map(h => (
+                  <TableCell key={h} sx={{ fontWeight: 700, fontSize: 12, color: "#64748B", py: 1.5 }}>{h}</TableCell>
+                ))}
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {logs.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={6} align="center" sx={{ py: 6, color: "text.secondary" }}>
+                    No audit logs found
+                  </TableCell>
+                </TableRow>
+              ) : logs.map(log => (
+                <TableRow key={log.id} hover sx={{ "&:last-child td": { border: 0 } }}>
+                  <TableCell sx={{ fontSize: 12, whiteSpace: "nowrap" }}>
+                    {new Date(log.created_at).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" })}
+                  </TableCell>
+                  <TableCell>
+                    <Chip label={log.action} size="small"
+                      sx={{ bgcolor: ACTION_BG[log.action], color: ACTION_COLORS[log.action], fontWeight: 700, fontSize: 11 }} />
+                  </TableCell>
+                  <TableCell sx={{ fontSize: 12 }}>{entityLabel(log.entity_type)}</TableCell>
+                  <TableCell sx={{ fontSize: 12, color: C.orange, fontWeight: 600 }}>{log.parent_sku_id || "—"}</TableCell>
+                  <TableCell sx={{ fontSize: 12, fontWeight: 700, color: log.quantity_change >= 0 ? C.green : C.red }}>
+                    {log.quantity_change != null ? (log.quantity_change >= 0 ? `+${log.quantity_change}` : log.quantity_change) : "—"}
+                  </TableCell>
+                  <TableCell sx={{ fontSize: 12, maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    <Tooltip title={log.description}><span>{log.description}</span></Tooltip>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </TableContainer>
+      )}
+
+      {totalPages > 1 && (
+        <Stack direction="row" spacing={1} justifyContent="center" alignItems="center">
+          <Button size="small" disabled={page <= 1} onClick={() => setPage(p => p - 1)}>← Prev</Button>
+          <Typography variant="caption" color="text.secondary">Page {page} of {totalPages}</Typography>
+          <Button size="small" disabled={page >= totalPages} onClick={() => setPage(p => p + 1)}>Next →</Button>
+        </Stack>
+      )}
+    </Stack>
+  );
+}
+
+// ── Main InventoryTab ─────────────────────────────────────────────────────────
+export function InventoryTab() {
+  const [section, setSection] = useState(0);
+  const [toast,   setToast]   = useState("");
+
+  const sections = ["Overview", "Stock", "Consumables", "History"];
+
+  return (
+    <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: 1400, mx: "auto" }}>
+      {/* Header */}
+      <Stack direction="row" justifyContent="space-between" alignItems="center" mb={3}>
+        <Box>
+          <Typography variant="h5" fontWeight={800} color="text.primary">Inventory</Typography>
+          <Typography variant="caption" color="text.secondary">Track stock, consumables, and all inventory activity</Typography>
         </Box>
-      </Paper>
+      </Stack>
+
+      {/* Section Tabs */}
+      <Stack direction="row" spacing={0.5} mb={3} p={0.5}
+        sx={{ bgcolor: "#F1F5F9", borderRadius: 2.5, display: "inline-flex" }}>
+        {sections.map((s, i) => (
+          <Button key={s} onClick={() => setSection(i)}
+            sx={{
+              textTransform: "none", fontWeight: 700, fontSize: 14, px: 2.5, py: 0.75,
+              borderRadius: 2, transition: "all 0.15s",
+              bgcolor: section === i ? "#fff" : "transparent",
+              color: section === i ? C.orange : "#64748B",
+              boxShadow: section === i ? "0 1px 4px rgba(0,0,0,0.1)" : "none",
+              "&:hover": { bgcolor: section === i ? "#fff" : "#E2E8F0" },
+            }}>
+            {s}
+          </Button>
+        ))}
+      </Stack>
+
+      {/* Content */}
+      {section === 0 && <OverviewSection />}
+      {section === 1 && <StockSection />}
+      {section === 2 && <ConsumablesSection />}
+      {section === 3 && <HistorySection />}
+
+      <Snackbar open={!!toast} autoHideDuration={3000} onClose={() => setToast("")}
+        anchorOrigin={{ vertical: "bottom", horizontal: "center" }}>
+        <Alert severity="success" onClose={() => setToast("")} sx={{ borderRadius: 2 }}>{toast}</Alert>
+      </Snackbar>
     </Box>
   );
 }

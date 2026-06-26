@@ -1,39 +1,35 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { API, C, fmt } from "../../App";
-
-// MUI core
 import {
-  Box,
-  Button,
-  Card,
-  CardContent,
-  Chip,
-  Dialog,
-  DialogActions,
-  DialogContent,
-  DialogTitle,
-  FormControlLabel,
-  Checkbox,
-  IconButton,
-  MenuItem,
-  Paper,
-  Select,
-  TextField,
-  Typography,
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableRow,
-  Pagination,
-  Alert,
+  Alert, Autocomplete, Box, Button, Card, CardActionArea, CardContent,
+  Chip, CircularProgress, Dialog, DialogActions, DialogContent, DialogTitle,
+  Divider, Drawer, FormControlLabel, Checkbox, IconButton, InputAdornment,
+  Paper, Stack, Table, TableBody, TableCell, TableHead, TableRow,
+  TextField, Tooltip, Typography,
 } from "@mui/material";
+import AddIcon from "@mui/icons-material/Add";
+import DeleteIcon from "@mui/icons-material/Delete";
+import DownloadIcon from "@mui/icons-material/Download";
+import EditIcon from "@mui/icons-material/Edit";
+import SearchIcon from "@mui/icons-material/Search";
+import ReceiptIcon from "@mui/icons-material/Receipt";
+import StorefrontIcon from "@mui/icons-material/Storefront";
+import CalendarTodayIcon from "@mui/icons-material/CalendarToday";
+import InventoryIcon from "@mui/icons-material/Inventory";
+import CloseIcon from "@mui/icons-material/Close";
+import FilterListIcon from "@mui/icons-material/FilterList";
+import RefreshIcon from "@mui/icons-material/Refresh";
+import SwapHorizIcon from "@mui/icons-material/SwapHoriz";
 
-// MUI DataGrid
-import { DataGrid } from "@mui/x-data-grid";
+// ── Helpers ───────────────────────────────────────────────────────────────────
+const todayStr = () => new Date().toISOString().slice(0, 10);
 
-// ── helpers ───────────────────────────────────────────────────────────────────
-const today = () => new Date().toISOString().slice(0, 10);
+function fmtDate(d) {
+  if (!d) return "—";
+  const [y, m, day] = d.split("-");
+  const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  return `${day} ${months[+m - 1]} ${y}`;
+}
 
 function emptyItem() {
   return { parent_sku_id: "", product_description: "", quantity: 1, price_per_unit: "", is_exchange: false };
@@ -42,44 +38,93 @@ function emptyItem() {
 function calcTotal(items) {
   return items.reduce((s, it) => {
     if (it.is_exchange) return s;
-    const qty   = parseInt(it.quantity, 10)  || 0;
-    const price = parseFloat(it.price_per_unit) || 0;
-    return s + qty * price;
+    return s + (parseInt(it.quantity, 10) || 0) * (parseFloat(it.price_per_unit) || 0);
   }, 0);
 }
 
-function fmtDate(d) {
-  if (!d) return "—";
-  const [y, m, day] = d.split("-");
-  return `${day}/${m}/${y}`;
+function KpiCard({ label, value, sub, icon, color }) {
+  return (
+    <Card variant="outlined" sx={{ flex: 1, minWidth: 150, borderRadius: 3, borderColor: "#E2E8F0" }}>
+      <CardContent sx={{ p: 2.5, "&:last-child": { pb: 2.5 } }}>
+        <Stack direction="row" justifyContent="space-between" alignItems="flex-start" mb={1}>
+          <Typography variant="caption" color="text.secondary" fontWeight={700} textTransform="uppercase" letterSpacing={0.5} fontSize={11}>
+            {label}
+          </Typography>
+          <Box sx={{ color, opacity: 0.6 }}>{icon}</Box>
+        </Stack>
+        <Typography variant="h5" fontWeight={800} color="text.primary">{value}</Typography>
+        {sub && <Typography variant="caption" color="text.secondary">{sub}</Typography>}
+      </CardContent>
+    </Card>
+  );
 }
 
-// ── Bill Form Modal ───────────────────────────────────────────────────────────
-function BillModal({ initial, parentSkus, onSave, onClose }) {
-  const [date,    setDate]    = useState(initial?.date       || today());
+// ── SKU Autocomplete row item ─────────────────────────────────────────────────
+function SkuAutocomplete({ value, onChange }) {
+  const [options, setOptions] = useState([]);
+  const [input,   setInput]   = useState(value || "");
+  const [loading, setLoading] = useState(false);
+  const debRef = useRef(null);
+
+  useEffect(() => {
+    if (!input || input.length < 1) { setOptions([]); return; }
+    clearTimeout(debRef.current);
+    debRef.current = setTimeout(async () => {
+      setLoading(true);
+      try {
+        const r = await fetch(`${API}/parent-prices/?search=${encodeURIComponent(input)}&page_size=20`);
+        const d = await r.json();
+        setOptions((d.results || d).map(p => p.item_id));
+      } catch {}
+      setLoading(false);
+    }, 250);
+  }, [input]);
+
+  return (
+    <Autocomplete
+      freeSolo
+      size="small"
+      options={options}
+      value={value}
+      inputValue={input}
+      loading={loading}
+      onInputChange={(_, v) => { setInput(v); onChange(v); }}
+      onChange={(_, v) => { if (v) { setInput(v); onChange(v); } }}
+      renderInput={(params) => (
+        <TextField {...params} placeholder="Parent SKU…"
+          InputProps={{ ...(params.InputProps ?? {}),
+            endAdornment: <>{loading && <CircularProgress size={12} />}{params.InputProps?.endAdornment}</>
+          }}
+          inputProps={{ ...params.inputProps, style: { fontSize: 13 } }}
+        />
+      )}
+    />
+  );
+}
+
+// ── Bill Form (create / edit) ─────────────────────────────────────────────────
+function BillForm({ initial, onSave, onClose }) {
+  const [date,    setDate]    = useState(initial?.date        || todayStr());
   const [seller,  setSeller]  = useState(initial?.seller_name || "");
   const [billNo,  setBillNo]  = useState(initial?.bill_number || "");
-  const [notes,   setNotes]   = useState(initial?.notes      || "");
+  const [notes,   setNotes]   = useState(initial?.notes       || "");
   const [items,   setItems]   = useState(
     initial?.items?.length ? initial.items.map(i => ({ ...i })) : [emptyItem()]
   );
-  const [saving, setSaving] = useState(false);
-  const [error,  setError]  = useState("");
+  const [saving,  setSaving]  = useState(false);
+  const [error,   setError]   = useState("");
 
-  const setItem = (idx, field, value) =>
-    setItems(prev => prev.map((it, i) => i === idx ? { ...it, [field]: value } : it));
-
-  const addItem    = () => setItems(prev => [...prev, emptyItem()]);
-  const removeItem = (idx) => setItems(prev => prev.filter((_, i) => i !== idx));
+  const setItem = (idx, field, val) =>
+    setItems(prev => prev.map((it, i) => i === idx ? { ...it, [field]: val } : it));
 
   const grandTotal = calcTotal(items);
 
   const handleSave = async () => {
-    if (!date || !seller.trim()) { setError("Date and seller name are required."); return; }
-    if (items.length === 0)      { setError("Add at least one item."); return; }
+    if (!date || !seller.trim())   { setError("Date and seller name are required."); return; }
+    if (items.length === 0)        { setError("Add at least one item."); return; }
     for (const it of items) {
-      if (!it.parent_sku_id.trim()) { setError("Select a SKU for every item."); return; }
-      if (!it.is_exchange && (!(parseFloat(it.price_per_unit) > 0))) {
+      if (!it.parent_sku_id.trim()) { setError("Select or type a SKU for every item."); return; }
+      if (!it.is_exchange && !(parseFloat(it.price_per_unit) > 0)) {
         setError("Enter a valid price for non-exchange items."); return;
       }
     }
@@ -88,201 +133,132 @@ function BillModal({ initial, parentSkus, onSave, onClose }) {
       const method = initial?.id ? "PUT" : "POST";
       const url    = initial?.id ? `${API}/purchases/${initial.id}/` : `${API}/purchases/`;
       const res = await fetch(url, {
-        method,
-        headers: { "Content-Type": "application/json" },
+        method, headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ date, seller_name: seller, bill_number: billNo, notes, items }),
       });
       if (!res.ok) { setError("Save failed. Check your inputs."); setSaving(false); return; }
-      const saved = await res.json();
-      onSave(saved);
-    } catch {
-      setError("Network error."); setSaving(false);
-    }
+      onSave(await res.json());
+    } catch { setError("Network error."); setSaving(false); }
   };
 
   return (
-    <Dialog open onClose={onClose} maxWidth="md" fullWidth PaperProps={{ sx: { borderRadius: 3 } }}>
-      <DialogTitle sx={{ pb: 1, borderBottom: `1px solid ${C.border}` }}>
-        <Box display="flex" alignItems="center" justifyContent="space-between">
+    <Dialog open onClose={onClose} maxWidth="md" fullWidth
+      PaperProps={{ sx: { borderRadius: 3, maxHeight: "92vh" } }}>
+      <DialogTitle sx={{ borderBottom: "1px solid #F1F5F9", pb: 2 }}>
+        <Stack direction="row" justifyContent="space-between" alignItems="center">
           <Box>
-            <Typography variant="h6" fontWeight={800} color={C.gray800}>
+            <Typography fontWeight={800} fontSize={18}>
               {initial?.id ? "Edit Purchase Bill" : "New Purchase Bill"}
             </Typography>
-            <Typography variant="caption" color={C.gray400}>
-              All data is preserved and reflected in inventory.
+            <Typography variant="caption" color="text.secondary">
+              All items update inventory automatically
             </Typography>
           </Box>
-          <IconButton size="small" onClick={onClose}>✕</IconButton>
-        </Box>
+          <IconButton onClick={onClose} size="small"><CloseIcon /></IconButton>
+        </Stack>
       </DialogTitle>
 
-      <DialogContent sx={{ pt: 2, display: "flex", flexDirection: "column", gap: 2 }}>
-        {/* Row 1 — Date / Seller / Bill No */}
-        <Box display="grid" gridTemplateColumns="1fr 1fr 1fr" gap={2}>
-          <TextField
-            label="Date *"
-            type="date"
-            size="small"
-            value={date}
-            onChange={e => setDate(e.target.value)}
-            InputLabelProps={{ shrink: true }}
-          />
-          <TextField
-            label="Seller / Vendor *"
-            size="small"
-            value={seller}
-            onChange={e => setSeller(e.target.value)}
-            placeholder="e.g. Raj Textiles"
-          />
-          <TextField
-            label="Bill / Invoice No."
-            size="small"
-            value={billNo}
-            onChange={e => setBillNo(e.target.value)}
-            placeholder="e.g. INV-001"
-          />
-        </Box>
+      <DialogContent sx={{ pt: 2.5 }}>
+        <Stack spacing={2.5}>
+          {error && <Alert severity="error" sx={{ borderRadius: 2 }}>{error}</Alert>}
 
-        {/* Notes */}
-        <TextField
-          label="Notes"
-          size="small"
-          value={notes}
-          onChange={e => setNotes(e.target.value)}
-          placeholder="Optional notes…"
-          fullWidth
-        />
+          {/* Bill header */}
+          <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
+            <TextField label="Date *" type="date" size="small" value={date}
+              onChange={e => setDate(e.target.value)} InputLabelProps={{ shrink: true }} sx={{ flex: 1 }} />
+            <TextField label="Seller / Vendor *" size="small" value={seller}
+              onChange={e => setSeller(e.target.value)} placeholder="e.g. Raj Textiles" sx={{ flex: 2 }} />
+            <TextField label="Bill / Invoice No." size="small" value={billNo}
+              onChange={e => setBillNo(e.target.value)} placeholder="INV-001" sx={{ flex: 1 }} />
+          </Stack>
 
-        {/* Items section */}
-        <Box>
-          <Box display="flex" alignItems="center" justifyContent="space-between" mb={1}>
-            <Typography variant="subtitle2" sx={{ fontSize: 11, fontWeight: 700, color: C.gray600, textTransform: "uppercase", letterSpacing: "0.05em" }}>
-              Items
-            </Typography>
-            <Button size="small" variant="outlined" onClick={addItem}
-              sx={{ borderColor: C.orange, color: C.orange, "&:hover": { borderColor: C.orange, background: C.orangeLight } }}>
-              + Add Item
-            </Button>
-          </Box>
+          <TextField label="Notes (optional)" size="small" value={notes}
+            onChange={e => setNotes(e.target.value)} fullWidth />
+
+          <Divider>
+            <Typography variant="caption" color="text.secondary" fontWeight={600}>ITEMS</Typography>
+          </Divider>
 
           {/* Column headers */}
-          <Box display="grid" sx={{ gridTemplateColumns: "1.6fr 2fr 0.7fr 1.1fr 1fr 0.6fr 0.4fr", gap: 1, mb: 0.5, px: 0.5 }}>
-            {["SKU", "Description", "Qty", "Price/Unit (₹)", "Total", "Exchange?", ""].map(h => (
-              <Typography key={h} sx={{ fontSize: 10, fontWeight: 700, color: C.gray400, textTransform: "uppercase", letterSpacing: "0.05em" }}>
-                {h}
-              </Typography>
+          <Box display="grid" sx={{ gridTemplateColumns: "2fr 2fr 0.7fr 1.1fr 1fr 80px 36px", gap: 1, px: 0.5 }}>
+            {["Parent SKU", "Description", "Qty", "Price/unit ₹", "Line Total", "Exchange?", ""].map(h => (
+              <Typography key={h} fontSize={10} fontWeight={700} color="text.secondary"
+                textTransform="uppercase" letterSpacing={0.5}>{h}</Typography>
             ))}
           </Box>
 
           {/* Item rows */}
-          {items.map((it, idx) => {
-            const lineTotal = it.is_exchange ? 0 : (parseInt(it.quantity, 10) || 0) * (parseFloat(it.price_per_unit) || 0);
-            return (
-              <Box key={idx} display="grid"
-                sx={{
-                  gridTemplateColumns: "1.6fr 2fr 0.7fr 1.1fr 1fr 0.6fr 0.4fr",
-                  gap: 1, mb: 1, alignItems: "center",
-                  background: it.is_exchange ? "#FFFBEB" : C.gray50,
-                  borderRadius: 2, p: "8px 10px",
-                  border: `1px solid ${it.is_exchange ? "#FDE68A" : C.border}`,
-                }}>
-                {/* SKU select */}
-                <Select
-                  size="small"
-                  value={it.parent_sku_id}
-                  onChange={e => setItem(idx, "parent_sku_id", e.target.value)}
-                  displayEmpty
-                  sx={{ fontSize: 12 }}
-                >
-                  <MenuItem value=""><em>— Select SKU —</em></MenuItem>
-                  {parentSkus.map(p => (
-                    <MenuItem key={p.item_id} value={p.item_id} sx={{ fontSize: 12 }}>{p.item_id}</MenuItem>
-                  ))}
-                </Select>
-
-                <TextField
-                  size="small"
-                  value={it.product_description}
-                  onChange={e => setItem(idx, "product_description", e.target.value)}
-                  placeholder="Description…"
-                  inputProps={{ style: { fontSize: 12 } }}
-                />
-
-                <TextField
-                  size="small"
-                  type="number"
-                  inputProps={{ min: 1, style: { fontSize: 12 } }}
-                  value={it.quantity}
-                  onChange={e => setItem(idx, "quantity", e.target.value)}
-                />
-
-                <TextField
-                  size="small"
-                  type="number"
-                  inputProps={{ min: 0, step: "0.01", style: { fontSize: 12 } }}
-                  value={it.price_per_unit}
-                  onChange={e => setItem(idx, "price_per_unit", e.target.value)}
-                  placeholder="0.00"
-                  disabled={it.is_exchange}
-                  sx={{ opacity: it.is_exchange ? 0.4 : 1 }}
-                />
-
-                <Typography sx={{ fontFamily: "monospace", fontSize: 13, fontWeight: 600, color: it.is_exchange ? C.gray300 : C.green, textAlign: "right" }}>
-                  {it.is_exchange ? "—" : `₹${lineTotal.toFixed(2)}`}
-                </Typography>
-
-                <Box display="flex" alignItems="center" justifyContent="center">
-                  <FormControlLabel
-                    control={
-                      <Checkbox
-                        checked={it.is_exchange}
-                        onChange={e => setItem(idx, "is_exchange", e.target.checked)}
-                        size="small"
-                        sx={{ color: C.amber, "&.Mui-checked": { color: C.amber } }}
-                      />
-                    }
-                    label={<Typography sx={{ fontSize: 10, color: C.amber, fontWeight: 600 }}>Exch</Typography>}
-                    sx={{ m: 0 }}
-                  />
+          <Stack spacing={1}>
+            {items.map((it, idx) => {
+              const lineTotal = it.is_exchange ? 0 : (parseInt(it.quantity, 10) || 0) * (parseFloat(it.price_per_unit) || 0);
+              return (
+                <Box key={idx} display="grid"
+                  sx={{
+                    gridTemplateColumns: "2fr 2fr 0.7fr 1.1fr 1fr 80px 36px",
+                    gap: 1, alignItems: "center",
+                    bgcolor: it.is_exchange ? "#FFFBEB" : "#F8FAFC",
+                    borderRadius: 2, p: "10px 12px",
+                    border: `1px solid ${it.is_exchange ? "#FDE68A" : "#E2E8F0"}`,
+                  }}>
+                  <SkuAutocomplete value={it.parent_sku_id}
+                    onChange={v => setItem(idx, "parent_sku_id", v)} />
+                  <TextField size="small" value={it.product_description}
+                    onChange={e => setItem(idx, "product_description", e.target.value)}
+                    placeholder="Description…" inputProps={{ style: { fontSize: 13 } }} />
+                  <TextField size="small" type="number" value={it.quantity}
+                    inputProps={{ min: 1, style: { fontSize: 13 } }}
+                    onChange={e => setItem(idx, "quantity", e.target.value)} />
+                  <TextField size="small" type="number" value={it.price_per_unit}
+                    inputProps={{ min: 0, step: "0.01", style: { fontSize: 13 } }}
+                    onChange={e => setItem(idx, "price_per_unit", e.target.value)}
+                    disabled={it.is_exchange} sx={{ opacity: it.is_exchange ? 0.4 : 1 }}
+                    placeholder="0.00" />
+                  <Typography fontSize={13} fontWeight={700}
+                    color={it.is_exchange ? "text.disabled" : C.green} textAlign="right">
+                    {it.is_exchange ? "—" : `₹${lineTotal.toFixed(2)}`}
+                  </Typography>
+                  <Stack direction="row" alignItems="center" justifyContent="center">
+                    <FormControlLabel
+                      control={
+                        <Checkbox checked={it.is_exchange} size="small"
+                          onChange={e => setItem(idx, "is_exchange", e.target.checked)}
+                          sx={{ color: C.amber, "&.Mui-checked": { color: C.amber }, p: 0.5 }} />
+                      }
+                      label={<Typography fontSize={10} color={C.amber} fontWeight={700}>Exch</Typography>}
+                      sx={{ m: 0 }} />
+                  </Stack>
+                  <IconButton size="small" onClick={() => setItems(p => p.filter((_, i) => i !== idx))}
+                    disabled={items.length === 1} sx={{ color: C.red, opacity: items.length === 1 ? 0.3 : 1 }}>
+                    <CloseIcon fontSize="small" />
+                  </IconButton>
                 </Box>
+              );
+            })}
+          </Stack>
 
-                <IconButton
-                  size="small"
-                  onClick={() => removeItem(idx)}
-                  disabled={items.length === 1}
-                  sx={{ color: C.red, opacity: items.length === 1 ? 0.3 : 1 }}
-                >✕</IconButton>
-              </Box>
-            );
-          })}
-
-          {/* Grand total */}
-          <Box display="flex" justifyContent="flex-end" mt={0.5} pt={1.5} sx={{ borderTop: `1px solid ${C.border}` }}>
-            <Typography sx={{ fontSize: 14, fontWeight: 700, color: C.gray700 }}>
-              Grand Total:&nbsp;
-              <Box component="span" sx={{ fontFamily: "monospace", color: C.orange, fontSize: 17 }}>
+          <Stack direction="row" justifyContent="space-between" alignItems="center"
+            pt={1} sx={{ borderTop: "1px solid #F1F5F9" }}>
+            <Button size="small" startIcon={<AddIcon />}
+              onClick={() => setItems(p => [...p, emptyItem()])}
+              sx={{ color: C.orange, textTransform: "none" }}>
+              Add Row
+            </Button>
+            <Stack direction="row" alignItems="center" spacing={1}>
+              <Typography variant="body2" color="text.secondary">Grand Total</Typography>
+              <Typography fontWeight={800} fontSize={20} color={C.orange} fontFamily="monospace">
                 ₹{grandTotal.toFixed(2)}
-              </Box>
-              &nbsp;<Box component="span" sx={{ fontSize: 11, color: C.gray400 }}>(excl. exchanges)</Box>
-            </Typography>
-          </Box>
-        </Box>
-
-        {error && (
-          <Alert severity="error" sx={{ fontSize: 13 }}>{error}</Alert>
-        )}
+              </Typography>
+              <Typography variant="caption" color="text.secondary">(excl. exchanges)</Typography>
+            </Stack>
+          </Stack>
+        </Stack>
       </DialogContent>
 
-      <DialogActions sx={{ px: 3, pb: 2.5, pt: 1.5, borderTop: `1px solid ${C.border}`, gap: 1 }}>
-        <Button variant="outlined" onClick={onClose} sx={{ color: C.gray600, borderColor: C.gray200 }}>
-          Cancel
-        </Button>
-        <Button
-          variant="contained"
-          onClick={handleSave}
-          disabled={saving}
-          sx={{ background: C.orange, "&:hover": { background: "#5B21B6" }, fontWeight: 700 }}
-        >
+      <DialogActions sx={{ px: 3, py: 2, borderTop: "1px solid #F1F5F9", gap: 1 }}>
+        <Button onClick={onClose} sx={{ color: "text.secondary", textTransform: "none" }}>Cancel</Button>
+        <Button variant="contained" onClick={handleSave} disabled={saving}
+          startIcon={saving ? <CircularProgress size={16} color="inherit" /> : null}
+          sx={{ bgcolor: C.orange, "&:hover": { bgcolor: "#5B21B6" }, fontWeight: 700, textTransform: "none", borderRadius: 2 }}>
           {saving ? "Saving…" : initial?.id ? "Save Changes" : "Create Bill"}
         </Button>
       </DialogActions>
@@ -290,112 +266,240 @@ function BillModal({ initial, parentSkus, onSave, onClose }) {
   );
 }
 
-// ── View Modal (read-only bill detail) ────────────────────────────────────────
-function BillViewModal({ bill, onClose, onEdit, onDownloadPdf }) {
+// ── Bill Detail Drawer ────────────────────────────────────────────────────────
+function BillDrawer({ bill, onClose, onEdit, onDelete, onDownload }) {
+  if (!bill) return null;
+  const exchangeItems = bill.items.filter(it => it.is_exchange);
+  const regularItems  = bill.items.filter(it => !it.is_exchange);
+
   return (
-    <Dialog open onClose={onClose} maxWidth="md" fullWidth PaperProps={{ sx: { borderRadius: 3 } }}>
-      <DialogTitle sx={{ pb: 1, borderBottom: `1px solid ${C.border}` }}>
-        <Box display="flex" alignItems="center" justifyContent="space-between">
-          <Box>
-            <Typography variant="h6" fontWeight={800} color={C.gray800}>
-              Bill #{bill.bill_number || bill.id}
-            </Typography>
-            <Typography variant="caption" color={C.gray400}>
-              {fmtDate(bill.date)} &middot; {bill.seller_name}
-            </Typography>
-          </Box>
-          <Box display="flex" gap={1}>
-            <Button size="small" variant="outlined" onClick={() => onDownloadPdf(bill.id)}
-              sx={{ fontSize: 12, borderColor: C.gray200, color: C.gray600 }}>
-              ⬇ PDF
-            </Button>
-            <Button size="small" variant="outlined" onClick={() => onEdit(bill)}
-              sx={{ fontSize: 12, borderColor: C.orange, color: C.orange, background: C.orangeLight, "&:hover": { background: C.orangeLight } }}>
-              ✏ Edit
-            </Button>
-            <IconButton size="small" onClick={onClose}>✕</IconButton>
+    <Drawer anchor="right" open={!!bill} onClose={onClose}
+      PaperProps={{ sx: { width: { xs: "100%", sm: 540 }, borderRadius: "16px 0 0 16px" } }}>
+      <Box sx={{ height: "100%", display: "flex", flexDirection: "column" }}>
+        {/* Header */}
+        <Box sx={{ p: 3, borderBottom: "1px solid #F1F5F9", bgcolor: C.orange, color: "#fff" }}>
+          <Stack direction="row" justifyContent="space-between" alignItems="flex-start">
+            <Box>
+              <Typography fontWeight={800} fontSize={20}>
+                Bill #{bill.bill_number || bill.id}
+              </Typography>
+              <Stack direction="row" spacing={1.5} mt={0.5} alignItems="center">
+                <Typography variant="caption" sx={{ opacity: 0.85 }}>
+                  {fmtDate(bill.date)}
+                </Typography>
+                <Box sx={{ width: 4, height: 4, borderRadius: "50%", bgcolor: "rgba(255,255,255,0.5)" }} />
+                <Typography variant="caption" sx={{ opacity: 0.85 }}>
+                  {bill.seller_name}
+                </Typography>
+              </Stack>
+            </Box>
+            <IconButton onClick={onClose} sx={{ color: "#fff" }}><CloseIcon /></IconButton>
+          </Stack>
+          <Typography fontWeight={800} fontSize={28} mt={2}>
+            {fmt(bill.total_amount)}
+          </Typography>
+          <Typography variant="caption" sx={{ opacity: 0.7 }}>
+            {bill.items.length} item{bill.items.length !== 1 ? "s" : ""} · {exchangeItems.length} exchange
+          </Typography>
+        </Box>
+
+        {/* Body */}
+        <Box sx={{ flex: 1, overflowY: "auto", p: 3 }}>
+          {bill.notes && (
+            <Alert severity="info" icon={false} sx={{ borderRadius: 2, mb: 2, fontSize: 13, fontStyle: "italic" }}>
+              {bill.notes}
+            </Alert>
+          )}
+
+          {/* Regular items */}
+          {regularItems.length > 0 && (
+            <Box mb={3}>
+              <Typography variant="caption" fontWeight={700} color="text.secondary"
+                textTransform="uppercase" letterSpacing={0.5} mb={1.5} display="block">
+                Items Purchased
+              </Typography>
+              <Stack spacing={1}>
+                {regularItems.map((it, i) => (
+                  <Box key={i} sx={{ p: 1.5, bgcolor: "#F8FAFC", borderRadius: 2, border: "1px solid #E2E8F0" }}>
+                    <Stack direction="row" justifyContent="space-between" alignItems="flex-start">
+                      <Box>
+                        <Typography fontWeight={700} fontSize={13} color={C.orange}>
+                          {it.parent_sku_id || "—"}
+                        </Typography>
+                        {it.product_description && (
+                          <Typography fontSize={12} color="text.secondary">{it.product_description}</Typography>
+                        )}
+                      </Box>
+                      <Box textAlign="right">
+                        <Typography fontWeight={700} fontSize={14} fontFamily="monospace">
+                          {fmt(it.total_amount)}
+                        </Typography>
+                        <Typography fontSize={11} color="text.secondary">
+                          {it.quantity} × {fmt(it.price_per_unit)}
+                        </Typography>
+                      </Box>
+                    </Stack>
+                  </Box>
+                ))}
+              </Stack>
+            </Box>
+          )}
+
+          {/* Exchange items */}
+          {exchangeItems.length > 0 && (
+            <Box mb={3}>
+              <Typography variant="caption" fontWeight={700} color="text.secondary"
+                textTransform="uppercase" letterSpacing={0.5} mb={1.5} display="block">
+                Exchange Items
+              </Typography>
+              <Stack spacing={1}>
+                {exchangeItems.map((it, i) => (
+                  <Box key={i} sx={{ p: 1.5, bgcolor: "#FFFBEB", borderRadius: 2, border: "1px solid #FDE68A" }}>
+                    <Stack direction="row" justifyContent="space-between" alignItems="center">
+                      <Box>
+                        <Typography fontWeight={700} fontSize={13} color={C.amber}>
+                          {it.parent_sku_id || "—"}
+                        </Typography>
+                        {it.product_description && (
+                          <Typography fontSize={12} color="text.secondary">{it.product_description}</Typography>
+                        )}
+                      </Box>
+                      <Stack direction="row" spacing={1} alignItems="center">
+                        <SwapHorizIcon sx={{ color: C.amber, fontSize: 16 }} />
+                        <Chip label={`${it.quantity} pcs`} size="small"
+                          sx={{ bgcolor: "#FDE68A", color: C.amber, fontWeight: 700, fontSize: 11 }} />
+                      </Stack>
+                    </Stack>
+                  </Box>
+                ))}
+              </Stack>
+            </Box>
+          )}
+
+          {/* Total */}
+          <Box sx={{ p: 2, bgcolor: "#F0F7FF", borderRadius: 2, border: "1px solid #BFDBFE" }}>
+            <Stack direction="row" justifyContent="space-between" alignItems="center">
+              <Typography fontWeight={700} color="text.secondary">Total Paid</Typography>
+              <Typography fontWeight={800} fontSize={22} color={C.orange} fontFamily="monospace">
+                {fmt(bill.total_amount)}
+              </Typography>
+            </Stack>
           </Box>
         </Box>
-      </DialogTitle>
 
-      <DialogContent sx={{ pt: 2 }}>
-        {bill.notes && (
-          <Typography sx={{ fontSize: 13, color: C.gray500, mb: 2, fontStyle: "italic" }}>
-            {bill.notes}
-          </Typography>
-        )}
+        {/* Footer actions */}
+        <Box sx={{ p: 3, borderTop: "1px solid #F1F5F9" }}>
+          <Stack spacing={1.5}>
+            <Button fullWidth variant="contained" startIcon={<DownloadIcon />}
+              href={`${API}/purchases/${bill.id}/pdf/`} target="_blank"
+              sx={{ bgcolor: C.orange, "&:hover": { bgcolor: "#5B21B6" }, fontWeight: 700, borderRadius: 2, textTransform: "none" }}>
+              Download Bill PDF
+            </Button>
+            <Stack direction="row" spacing={1}>
+              <Button fullWidth variant="outlined" startIcon={<EditIcon />} onClick={() => onEdit(bill)}
+                sx={{ borderColor: C.orange, color: C.orange, textTransform: "none", borderRadius: 2 }}>
+                Edit Bill
+              </Button>
+              <Button variant="outlined" startIcon={<DeleteIcon />} onClick={() => onDelete(bill.id)}
+                sx={{ borderColor: "#FECDD3", color: C.red, textTransform: "none", borderRadius: 2, minWidth: 110 }}>
+                Delete
+              </Button>
+            </Stack>
+          </Stack>
+        </Box>
+      </Box>
+    </Drawer>
+  );
+}
 
-        <Table size="small" sx={{ fontSize: 13 }}>
-          <TableHead>
-            <TableRow>
-              {["SKU", "Description", "Qty", "Price/Unit", "Total", "Exchange"].map(h => (
-                <TableCell key={h} align={["Qty", "Price/Unit", "Total"].includes(h) ? "right" : "left"}
-                  sx={{ fontWeight: 700, fontSize: 11, textTransform: "uppercase", color: C.gray500, letterSpacing: "0.06em", background: C.gray50, borderBottom: `1px solid ${C.border}` }}>
-                  {h}
-                </TableCell>
-              ))}
-            </TableRow>
-          </TableHead>
-          <TableBody>
-            {bill.items.map((it, i) => (
-              <TableRow key={it.id} sx={{ background: i % 2 === 0 ? "#FFFFFF" : C.gray50 }}>
-                <TableCell sx={{ fontFamily: "monospace", fontWeight: 600, color: C.orange, fontSize: 12 }}>
-                  {it.parent_sku_id || "—"}
-                </TableCell>
-                <TableCell sx={{ color: C.gray700 }}>{it.product_description || "—"}</TableCell>
-                <TableCell align="right" sx={{ color: C.gray700 }}>{it.quantity}</TableCell>
-                <TableCell align="right" sx={{ fontFamily: "monospace", color: C.gray700 }}>{fmt(it.price_per_unit)}</TableCell>
-                <TableCell align="right" sx={{ fontFamily: "monospace", fontWeight: 600, color: C.gray700 }}>
-                  {it.is_exchange
-                    ? <Box component="span" sx={{ color: C.gray300 }}>—</Box>
-                    : fmt(it.total_amount)}
-                </TableCell>
-                <TableCell align="center">
-                  {it.is_exchange
-                    ? <Chip label="Exchange" size="small" sx={{ fontSize: 10, fontWeight: 600, background: C.amberLight, color: C.amber, border: `1px solid #FDE68A`, height: 22 }} />
-                    : <Box component="span" sx={{ color: C.gray300 }}>—</Box>}
-                </TableCell>
-              </TableRow>
-            ))}
-
-            {/* Grand total footer row */}
-            <TableRow sx={{ background: "#FFF0EA" }}>
-              <TableCell colSpan={4} sx={{ fontWeight: 700, color: C.gray700 }}>
-                Grand Total (excl. exchanges)
-              </TableCell>
-              <TableCell align="right" sx={{ fontFamily: "monospace", fontWeight: 800, fontSize: 15, color: C.orange }}>
+// ── Bill Card ─────────────────────────────────────────────────────────────────
+function BillCard({ bill, onClick }) {
+  const exchangeCount = bill.items.filter(it => it.is_exchange).length;
+  const regularCount  = bill.items.filter(it => !it.is_exchange).length;
+  return (
+    <Card variant="outlined"
+      sx={{ borderRadius: 3, borderColor: "#E2E8F0", transition: "all 0.15s", "&:hover": { borderColor: C.orange, boxShadow: "0 2px 12px rgba(109,40,217,0.1)" } }}>
+      <CardActionArea onClick={onClick} sx={{ p: 0 }}>
+        <CardContent sx={{ p: 2.5, "&:last-child": { pb: 2.5 } }}>
+          <Stack direction="row" justifyContent="space-between" alignItems="flex-start">
+            <Box flex={1} mr={1}>
+              <Stack direction="row" spacing={1} alignItems="center" mb={0.5}>
+                <Typography fontWeight={800} fontSize={14} color="text.primary">
+                  {bill.seller_name}
+                </Typography>
+                {exchangeCount > 0 && (
+                  <Chip label={`${exchangeCount} exch`} size="small"
+                    sx={{ bgcolor: "#FFFBEB", color: C.amber, border: "1px solid #FDE68A", fontWeight: 700, fontSize: 10, height: 18 }} />
+                )}
+              </Stack>
+              <Stack direction="row" spacing={1.5} alignItems="center">
+                <Typography variant="caption" color="text.secondary">{fmtDate(bill.date)}</Typography>
+                <Box sx={{ width: 3, height: 3, borderRadius: "50%", bgcolor: "#CBD5E1" }} />
+                <Typography variant="caption" color="text.secondary">
+                  {bill.bill_number ? `#${bill.bill_number}` : `Bill #${bill.id}`}
+                </Typography>
+                <Box sx={{ width: 3, height: 3, borderRadius: "50%", bgcolor: "#CBD5E1" }} />
+                <Typography variant="caption" color="text.secondary">
+                  {regularCount} item{regularCount !== 1 ? "s" : ""}
+                </Typography>
+              </Stack>
+              {bill.notes && (
+                <Typography variant="caption" color="text.secondary" mt={0.5} display="block"
+                  sx={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 260 }}>
+                  {bill.notes}
+                </Typography>
+              )}
+            </Box>
+            <Box textAlign="right">
+              <Typography fontWeight={800} fontSize={16} color={C.orange} fontFamily="monospace">
                 {fmt(bill.total_amount)}
-              </TableCell>
-              <TableCell />
-            </TableRow>
-          </TableBody>
-        </Table>
+              </Typography>
+              <Typography variant="caption" color="text.secondary" display="block">total</Typography>
+            </Box>
+          </Stack>
+        </CardContent>
+      </CardActionArea>
+    </Card>
+  );
+}
+
+// ── Delete Confirm Dialog ─────────────────────────────────────────────────────
+function ConfirmDelete({ billId, onConfirm, onCancel }) {
+  const [deleting, setDeleting] = useState(false);
+  return (
+    <Dialog open onClose={onCancel} maxWidth="xs" PaperProps={{ sx: { borderRadius: 3 } }}>
+      <DialogTitle fontWeight={800}>Delete Purchase Bill?</DialogTitle>
+      <DialogContent>
+        <Typography color="text.secondary">
+          This will permanently delete the bill and remove it from inventory history. This cannot be undone.
+        </Typography>
       </DialogContent>
+      <DialogActions sx={{ px: 3, py: 2 }}>
+        <Button onClick={onCancel} sx={{ textTransform: "none" }}>Cancel</Button>
+        <Button variant="contained" color="error" disabled={deleting}
+          onClick={async () => { setDeleting(true); await onConfirm(billId); }}
+          sx={{ textTransform: "none", borderRadius: 2 }}>
+          {deleting ? <CircularProgress size={16} color="inherit" /> : "Delete"}
+        </Button>
+      </DialogActions>
     </Dialog>
   );
 }
 
 // ── Main Tab ──────────────────────────────────────────────────────────────────
 export function PurchasesTab() {
-  const [bills,      setBills]      = useState([]);
-  const [total,      setTotal]      = useState(0);
-  const [loading,    setLoading]    = useState(false);
-  const [dateFrom,   setDateFrom]   = useState("");
-  const [dateTo,     setDateTo]     = useState("");
-  const [sellerQ,    setSellerQ]    = useState("");
-  const [parentSkus, setParentSkus] = useState([]);
-  const [showForm,   setShowForm]   = useState(false);
-  const [editBill,   setEditBill]   = useState(null);
-  const [viewBill,   setViewBill]   = useState(null);
-  const [deleting,   setDeleting]   = useState(null);
-
-  // Load parent SKUs once
-  useEffect(() => {
-    fetch(`${API}/parent-prices/`)
-      .then(r => r.json())
-      .then(d => setParentSkus(Array.isArray(d) ? d : (d.results || [])))
-      .catch(() => {});
-  }, []);
+  const [bills,     setBills]     = useState([]);
+  const [total,     setTotal]     = useState(0);
+  const [loading,   setLoading]   = useState(false);
+  const [dateFrom,  setDateFrom]  = useState("");
+  const [dateTo,    setDateTo]    = useState("");
+  const [sellerQ,   setSellerQ]   = useState("");
+  const [showForm,  setShowForm]  = useState(false);
+  const [editBill,  setEditBill]  = useState(null);
+  const [viewBill,  setViewBill]  = useState(null);
+  const [deletingId, setDeletingId] = useState(null);
+  const [page,      setPage]      = useState(1);
+  const PAGE_SIZE = 20;
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -410,6 +514,7 @@ export function PurchasesTab() {
         const d = await r.json();
         setBills(d.results || []);
         setTotal(d.total || 0);
+        setPage(1);
       }
     } finally { setLoading(false); }
   }, [dateFrom, dateTo, sellerQ]);
@@ -417,295 +522,161 @@ export function PurchasesTab() {
   useEffect(() => { load(); }, [load]);
 
   const handleSaved = (saved) => {
-    setShowForm(false);
-    setEditBill(null);
+    setShowForm(false); setEditBill(null);
     load();
-    if (viewBill && viewBill.id === saved.id) setViewBill(saved);
+    if (viewBill?.id === saved.id) setViewBill(saved);
   };
 
   const handleDelete = async (id) => {
-    if (!window.confirm("Delete this purchase bill? This cannot be undone.")) return;
-    setDeleting(id);
     await fetch(`${API}/purchases/${id}/`, { method: "DELETE" });
-    setDeleting(null);
+    setDeletingId(null);
     if (viewBill?.id === id) setViewBill(null);
     load();
   };
 
-  const handleDownloadPdf = async (id) => {
-    const resp = await fetch(`${API}/purchases/${id}/pdf/`);
-    if (!resp.ok) return;
-    const blob = await resp.blob();
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement("a");
-    a.href     = url;
-    a.download = `purchase_bill_${id}.pdf`;
-    a.click();
-    URL.revokeObjectURL(url);
-  };
+  const clearFilters = () => { setDateFrom(""); setDateTo(""); setSellerQ(""); };
+  const hasFilters = dateFrom || dateTo || sellerQ;
 
-  // Summary KPIs
+  // KPI computations
   const totalSpend    = bills.reduce((s, b) => s + parseFloat(b.total_amount || 0), 0);
-  const totalItems    = bills.reduce((s, b) => s + b.items.length, 0);
+  const totalQty      = bills.reduce((s, b) => s + b.items.filter(i => !i.is_exchange).reduce((q, i) => q + i.quantity, 0), 0);
   const uniqueSellers = [...new Set(bills.map(b => b.seller_name))].length;
 
-  // DataGrid columns
-  const columns = [
-    {
-      field: "date",
-      headerName: "Date",
-      width: 110,
-      renderCell: ({ value }) => (
-        <Typography sx={{ fontSize: 13, fontWeight: 600, color: C.gray700 }}>{fmtDate(value)}</Typography>
-      ),
-    },
-    {
-      field: "bill_number",
-      headerName: "Bill No.",
-      width: 130,
-      renderCell: ({ row }) => (
-        <Typography sx={{ fontFamily: "monospace", fontSize: 12, color: C.blue }}>
-          {row.bill_number || `#${row.id}`}
-        </Typography>
-      ),
-    },
-    {
-      field: "seller_name",
-      headerName: "Seller",
-      flex: 1,
-      minWidth: 150,
-      renderCell: ({ value }) => (
-        <Typography sx={{ fontSize: 13, fontWeight: 600, color: C.gray700 }}>{value}</Typography>
-      ),
-    },
-    {
-      field: "items",
-      headerName: "Items",
-      width: 160,
-      sortable: false,
-      renderCell: ({ row }) => {
-        const exchangeCount = row.items.filter(it => it.is_exchange).length;
-        return (
-          <Box display="flex" alignItems="center" gap={0.75}>
-            <Typography sx={{ fontSize: 13, color: C.gray700 }}>
-              {row.items.length} line{row.items.length !== 1 ? "s" : ""}
-            </Typography>
-            {exchangeCount > 0 && (
-              <Chip
-                label={`${exchangeCount} exchange${exchangeCount > 1 ? "s" : ""}`}
-                size="small"
-                sx={{ fontSize: 10, fontWeight: 600, background: C.amberLight, color: C.amber, border: `1px solid #FDE68A`, height: 20 }}
-              />
-            )}
-          </Box>
-        );
-      },
-    },
-    {
-      field: "total_amount",
-      headerName: "Total Amount",
-      width: 140,
-      align: "right",
-      headerAlign: "right",
-      renderCell: ({ value }) => (
-        <Typography sx={{ fontFamily: "monospace", fontWeight: 700, color: C.orange, fontSize: 13 }}>
-          {fmt(value)}
-        </Typography>
-      ),
-    },
-    {
-      field: "actions",
-      headerName: "Actions",
-      width: 160,
-      sortable: false,
-      renderCell: ({ row }) => (
-        <Box display="flex" gap={0.75} onClick={e => e.stopPropagation()}>
-          <Button
-            size="small"
-            variant="outlined"
-            onClick={() => handleDownloadPdf(row.id)}
-            sx={{ fontSize: 11, px: 1, py: 0.25, minWidth: 0, borderColor: C.gray200, color: C.gray600 }}
-            title="Download PDF"
-          >⬇ PDF</Button>
-          <Button
-            size="small"
-            variant="outlined"
-            onClick={() => setEditBill(row)}
-            sx={{ fontSize: 11, px: 1, py: 0.25, minWidth: 0, borderColor: C.orange, color: C.orange, background: C.orangeLight, "&:hover": { background: C.orangeLight } }}
-            title="Edit"
-          >✏</Button>
-          <Button
-            size="small"
-            variant="outlined"
-            onClick={() => handleDelete(row.id)}
-            disabled={deleting === row.id}
-            sx={{ fontSize: 11, px: 1, py: 0.25, minWidth: 0, borderColor: "transparent", color: C.red }}
-            title="Delete"
-          >{deleting === row.id ? "…" : "✕"}</Button>
-        </Box>
-      ),
-    },
-  ];
+  // Paginate
+  const paged      = bills.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  const totalPages = Math.ceil(bills.length / PAGE_SIZE);
 
   return (
-    <Box display="flex" flexDirection="column" gap={2.5}>
-
-      {/* Modals */}
+    <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: 1200, mx: "auto" }}>
+      {/* Modals & Drawer */}
       {(showForm || editBill) && (
-        <BillModal
-          initial={editBill}
-          parentSkus={parentSkus}
-          onSave={handleSaved}
-          onClose={() => { setShowForm(false); setEditBill(null); }}
-        />
+        <BillForm initial={editBill} onSave={handleSaved}
+          onClose={() => { setShowForm(false); setEditBill(null); }} />
       )}
       {viewBill && !editBill && (
-        <BillViewModal
-          bill={viewBill}
-          onClose={() => setViewBill(null)}
+        <BillDrawer bill={viewBill} onClose={() => setViewBill(null)}
           onEdit={(b) => { setViewBill(null); setEditBill(b); }}
-          onDownloadPdf={handleDownloadPdf}
-        />
+          onDelete={(id) => { setViewBill(null); setDeletingId(id); }}
+          onDownload={(id) => window.open(`${API}/purchases/${id}/pdf/`, "_blank")} />
+      )}
+      {deletingId && (
+        <ConfirmDelete billId={deletingId}
+          onConfirm={handleDelete} onCancel={() => setDeletingId(null)} />
       )}
 
-      {/* Header row */}
-      <Box display="flex" alignItems="center" justifyContent="space-between" flexWrap="wrap" gap={1.5}>
+      {/* Header */}
+      <Stack direction="row" justifyContent="space-between" alignItems="flex-start" mb={3} flexWrap="wrap" gap={2}>
         <Box>
-          <Typography variant="h5" fontWeight={800} color={C.gray800} mb={0.25}>
-            🛒 Purchases
-          </Typography>
-          <Typography variant="body2" color={C.gray400}>
-            Track every stock purchase; PDF bills on demand.
+          <Typography variant="h5" fontWeight={800}>Purchases</Typography>
+          <Typography variant="caption" color="text.secondary">
+            Track stock purchases · PDF bills · Inventory auto-updated
           </Typography>
         </Box>
-        <Button
-          variant="contained"
-          onClick={() => setShowForm(true)}
-          sx={{ background: C.orange, "&:hover": { background: "#5B21B6" }, fontWeight: 700, borderRadius: 2 }}
-        >
-          + New Purchase Bill
+        <Button variant="contained" startIcon={<AddIcon />} onClick={() => setShowForm(true)}
+          sx={{ bgcolor: C.orange, "&:hover": { bgcolor: "#5B21B6" }, fontWeight: 700, borderRadius: 2, textTransform: "none" }}>
+          New Purchase Bill
         </Button>
-      </Box>
+      </Stack>
 
-      {/* KPI strip */}
-      <Box display="flex" flexWrap="wrap" gap={1.75}>
-        {[
-          { label: "Total Spend",     value: `₹${totalSpend.toLocaleString("en-IN", { minimumFractionDigits: 2 })}`, accent: C.orange, icon: "💸" },
-          { label: "Bills Recorded",  value: `${total}`,        accent: C.blue,  icon: "🧾" },
-          { label: "Total SKU Lines", value: `${totalItems}`,   accent: C.green, icon: "📦" },
-          { label: "Unique Sellers",  value: `${uniqueSellers}`, accent: C.amber, icon: "🏪" },
-        ].map(k => (
-          <Paper key={k.label} elevation={1} sx={{
-            borderTop: `3px solid ${k.accent}`, borderRadius: 2, p: 3,
-            minWidth: "max-content",
-          }}>
-            <Typography sx={{ fontSize: 11, fontWeight: 700, color: C.gray400, letterSpacing: "0.07em", textTransform: "uppercase", mb: 1, whiteSpace: "nowrap" }}>
-              {k.icon} {k.label}
-            </Typography>
-            <Typography sx={{ fontSize: 22, fontWeight: 800, fontFamily: "'DM Mono', monospace", color: k.accent, whiteSpace: "nowrap" }}>
-              {k.value}
-            </Typography>
-          </Paper>
-        ))}
-      </Box>
+      {/* KPI Row */}
+      <Stack direction={{ xs: "column", sm: "row" }} spacing={2} mb={3} flexWrap="wrap">
+        <KpiCard label="Total Spend" value={`₹${totalSpend.toLocaleString("en-IN", { maximumFractionDigits: 0 })}`}
+          sub={`${total} bills`} icon={<ReceiptIcon />} color={C.orange} />
+        <KpiCard label="Units Purchased" value={totalQty.toLocaleString("en-IN")}
+          sub="excl. exchanges" icon={<InventoryIcon />} color={C.blue} />
+        <KpiCard label="Unique Sellers" value={uniqueSellers}
+          sub="vendors" icon={<StorefrontIcon />} color={C.green} />
+        <KpiCard label="Bills Recorded" value={total}
+          sub={hasFilters ? "filtered" : "all time"} icon={<CalendarTodayIcon />} color={C.amber} />
+      </Stack>
 
-      {/* Filter bar */}
-      <Paper elevation={1} sx={{ borderRadius: 2, px: 2.5, py: 1.75, display: "flex", gap: 1.5, flexWrap: "wrap", alignItems: "center" }}>
-        <Typography sx={{ fontSize: 12, fontWeight: 700, color: C.gray400, textTransform: "uppercase", letterSpacing: "0.06em" }}>
-          Filter
-        </Typography>
-        <TextField
-          type="date"
-          size="small"
-          value={dateFrom}
-          onChange={e => setDateFrom(e.target.value)}
-          InputLabelProps={{ shrink: true }}
-          sx={{ width: 155 }}
-        />
-        <Typography sx={{ color: C.gray300 }}>→</Typography>
-        <TextField
-          type="date"
-          size="small"
-          value={dateTo}
-          onChange={e => setDateTo(e.target.value)}
-          InputLabelProps={{ shrink: true }}
-          sx={{ width: 155 }}
-        />
-        <Box sx={{ width: 1, height: 24, background: C.gray200 }} />
-        <TextField
-          size="small"
-          value={sellerQ}
-          onChange={e => setSellerQ(e.target.value)}
-          placeholder="🔍 Seller name…"
-          sx={{ width: 210 }}
-        />
-        {(dateFrom || dateTo || sellerQ) && (
-          <Button
-            size="small"
-            variant="outlined"
-            onClick={() => { setDateFrom(""); setDateTo(""); setSellerQ(""); }}
-            sx={{ fontSize: 12, color: C.red, borderColor: C.gray200 }}
-          >
-            ✕ Clear
-          </Button>
-        )}
+      {/* Filter Bar */}
+      <Paper variant="outlined" sx={{ borderRadius: 3, borderColor: "#E2E8F0", p: 2, mb: 3 }}>
+        <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} alignItems={{ sm: "center" }} flexWrap="wrap">
+          <Stack direction="row" spacing={1} alignItems="center">
+            <FilterListIcon fontSize="small" sx={{ color: "text.secondary" }} />
+            <Typography fontSize={12} fontWeight={700} color="text.secondary" textTransform="uppercase" letterSpacing={0.5}>
+              Filter
+            </Typography>
+          </Stack>
+          <TextField size="small" type="date" value={dateFrom} label="From"
+            onChange={e => setDateFrom(e.target.value)} InputLabelProps={{ shrink: true }} sx={{ width: 160 }} />
+          <TextField size="small" type="date" value={dateTo} label="To"
+            onChange={e => setDateTo(e.target.value)} InputLabelProps={{ shrink: true }} sx={{ width: 160 }} />
+          <TextField size="small" value={sellerQ} onChange={e => setSellerQ(e.target.value)}
+            placeholder="Search seller…"
+            InputProps={{ startAdornment: <InputAdornment position="start"><SearchIcon fontSize="small" sx={{ color: "text.secondary" }} /></InputAdornment> }}
+            sx={{ flex: 1, minWidth: 180 }} />
+          <Stack direction="row" spacing={1}>
+            {hasFilters && (
+              <Button size="small" onClick={clearFilters}
+                sx={{ textTransform: "none", color: C.red, borderColor: "#FECDD3" }} variant="outlined">
+                Clear
+              </Button>
+            )}
+            <IconButton size="small" onClick={load}>
+              <RefreshIcon fontSize="small" />
+            </IconButton>
+          </Stack>
+        </Stack>
       </Paper>
 
-      {/* Bills DataGrid */}
-      <Paper elevation={1} sx={{ borderRadius: 2, overflow: "hidden" }}>
-        {/* Section header */}
-        <Box display="flex" alignItems="center" justifyContent="space-between" px={3} pt={2.5} pb={1.5}>
-          <Box display="flex" alignItems="center" gap={1.25}>
-            <Typography variant="subtitle1" fontWeight={700} color={C.gray800}>
-              Purchase Bills
-            </Typography>
-            <Chip
-              label={total}
-              size="small"
-              sx={{ fontSize: 11, fontWeight: 700, background: C.gray100, color: C.gray500, border: `1px solid ${C.gray200}`, height: 22 }}
-            />
+      {/* Bills List */}
+      <Box>
+        <Stack direction="row" justifyContent="space-between" alignItems="center" mb={2}>
+          <Stack direction="row" spacing={1} alignItems="center">
+            <Typography fontWeight={700} fontSize={15}>Purchase Bills</Typography>
+            <Chip label={bills.length} size="small"
+              sx={{ bgcolor: "#F1F5F9", color: "text.secondary", fontWeight: 700, fontSize: 11 }} />
+          </Stack>
+          {loading && <CircularProgress size={18} sx={{ color: C.orange }} />}
+        </Stack>
+
+        {loading && bills.length === 0 ? (
+          <Box display="flex" justifyContent="center" py={10}>
+            <CircularProgress sx={{ color: C.orange }} />
           </Box>
-          {loading && (
-            <Typography sx={{ fontSize: 12, color: C.gray400 }}>Loading…</Typography>
-          )}
-        </Box>
+        ) : bills.length === 0 ? (
+          <Box textAlign="center" py={10}>
+            <ReceiptIcon sx={{ fontSize: 48, color: "#CBD5E1", mb: 2 }} />
+            <Typography color="text.secondary" fontWeight={600}>No purchase bills found</Typography>
+            <Typography variant="caption" color="text.secondary">
+              {hasFilters ? "Try clearing your filters" : "Create your first purchase bill"}
+            </Typography>
+          </Box>
+        ) : (
+          <Stack spacing={1.5}>
+            {paged.map(bill => (
+              <BillCard key={bill.id} bill={bill} onClick={() => setViewBill(bill)} />
+            ))}
+          </Stack>
+        )}
 
-        <Box sx={{ height: bills.length === 0 ? 200 : Math.min(bills.length * 52 + 110, 600), width: "100%" }}>
-          <DataGrid
-            rows={bills}
-            columns={columns}
-            getRowId={r => r.id}
-            loading={loading}
-            initialState={{ pagination: { paginationModel: { pageSize: 20 } } }}
-            pageSizeOptions={[20, 50]}
-            rowHeight={52}
-            disableRowSelectionOnClick
-            onRowClick={({ row }) => setViewBill(row)}
-            sx={{
-              border: "none",
-              "& .MuiDataGrid-columnHeaders": {
-                background: C.gray50,
-                fontSize: 11,
-                fontWeight: 700,
-                textTransform: "uppercase",
-                letterSpacing: "0.06em",
-                color: C.gray500,
-                borderBottom: `1px solid ${C.border}`,
-              },
-              "& .MuiDataGrid-cell": {
-                borderBottom: `1px solid ${C.gray100}`,
-                cursor: "pointer",
-              },
-              "& .MuiDataGrid-row:hover": {
-                background: "#F0F7FF",
-              },
-              "& .MuiDataGrid-footerContainer": {
-                borderTop: `1px solid ${C.gray100}`,
-              },
-            }}
-          />
-        </Box>
-      </Paper>
+        {/* Pagination */}
+        {totalPages > 1 && (
+          <Stack direction="row" justifyContent="center" alignItems="center" spacing={1} mt={3}>
+            <Button size="small" disabled={page <= 1} onClick={() => setPage(p => p - 1)}
+              sx={{ textTransform: "none" }}>
+              ← Prev
+            </Button>
+            {Array.from({ length: Math.min(totalPages, 7) }, (_, i) => {
+              const p = totalPages <= 7 ? i + 1 : (page <= 4 ? i + 1 : page - 3 + i);
+              if (p < 1 || p > totalPages) return null;
+              return (
+                <Button key={p} size="small" onClick={() => setPage(p)}
+                  variant={page === p ? "contained" : "text"}
+                  sx={{ minWidth: 36, textTransform: "none", bgcolor: page === p ? C.orange : "transparent", color: page === p ? "#fff" : "text.secondary", "&:hover": { bgcolor: page === p ? C.orange : "#F1F5F9" } }}>
+                  {p}
+                </Button>
+              );
+            })}
+            <Button size="small" disabled={page >= totalPages} onClick={() => setPage(p => p + 1)}
+              sx={{ textTransform: "none" }}>
+              Next →
+            </Button>
+          </Stack>
+        )}
+      </Box>
     </Box>
   );
 }

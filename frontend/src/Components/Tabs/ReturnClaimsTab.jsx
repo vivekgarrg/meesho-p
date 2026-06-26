@@ -12,19 +12,19 @@ import { FilterBar, fmtMonth, monthToRange } from "../shared/FilterBar";
 const PAGE_SIZE = 30;
 
 const STATUS_FILTERS = [
-  { id: "",       label: "All" },
+  { id: "", label: "All" },
   { id: "return", label: "Returns" },
-  { id: "rto",    label: "RTO" },
-  { id: "claim",  label: "Claims" },
+  { id: "rto", label: "RTO" },
+  { id: "claim", label: "Claims" },
 ];
 
 const STATUS_COLOR = {
-  RETURN:       { bg: "#FEE2E2", fg: "#991B1B" },
-  RTO:          { bg: "#FEF3C7", fg: "#92400E" },
+  RETURN: { bg: "#FEE2E2", fg: "#991B1B" },
+  RTO: { bg: "#FEF3C7", fg: "#92400E" },
   RTO_COMPLETE: { bg: "#FEF3C7", fg: "#92400E" },
-  DELIVERED:    { bg: "#D1FAE5", fg: "#065F46" },
-  SHIPPED:      { bg: "#DBEAFE", fg: "#1E40AF" },
-  CANCELLED:    { bg: "#F3F4F6", fg: "#6B7280" },
+  DELIVERED: { bg: "#D1FAE5", fg: "#065F46" },
+  SHIPPED: { bg: "#DBEAFE", fg: "#1E40AF" },
+  CANCELLED: { bg: "#F3F4F6", fg: "#6B7280" },
 };
 
 function StatusBadge({ status }) {
@@ -79,11 +79,27 @@ function SubRow({ row, idx }) {
   );
 }
 
+const ORDER_TYPE_STYLE = {
+  CLAIM:     { bg: "#FEF3C7", fg: "#92400E", label: "CLAIM" },
+  RETURN:    { bg: "#FEE2E2", fg: "#991B1B", label: "RETURN" },
+  RTO:       { bg: "#FEF9C3", fg: "#713F12", label: "RTO" },
+  DELIVERED: { bg: "#D1FAE5", fg: "#065F46", label: "DELIVERED" },
+};
+
+function OrderTypeBadge({ orderType }) {
+  const s = ORDER_TYPE_STYLE[orderType] || ORDER_TYPE_STYLE.DELIVERED;
+  return (
+    <span style={{ background: s.bg, color: s.fg, fontWeight: 700, fontSize: 11, padding: "2px 8px", borderRadius: 10, whiteSpace: "nowrap" }}>
+      {s.label}
+    </span>
+  );
+}
+
 // ── Main summary row (collapsible) ────────────────────────────────────────────
 function OrderRow({ item }) {
   const [expanded, setExpanded] = useState(false);
   const net = item.net_settlement;
-  const hasClaim = item.total_claims > 0;
+  const orderType = item.order_type || (item.total_claims > 0 ? "CLAIM" : null);
 
   return (
     <>
@@ -120,11 +136,9 @@ function OrderRow({ item }) {
           {item.product_name || "—"}
         </td>
         <td style={{ padding: "12px 8px" }}>
-          <StatusBadge status={item.latest_status} />
-          {hasClaim && (
-            <span style={{ marginLeft: 4, background: "#FEF3C7", color: "#92400E", fontWeight: 700, fontSize: 10, padding: "2px 6px", borderRadius: 10 }}>
-              CLAIM
-            </span>
+          <OrderTypeBadge orderType={orderType} />
+          {orderType !== "CLAIM" && item.latest_status && (
+            <span style={{ marginLeft: 4 }}><StatusBadge status={item.latest_status} /></span>
           )}
         </td>
         <td style={{ padding: "12px 8px", textAlign: "center" }}>
@@ -135,8 +149,8 @@ function OrderRow({ item }) {
         <td style={{ padding: "12px 12px", textAlign: "right", fontFamily: "monospace", fontWeight: 800, fontSize: 14, color: net < 0 ? C.red : net > 0 ? C.green : C.gray400 }}>
           {fmt(net)}
         </td>
-        <td style={{ padding: "12px 12px", textAlign: "right", fontFamily: "monospace", fontSize: 13, color: hasClaim ? C.amber : C.gray300, fontWeight: hasClaim ? 700 : 400 }}>
-          {hasClaim ? fmt(item.total_claims) : "—"}
+        <td style={{ padding: "12px 12px", textAlign: "right", fontFamily: "monospace", fontSize: 13, color: orderType === "CLAIM" ? C.amber : C.gray300, fontWeight: orderType === "CLAIM" ? 700 : 400 }}>
+          {orderType === "CLAIM" ? fmt(item.total_claims) : "—"}
         </td>
         <td style={{ padding: "12px 12px", textAlign: "right", fontFamily: "monospace", fontSize: 12, color: C.red }}>
           {fmt(item.total_commission)}
@@ -202,17 +216,17 @@ function Pagination({ page, total, pageSize, onChange }) {
 
 // ── Main Tab ──────────────────────────────────────────────────────────────────
 export function ReturnClaimsTab() {
-  const [months,       setMonths]       = useState([]);
-  const [mode,         setMode]         = useState("all");
-  const [selMonth,     setSelMonth]     = useState("");
-  const [custFrom,     setCustFrom]     = useState("");
-  const [custTo,       setCustTo]       = useState("");
-  const [activeRange,  setActiveRange]  = useState(null);
+  const [months, setMonths] = useState([]);
+  const [mode, setMode] = useState("all");
+  const [selMonth, setSelMonth] = useState("");
+  const [custFrom, setCustFrom] = useState("");
+  const [custTo, setCustTo] = useState("");
+  const [activeRange, setActiveRange] = useState(null);
   const [statusFilter, setStatusFilter] = useState("");
-  const [search,       setSearch]       = useState("");
-  const [page,         setPage]         = useState(1);
-  const [data,         setData]         = useState(null);
-  const [loading,      setLoading]      = useState(true);
+  const [search, setSearch] = useState("");
+  const [page, setPage] = useState(1);
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     fetch(`${API}/profit/available-months/`)
@@ -221,7 +235,7 @@ export function ReturnClaimsTab() {
         setMonths(ms);
         const target = ms[0] || null;
         if (target) { setMode("month"); setSelMonth(target); setActiveRange(monthToRange(target)); }
-        else         setActiveRange({});
+        else setActiveRange({});
       })
       .catch(() => setActiveRange({}));
   }, []);
@@ -237,7 +251,7 @@ export function ReturnClaimsTab() {
     if (queryKey === null) return;
     setLoading(true);
     const params = { ...activeRange, page, page_size: PAGE_SIZE };
-    if (search)       params.search = search;
+    if (search) params.search = search;
     if (statusFilter) params.status = statusFilter;
     fetch(`${API}/orders/return-claims/?${new URLSearchParams(params)}`)
       .then((r) => r.json())
@@ -246,8 +260,8 @@ export function ReturnClaimsTab() {
   }, [queryKey]);
 
   const filterLabel =
-    mode === "month"  ? fmtMonth(selMonth) :
-    mode === "custom" ? `${custFrom} → ${custTo}` : "All Time";
+    mode === "month" ? fmtMonth(selMonth) :
+      mode === "custom" ? `${custFrom} → ${custTo}` : "All Time";
 
   return (
     <Box sx={{ display: "flex", flexDirection: "column", gap: 2.5 }}>
@@ -264,10 +278,10 @@ export function ReturnClaimsTab() {
       {/* Shared filter bar */}
       <FilterBar
         months={months}
-        mode={mode}           setMode={setMode}
-        selectedMonth={selMonth}   setSelectedMonth={setSelMonth}
-        customFrom={custFrom}      setCustomFrom={setCustFrom}
-        customTo={custTo}          setCustomTo={setCustTo}
+        mode={mode} setMode={setMode}
+        selectedMonth={selMonth} setSelectedMonth={setSelMonth}
+        customFrom={custFrom} setCustomFrom={setCustFrom}
+        customTo={custTo} setCustomTo={setCustTo}
         onApply={(range) => setActiveRange(range)}
       />
 

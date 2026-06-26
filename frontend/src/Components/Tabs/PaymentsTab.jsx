@@ -143,22 +143,22 @@ const COLUMNS = [
 
 // ── Main tab ──────────────────────────────────────────────────────────────────
 export function PaymentsTab() {
-  const [data,         setData]         = useState([]);
-  const [total,        setTotal]        = useState(0);
-  const [page,         setPage]         = useState(1);
+  const [data, setData] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
   const [statusFilter, setStatusFilter] = useState("");
-  const [skuFilter,    setSkuFilter]    = useState("");
-  const [dateRange,    setDateRange]    = useState({ from: "", to: "" });
-  const [stats,        setStats]        = useState(null); // payment_stats from dashboard
+  const [skuFilter, setSkuFilter] = useState("");
+  const [dateRange, setDateRange] = useState({ from: "", to: "" });
+  const [stats, setStats] = useState(null); // payment_stats from dashboard
 
   // Paginated rows
   const load = useCallback(async () => {
     const params = new URLSearchParams({
       page, page_size: PAGE_SIZE,
       ...(statusFilter && { status: statusFilter }),
-      ...(skuFilter    && { sku: skuFilter }),
+      ...(skuFilter && { sku: skuFilter }),
       ...(dateRange.from && { date_from: dateRange.from }),
-      ...(dateRange.to   && { date_to: dateRange.to }),
+      ...(dateRange.to && { date_to: dateRange.to }),
     });
     const r = await fetch(`${API}/orders/?${params}`);
     if (r.ok) { const d = await r.json(); setData(d.results); setTotal(d.total); }
@@ -168,7 +168,7 @@ export function PaymentsTab() {
   const loadStats = useCallback(async () => {
     const params = new URLSearchParams({
       ...(dateRange.from && { date_from: dateRange.from }),
-      ...(dateRange.to   && { date_to: dateRange.to }),
+      ...(dateRange.to && { date_to: dateRange.to }),
     });
     const r = await fetch(`${API}/dashboard/?${params}`);
     if (r.ok) { const d = await r.json(); setStats(d.payment_stats); }
@@ -180,7 +180,7 @@ export function PaymentsTab() {
   const handleDateChange = (range) => { setDateRange(range); setPage(1); };
   const handlePaginationModelChange = (model) => setPage(model.page + 1);
 
-  const netSettle  = Number(stats?.total_settlement ?? 0);
+  const netSettle = Number(stats?.total_settlement ?? 0);
   const commission = Math.abs(Number(stats?.total_commission ?? 0));
 
   return (
@@ -195,10 +195,10 @@ export function PaymentsTab() {
 
       {/* ── KPI cards ─────────────────────────────────────────────────────── */}
       <Box sx={{ display: "flex", gap: 2, flexWrap: "wrap" }}>
-        <KPICard label="Total Payments" value={stats?.total ?? total} color={C.blue}  sub="payment records" />
-        <KPICard label="Total Sale ₹"    value={stats?.total_sale}    isAmount color={C.gray800} sub="gross sale amount" />
+        <KPICard label="Total Payments" value={stats?.total ?? total} color={C.blue} sub="payment records" />
+        <KPICard label="Total Sale ₹" value={stats?.total_sale} isAmount color={C.gray800} sub="gross sale amount" />
         <KPICard
-          label="Net Settlement ₹"  value={stats?.total_settlement} isAmount
+          label="Net Settlement ₹" value={stats?.total_settlement} isAmount
           color={netSettle >= 0 ? C.green : C.red}
           bg={netSettle >= 0 ? "#ECFDF5" : "#FFF1F2"}
           sub="after all deductions"
@@ -207,13 +207,9 @@ export function PaymentsTab() {
       </Box>
 
       {/* ── Filters ───────────────────────────────────────────────────────── */}
-      <Card variant="outlined" sx={{ borderRadius: 3 }}>
+      <Card variant="outlined" sx={{ borderRadius: 3, border: "1px solid red", zIndex: 1 }}>
         <CardContent sx={{ py: 1.5, px: 1.75, "&:last-child": { pb: 1.5 } }}>
-          <Stack direction="row" flexWrap="wrap" alignItems="center" gap={1.25}>
-            <DateRangePicker from={dateRange.from} to={dateRange.to} onChange={handleDateChange} />
-
-            <Box sx={{ width: 1, height: 28, bgcolor: C.gray200 }} />
-
+          <Box direction="row" flexWrap="wrap" alignItems="center" gap={1.25} sx={{ display: "flex", gap: 2 }}>
             <TextField
               size="small"
               value={skuFilter}
@@ -228,15 +224,12 @@ export function PaymentsTab() {
                 ),
               }}
             />
-
-            <Box sx={{ width: 1, height: 28, bgcolor: C.gray200 }} />
-
             <ToggleButtonGroup
               exclusive size="small" value={statusFilter} sx={{ flexWrap: "wrap", gap: 0.5 }}
               onChange={(_, val) => { if (val !== null) { setStatusFilter(val); setPage(1); } }}
             >
               {["", ...PAYMENT_STATUSES].map((s) => {
-                const isActive  = statusFilter === s;
+                const isActive = statusFilter === s;
                 const baseColor = STATUS_COLORS[s] || C.gray700;
                 return (
                   <ToggleButton key={s || "ALL"} value={s} sx={{
@@ -255,7 +248,7 @@ export function PaymentsTab() {
                 );
               })}
             </ToggleButtonGroup>
-          </Stack>
+          </Box>
         </CardContent>
       </Card>
 
