@@ -1,299 +1,410 @@
-import React, { useCallback, useEffect, useState } from "react";
-import {
-  Box, Card, CardContent, Chip, Paper, Stack,
-  TextField, ToggleButton, ToggleButtonGroup, Typography,
-} from "@mui/material";
-import InputAdornment from "@mui/material/InputAdornment";
+import React, { useEffect, useRef, useState } from "react";
+import { API, C, S, btn, Tag } from "../../App";
+import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
+import ExpandLessIcon from "@mui/icons-material/ExpandLess";
 import SearchIcon from "@mui/icons-material/Search";
-import { DataGrid } from "@mui/x-data-grid";
+import { CircularProgress } from "@mui/material";
 
-import { API, C, fmt, STATUS_COLORS } from "../../App";
-import { DateRangePicker } from "../shared/DateRangePicker";
-import { PAGE_SIZE } from "../../lib/helper";
+// ── constants ─────────────────────────────────────────────────────────────────
 
-const PAYMENT_STATUSES = ["DELIVERED", "RTO", "RETURN", "PENDING", "CANCELLED"];
+const STATUS_META = {
+  DELIVERED: { label: "Delivered", bg: "#059669", light: "#D1FAE5", border: "#6EE7B7" },
+  RETURN:    { label: "Returned",  bg: "#E11D48", light: "#FFF1F2", border: "#FECDD3" },
+  RTO:       { label: "RTO",       bg: "#7C3AED", light: "#F5F3FF", border: "#DDD6FE" },
+  EXCHANGE:  { label: "Exchange",  bg: "#2563EB", light: "#EFF6FF", border: "#BFDBFE" },
+  CLAIM:     { label: "Claim",     bg: "#D97706", light: "#FFFBEB", border: "#FDE68A" },
+  SHIPPED:   { label: "Shipped",   bg: "#64748B", light: "#F1F5F9", border: "#CBD5E1" },
+  UNKNOWN:   { label: "Unknown",   bg: "#94A3B8", light: "#F8FAFC", border: "#E2E8F0" },
+};
 
-// ── Status chip ───────────────────────────────────────────────────────────────
-function StatusChip({ status }) {
-  const s = (status || "").toUpperCase();
-  const color = STATUS_COLORS[s] || C.gray400;
-  return (
-    <Chip
-      label={status || "—"}
-      size="small"
-      sx={{ bgcolor: color, color: "#fff", fontWeight: 700, fontSize: 11, height: 22, borderRadius: "11px" }}
-    />
-  );
+const ALL_STATUSES = ["DELIVERED", "RETURN", "RTO", "EXCHANGE", "CLAIM", "SHIPPED", "UNKNOWN"];
+const PAGE_SIZE    = 50;
+
+const fmt2 = (n) =>
+  n === null || n === undefined
+    ? "—"
+    : `₹${Number(n).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+function fmtMonth(m) {
+  if (!m) return "All time";
+  const [y, mo] = m.split("-");
+  return new Date(Number(y), Number(mo) - 1, 1)
+    .toLocaleString("en-IN", { month: "short", year: "numeric" });
 }
 
-// ── KPI card ──────────────────────────────────────────────────────────────────
-function KPICard({ label, value, isAmount, color, bg, sub }) {
-  const displayValue = isAmount ? fmt(value) : (value ?? 0).toLocaleString("en-IN");
-  const numVal = Number(value ?? 0);
-  const resolvedColor = color ?? (numVal < 0 ? C.red : numVal > 0 ? C.green : C.gray800);
+function StatusBadge({ status }) {
+  const m = STATUS_META[status] || STATUS_META.UNKNOWN;
   return (
-    <Paper variant="outlined" sx={{
-      flex: "1 1 170px", p: "16px 20px", borderRadius: 3,
-      borderTop: `3px solid ${resolvedColor}`,
-      background: bg || "#fff",
-      position: "relative", overflow: "hidden",
+    <span style={{
+      display: "inline-block", padding: "3px 10px", borderRadius: 20,
+      background: m.light, color: m.bg, border: `1px solid ${m.border}`,
+      fontWeight: 700, fontSize: 11, letterSpacing: "0.04em",
     }}>
-      <Box sx={{ position: "absolute", right: -8, top: -8, width: 52, height: 52, borderRadius: "50%", bgcolor: resolvedColor, opacity: 0.07 }} />
-      <Typography sx={{ fontSize: 11, fontWeight: 700, color: "text.secondary", textTransform: "uppercase", letterSpacing: "0.07em", mb: 0.75 }}>
-        {label}
-      </Typography>
-      <Typography sx={{ fontSize: isAmount ? 22 : 28, fontWeight: 800, fontFamily: "monospace", color: resolvedColor, lineHeight: 1.1 }}>
-        {displayValue}
-      </Typography>
-      {sub && (
-        <Typography variant="caption" sx={{ color: "text.disabled", mt: 0.5, display: "block" }}>{sub}</Typography>
-      )}
-    </Paper>
+      {m.label}
+    </span>
   );
 }
 
-// ── DataGrid columns ──────────────────────────────────────────────────────────
-const COLUMNS = [
-  {
-    field: "sub_order_no", headerName: "Sub Order No", width: 158,
-    renderCell: ({ value }) => (
-      <Typography sx={{ fontFamily: "monospace", fontSize: 11, color: C.blue, fontWeight: 600, bgcolor: C.blueLight, px: 0.75, py: 0.25, borderRadius: 1 }}>
-        {value}
-      </Typography>
-    ),
-  },
-  {
-    field: "order_date", headerName: "Order Date", width: 110,
-    valueFormatter: (value) => (value || "").slice(0, 10),
-    renderCell: ({ value }) => (
-      <Typography variant="body2" sx={{ color: C.gray500, fontSize: 12 }}>{(value || "").slice(0, 10) || "—"}</Typography>
-    ),
-  },
-  {
-    field: "supplier_sku", headerName: "SKU", width: 130,
-    renderCell: ({ value }) => value ? (
-      <Chip label={value} size="small" sx={{ fontFamily: "monospace", fontWeight: 600, fontSize: 11, bgcolor: C.orangeLight, color: C.orange, border: `1px solid ${C.orangeBorder}` }} />
-    ) : (
-      <Typography variant="caption" sx={{ color: C.gray300 }}>—</Typography>
-    ),
-  },
-  {
-    field: "product_name", headerName: "Product Name", flex: 1, minWidth: 160,
-    renderCell: ({ value }) => (
-      <Typography variant="body2" noWrap title={value || ""} sx={{ color: C.gray600, fontSize: 12 }}>{value || "—"}</Typography>
-    ),
-  },
-  {
-    field: "live_order_status", headerName: "Status", width: 120,
-    renderCell: ({ value }) => <StatusChip status={value} />,
-  },
-  {
-    field: "quantity", headerName: "Qty", width: 60, align: "center", headerAlign: "center",
-    renderCell: ({ value }) => (
-      <Typography sx={{ fontFamily: "monospace", fontWeight: 600, fontSize: 13 }}>{value ?? 1}</Typography>
-    ),
-  },
-  {
-    field: "total_sale_amount", headerName: "Sale ₹", width: 120, align: "right", headerAlign: "right",
-    renderCell: ({ value }) => (
-      <Typography sx={{ fontFamily: "monospace", fontSize: 13, color: C.gray700 }}>{fmt(value)}</Typography>
-    ),
-  },
-  {
-    field: "final_settlement_amount", headerName: "Settlement ₹", width: 130, align: "right", headerAlign: "right",
-    renderCell: ({ value }) => {
-      const n = Number(value || 0);
-      return (
-        <Typography sx={{ fontFamily: "monospace", fontWeight: 700, fontSize: 13, color: n < 0 ? C.red : C.green }}>
-          {fmt(n)}
-        </Typography>
-      );
-    },
-  },
-  {
-    field: "meesho_commission_incl_gst", headerName: "Commission", width: 120, align: "right", headerAlign: "right",
-    renderCell: ({ value }) => (
-      <Typography sx={{ fontFamily: "monospace", fontSize: 13, color: C.orange }}>{fmt(value)}</Typography>
-    ),
-  },
-  {
-    field: "claims", headerName: "Claims ₹", width: 100, align: "right", headerAlign: "right",
-    renderCell: ({ value }) => {
-      const n = Number(value || 0);
-      return (
-        <Typography sx={{ fontFamily: "monospace", fontSize: 13, color: n > 0 ? C.amber : C.gray300, fontWeight: n > 0 ? 700 : 400 }}>
-          {n > 0 ? fmt(n) : "—"}
-        </Typography>
-      );
-    },
-  },
-  {
-    field: "tcs", headerName: "TCS", width: 90, align: "right", headerAlign: "right",
-    renderCell: ({ value }) => (
-      <Typography sx={{ fontFamily: "monospace", fontSize: 12, color: C.gray400 }}>{fmt(value)}</Typography>
-    ),
-  },
-  {
-    field: "tds", headerName: "TDS", width: 90, align: "right", headerAlign: "right",
-    renderCell: ({ value }) => (
-      <Typography sx={{ fontFamily: "monospace", fontSize: 12, color: C.gray400 }}>{fmt(value)}</Typography>
-    ),
-  },
-];
+function SettlementAmt({ value }) {
+  const n = Number(value || 0);
+  return (
+    <span style={{
+      fontFamily: "monospace", fontWeight: 700, fontSize: 13,
+      color: n < 0 ? C.red : n > 0 ? C.green : C.gray400,
+    }}>
+      {n >= 0 ? "+" : ""}{fmt2(n)}
+    </span>
+  );
+}
 
-// ── Main tab ──────────────────────────────────────────────────────────────────
+function KpiCard({ label, value, isAmount, color, bg, sub }) {
+  return (
+    <div style={{
+      flex: "1 1 150px", padding: "14px 18px", borderRadius: 14,
+      background: bg || C.white, border: `1.5px solid ${C.gray200}`,
+      borderTop: `3px solid ${color || C.orange}`,
+    }}>
+      <div style={{ fontSize: 10, fontWeight: 700, color: C.gray400, textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 5 }}>{label}</div>
+      <div style={{ fontSize: isAmount ? 17 : 24, fontWeight: 800, fontFamily: "monospace", color: color || C.gray800, lineHeight: 1.1 }}>
+        {isAmount ? fmt2(value) : (value ?? 0).toLocaleString("en-IN")}
+      </div>
+      {sub && <div style={{ fontSize: 11, color: C.gray400, marginTop: 3 }}>{sub}</div>}
+    </div>
+  );
+}
+
+function ExpandedRows({ rows }) {
+  if (!rows || rows.length === 0) return (
+    <tr><td colSpan={7} style={{ padding: "14px 24px", color: C.gray400, fontSize: 12, fontStyle: "italic" }}>No detail rows.</td></tr>
+  );
+  return rows.map((r, i) => {
+    const status = (r.live_order_status || "").toUpperCase();
+    const m = STATUS_META[status];
+    return (
+      <tr key={r.id ?? i} style={{ background: "#F0F9FF", borderBottom: `1px solid ${C.gray100}` }}>
+        <td style={{ ...S.td, paddingLeft: 40, fontSize: 11, color: C.gray400, width: 32 }}>↳</td>
+        <td style={{ ...S.td }}>
+          {m
+            ? <span style={{ fontSize: 11, fontWeight: 600, color: m.bg, background: m.light, padding: "2px 8px", borderRadius: 6, border: `1px solid ${m.border}` }}>{r.live_order_status || "—"}</span>
+            : <span style={{ color: C.gray400, fontSize: 11 }}>{r.live_order_status || "—"}</span>}
+        </td>
+        <td style={{ ...S.td, color: C.gray500, fontSize: 11 }}>{r.payment_date || "—"}</td>
+        <td style={{ ...S.td, fontFamily: "monospace", fontSize: 12, color: C.gray600 }}>{fmt2(r.total_sale_amount)}</td>
+        <td style={{ ...S.td, fontFamily: "monospace", fontSize: 12 }}>
+          <span style={{ color: Number(r.final_settlement_amount) < 0 ? C.red : C.green }}>
+            {fmt2(r.final_settlement_amount)}
+          </span>
+        </td>
+        <td style={{ ...S.td, fontFamily: "monospace", fontSize: 11, color: C.orange }}>{fmt2(r.meesho_commission_incl_gst)}</td>
+        <td style={{ ...S.td }}>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            {r.tcs  ? <span style={{ fontSize: 10, color: C.gray400 }}>TCS {fmt2(r.tcs)}</span>   : null}
+            {r.tds  ? <span style={{ fontSize: 10, color: C.gray400 }}>TDS {fmt2(r.tds)}</span>   : null}
+            {r.claims > 0 ? <span style={{ fontSize: 10, fontWeight: 700, color: "#D97706" }}>Claim {fmt2(r.claims)}</span> : null}
+            {r.return_shipping_charge ? <span style={{ fontSize: 10, color: C.red }}>RetShip {fmt2(r.return_shipping_charge)}</span> : null}
+          </div>
+        </td>
+      </tr>
+    );
+  });
+}
+
+// ── Main ──────────────────────────────────────────────────────────────────────
 export function PaymentsTab() {
-  const [data, setData] = useState([]);
-  const [total, setTotal] = useState(0);
-  const [page, setPage] = useState(1);
-  const [statusFilter, setStatusFilter] = useState("");
-  const [skuFilter, setSkuFilter] = useState("");
-  const [dateRange, setDateRange] = useState({ from: "", to: "" });
-  const [stats, setStats] = useState(null); // payment_stats from dashboard
+  const [months, setMonths]   = useState([]);
+  // All filter+pagination in ONE object — changes are atomic, no stale page issues
+  const [query, setQuery]     = useState({ month: null, status: "", search: "", page: 1 });
 
-  // Paginated rows
-  const load = useCallback(async () => {
-    const params = new URLSearchParams({
-      page, page_size: PAGE_SIZE,
-      ...(statusFilter && { status: statusFilter }),
-      ...(skuFilter && { sku: skuFilter }),
-      ...(dateRange.from && { date_from: dateRange.from }),
-      ...(dateRange.to && { date_to: dateRange.to }),
-    });
-    const r = await fetch(`${API}/orders/?${params}`);
-    if (r.ok) { const d = await r.json(); setData(d.results); setTotal(d.total); }
-  }, [page, statusFilter, skuFilter, dateRange]);
+  const [groups, setGroups]   = useState([]);
+  const [total, setTotal]     = useState(0);
+  const [kpi, setKpi]         = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [expanded, setExpanded] = useState(new Set());
 
-  // Aggregate stats (always matches the date range, ignores pagination)
-  const loadStats = useCallback(async () => {
-    const params = new URLSearchParams({
-      ...(dateRange.from && { date_from: dateRange.from }),
-      ...(dateRange.to && { date_to: dateRange.to }),
-    });
-    const r = await fetch(`${API}/dashboard/?${params}`);
-    if (r.ok) { const d = await r.json(); setStats(d.payment_stats); }
-  }, [dateRange]);
+  // Abort controller ref — cancel in-flight requests when query changes
+  const abortRef = useRef(null);
 
-  useEffect(() => { load(); }, [load]);
-  useEffect(() => { loadStats(); }, [loadStats]);
+  // Load available months once, then set the initial month
+  useEffect(() => {
+    fetch(`${API}/profit/available-months/`)
+      .then(r => r.json())
+      .then(ms => {
+        setMonths(ms || []);
+        // Set initial month atomically — no separate page reset needed
+        if (ms && ms.length > 0) {
+          setQuery(q => ({ ...q, month: ms[0], page: 1 }));
+        }
+      })
+      .catch(() => {});
+  }, []);
 
-  const handleDateChange = (range) => { setDateRange(range); setPage(1); };
-  const handlePaginationModelChange = (model) => setPage(model.page + 1);
+  // Single effect — fires whenever query object changes (one render, one fetch)
+  useEffect(() => {
+    // Cancel previous in-flight request
+    if (abortRef.current) abortRef.current.abort();
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
 
-  const netSettle = Number(stats?.total_settlement ?? 0);
-  const commission = Math.abs(Number(stats?.total_commission ?? 0));
+    setLoading(true);
+    setExpanded(new Set()); // collapse rows on filter change
+
+    const p = new URLSearchParams({ page: query.page, page_size: PAGE_SIZE });
+    if (query.month)  p.set("month",  query.month);
+    if (query.status) p.set("status", query.status);
+
+    fetch(`${API}/orders/grouped/?${p}`, { signal: ctrl.signal })
+      .then(r => r.json())
+      .then(data => {
+        let gs = data.groups || [];
+        if (query.search.trim()) {
+          const q = query.search.trim().toLowerCase();
+          gs = gs.filter(g =>
+            (g.sub_order_no  || "").toLowerCase().includes(q) ||
+            (g.sku           || "").toLowerCase().includes(q) ||
+            (g.product_name  || "").toLowerCase().includes(q)
+          );
+        }
+        setGroups(gs);
+        setTotal(data.total  || 0);
+        setKpi(data.kpi      || null);
+      })
+      .catch(err => { if (err.name !== "AbortError") console.error(err); })
+      .finally(() => { if (!ctrl.signal.aborted) setLoading(false); });
+
+    return () => ctrl.abort();
+  }, [query]);
+
+  // Helpers that reset page to 1 atomically when filter changes
+  const setMonth  = (m) => setQuery(q => ({ ...q, month:  m, page: 1 }));
+  const setStatus = (s) => setQuery(q => ({ ...q, status: s, page: 1 }));
+  const setSearch = (s) => setQuery(q => ({ ...q, search: s, page: 1 }));
+  const setPage   = (p) => setQuery(q => ({ ...q, page:   p }));
+
+  const toggleExpand = (id) => setExpanded(prev => {
+    const s = new Set(prev); s.has(id) ? s.delete(id) : s.add(id); return s;
+  });
+
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const byStatus   = kpi?.by_status || [];
 
   return (
-    <Stack spacing={2.5}>
-      {/* ── Header ────────────────────────────────────────────────────────── */}
-      <Box>
-        <Typography variant="h6" sx={{ fontWeight: 800, color: C.gray800, mb: 0.25 }}>Payments</Typography>
-        <Typography variant="body2" sx={{ color: C.gray400 }}>
-          Settled orders with Meesho payment data — commission, TCS/TDS, claims and net settlement.
-        </Typography>
-      </Box>
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
 
-      {/* ── KPI cards ─────────────────────────────────────────────────────── */}
-      <Box sx={{ display: "flex", gap: 2, flexWrap: "wrap" }}>
-        <KPICard label="Total Payments" value={stats?.total ?? total} color={C.blue} sub="payment records" />
-        <KPICard label="Total Sale ₹" value={stats?.total_sale} isAmount color={C.gray800} sub="gross sale amount" />
-        <KPICard
-          label="Net Settlement ₹" value={stats?.total_settlement} isAmount
-          color={netSettle >= 0 ? C.green : C.red}
-          bg={netSettle >= 0 ? "#ECFDF5" : "#FFF1F2"}
-          sub="after all deductions"
-        />
-        <KPICard label="Commission ₹" value={stats?.total_commission} isAmount color={C.orange} sub="incl. GST" />
-      </Box>
+      {/* ── Header ── */}
+      <div>
+        <h1 style={{ fontSize: 20, fontWeight: 800, color: C.gray800, margin: 0 }}>Payments</h1>
+        <p style={{ color: C.gray400, fontSize: 13, margin: "4px 0 0" }}>
+          Orders grouped by sub-order number · classified by effective outcome
+        </p>
+      </div>
 
-      {/* ── Filters ───────────────────────────────────────────────────────── */}
-      <Card variant="outlined" sx={{ borderRadius: 3, border: "1px solid red", zIndex: 1 }}>
-        <CardContent sx={{ py: 1.5, px: 1.75, "&:last-child": { pb: 1.5 } }}>
-          <Box direction="row" flexWrap="wrap" alignItems="center" gap={1.25} sx={{ display: "flex", gap: 2 }}>
-            <TextField
-              size="small"
-              value={skuFilter}
-              onChange={(e) => { setSkuFilter(e.target.value); setPage(1); }}
-              placeholder="Filter by SKU…"
-              sx={{ width: 180, "& .MuiInputBase-input": { fontSize: 12 } }}
-              InputProps={{
-                startAdornment: (
-                  <InputAdornment position="start">
-                    <SearchIcon fontSize="small" sx={{ color: "text.disabled", fontSize: 16 }} />
-                  </InputAdornment>
-                ),
-              }}
-            />
-            <ToggleButtonGroup
-              exclusive size="small" value={statusFilter} sx={{ flexWrap: "wrap", gap: 0.5 }}
-              onChange={(_, val) => { if (val !== null) { setStatusFilter(val); setPage(1); } }}
-            >
-              {["", ...PAYMENT_STATUSES].map((s) => {
-                const isActive = statusFilter === s;
-                const baseColor = STATUS_COLORS[s] || C.gray700;
-                return (
-                  <ToggleButton key={s || "ALL"} value={s} sx={{
-                    px: 1.5, py: 0.5, fontSize: 12, fontWeight: isActive ? 700 : 400,
-                    borderRadius: "20px !important",
-                    border: `1px solid ${isActive ? baseColor : C.gray300} !important`,
-                    color: isActive ? "#fff" : C.gray600,
-                    bgcolor: isActive ? baseColor : C.white,
-                    textTransform: "none", lineHeight: 1.4, minWidth: "unset",
-                    "&.Mui-selected": { bgcolor: baseColor, color: "#fff", "&:hover": { bgcolor: baseColor, opacity: 0.9 } },
-                    "&:hover": { bgcolor: isActive ? baseColor : C.gray100, opacity: 0.92 },
-                    transition: "all 0.15s",
-                  }}>
-                    {s || "All"}
-                  </ToggleButton>
-                );
-              })}
-            </ToggleButtonGroup>
-          </Box>
-        </CardContent>
-      </Card>
+      {/* ── Month selector ── */}
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+        <button
+          onClick={() => setMonth(null)}
+          style={{ ...btn(query.month === null ? "primary" : "ghost", "sm"), borderRadius: 20, padding: "6px 14px", fontSize: 12 }}
+        >
+          All time
+        </button>
+        {months.map(m => (
+          <button
+            key={m}
+            onClick={() => setMonth(m)}
+            style={{ ...btn(query.month === m ? "primary" : "ghost", "sm"), borderRadius: 20, padding: "6px 14px", fontSize: 12 }}
+          >
+            {fmtMonth(m)}
+          </button>
+        ))}
+      </div>
 
-      {/* ── Data Grid ─────────────────────────────────────────────────────── */}
-      <Paper elevation={0} sx={{ background: C.white, border: `1px solid ${C.border}`, borderRadius: 3, overflow: "hidden" }}>
-        <Box sx={{ px: 2.5, py: 1.5, borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center", gap: 1.5 }}>
-          <Typography variant="subtitle2" fontWeight={700} color={C.gray800}>
-            Payment Records
-          </Typography>
-          <Chip
-            label={total.toLocaleString("en-IN")}
-            size="small"
-            sx={{ bgcolor: C.gray100, color: C.gray500, fontWeight: 700, fontSize: 11, border: `1px solid ${C.gray200}` }}
+      {/* ── KPI cards ── */}
+      {kpi && (
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+          <KpiCard
+            label="Total Orders"
+            value={kpi.total_groups}
+            color={C.blue}
+            sub={query.month ? fmtMonth(query.month) : "all time"}
           />
-          <Typography variant="caption" sx={{ color: C.gray400, ml: "auto" }}>
-            Showing page {page} · {PAGE_SIZE} per page
-          </Typography>
-        </Box>
+          <KpiCard
+            label="Net Settlement"
+            value={kpi.total_settlement}
+            isAmount
+            color={kpi.total_settlement >= 0 ? C.green : C.red}
+            bg={kpi.total_settlement >= 0 ? "#ECFDF5" : "#FFF1F2"}
+            sub="after deductions"
+          />
+          {byStatus.map(s => {
+            const m = STATUS_META[s.status] || STATUS_META.UNKNOWN;
+            return (
+              <KpiCard
+                key={s.status}
+                label={m.label}
+                value={s.count}
+                color={m.bg}
+                bg={m.light}
+                sub={fmt2(s.settlement)}
+              />
+            );
+          })}
+        </div>
+      )}
 
-        <DataGrid
-          rows={data}
-          columns={COLUMNS}
-          getRowId={(row) => row.sub_order_no}
-          rowHeight={52}
-          disableRowSelectionOnClick
-          paginationMode="server"
-          rowCount={total}
-          paginationModel={{ page: page - 1, pageSize: PAGE_SIZE }}
-          onPaginationModelChange={handlePaginationModelChange}
-          pageSizeOptions={[PAGE_SIZE]}
-          localeText={{ noRowsLabel: "No payment records found" }}
-          sx={{
-            border: 0,
-            fontSize: 13,
-            "& .MuiDataGrid-columnHeaders": {
-              bgcolor: C.gray50,
-              borderBottom: `1px solid ${C.border}`,
-              "& .MuiDataGrid-columnHeaderTitle": { fontSize: 11, fontWeight: 700, color: C.gray500, textTransform: "uppercase", letterSpacing: "0.06em" },
-            },
-            "& .MuiDataGrid-row:hover": { bgcolor: "#F0F7FF" },
-            "& .MuiDataGrid-cell": { borderBottom: `1px solid ${C.gray100}`, color: C.gray700, display: "flex", alignItems: "center" },
-            "& .MuiDataGrid-footerContainer": { borderTop: `1px solid ${C.gray100}` },
-          }}
-        />
-      </Paper>
-    </Stack>
+      {/* ── Filters row ── */}
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+        {/* Status pills */}
+        <button
+          onClick={() => setStatus("")}
+          style={{ ...btn(query.status === "" ? "primary" : "ghost", "sm"), borderRadius: 20, padding: "5px 14px", fontSize: 12 }}
+        >
+          All
+        </button>
+        {ALL_STATUSES.map(s => {
+          const m = STATUS_META[s];
+          const active = query.status === s;
+          return (
+            <button key={s} onClick={() => setStatus(s)} style={{
+              padding: "5px 14px", borderRadius: 20, fontSize: 12,
+              fontWeight: active ? 700 : 500, cursor: "pointer", fontFamily: "inherit",
+              background: active ? m.bg : m.light, color: active ? "#fff" : m.bg,
+              border: `1px solid ${active ? m.bg : m.border}`, transition: "all 0.15s",
+            }}>
+              {m.label}
+            </button>
+          );
+        })}
+
+        {/* Search */}
+        <div style={{ position: "relative", marginLeft: "auto", minWidth: 220 }}>
+          <SearchIcon style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", fontSize: 16, color: C.gray400 }} />
+          <input
+            value={query.search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Sub-order / SKU / product…"
+            style={{ ...S.inp, paddingLeft: 32, fontSize: 12 }}
+          />
+        </div>
+      </div>
+
+      {/* ── Table ── */}
+      <div style={{ ...S.card, padding: 0, overflow: "hidden" }}>
+        <div style={{ padding: "12px 20px", borderBottom: `1px solid ${C.gray100}`, display: "flex", alignItems: "center", gap: 10 }}>
+          <span style={{ fontWeight: 700, fontSize: 13, color: C.gray800 }}>Order Groups</span>
+          <span style={{ fontSize: 12, color: C.gray400, background: C.gray100, borderRadius: 10, padding: "2px 8px", fontWeight: 600 }}>
+            {loading ? "…" : total.toLocaleString("en-IN")}
+          </span>
+          <span style={{ marginLeft: "auto", fontSize: 12, color: C.gray400 }}>
+            {!loading && `Page ${query.page} / ${totalPages}`}
+          </span>
+        </div>
+
+        {loading ? (
+          <div style={{ display: "flex", justifyContent: "center", padding: 60 }}>
+            <CircularProgress style={{ color: C.orange }} />
+          </div>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+              <thead>
+                <tr>
+                  {["", "Sub-Order No", "Status", "SKU / Product", "Order Date", "Settlement", "Rows"].map(h => (
+                    <th key={h} style={{ ...S.th, fontSize: 10, whiteSpace: "nowrap" }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {groups.length === 0 ? (
+                  <tr><td colSpan={7} style={{ ...S.td, textAlign: "center", padding: 56, color: C.gray400 }}>
+                    No payment groups found for the selected filters.
+                  </td></tr>
+                ) : groups.map((g, idx) => {
+                  const isOpen = expanded.has(g.sub_order_no);
+                  const rowBg  = idx % 2 === 0 ? C.white : C.gray50;
+                  return (
+                    <React.Fragment key={g.sub_order_no}>
+                      <tr style={{ background: rowBg, borderBottom: isOpen ? "none" : `1px solid ${C.gray100}` }}>
+                        {/* Expand toggle */}
+                        <td style={{ ...S.td, width: 40, textAlign: "center" }}>
+                          <button
+                            onClick={() => toggleExpand(g.sub_order_no)}
+                            style={{ background: "none", border: "none", cursor: "pointer", color: C.orange, padding: 4, display: "flex", alignItems: "center" }}
+                          >
+                            {isOpen ? <ExpandLessIcon style={{ fontSize: 18 }} /> : <ExpandMoreIcon style={{ fontSize: 18 }} />}
+                          </button>
+                        </td>
+                        {/* Sub-order no */}
+                        <td style={{ ...S.td }}>
+                          <span style={{ fontFamily: "monospace", fontWeight: 700, fontSize: 12, color: C.blue, background: "#EFF6FF", padding: "2px 7px", borderRadius: 5 }}>
+                            {g.sub_order_no}
+                          </span>
+                        </td>
+                        {/* Status */}
+                        <td style={{ ...S.td }}><StatusBadge status={g.status} /></td>
+                        {/* SKU + Product */}
+                        <td style={{ ...S.td, maxWidth: 220 }}>
+                          {g.sku && (
+                            <span style={{ fontSize: 11, fontFamily: "monospace", color: C.orange, background: C.orangeLight, padding: "1px 6px", borderRadius: 4, display: "inline-block", marginBottom: 3 }}>
+                              {g.sku}
+                            </span>
+                          )}
+                          <div style={{ fontSize: 11, color: C.gray600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 210 }} title={g.product_name}>
+                            {g.product_name || "—"}
+                          </div>
+                        </td>
+                        {/* Order date */}
+                        <td style={{ ...S.td, color: C.gray500, fontSize: 11, whiteSpace: "nowrap" }}>{g.order_date || "—"}</td>
+                        {/* Settlement */}
+                        <td style={{ ...S.td, textAlign: "right" }}><SettlementAmt value={g.settlement} /></td>
+                        {/* Row count */}
+                        <td style={{ ...S.td, textAlign: "center" }}>
+                          <Tag variant={g.row_count > 1 ? "amber" : "gray"}>{g.row_count}</Tag>
+                        </td>
+                      </tr>
+
+                      {/* Expanded rows */}
+                      {isOpen && (
+                        <>
+                          <tr style={{ background: "#F0F9FF" }}>
+                            <td colSpan={7} style={{ padding: 0 }}>
+                              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+                                <thead>
+                                  <tr style={{ background: "#E0F2FE" }}>
+                                    {["", "Status", "Payment Date", "Sale ₹", "Settlement ₹", "Commission", "Misc"].map(h => (
+                                      <th key={h} style={{ ...S.th, fontSize: 10, padding: "6px 12px" }}>{h}</th>
+                                    ))}
+                                  </tr>
+                                </thead>
+                                <tbody><ExpandedRows rows={g.rows} /></tbody>
+                              </table>
+                            </td>
+                          </tr>
+                          <tr style={{ height: 4, background: C.gray100 }}><td colSpan={7} /></tr>
+                        </>
+                      )}
+                    </React.Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {/* Pagination */}
+        {!loading && total > PAGE_SIZE && (
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 20px", borderTop: `1px solid ${C.gray100}` }}>
+            <span style={{ fontSize: 12, color: C.gray400 }}>
+              {Math.min((query.page - 1) * PAGE_SIZE + 1, total)}–{Math.min(query.page * PAGE_SIZE, total)} of {total.toLocaleString("en-IN")}
+            </span>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={() => setPage(query.page - 1)} disabled={query.page === 1} style={{ ...btn("ghost", "sm"), opacity: query.page === 1 ? 0.4 : 1 }}>← Prev</button>
+              <span style={{ fontSize: 12, color: C.gray500, alignSelf: "center", padding: "0 4px" }}>
+                {query.page} / {totalPages}
+              </span>
+              <button onClick={() => setPage(query.page + 1)} disabled={query.page >= totalPages} style={{ ...btn("ghost", "sm"), opacity: query.page >= totalPages ? 0.4 : 1 }}>Next →</button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
   );
 }

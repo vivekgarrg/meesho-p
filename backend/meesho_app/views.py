@@ -395,11 +395,26 @@ def _pick_settlement_rows(c):
     # return c["non_shipped"], False
 
 
-def _sum_settlement(rows):
+def _sum_settlement(rows, include_shipped=False):
+    """
+    Sum final_settlement_amount across rows.
+
+    SHIPPED rows represent an advance/provisional payment.  They should be
+    included only when the order has *progressed past shipping* (i.e. has a
+    DELIVERED / RETURN / RTO / EXCHANGE row), because in that case both the
+    advance credit (SHIPPED row) and the final adjustment (e.g. RETURNED row)
+    are real money movements that must both be counted.
+
+    For orders still sitting in SHIPPED state (no final row yet) the SHIPPED
+    amount is provisional and is excluded to avoid double-counting when the
+    final row arrives later.
+    """
     return sum(
         Decimal(r.final_settlement_amount or 0)
         for r in rows
-        if not r.live_order_status or r.live_order_status.upper() not in _SHIPPED_STATUSES
+        if include_shipped
+        or not r.live_order_status
+        or r.live_order_status.upper() not in _SHIPPED_STATUSES
     )
 
 
@@ -439,14 +454,22 @@ def compute_order_net(payment_rows, sku_final_price, sku_packaging_price, quanti
     tax_cost       = ( purchase_cost * Decimal(str(sku_tax_percent or 0)) / Decimal("100")) * qty
 
     c = _classify_rows(payment_rows)
-    
+
     adj_rows      = c["adj"]
     main_rows     = c["main"]
     affiliate_fees = _affiliate_total(adj_rows)
     claims         = _extract_claims(adj_rows)
     return_shipping_fee = _extract_return_fee(main_rows)
     sub_order_no   = payment_rows[0].sub_order_no
-    total_settlement = _sum_settlement(c["rows"])
+
+    # Include the SHIPPED row's settlement when the order progressed past shipping —
+    # both the advance credit (SHIPPED) and the final adjustment (RETURN/RTO/DELIVERED)
+    # are real money movements and must be summed together.
+    progressed_past_shipped = bool(
+        c["return_rows"] or c["rto_rows"] or c["delivered_rows"]
+        or c["exchange_rows"] or c["claim_rows"]
+    )
+    total_settlement = _sum_settlement(c["rows"], include_shipped=progressed_past_shipped)
     
     net = 0
     status = ""
@@ -1437,6 +1460,144 @@ def profit_summary(request):
             "total_deduction_rate_pct": total_deduction_rate_pct,
         },
         "payout_breakdown": _build_payout_breakdown(qs),
+    })
+
+
+@api_view(["GET"])
+def orders_grouped(request):
+    """
+    Returns OrderPayment rows grouped by sub_order_no with a derived classified status.
+    Filters: ?month=YYYY-MM, ?date_from=, ?date_to=, ?status=DELIVERED|RETURN|RTO|EXCHANGE|SHIPPED|UNKNOWN
+    Also returns KPI summary for the filtered set.
+    """
+    from collections import defaultdict
+    import calendar as _cal
+
+    month      = request.GET.get("month", "").strip()
+    date_from  = request.GET.get("date_from", "").strip()
+    date_to    = request.GET.get("date_to", "").strip()
+    status_f   = request.GET.get("status", "").strip().upper()
+    page       = int(request.GET.get("page", 1))
+    page_size  = int(request.GET.get("page_size", 50))
+
+    qs = OrderPayment.objects.all()
+
+    if month:
+        year, mo = (int(x) for x in month.split("-"))
+        first_day = datetime(year, mo, 1).date()
+        last_day  = datetime(year, mo, _cal.monthrange(year, mo)[1]).date()
+        qs = qs.filter(
+            order_date__gte=datetime.combine(first_day, time.min),
+            order_date__lte=datetime.combine(last_day,  time.max),
+        )
+    else:
+        if date_from:
+            d = datetime.strptime(date_from, "%Y-%m-%d").date()
+            qs = qs.filter(order_date__gte=datetime.combine(d, time.min))
+        if date_to:
+            d = datetime.strptime(date_to, "%Y-%m-%d").date()
+            qs = qs.filter(order_date__lte=datetime.combine(d, time.max))
+
+    all_rows = list(qs.order_by("sub_order_no", "payment_date", "id"))
+
+    # ── Group by sub_order_no ─────────────────────────────────────────────────
+    groups: dict = defaultdict(list)
+    for r in all_rows:
+        groups[r.sub_order_no].append(r)
+
+    def _effective_status(row_list):
+        statuses = {(r.live_order_status or "").upper() for r in row_list}
+        has_claim = any((r.claims or 0) > 0 for r in row_list)
+        if has_claim:                                    return "CLAIM"
+        if statuses & _EXCHANGE_STATUSES:                return "EXCHANGE"
+        if statuses & _RETURN_STATUSES:                  return "RETURN"
+        if statuses & _RTO_STATUSES:                     return "RTO"
+        if statuses & _DELIVERED_STATUSES:               return "DELIVERED"
+        if statuses & _SHIPPED_STATUSES:                 return "SHIPPED"
+        return "UNKNOWN"
+
+    def _group_settlement(row_list):
+        statuses = {(r.live_order_status or "").upper() for r in row_list}
+        progressed = bool(
+            statuses & (_RETURN_STATUSES | _RTO_STATUSES | _DELIVERED_STATUSES | _EXCHANGE_STATUSES)
+        )
+        return float(_sum_settlement(row_list, include_shipped=progressed))
+
+    # ── Classify every group ──────────────────────────────────────────────────
+    classified = []
+    for sub_no, rows in groups.items():
+        eff = _effective_status(rows)
+        first = rows[0]
+        classified.append({
+            "sub_order_no":   sub_no,
+            "status":         eff,
+            "settlement":     _group_settlement(rows),
+            "sku":            first.supplier_sku,
+            "catalog_id":     first.catalog_id,
+            "product_name":   first.product_name,
+            "order_date":     str(first.order_date.date()) if first.order_date else None,
+            "row_count":      len(rows),
+            "rows":           [],     # filled below for the requested page only
+        })
+
+    # ── KPI summary (all groups, before pagination) ───────────────────────────
+    from collections import Counter
+    status_counts = Counter(g["status"] for g in classified)
+    status_settlement = {}
+    for g in classified:
+        status_settlement[g["status"]] = round(
+            status_settlement.get(g["status"], 0) + g["settlement"], 2
+        )
+    kpi = {
+        "total_groups":     len(classified),
+        "total_settlement": round(sum(g["settlement"] for g in classified), 2),
+        "by_status":        [
+            {"status": s, "count": status_counts[s], "settlement": status_settlement.get(s, 0)}
+            for s in ["DELIVERED", "RETURN", "RTO", "EXCHANGE", "CLAIM", "SHIPPED", "UNKNOWN"]
+            if status_counts.get(s, 0) > 0
+        ],
+    }
+
+    # ── Apply status filter ───────────────────────────────────────────────────
+    if status_f:
+        classified = [g for g in classified if g["status"] == status_f]
+
+    # Sort newest first
+    classified.sort(key=lambda g: g["order_date"] or "", reverse=True)
+
+    total = len(classified)
+    page_groups = classified[(page - 1) * page_size: page * page_size]
+
+    # Attach full row detail only for page groups (avoid serializing thousands of rows)
+    sub_nos_page = {g["sub_order_no"] for g in page_groups}
+    detail_map: dict = defaultdict(list)
+    for r in all_rows:
+        if r.sub_order_no in sub_nos_page:
+            detail_map[r.sub_order_no].append({
+                "id":                          r.id,
+                "sub_order_no":                r.sub_order_no,
+                "live_order_status":           r.live_order_status,
+                "payment_date":                str(r.payment_date) if r.payment_date else None,
+                "order_date":                  str(r.order_date.date()) if r.order_date else None,
+                "final_settlement_amount":     float(r.final_settlement_amount or 0),
+                "total_sale_amount":           float(r.total_sale_amount or 0),
+                "meesho_commission_incl_gst":  float(r.meesho_commission_incl_gst or 0),
+                "tcs":                         float(r.tcs or 0),
+                "tds":                         float(r.tds or 0),
+                "claims":                      float(r.claims or 0),
+                "return_shipping_charge":      float(r.return_shipping_charge or 0),
+                "listing_price_incl_taxes":    float(r.listing_price_incl_taxes or 0),
+            })
+
+    for g in page_groups:
+        g["rows"] = detail_map.get(g["sub_order_no"], [])
+
+    return Response({
+        "total":     total,
+        "page":      page,
+        "page_size": page_size,
+        "kpi":       kpi,
+        "groups":    page_groups,
     })
 
 

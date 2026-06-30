@@ -80,7 +80,7 @@ function MetricsPanel({ data, filterLabel }) {
   const delPft    = data.reduce((a, s) => a + (s.delivered_profit || 0), 0);
   const retLoss   = data.reduce((a, s) => a + (s.return_loss      || 0), 0);
   const rtoLoss   = data.reduce((a, s) => a + (s.rto_loss         || 0), 0);
-  const exchNet   = data.reduce((a, s) => a + (s.exchange_net     || 0), 0);
+  const exchNet   = data.reduce((a, s) => a + (s.exchange_loss    || 0), 0);
   const claimLoss = data.reduce((a, s) => a + (s.claim_loss       || 0), 0);
   const otherNet  = data.reduce((a, s) => a + (s.other_net        || 0), 0);
   const nDel      = data.reduce((a, s) => a + (s.delivered_count  || 0), 0);
@@ -722,7 +722,7 @@ export function SKUAnalysisTab() {
         const avg_settlement_per_piece = delQty > 0 ? (delPft + delCost) / delQty : null;
         return {
           sku_id: key, ...r,
-          net_profit: Number(r.net_profit ?? (delPft + Number(r.return_loss || 0) + Number(r.rto_loss || 0) + Number(r.exchange_net || 0) + Number(r.claim_loss || 0))),
+          net_profit: Number(r.net_profit ?? (delPft + Number(r.return_loss || 0) + Number(r.rto_loss || 0) + Number(r.exchange_loss || 0) + Number(r.claim_loss || 0))),
           avg_profit_per_piece,
           avg_settlement_per_piece,
         };

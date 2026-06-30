@@ -18,8 +18,6 @@ import { ProductPhotosTab } from "./Components/Tabs/ProductPhotosTab";
 import { MismatchTab } from "./Components/Tabs/MismatchTab";
 import { MeeshoInventoryTab } from "./Components/Tabs/MeeshoInventoryTab";
 import { MeeshoPricingTab } from "./Components/Tabs/MeeshoPricingTab";
-import { ReturnClaimsTab } from "./Components/Tabs/ReturnClaimsTab";
-import { ClaimedOrdersTab } from "./Components/Tabs/ClaimedOrdersTab";
 import { SKU_PAGE_SIZE as skuPageSize } from "./lib/helper";
 import TableData from "./Components/Table/TableData";
 
@@ -386,8 +384,6 @@ const NAV_GROUPS = [
       { path: "/orders",        label: "Orders",          icon: "⊡" },
       { path: "/payments",      label: "Payments",        icon: "◎" },
       { path: "/unsettled",     label: "Unsettled",       icon: "⚡" },
-      { path: "/return-claims", label: "Returns & Claims", icon: "↩" },
-      { path: "/claimed",       label: "Claimed Orders",  icon: "✦" },
       { path: "/mismatch",      label: "Pay Mismatch",    icon: "⊝" },
       { path: "/labels",        label: "Labels",          icon: "⊟" },
     ],
@@ -617,8 +613,6 @@ export default function App() {
             <Route path="/unsettled"       element={<UnsettledOrdersTab />} />
             <Route path="/payments"        element={<PaymentsTab />} />
             <Route path="/mismatch"        element={<MismatchTab />} />
-            <Route path="/return-claims"   element={<ReturnClaimsTab />} />
-            <Route path="/claimed"         element={<ClaimedOrdersTab />} />
             <Route path="/sku-analysis"   element={<SKUAnalysisTab />} />
             <Route path="/pricing"        element={<PricingTab />} />
             <Route path="/upload"         element={<UploadTab />} />

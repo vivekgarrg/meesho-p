@@ -6,6 +6,7 @@ urlpatterns = [
     path("profit/available-months/", views.available_months, name="available_months"),
     path("profit/", views.profit_summary, name="profit_summary"),
     path("orders/", views.order_payments_list, name="order_payments_list"),
+    path("orders/grouped/",          views.orders_grouped,         name="orders_grouped"),
     path("orders/status-breakdown/", views.order_status_breakdown, name="order_status_breakdown"),
     path("orders/unsettled/",       views.unsettled_orders,    name="unsettled_orders"),
     path("orders/payment-mismatch/", views.payment_mismatch,     name="payment_mismatch"),
