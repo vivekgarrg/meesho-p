@@ -16,7 +16,7 @@ import concurrent.futures
 from PIL import Image
 from .helpers.helper import status_wise_summary
 
-from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, PurchaseBill, PurchaseItem, BlockedCustomer, InventoryAdjustment, ConsumableItem, ConsumablePurchase, ConsumableUsage, InventoryLog
+from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, PurchaseBill, PurchaseItem, BlockedCustomer, InventoryAdjustment, ConsumableItem, ConsumablePurchase, ConsumableUsage, InventoryLog, MeeshoInventory, MeeshoPriceUpdate
 from .serializers import (
     OrderPaymentSerializer, AdsCostSerializer,
     ReferralPaymentSerializer, CompensationRecoverySerializer,
@@ -323,22 +323,19 @@ def _classify_rows(payment_rows):
     main_all = [r for r in rows if r.live_order_status]
     adj      = [r for r in rows if not r.live_order_status]
     
-    #assumption main status
-    main_status = main_all[0].live_order_status 
-    
     _seen: dict = {}
     for r in main_all:
-        _seen[r.live_order_status.upper()] = r 
+        _seen[r.live_order_status.upper()] = r
     main = list(_seen.values())
-    
+
     _seen2: dict = {}
     for r in adj:
-        if r.claims > 0:
+        if r.claims and r.claims > 0:
             _seen2["claim"] = r
-        elif r.recovery_reason.lower() == "affiliate fee":
+        elif r.recovery_reason and r.recovery_reason.lower() == "affiliate fee":
             _seen2["affiliate"] = r
         else:
-            _seen2["others"] = r     
+            _seen2["others"] = r
                 
         
     all_known_statuses = (
@@ -399,7 +396,11 @@ def _pick_settlement_rows(c):
 
 
 def _sum_settlement(rows):
-    return sum(Decimal(r.final_settlement_amount or 0) for r in rows)
+    return sum(
+        Decimal(r.final_settlement_amount or 0)
+        for r in rows
+        if not r.live_order_status or r.live_order_status.upper() not in _SHIPPED_STATUSES
+    )
 
 
 def _extract_claims(adj_rows):
@@ -4068,3 +4069,418 @@ def generate_product_images(request):
             results[result["index"]] = result
 
     return Response({"results": results})
+
+
+# ── Meesho Inventory ───────────────────────────────────────────────────────────
+
+_INV_COL_MAP = {
+    "serial no":           "serial_no",
+    "serial_no":           "serial_no",
+    "catalog name":        "catalog_name",
+    "catalog_name":        "catalog_name",
+    "catalog id":          "catalog_id",
+    "catalog_id":          "catalog_id",
+    "product name":        "product_name",
+    "product_name":        "product_name",
+    "product id":          "product_id",
+    "product_id":          "product_id",
+    "style id":            "style_id",
+    "style_id":            "style_id",
+    "variation id":        "variation_id",
+    "variation_id":        "variation_id",
+    "variation":           "variation",
+    "stock":               "stock_type",
+    "stock_type":          "stock_type",
+    "system stock count":  "system_stock_count",
+    "system_stock_count":  "system_stock_count",
+    "your stock count":    "seller_stock_count",
+    "seller_stock_count":  "seller_stock_count",
+}
+
+_DESCRIPTION_ROW_MARKERS = {
+    "row identifier", "catalog name", "catalog id", "product id/style id",
+}
+
+
+def _safe_inv_int(val, default=None):
+    try:
+        v = int(float(str(val).strip()))
+        return v
+    except Exception:
+        return default
+
+
+@api_view(["POST"])
+@parser_classes([MultiPartParser])
+def meesho_inventory_upload(request):
+    file = request.FILES.get("file")
+    if not file:
+        return Response({"error": "No file provided."}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        if file.name.lower().endswith((".xlsx", ".xls")):
+            import openpyxl as _opxl
+            file.seek(0)
+            wb = _opxl.load_workbook(file, read_only=True, data_only=True)
+            # Find the sheet whose name contains "fill this" (case-insensitive)
+            sheet_name = None
+            for name in wb.sheetnames:
+                if "fill this" in name.lower():
+                    sheet_name = name
+                    break
+            wb.close()
+            file.seek(0)
+            df = pd.read_excel(file, sheet_name=sheet_name, dtype=str)
+        else:
+            df = pd.read_csv(file, dtype=str)
+    except Exception as exc:
+        return Response({"error": f"Could not read file: {exc}"}, status=status.HTTP_400_BAD_REQUEST)
+
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    df.rename(columns=_INV_COL_MAP, inplace=True)
+
+    if "serial_no" not in df.columns:
+        return Response({"error": "Missing required column: SERIAL NO"}, status=status.HTTP_400_BAD_REQUEST)
+
+    def _is_description_row(row):
+        val = str(row.get("serial_no", "")).strip().lower()
+        return val in _DESCRIPTION_ROW_MARKERS or not val.lstrip("-").lstrip().replace(".", "").isdigit()
+
+    df = df[~df.apply(_is_description_row, axis=1)].reset_index(drop=True)
+
+    created = updated = skipped = 0
+    with transaction.atomic():
+        for _, row in df.iterrows():
+            sno     = _safe_inv_int(row.get("serial_no"))
+            cat_id  = _safe_inv_int(row.get("catalog_id"))
+            prod_id = _safe_inv_int(row.get("product_id"))
+            if sno is None or cat_id is None or prod_id is None:
+                skipped += 1
+                continue
+
+            raw_seller = row.get("seller_stock_count", "")
+            seller_count = _safe_inv_int(raw_seller) if str(raw_seller).strip() not in ("", "nan") else None
+
+            defaults = {
+                "catalog_name":       str(row.get("catalog_name", "")).strip(),
+                "catalog_id":         cat_id,
+                "product_name":       str(row.get("product_name", "")).strip(),
+                "product_id":         prod_id,
+                "style_id":           str(row.get("style_id", "")).strip(),
+                "variation_id":       _safe_inv_int(row.get("variation_id")),
+                "variation":          str(row.get("variation", "")).strip(),
+                "stock_type":         str(row.get("stock_type", "ALL")).strip().upper() or "ALL",
+                "system_stock_count": _safe_inv_int(row.get("system_stock_count"), 0),
+                "seller_stock_count": seller_count,
+            }
+            _, was_created = MeeshoInventory.objects.update_or_create(
+                serial_no=sno, defaults=defaults,
+            )
+            if was_created:
+                created += 1
+            else:
+                updated += 1
+
+    return Response(
+        {"success": True, "created": created, "updated": updated, "skipped": skipped},
+        status=status.HTTP_201_CREATED,
+    )
+
+
+@api_view(["GET", "PATCH"])
+def meesho_inventory_list(request):
+    if request.method == "PATCH":
+        updates = request.data if isinstance(request.data, list) else []
+        count = 0
+        with transaction.atomic():
+            for item in updates:
+                pk  = item.get("id")
+                val = item.get("seller_stock_count")
+                if pk is None:
+                    continue
+                MeeshoInventory.objects.filter(pk=pk).update(
+                    seller_stock_count=_safe_inv_int(val)
+                )
+                count += 1
+        return Response({"updated": count})
+
+    qs = MeeshoInventory.objects.all().order_by("serial_no")
+    if request.GET.get("low_stock") == "1":
+        qs = qs.filter(system_stock_count__lt=100)
+
+    search = request.GET.get("q", "").strip()
+    if search:
+        qs = qs.filter(
+            DQ(catalog_name__icontains=search) |
+            DQ(product_name__icontains=search) |
+            DQ(style_id__icontains=search)
+        )
+
+    data = list(qs.values(
+        "id", "serial_no", "catalog_name", "catalog_id",
+        "product_name", "product_id", "style_id",
+        "variation_id", "variation", "stock_type",
+        "system_stock_count", "seller_stock_count",
+    ))
+    total           = MeeshoInventory.objects.count()
+    low_stock_count = MeeshoInventory.objects.filter(system_stock_count__lt=100).count()
+    return Response({"items": data, "total": total, "low_stock_count": low_stock_count})
+
+
+@api_view(["GET"])
+def meesho_inventory_download(request):
+    from io import BytesIO
+    from django.http import HttpResponse
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment
+
+    qs = MeeshoInventory.objects.all().order_by("serial_no")
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Inventory-Fill this"
+
+    headers = [
+        "SERIAL NO", "CATALOG NAME", "CATALOG ID", "PRODUCT NAME",
+        "PRODUCT ID", "STYLE ID", "VARIATION ID", "VARIATION",
+        "STOCK", "SYSTEM STOCK COUNT", "YOUR STOCK COUNT",
+    ]
+    desc_row = [
+        "Row identifier", "Catalog name", "Catalog id", "Product name",
+        "Product id", "Product ID/Style ID", "Variation id", "Variation",
+        "Stock type (IN_STOCK / OUT_OF_STOCK / ALL)",
+        "Current system stock count",
+        "Edit this (keep empty if no change in stock)",
+    ]
+    ws.append(headers)
+    ws.append(desc_row)
+
+    for item in qs:
+        # YOUR STOCK COUNT: filled only where the seller has set a new value,
+        # empty otherwise so Meesho skips those rows
+        your_stock = item.seller_stock_count if item.seller_stock_count is not None else ""
+        ws.append([
+            item.serial_no,
+            item.catalog_name,
+            item.catalog_id,
+            item.product_name,
+            item.product_id,
+            item.style_id,
+            item.variation_id,
+            item.variation,
+            item.stock_type,
+            item.system_stock_count,
+            your_stock,
+        ])
+
+    col_widths = [10, 28, 14, 50, 14, 30, 14, 14, 10, 22, 22]
+    for i, w in enumerate(col_widths, 1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
+
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    response = HttpResponse(
+        buf.read(),
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    response["Content-Disposition"] = 'attachment; filename="meesho_inventory_updated.xlsx"'
+    return response
+
+
+# ── Meesho Price Update ────────────────────────────────────────────────────────
+
+@api_view(["GET", "PATCH"])
+def meesho_price_update_list(request):
+    """
+    GET  — return all inventory items enriched with profit data.
+           ?max_profit=<n>  filters to SKUs with avg_profit_per_unit < n
+           ?q=<search>      filters by catalog/product/style
+    PATCH — bulk-save price updates: [{inventory_id, new_msp, new_wdrp, new_mrp}, ...]
+    """
+    if request.method == "PATCH":
+        updates = request.data if isinstance(request.data, list) else []
+        count = 0
+        with transaction.atomic():
+            for item in updates:
+                inv_id = item.get("inventory_id")
+                if inv_id is None:
+                    continue
+                try:
+                    inv = MeeshoInventory.objects.get(pk=inv_id)
+                except MeeshoInventory.DoesNotExist:
+                    continue
+                defaults = {}
+                for field in ("new_msp", "new_wdrp", "new_mrp"):
+                    raw = item.get(field)
+                    defaults[field] = safe_decimal(raw) if raw not in (None, "", "null") else None
+                MeeshoPriceUpdate.objects.update_or_create(inventory=inv, defaults=defaults)
+                count += 1
+        return Response({"updated": count})
+
+    # ── GET ──────────────────────────────────────────────────────────────────
+    from django.db.models import Avg, Count, Sum as DjSum
+
+    # Per-SKU delivery stats from OrderPayment
+    delivered_agg = (
+        OrderPayment.objects
+        .filter(live_order_status__iexact="delivered")
+        .values("supplier_sku")
+        .annotate(
+            avg_settlement=Avg("final_settlement_amount"),
+            delivery_count=Count("id"),
+        )
+    )
+    delivered_map = {r["supplier_sku"]: r for r in delivered_agg}
+
+    # Current listing price per SKU
+    listing_agg = (
+        OrderPayment.objects
+        .exclude(listing_price_incl_taxes=None)
+        .values("supplier_sku")
+        .annotate(last_price=Avg("listing_price_incl_taxes"))
+    )
+    listing_map = {r["supplier_sku"]: float(r["last_price"] or 0) for r in listing_agg}
+
+    # Cost from FinalPrice
+    fp_map = {fp.sku_id: float(fp.final_price or 0)
+              for fp in FinalPrice.objects.only("sku_id", "final_price")}
+
+    # Existing price updates
+    pu_map = {pu.inventory_id: pu
+              for pu in MeeshoPriceUpdate.objects.select_related("inventory")}
+
+    qs = MeeshoInventory.objects.all().order_by("serial_no")
+
+    search = request.GET.get("q", "").strip()
+    if search:
+        qs = qs.filter(
+            DQ(catalog_name__icontains=search) |
+            DQ(product_name__icontains=search) |
+            DQ(style_id__icontains=search)
+        )
+
+    max_profit_str = request.GET.get("max_profit", "").strip()
+    max_profit = None
+    try:
+        if max_profit_str != "":
+            max_profit = float(max_profit_str)
+    except ValueError:
+        pass
+
+    results = []
+    for inv in qs:
+        sid = inv.style_id.strip() if inv.style_id else ""
+        d   = delivered_map.get(sid, {})
+
+        avg_settlement = float(d.get("avg_settlement") or 0)
+        delivery_count = int(d.get("delivery_count") or 0)
+        cost           = fp_map.get(sid, None)
+        current_price  = listing_map.get(sid, None)
+
+        avg_profit = None
+        if cost is not None and avg_settlement:
+            avg_profit = round(avg_settlement - cost, 2)
+
+        # Apply profit threshold filter
+        if max_profit is not None:
+            if avg_profit is None or avg_profit >= max_profit:
+                continue
+
+        pu = pu_map.get(inv.id)
+        results.append({
+            "inventory_id":    inv.id,
+            "serial_no":       inv.serial_no,
+            "catalog_name":    inv.catalog_name,
+            "catalog_id":      inv.catalog_id,
+            "product_name":    inv.product_name,
+            "product_id":      inv.product_id,
+            "style_id":        inv.style_id,
+            "variation":       inv.variation,
+            "variation_id":    inv.variation_id,
+            "system_stock":    inv.system_stock_count,
+            "delivery_count":  delivery_count,
+            "avg_settlement":  round(avg_settlement, 2) if avg_settlement else None,
+            "cost":            cost,
+            "current_price":   current_price,
+            "avg_profit":      avg_profit,
+            # saved price updates
+            "new_msp":         float(pu.new_msp)  if pu and pu.new_msp  is not None else None,
+            "new_wdrp":        float(pu.new_wdrp) if pu and pu.new_wdrp is not None else None,
+            "new_mrp":         float(pu.new_mrp)  if pu and pu.new_mrp  is not None else None,
+        })
+
+    return Response({
+        "items": results,
+        "total": len(results),
+    })
+
+
+@api_view(["GET"])
+def meesho_price_update_download(request):
+    """
+    Download the Meesho price update sheet.
+    Only rows where new_msp has been set are included.
+    Columns match Meesho's bulk price update template exactly.
+    """
+    from io import BytesIO
+    from django.http import HttpResponse
+    import openpyxl
+
+    rows = (
+        MeeshoPriceUpdate.objects
+        .filter(new_msp__isnull=False)
+        .select_related("inventory")
+        .order_by("inventory__serial_no")
+    )
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "MSP Update"
+
+    headers = [
+        "Catalog ID",
+        "Product ID",
+        "Variation Name",
+        "Variation ID",
+        "New Meesho Selling Price (MSP)",
+        "Wrong/Defective Return Price (WDRP) (if catalog is part of WDRP)",
+        "New Maximum Retail Price (MRP) (Optional)",
+    ]
+    ws.append(headers)
+
+    from openpyxl.styles import Font, PatternFill, Alignment
+    header_fill = PatternFill("solid", fgColor="4F46E5")
+    header_font = Font(bold=True, color="FFFFFF")
+    for cell in ws[1]:
+        cell.font      = header_font
+        cell.fill      = header_fill
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    for pu in rows:
+        inv = pu.inventory
+        ws.append([
+            inv.catalog_id,
+            inv.product_id,
+            inv.variation or "Free Size",
+            inv.variation_id,
+            float(pu.new_msp),
+            float(pu.new_wdrp) if pu.new_wdrp is not None else "",
+            float(pu.new_mrp)  if pu.new_mrp  is not None else "",
+        ])
+
+    col_widths = [14, 14, 20, 14, 32, 50, 35]
+    for i, w in enumerate(col_widths, 1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
+
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    resp = HttpResponse(
+        buf.read(),
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    resp["Content-Disposition"] = 'attachment; filename="meesho_price_update.xlsx"'
+    return resp

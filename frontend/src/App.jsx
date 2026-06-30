@@ -16,6 +16,8 @@ import { InventoryTab } from "./Components/Tabs/InventoryTab";
 import { FraudCustomersTab } from "./Components/Tabs/FraudCustomersTab";
 import { ProductPhotosTab } from "./Components/Tabs/ProductPhotosTab";
 import { MismatchTab } from "./Components/Tabs/MismatchTab";
+import { MeeshoInventoryTab } from "./Components/Tabs/MeeshoInventoryTab";
+import { MeeshoPricingTab } from "./Components/Tabs/MeeshoPricingTab";
 import { ReturnClaimsTab } from "./Components/Tabs/ReturnClaimsTab";
 import { ClaimedOrdersTab } from "./Components/Tabs/ClaimedOrdersTab";
 import { SKU_PAGE_SIZE as skuPageSize } from "./lib/helper";
@@ -395,8 +397,10 @@ const NAV_GROUPS = [
     color: "#60A5FA",
     items: [
       { path: "/pricing",   label: "SKU Pricing", icon: "⊞" },
-      { path: "/inventory", label: "Inventory",   icon: "⊕" },
-      { path: "/purchases", label: "Purchases",   icon: "⊗" },
+      { path: "/inventory",        label: "Inventory",        icon: "⊕" },
+      { path: "/meesho-inventory", label: "Meesho Stock",   icon: "⊞" },
+      { path: "/meesho-pricing",   label: "Price Update",  icon: "₹" },
+      { path: "/purchases",        label: "Purchases",         icon: "⊗" },
     ],
   },
   {
@@ -620,7 +624,9 @@ export default function App() {
             <Route path="/upload"         element={<UploadTab />} />
             <Route path="/labels"         element={<LabelsTab />} />
             <Route path="/purchases"      element={<PurchasesTab />} />
-            <Route path="/inventory"      element={<InventoryTab />} />
+            <Route path="/inventory"         element={<InventoryTab />} />
+            <Route path="/meesho-inventory"  element={<MeeshoInventoryTab />} />
+            <Route path="/meesho-pricing"    element={<MeeshoPricingTab />} />
             <Route path="/fraud"          element={<FraudCustomersTab />} />
             <Route path="/product-photos" element={<ProductPhotosTab />} />
           </Routes>

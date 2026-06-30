@@ -58,6 +58,13 @@ urlpatterns = [
     path("consumables/usages/<int:usage_id>/", views.consumable_usage_detail, name="consumable_usage_detail"),
     # Product Photography AI
     path("product-photos/generate/", views.generate_product_images, name="generate_product_images"),
+    # Meesho Inventory
+    path("meesho-inventory/",          views.meesho_inventory_list,     name="meesho_inventory_list"),
+    path("meesho-inventory/upload/",   views.meesho_inventory_upload,   name="meesho_inventory_upload"),
+    path("meesho-inventory/download/", views.meesho_inventory_download, name="meesho_inventory_download"),
+    # Meesho Price Update
+    path("meesho-price-update/",          views.meesho_price_update_list,     name="meesho_price_update_list"),
+    path("meesho-price-update/download/", views.meesho_price_update_download, name="meesho_price_update_download"),
     # Label packing
     path("labels/orders/<str:order_id>/pack/", views.label_order_pack, name="label_order_pack"),
     path("labels/bulk-pack/",       views.label_bulk_pack,     name="label_bulk_pack"),

@@ -490,3 +490,65 @@ class LabelOrder(models.Model):
 
     def __str__(self):
         return f"{self.order_id} | {self.courier_name} | {self.sku}"
+
+
+class MeeshoInventory(models.Model):
+    """
+    Mirrors the Meesho inventory sheet (catalog/product/variation level).
+    system_stock_count is fetched from Meesho; seller_stock_count is the
+    editable 'YOUR STOCK COUNT' column used to push updates back.
+    """
+
+    STOCK_TYPE_CHOICES = [
+        ("IN_STOCK",     "In Stock"),
+        ("OUT_OF_STOCK", "Out of Stock"),
+        ("ALL",          "All"),
+    ]
+
+    serial_no          = models.PositiveIntegerField(unique=True, help_text="Row identifier from the Meesho sheet")
+    catalog_name       = models.CharField(max_length=500)
+    catalog_id         = models.BigIntegerField(db_index=True)
+    product_name       = models.TextField()
+    product_id         = models.BigIntegerField(db_index=True)
+    style_id           = models.CharField(max_length=255, blank=True)
+    variation_id       = models.BigIntegerField(null=True, blank=True)
+    variation          = models.CharField(max_length=255, blank=True)
+    stock_type         = models.CharField(max_length=15, choices=STOCK_TYPE_CHOICES, default="ALL")
+    system_stock_count = models.IntegerField(default=0, help_text="Current stock count as reported by Meesho")
+    seller_stock_count = models.IntegerField(null=True, blank=True, help_text="Seller-edited stock count to push to Meesho")
+
+    uploaded_at        = models.DateTimeField(auto_now_add=True)
+    updated_at         = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "meesho_inventory"
+        ordering = ["serial_no"]
+        indexes = [
+            models.Index(fields=["catalog_id"]),
+            models.Index(fields=["product_id"]),
+        ]
+
+    def __str__(self):
+        return f"[{self.serial_no}] {self.catalog_name} — {self.style_id}"
+
+
+class MeeshoPriceUpdate(models.Model):
+    """Stores the new prices a seller wants to push to Meesho for a given inventory item."""
+    inventory = models.OneToOneField(
+        MeeshoInventory, on_delete=models.CASCADE,
+        related_name="price_update",
+    )
+    new_msp  = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True,
+                                   help_text="New Meesho Selling Price")
+    new_wdrp = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True,
+                                   help_text="Wrong/Defective Return Price")
+    new_mrp  = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True,
+                                   help_text="New Maximum Retail Price (optional)")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "meesho_price_updates"
+        ordering = ["inventory__serial_no"]
+
+    def __str__(self):
+        return f"PriceUpdate {self.inventory.style_id}: MSP={self.new_msp}"
