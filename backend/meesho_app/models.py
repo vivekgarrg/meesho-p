@@ -490,3 +490,36 @@ class LabelOrder(models.Model):
 
     def __str__(self):
         return f"{self.order_id} | {self.courier_name} | {self.sku}"
+
+
+STOCK_TYPE_CHOICES = [
+    ("IN_STOCK",      "IN_STOCK"),
+    ("OUT_OF_STOCK",  "OUT_OF_STOCK"),
+    ("ALL",           "ALL"),
+]
+
+class MeeshoStockItem(models.Model):
+    """One row from a Meesho inventory/stock xlsx sheet."""
+
+    row_identifier    = models.CharField(max_length=200, blank=True)
+    catalog_name      = models.CharField(max_length=500, blank=True)
+    catalog_id        = models.CharField(max_length=100, db_index=True)
+    product_name      = models.CharField(max_length=500, blank=True)
+    product_id        = models.CharField(max_length=100, db_index=True)
+    product_style_id  = models.CharField(max_length=200, blank=True)
+    variation_id      = models.CharField(max_length=200, blank=True)
+    variation         = models.CharField(max_length=500, blank=True)
+    stock_type        = models.CharField(max_length=20, choices=STOCK_TYPE_CHOICES, blank=True)
+    current_stock     = models.IntegerField(null=True, blank=True)
+    edit_stock        = models.IntegerField(null=True, blank=True)
+
+    uploaded_at       = models.DateTimeField(auto_now_add=True)
+    updated_at        = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table        = "meesho_stock_item"
+        unique_together = [("catalog_id", "product_id")]
+        ordering        = ["catalog_id", "product_id"]
+
+    def __str__(self):
+        return f"{self.catalog_id} / {self.product_id}"

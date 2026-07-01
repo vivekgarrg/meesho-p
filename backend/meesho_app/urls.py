@@ -62,4 +62,11 @@ urlpatterns = [
     path("labels/orders/<str:order_id>/pack/", views.label_order_pack, name="label_order_pack"),
     path("labels/bulk-pack/",       views.label_bulk_pack,     name="label_bulk_pack"),
     path("labels/unpacked/",        views.label_unpacked,      name="label_unpacked"),
+    # Meesho Stock Sheet
+    path("meesho-stock/",                      views.meesho_stock_list,           name="meesho_stock_list"),
+    path("meesho-stock/upload/",               views.meesho_stock_upload,         name="meesho_stock_upload"),
+    path("meesho-stock/clear/",                views.meesho_stock_clear,          name="meesho_stock_clear"),
+    path("meesho-stock/price-fix/",            views.meesho_stock_price_fix,      name="meesho_stock_price_fix"),
+    path("meesho-stock/generate-price-sheet/", views.meesho_stock_generate_sheet, name="meesho_stock_generate_sheet"),
+    path("meesho-stock/<int:item_id>/",        views.meesho_stock_update,         name="meesho_stock_update"),
 ]

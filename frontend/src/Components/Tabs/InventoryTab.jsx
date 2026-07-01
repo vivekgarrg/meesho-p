@@ -26,40 +26,40 @@ import { API, C, fmt } from "../../App";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const ADJUSTMENT_REASONS = [
-  { value: "DAMAGED",    label: "Damaged / Written Off" },
-  { value: "FOUND",      label: "Stock Found / Recount" },
+  { value: "DAMAGED", label: "Damaged / Written Off" },
+  { value: "FOUND", label: "Stock Found / Recount" },
   { value: "CORRECTION", label: "Inventory Correction" },
-  { value: "LOST",       label: "Lost / Stolen" },
-  { value: "RETURN",     label: "Customer Return (non-Meesho)" },
-  { value: "OTHER",      label: "Other" },
+  { value: "LOST", label: "Lost / Stolen" },
+  { value: "RETURN", label: "Customer Return (non-Meesho)" },
+  { value: "OTHER", label: "Other" },
 ];
 
 const CONSUMABLE_CATEGORIES = [
-  { value: "POLYTHENE",    label: "Polythene Bags" },
-  { value: "BUBBLE_WRAP",  label: "Bubble Wrap" },
-  { value: "STATIONARY",   label: "Stationery" },
-  { value: "LABELS",       label: "Labels" },
-  { value: "BOX",          label: "Boxes" },
-  { value: "OTHER",        label: "Other" },
+  { value: "POLYTHENE", label: "Polythene Bags" },
+  { value: "BUBBLE_WRAP", label: "Bubble Wrap" },
+  { value: "STATIONARY", label: "Stationery" },
+  { value: "LABELS", label: "Labels" },
+  { value: "BOX", label: "Boxes" },
+  { value: "OTHER", label: "Other" },
 ];
 
 const CONSUMABLE_UNITS = [
   { value: "pieces", label: "Pieces" },
-  { value: "rolls",  label: "Rolls" },
+  { value: "rolls", label: "Rolls" },
   { value: "meters", label: "Meters" },
-  { value: "grams",  label: "Grams" },
-  { value: "kgs",    label: "Kgs" },
-  { value: "packs",  label: "Packs" },
-  { value: "boxes",  label: "Boxes" },
+  { value: "grams", label: "Grams" },
+  { value: "kgs", label: "Kgs" },
+  { value: "packs", label: "Packs" },
+  { value: "boxes", label: "Boxes" },
 ];
 
 const CAT_COLORS = {
-  POLYTHENE:   "#6D28D9",
+  POLYTHENE: "#6D28D9",
   BUBBLE_WRAP: "#2563EB",
-  STATIONARY:  "#059669",
-  LABELS:      "#D97706",
-  BOX:         "#E11D48",
-  OTHER:       "#64748B",
+  STATIONARY: "#059669",
+  LABELS: "#D97706",
+  BOX: "#E11D48",
+  OTHER: "#64748B",
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -101,15 +101,15 @@ const today = () => new Date().toISOString().slice(0, 10);
 // ── Add Stock / Purchase Modal (with SKU Autocomplete + PDF) ──────────────────
 function AddStockModal({ open, onClose, onSaved }) {
   const [skuOptions, setSkuOptions] = useState([]);
-  const [skuInput,   setSkuInput]   = useState("");
-  const [skuValue,   setSkuValue]   = useState(null);
+  const [skuInput, setSkuInput] = useState("");
+  const [skuValue, setSkuValue] = useState(null);
   const [loadingSku, setLoadingSku] = useState(false);
   const [sellerName, setSellerName] = useState("");
-  const [date,       setDate]       = useState(today());
-  const [items,      setItems]      = useState([{ sku_id: "", qty: "", price: "" }]);
-  const [notes,      setNotes]      = useState("");
-  const [saving,     setSaving]     = useState(false);
-  const [err,        setErr]        = useState("");
+  const [date, setDate] = useState(today());
+  const [items, setItems] = useState([{ sku_id: "", qty: "", price: "" }]);
+  const [notes, setNotes] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState("");
   const [savedBillId, setSavedBillId] = useState(null);
   const debounceRef = useRef(null);
 
@@ -209,7 +209,8 @@ function AddStockModal({ open, onClose, onSaved }) {
               getOptionLabel={o => (typeof o === "string" ? o : o.label)}
               renderInput={(params) => (
                 <TextField {...params} label="Parent SKU *" placeholder="Type to search or enter new SKU"
-                  InputProps={{ ...(params.InputProps ?? {}),
+                  InputProps={{
+                    ...(params.InputProps ?? {}),
                     endAdornment: <>{loadingSku && <CircularProgress size={16} />}{params.InputProps?.endAdornment}</>
                   }}
                 />
@@ -255,11 +256,11 @@ function AddStockModal({ open, onClose, onSaved }) {
 
 // ── Adjustment Modal ──────────────────────────────────────────────────────────
 function AdjustmentModal({ open, sku, onClose, onSaved }) {
-  const [qty,    setQty]    = useState("");
+  const [qty, setQty] = useState("");
   const [reason, setReason] = useState("CORRECTION");
-  const [notes,  setNotes]  = useState("");
+  const [notes, setNotes] = useState("");
   const [saving, setSaving] = useState(false);
-  const [err,    setErr]    = useState("");
+  const [err, setErr] = useState("");
 
   const reset = () => { setQty(""); setReason("CORRECTION"); setNotes(""); setSaving(false); setErr(""); };
 
@@ -309,14 +310,14 @@ function AdjustmentModal({ open, sku, onClose, onSaved }) {
 
 // ── New SKU Modal ─────────────────────────────────────────────────────────────
 function NewSKUModal({ onSave, onClose }) {
-  const [skuId,      setSkuId]      = useState("");
-  const [initQty,    setInitQty]    = useState("");
-  const [initPrice,  setInitPrice]  = useState("");
+  const [skuId, setSkuId] = useState("");
+  const [initQty, setInitQty] = useState("");
+  const [initPrice, setInitPrice] = useState("");
   const [initSeller, setInitSeller] = useState("");
-  const [initDate,   setInitDate]   = useState(today());
-  const [itemPrice,  setItemPrice]  = useState("");
-  const [saving,     setSaving]     = useState(false);
-  const [err,        setErr]        = useState("");
+  const [initDate, setInitDate] = useState(today());
+  const [itemPrice, setItemPrice] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState("");
 
   const save = async () => {
     if (!skuId.trim()) { setErr("Parent SKU ID is required."); return; }
@@ -374,12 +375,12 @@ function NewSKUModal({ onSave, onClose }) {
 
 // ── Consumable Item Modal ─────────────────────────────────────────────────────
 function ConsumableItemModal({ open, item, onClose, onSaved }) {
-  const [name,     setName]     = useState(item?.name || "");
+  const [name, setName] = useState(item?.name || "");
   const [category, setCategory] = useState(item?.category || "POLYTHENE");
-  const [unit,     setUnit]     = useState(item?.unit || "pieces");
-  const [notes,    setNotes]    = useState(item?.notes || "");
-  const [saving,   setSaving]   = useState(false);
-  const [err,      setErr]      = useState("");
+  const [unit, setUnit] = useState(item?.unit || "pieces");
+  const [notes, setNotes] = useState(item?.notes || "");
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState("");
 
   const save = async () => {
     if (!name.trim()) { setErr("Name is required."); return; }
@@ -432,13 +433,13 @@ function ConsumableItemModal({ open, item, onClose, onSaved }) {
 
 // ── Consumable Purchase Modal ─────────────────────────────────────────────────
 function ConsumablePurchaseModal({ open, item, onClose, onSaved }) {
-  const [date,    setDate]    = useState(today());
-  const [qty,     setQty]     = useState("");
-  const [price,   setPrice]   = useState("");
-  const [seller,  setSeller]  = useState("");
-  const [notes,   setNotes]   = useState("");
-  const [saving,  setSaving]  = useState(false);
-  const [err,     setErr]     = useState("");
+  const [date, setDate] = useState(today());
+  const [qty, setQty] = useState("");
+  const [price, setPrice] = useState("");
+  const [seller, setSeller] = useState("");
+  const [notes, setNotes] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState("");
 
   const save = async () => {
     if (!qty || parseFloat(qty) <= 0) { setErr("Qty must be positive."); return; }
@@ -485,11 +486,11 @@ function ConsumablePurchaseModal({ open, item, onClose, onSaved }) {
 // ── Consumable Usage Modal ────────────────────────────────────────────────────
 function ConsumableUsageModal({ open, item, onClose, onSaved }) {
   const [eventType, setEventType] = useState("USE");
-  const [date,      setDate]      = useState(today());
-  const [qty,       setQty]       = useState("");
-  const [notes,     setNotes]     = useState("");
-  const [saving,    setSaving]    = useState(false);
-  const [err,       setErr]       = useState("");
+  const [date, setDate] = useState(today());
+  const [qty, setQty] = useState("");
+  const [notes, setNotes] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState("");
 
   const save = async () => {
     if (!qty || parseFloat(qty) <= 0) { setErr("Qty must be positive."); return; }
@@ -543,7 +544,7 @@ function ConsumableUsageModal({ open, item, onClose, onSaved }) {
 
 // ── Overview Section ──────────────────────────────────────────────────────────
 function OverviewSection() {
-  const [data,    setData]    = useState(null);
+  const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(async () => {
@@ -551,7 +552,7 @@ function OverviewSection() {
     try {
       const r = await fetch(`${API}/inventory/charts/`);
       setData(await r.json());
-    } catch {}
+    } catch { }
     setLoading(false);
   }, []);
 
@@ -563,16 +564,16 @@ function OverviewSection() {
   const { stock_by_sku = [], stock_status = {}, monthly_purchases = [], consumable_monthly = [], total_skus, total_stock, total_value, top_by_value = [] } = data;
 
   const pieData = [
-    { id: 0, value: stock_status.instock || 0, label: "In Stock",   color: C.green },
-    { id: 1, value: stock_status.low     || 0, label: "Low Stock",  color: C.amber },
-    { id: 2, value: stock_status.out     || 0, label: "Out of Stock", color: C.red },
+    { id: 0, value: stock_status.instock || 0, label: "In Stock", color: C.green },
+    { id: 1, value: stock_status.low || 0, label: "Low Stock", color: C.amber },
+    { id: 2, value: stock_status.out || 0, label: "Out of Stock", color: C.red },
   ].filter(d => d.value > 0);
 
   const monthLabels = monthly_purchases.map(m => m.month);
-  const monthQtys   = monthly_purchases.map(m => m.total_qty || 0);
+  const monthQtys = monthly_purchases.map(m => m.total_qty || 0);
 
-  const catColors = ["#6D28D9","#2563EB","#059669","#D97706","#E11D48","#64748B"];
-  const consCats  = [...new Set(consumable_monthly.map(m => m.category))];
+  const catColors = ["#6D28D9", "#2563EB", "#059669", "#D97706", "#E11D48", "#64748B"];
+  const consCats = [...new Set(consumable_monthly.map(m => m.category))];
   const consMonths = [...new Set(consumable_monthly.map(m => m.month))];
 
   return (
@@ -625,7 +626,7 @@ function OverviewSection() {
             {monthLabels.length > 1 ? (
               <LineChart
                 xAxis={[{ data: monthLabels, scaleType: "point" }]}
-                series={[{ data: monthQtys, label: "Units Purchased", color: C.blue, area: true }]}
+                series={[{ data: monthQtys, label: "Units Purchased", color: C.blue }]}
                 height={220}
                 margin={{ left: 50, right: 20, top: 10, bottom: 40 }}
               />
@@ -653,15 +654,15 @@ function OverviewSection() {
 
 // ── Stock Section ─────────────────────────────────────────────────────────────
 function StockSection() {
-  const [rows,      setRows]      = useState([]);
-  const [loading,   setLoading]   = useState(true);
-  const [filter,    setFilter]    = useState("all");
-  const [search,    setSearch]    = useState("");
-  const [searchQ,   setSearchQ]   = useState("");
-  const [adjSku,    setAdjSku]    = useState(null);
-  const [showNew,   setShowNew]   = useState(false);
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [filter, setFilter] = useState("all");
+  const [search, setSearch] = useState("");
+  const [searchQ, setSearchQ] = useState("");
+  const [adjSku, setAdjSku] = useState(null);
+  const [showNew, setShowNew] = useState(false);
   const [showStock, setShowStock] = useState(false);
-  const [confirm,   setConfirm]   = useState(null);
+  const [confirm, setConfirm] = useState(null);
   const debRef = useRef(null);
 
   const load = useCallback(async () => {
@@ -672,7 +673,7 @@ function StockSection() {
       const r = await fetch(`${API}/inventory/?${params}`);
       const d = await r.json();
       setRows(d.results || d);
-    } catch {}
+    } catch { }
     setLoading(false);
   }, [searchQ]);
 
@@ -685,16 +686,16 @@ function StockSection() {
 
   const filtered = rows.filter(r => {
     if (filter === "instock") return r.current_stock > 5;
-    if (filter === "low")     return r.current_stock > 0 && r.current_stock <= 5;
-    if (filter === "out")     return r.current_stock <= 0;
+    if (filter === "low") return r.current_stock > 0 && r.current_stock <= 5;
+    if (filter === "out") return r.current_stock <= 0;
     return true;
   });
 
   const counts = {
-    all:     rows.length,
+    all: rows.length,
     instock: rows.filter(r => r.current_stock > 5).length,
-    low:     rows.filter(r => r.current_stock > 0 && r.current_stock <= 5).length,
-    out:     rows.filter(r => r.current_stock <= 0).length,
+    low: rows.filter(r => r.current_stock > 0 && r.current_stock <= 5).length,
+    out: rows.filter(r => r.current_stock <= 0).length,
   };
 
   const deleteSku = async (skuId) => {
@@ -714,7 +715,7 @@ function StockSection() {
     <Stack spacing={2}>
       <Stack direction={{ xs: "column", sm: "row" }} spacing={2} alignItems={{ sm: "center" }} justifyContent="space-between">
         <Stack direction="row" spacing={1} flexWrap="wrap">
-          {[["all","All"], ["instock","In Stock"], ["low","Low Stock"], ["out","Out of Stock"]].map(([key, label]) => (
+          {[["all", "All"], ["instock", "In Stock"], ["low", "Low Stock"], ["out", "Out of Stock"]].map(([key, label]) => (
             <Button key={key} size="small" onClick={() => setFilter(key)} sx={tabSx(filter === key)}>
               {label} <Box component="span" sx={{ ml: 0.5, fontSize: 11, opacity: 0.8 }}>({counts[key]})</Box>
             </Button>
@@ -740,7 +741,7 @@ function StockSection() {
           <Table size="small">
             <TableHead>
               <TableRow sx={{ bgcolor: "#F8FAFC" }}>
-                {["Parent SKU","Purchase Value","Purchased","Sold","RTO","Adjusted","Current Stock","Actions"].map(h => (
+                {["Parent SKU", "Purchase Value", "Purchased", "Sold", "RTO", "Adjusted", "Current Stock", "Actions"].map(h => (
                   <TableCell key={h} sx={{ fontWeight: 700, fontSize: 12, color: "#64748B", py: 1.5 }}>{h}</TableCell>
                 ))}
               </TableRow>
@@ -822,9 +823,9 @@ function ConsumableCard({ item, onEdit, onPurchase, onUsage, onDelete }) {
       ]);
       const [p, u] = await Promise.all([pRes.json(), uRes.json()]);
       const purchases = (p.results || p).map(x => ({ ...x, _type: "PURCHASE" }));
-      const usages    = (u.results || u).map(x => ({ ...x, _type: "USAGE" }));
+      const usages = (u.results || u).map(x => ({ ...x, _type: "USAGE" }));
       setHistory([...purchases, ...usages].sort((a, b) => new Date(b.date) - new Date(a.date)));
-    } catch {}
+    } catch { }
     setLoadingH(false);
     setExpanded(true);
   };
@@ -895,14 +896,14 @@ function ConsumableCard({ item, onEdit, onPurchase, onUsage, onDelete }) {
 
 // ── Consumables Section ───────────────────────────────────────────────────────
 function ConsumablesSection() {
-  const [items,       setItems]       = useState([]);
-  const [loading,     setLoading]     = useState(true);
-  const [editItem,    setEditItem]    = useState(null);
-  const [showNew,     setShowNew]     = useState(false);
+  const [items, setItems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [editItem, setEditItem] = useState(null);
+  const [showNew, setShowNew] = useState(false);
   const [purchaseFor, setPurchaseFor] = useState(null);
-  const [usageFor,    setUsageFor]    = useState(null);
-  const [deleteFor,   setDeleteFor]   = useState(null);
-  const [catFilter,   setCatFilter]   = useState("ALL");
+  const [usageFor, setUsageFor] = useState(null);
+  const [deleteFor, setDeleteFor] = useState(null);
+  const [catFilter, setCatFilter] = useState("ALL");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -910,7 +911,7 @@ function ConsumablesSection() {
       const r = await fetch(`${API}/consumables/items/`);
       const d = await r.json();
       setItems(d.results || d);
-    } catch {}
+    } catch { }
     setLoading(false);
   }, []);
 
@@ -994,11 +995,11 @@ const ACTION_COLORS = { CREATE: "#059669", UPDATE: "#D97706", DELETE: "#E11D48" 
 const ACTION_BG = { CREATE: "#ECFDF5", UPDATE: "#FFFBEB", DELETE: "#FFF1F2" };
 
 function HistorySection() {
-  const [logs,      setLogs]      = useState([]);
-  const [loading,   setLoading]   = useState(true);
-  const [page,      setPage]      = useState(1);
-  const [total,     setTotal]     = useState(0);
-  const [filters,   setFilters]   = useState({ entity_type: "", action: "", parent_sku: "", date_from: "", date_to: "" });
+  const [logs, setLogs] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [filters, setFilters] = useState({ entity_type: "", action: "", parent_sku: "", date_from: "", date_to: "" });
 
   const PAGE_SIZE = 25;
 
@@ -1011,7 +1012,7 @@ function HistorySection() {
       const d = await r.json();
       setLogs(d.results || []);
       setTotal(d.count || 0);
-    } catch {}
+    } catch { }
     setLoading(false);
   }, [page, filters]);
 
@@ -1121,7 +1122,7 @@ function HistorySection() {
 // ── Main InventoryTab ─────────────────────────────────────────────────────────
 export function InventoryTab() {
   const [section, setSection] = useState(0);
-  const [toast,   setToast]   = useState("");
+  const [toast, setToast] = useState("");
 
   const sections = ["Overview", "Stock", "Consumables", "History"];
 

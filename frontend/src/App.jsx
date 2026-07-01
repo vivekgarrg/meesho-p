@@ -13,6 +13,7 @@ import { SKUAnalysisTab } from "./Components/Tabs/SKUProfitTab";
 import { LabelsTab } from "./Components/Tabs/LabelsTab";
 import { PurchasesTab } from "./Components/Tabs/PurchasesTab";
 import { InventoryTab } from "./Components/Tabs/InventoryTab";
+import { MeeshoStockTab } from "./Components/Tabs/MeeshoStockTab";
 import { FraudCustomersTab } from "./Components/Tabs/FraudCustomersTab";
 import { ProductPhotosTab } from "./Components/Tabs/ProductPhotosTab";
 import { MismatchTab } from "./Components/Tabs/MismatchTab";
@@ -395,8 +396,9 @@ const NAV_GROUPS = [
     color: "#60A5FA",
     items: [
       { path: "/pricing",   label: "SKU Pricing", icon: "⊞" },
-      { path: "/inventory", label: "Inventory",   icon: "⊕" },
-      { path: "/purchases", label: "Purchases",   icon: "⊗" },
+      { path: "/inventory",     label: "Inventory",     icon: "⊕" },
+      { path: "/purchases",     label: "Purchases",     icon: "⊗" },
+      { path: "/meesho-stock",  label: "Stock Sheet",   icon: "⊡" },
     ],
   },
   {
@@ -621,6 +623,7 @@ export default function App() {
             <Route path="/labels"         element={<LabelsTab />} />
             <Route path="/purchases"      element={<PurchasesTab />} />
             <Route path="/inventory"      element={<InventoryTab />} />
+            <Route path="/meesho-stock"   element={<MeeshoStockTab />} />
             <Route path="/fraud"          element={<FraudCustomersTab />} />
             <Route path="/product-photos" element={<ProductPhotosTab />} />
           </Routes>
