@@ -281,6 +281,7 @@ function MetricsPanel({ data, filterLabel, profitSummary }) {
           ))}
         </Box>
       </Box>
+
     </Box>
   );
 }
@@ -457,7 +458,7 @@ function SKUDetailModal({ sku, months, initialRange, initialMonth, onClose }) {
   const delGross  = delNet + delCost;
   const retNet    = Number(d.return_loss             || 0);
   const rtoNet    = Number(d.rto_loss                || 0);
-  const exchNet   = Number(d.exchange_net            || 0);
+  const exchNet   = Number(d.exchange_loss            || 0); // fix: was exchange_net (always 0)
   const claimNet  = Number(d.claim_loss              || 0);
   const claimsRcv = Number(d.claims_total            || 0);
   const otherNet  = Number(d.other_net               || 0);
@@ -791,13 +792,15 @@ function SKUDetailModal({ sku, months, initialRange, initialMonth, onClose }) {
                           </TableHead>
                           <TableBody>
                             {monthly.map(({ month, raw }) => {
-                              const mNet  = Number(raw.net_profit       || 0);
-                              const mDel  = Number(raw.delivered_profit || 0);
-                              const mRet  = Number(raw.return_loss      || 0);
-                              const mRTO  = Number(raw.rto_loss         || 0);
-                              const mExch = Number(raw.exchange_net     || 0);
-                              const mClm  = Number(raw.claim_loss       || 0);
-                              const mPkg  = Number(raw.total_packaging_cost || 0);
+                              const mNet  = Number(raw.net_profit            || 0);
+                              const mDel  = Number(raw.delivered_profit      || 0);
+                              const mRet  = Number(raw.return_loss           || 0);
+                              const mRTO  = Number(raw.rto_loss              || 0);
+                              const mExch = Number(raw.exchange_loss         || 0); // fix: was exchange_net (always 0)
+                              const mClm  = Number(raw.claim_loss            || 0);
+                              const mPkg  = Number(raw.total_packaging_cost  || 0);
+                              // Verify: mDel + mRet + mRTO + mExch + mClm === mNet (pkg already inside mDel)
+                              const computedNet = mDel + mRet + mRTO + mExch + mClm;
                               return (
                                 <TableRow key={month} sx={{ "&:hover": { bgcolor: "#F8FAFC" } }}>
                                   <TableCell sx={{ fontWeight: 700, whiteSpace: "nowrap", fontSize: 13 }}>{fmtShort(month)}</TableCell>
@@ -811,7 +814,14 @@ function SKUDetailModal({ sku, months, initialRange, initialMonth, onClose }) {
                                   <TableCell sx={{ color: "#2563EB", fontFamily: "monospace", fontSize: 12 }}>{mExch !== 0 ? `${mExch >= 0 ? "+" : ""}${fmt(mExch)}` : "—"}</TableCell>
                                   <TableCell sx={{ color: "#7C3AED", fontFamily: "monospace", fontSize: 12 }}>{mClm  !== 0 ? `${mClm  >= 0 ? "+" : ""}${fmt(mClm)}`  : "—"}</TableCell>
                                   <TableCell sx={{ color: "#D97706", fontFamily: "monospace", fontSize: 12 }}>{mPkg  > 0  ? `−${fmt(mPkg)}` : "—"}</TableCell>
-                                  <TableCell><PLChip value={mNet} /></TableCell>
+                                  <TableCell>
+                                    <PLChip value={mNet} />
+                                    {Math.abs(computedNet - mNet) > 0.5 && (
+                                      <Tooltip title={`Computed: ${fmt(computedNet)} vs Backend: ${fmt(mNet)}`}>
+                                        <Typography sx={{ fontSize: 9, color: "#E11D48", mt: 0.3 }}>⚠ mismatch</Typography>
+                                      </Tooltip>
+                                    )}
+                                  </TableCell>
                                 </TableRow>
                               );
                             })}
@@ -1276,20 +1286,22 @@ export function SKUAnalysisTab() {
       .then(d => {
         setProfitSummary(d);
         const raw = d.sku_wise_profit || {};
-        const prepared = Object.keys(raw).map(key => {
-          const skuRaw  = raw[key];
-          const delPft  = Number(skuRaw.delivered_profit || 0);
-          const delQty  = Number(skuRaw.delivered_quantity || 0);
-          const delCost = Number(skuRaw.delivered_purchase_cost || 0);
-          const avg_profit_per_piece     = delQty > 0 ? delPft / delQty : null;
-          const avg_settlement_per_piece = delQty > 0 ? (delPft + delCost) / delQty : null;
-          return {
-            sku_id: key, ...skuRaw,
-            net_profit: Number(skuRaw.net_profit ?? (delPft + Number(skuRaw.return_loss || 0) + Number(skuRaw.rto_loss || 0) + Number(skuRaw.exchange_net || 0) + Number(skuRaw.claim_loss || 0))),
-            avg_profit_per_piece,
-            avg_settlement_per_piece,
-          };
-        }).sort((a, b) => b.net_profit - a.net_profit);
+        const prepared = Object.keys(raw)
+          .filter(key => key !== "__unattributed__")
+          .map(key => {
+            const skuRaw  = raw[key];
+            const delPft  = Number(skuRaw.delivered_profit || 0);
+            const delQty  = Number(skuRaw.delivered_quantity || 0);
+            const delCost = Number(skuRaw.delivered_purchase_cost || 0);
+            const avg_profit_per_piece     = delQty > 0 ? delPft / delQty : null;
+            const avg_settlement_per_piece = delQty > 0 ? (delPft + delCost) / delQty : null;
+            return {
+              sku_id: key, ...skuRaw,
+              net_profit: Number(skuRaw.net_profit ?? (delPft + Number(skuRaw.return_loss || 0) + Number(skuRaw.rto_loss || 0) + Number(skuRaw.exchange_loss || 0) + Number(skuRaw.claim_loss || 0))),
+              avg_profit_per_piece,
+              avg_settlement_per_piece,
+            };
+          }).sort((a, b) => b.net_profit - a.net_profit);
         setAllData(prepared); setLoading(false);
       })
       .catch(e => { if (e.name !== "AbortError") setLoading(false); });
@@ -1370,6 +1382,51 @@ export function SKUAnalysisTab() {
           onResolved={() => setReloadTick(t => t + 1)}
         />
       )}
+
+      {/* ── Unattributed orders panel ─────────────────────────────────────── */}
+      {!loading && (profitSummary?.orders_missing_price ?? 0) > 0 && (() => {
+        const uAmt   = Number(profitSummary?.sku_wise_profit?.["__unattributed__"]?.net_profit ?? 0);
+        const uCount = profitSummary.orders_missing_price;
+        const orderNetPL = Number(profitSummary?.net_profit_loss ?? 0);
+        return (
+          <Box sx={{
+            ...DS.card, p: 2, display: "flex", gap: 2, alignItems: "flex-start",
+            border: "1px solid #FDE68A", bgcolor: "#FFFBEB",
+          }}>
+            <Typography sx={{ fontSize: 22, lineHeight: 1, mt: 0.25 }}>📦</Typography>
+            <Box sx={{ flex: 1 }}>
+              <Typography sx={{ fontSize: 14, fontWeight: 700, color: "#92400E", mb: 0.5 }}>
+                Unattributed Orders — {uCount} orders with no pricing
+              </Typography>
+              <Typography sx={{ fontSize: 12, color: "#78350F", mb: 1.5 }}>
+                These orders have settled amounts but no purchase price on record, so they can't be split into per-SKU profit.
+                Their net settlement is already included in <b>Order Net P&L</b> ({fmt(orderNetPL)}) but won't appear in any SKU row.
+              </Typography>
+              <Box sx={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                <Box>
+                  <Typography sx={{ fontSize: 11, color: "#92400E", fontWeight: 700, letterSpacing: 0.5 }}>ORDERS</Typography>
+                  <Typography sx={{ fontFamily: "monospace", fontWeight: 800, fontSize: 22, color: "#92400E", lineHeight: 1.2 }}>
+                    {uCount}
+                  </Typography>
+                </Box>
+                <Box>
+                  <Typography sx={{ fontSize: 11, color: "#92400E", fontWeight: 700, letterSpacing: 0.5 }}>NET SETTLEMENT</Typography>
+                  <Typography sx={{ fontFamily: "monospace", fontWeight: 800, fontSize: 22, lineHeight: 1.2, color: uAmt >= 0 ? "#059669" : "#DC2626" }}>
+                    {uAmt >= 0 ? "+" : ""}{fmt(uAmt)}
+                  </Typography>
+                </Box>
+                <Box sx={{ alignSelf: "center" }}>
+                  <Chip
+                    label="Add pricing → Pricing tab"
+                    size="small"
+                    sx={{ bgcolor: "#FEF3C7", color: "#92400E", fontWeight: 700, border: "1px solid #FCD34D", cursor: "pointer" }}
+                  />
+                </Box>
+              </Box>
+            </Box>
+          </Box>
+        );
+      })()}
 
       {/* ── Loading ──────────────────────────────────────────────────────── */}
       {loading && (

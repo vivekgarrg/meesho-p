@@ -1377,6 +1377,19 @@ def profit_summary(request):
 
     net_revenue = revenue - total_purchase_cost + ads + comp_recovery
 
+    # Ensure sum(sku.net_profit) == revenue - total_purchase_cost by absorbing the gap
+    # (settlement from missing-SKU orders) into a synthetic __unattributed__ bucket.
+    total_sku_net = sum(Decimal(str(v.get("net_profit", 0) or 0)) for v in order_wise_profit.values())
+    unattributed_gap = (revenue - total_purchase_cost) - total_sku_net
+    if abs(unattributed_gap) > Decimal("0.01"):
+        order_wise_profit["__unattributed__"] = {
+            "net_profit": float(unattributed_gap),
+            "order_count": orders_missing_price,
+            "sku_id": "__unattributed__",
+            "one_unit_price": 0,
+            "total_purchase_cost": 0,
+        }
+
     # Keep raw DB aggregate as informational (includes claims adj rows) — NOT used in P&L
     raw_settlement = revenue
 
@@ -1395,7 +1408,7 @@ def profit_summary(request):
         "total_packaging_cost":   round(total_packaging_cost, 2),
         "total_packaging_cost_for_returns": round(total_packaging_cost_for_return, 2),
         "total_tax_cost":         round(total_tax_cost, 2),
-        "net_profit_loss": round( revenue - total_purchase_cost, 2),
+        "net_profit_loss": round(float(revenue - total_purchase_cost), 2),
         "order_summary": order_status_summary,
         "total_loss":             round(total_loss, 2),
         "total_rto_loss":         round(total_rto_loss, 2),
@@ -1893,19 +1906,41 @@ def upload_orders_csv(request):
 
 @api_view(["GET"])
 def full_orders_list(request):
-    """Paginated list of Order rows with date/status/sku filters."""
-    page = int(request.GET.get("page", 1))
+    """Paginated list of Order rows with date/status/sku/state/search/month filters."""
+    page      = int(request.GET.get("page", 1))
     page_size = int(request.GET.get("page_size", 50))
     status_filter = request.GET.get("status", "")
-    sku_filter = request.GET.get("sku", "")
-    date_from = request.GET.get("date_from", "")
-    date_to = request.GET.get("date_to", "")
+    sku_filter    = request.GET.get("sku", "")
+    state_filter  = request.GET.get("state", "")
+    search        = request.GET.get("search", "")
+    month         = request.GET.get("month", "")   # YYYY-MM
+    date_from     = request.GET.get("date_from", "")
+    date_to       = request.GET.get("date_to", "")
+
+    # month shortcut overrides explicit date_from/date_to
+    if month:
+        try:
+            y, m = int(month[:4]), int(month[5:7])
+            import calendar
+            last_day = calendar.monthrange(y, m)[1]
+            date_from = f"{y:04d}-{m:02d}-01"
+            date_to   = f"{y:04d}-{m:02d}-{last_day:02d}"
+        except (ValueError, IndexError):
+            pass
 
     qs = Order.objects.all()
     if status_filter:
         qs = qs.filter(reason_for_credit_entry__iexact=status_filter)
     if sku_filter:
         qs = qs.filter(sku__icontains=sku_filter)
+    if state_filter:
+        qs = qs.filter(customer_state__iexact=state_filter)
+    if search:
+        qs = qs.filter(
+            DQ(sub_order_no__icontains=search) |
+            DQ(product_name__icontains=search) |
+            DQ(sku__icontains=search)
+        )
     if date_from:
         qs = qs.filter(order_date__gte=date_from)
     if date_to:
@@ -1925,17 +1960,30 @@ def full_orders_list(request):
 @api_view(["GET"])
 def full_orders_analytics(request):
     """Aggregate stats for Order model — drives the Orders tab summary cards."""
-    date_from = request.GET.get("date_from", "")
-    date_to = request.GET.get("date_to", "")
+    date_from     = request.GET.get("date_from", "")
+    date_to       = request.GET.get("date_to", "")
+    status_filter = request.GET.get("status", "")
+    month         = request.GET.get("month", "")
 
-    date_filtered = Order.objects.all()
+    if month:
+        try:
+            y, m = int(month[:4]), int(month[5:7])
+            import calendar
+            last_day = calendar.monthrange(y, m)[1]
+            date_from = f"{y:04d}-{m:02d}-01"
+            date_to   = f"{y:04d}-{m:02d}-{last_day:02d}"
+        except (ValueError, IndexError):
+            pass
+
+    base = Order.objects.all()
     if date_from:
-        date_filtered = date_filtered.filter(order_date__gte=date_from)
+        base = base.filter(order_date__gte=date_from)
     if date_to:
-        date_filtered = date_filtered.filter(order_date__lte=date_to)
+        base = base.filter(order_date__lte=date_to)
+    if status_filter:
+        base = base.filter(reason_for_credit_entry__iexact=status_filter)
 
-    # Use latest status per order so lifecycle updates don't double-count
-    qs = Order.latest_per_order(base_qs=date_filtered)
+    qs = Order.latest_per_order(base_qs=base)
 
     by_status = list(
         qs.values("reason_for_credit_entry")
@@ -1955,7 +2003,7 @@ def full_orders_analytics(request):
     by_sku = list(
         qs.values("sku")
         .annotate(count=Count("sub_order_no", distinct=True), total_qty=Sum("quantity"))
-        .order_by("-count")[:20]
+        .order_by("-count")[:15]
     )
 
     daily = list(
@@ -1964,12 +2012,22 @@ def full_orders_analytics(request):
         .order_by("order_date")
     )
 
+    # Available months — always from unfiltered base for the month picker
+    all_months = list(
+        Order.objects.values_list("order_date", flat=True)
+        .exclude(order_date__isnull=True)
+        .order_by("order_date")
+        .distinct()
+    )
+    months = sorted({str(d)[:7] for d in all_months})
+
     return Response({
         "total": qs.count(),
         "by_status": by_status,
         "by_state": by_state,
         "by_sku": by_sku,
         "daily": daily,
+        "months": months,
     })
 
 
