@@ -293,13 +293,16 @@ export function OverviewTab() {
 
   useEffect(() => {
     if (activeRange === null) return;
+    const ctrl = new AbortController();
     setLoading(true);
     const qs = Object.keys(activeRange).length ? `?${new URLSearchParams(activeRange)}` : "";
     Promise.all([
-      fetch(`${API}/profit/${qs}`).then(r => r.json()),
-      fetch(`${API}/dashboard/${qs}`).then(r => r.json()),
-    ]).then(([p, d]) => { setProfit(p); setDash(d); setLoading(false); }).catch(() => setLoading(false));
-  }, [activeRange]);
+      fetch(`${API}/profit/${qs}`,    { signal: ctrl.signal }).then(r => r.json()),
+      fetch(`${API}/dashboard/${qs}`, { signal: ctrl.signal }).then(r => r.json()),
+    ]).then(([p, d]) => { setProfit(p); setDash(d); setLoading(false); })
+      .catch(e => { if (e.name !== "AbortError") setLoading(false); });
+    return () => ctrl.abort();
+  }, [JSON.stringify(activeRange ?? {})]); // eslint-disable-line
 
   // ── Derived values ────────────────────────────────────────────────────────
   const netProfit = Number(profit?.net_revenue ?? 0);
@@ -416,8 +419,8 @@ export function OverviewTab() {
     { icon: "✅", label: "Delivered", count: nDel, gross: delGross, cost: delCost, rate: delRate, net: deliveredSummary?.net_profit_loss, netColor: C.green },
     { icon: "↩", label: "Return", count: nRet, gross: retGross, cost: 0, net: returnSummary?.net_profit_loss, rate: retRate, netColor: returnSummary?.net_profit_loss >= 0 ? C.gray600 : C.red },
     { icon: "🔄", label: "RTO", count: nRTO, gross: rtoGross, cost: 0, net: rtoNet, rate: rtoRate, netColor: rtoNet >= 0 ? C.gray600 : C.amber },
-    { icon: "🔁", label: "Exchanged", count: nExchange, gross: exchGross, cost: exchPkgCost, rate: exchangeRate, net: exchangeNet, netColor: exchangeNet >= 0 ? C.gray600 : C.blue },
-    { icon: "⚠", label: "Claim", count: nClaim, gross: claimGross, cost: claimCost, net: claimNet, rate: claimRate, netColor: claimNet >= 0 ? C.gray600 : "#7C3AED" },
+    { icon: "🔁", label: "Exchanged", count: nExchange, gross: exchGross, cost: exchPkgCost, rate: exchangeRate, net: nExchangeProfitLoss, netColor: nExchangeProfitLoss >= 0 ? C.gray600 : C.blue },
+    { icon: "⚠", label: "Claim", count: nClaim, gross: claimGross, cost: claimCost, net: nClaimProfitLoss, rate: claimRate, netColor: nClaimProfitLoss >= 0 ? C.gray600 : "#7C3AED" },
     { icon: "⊘", label: "Unknown", count: nOther, gross: otherNet, cost: 0, net: otherNet, rate: otherRate, netColor: otherNet >= 0 ? C.gray600 : C.red },
   ];
 
@@ -618,37 +621,220 @@ export function OverviewTab() {
         </SectionCard>
 
         {/* ── 7. Meesho Deductions ───────────────────────────────────────── */}
-        <SectionCard title="Meesho Deductions (already reflected in net settlement)">
-          <div style={{ display: "flex", gap: 18, flexWrap: "wrap" }}>
-            <div style={{ flex: "1 1 280px" }}>
-              <DeductionRow label="Commission incl. GST" value={commAmt} pct={commPct} color={C.orange} />
-              <DeductionRow label="TCS — Tax Collected at Source" value={tcsAmt} pct={tcsPct} color={C.gray500} />
-              <DeductionRow label="TDS — Tax Deducted at Source" value={tdsAmt} pct={tdsPct} color={C.gray500} />
-              <DeductionRow label="Shipping Charges" value={profit.total_shipping_cost} color={C.amber} />
-              <DeductionRow label="Ads Cost" value={profit.total_ads_cost} color={C.red} />
-              <DeductionRow label="Affiliate Fee" value={profit.total_affiliate_fee} color={C.red} />
-              <div style={{ borderTop: "2px solid #E2E8F0", paddingTop: 10, marginTop: 4 }}>
-                <DeductionRow label="Total (Comm + TCS + TDS)" value={Number(commAmt) + Number(tcsAmt) + Number(tdsAmt)} pct={totalDeductPct} color={C.red} />
+        {(() => {
+          const deductItems = [
+            {
+              icon: "🏷️", label: "Commission incl. GST",
+              desc: "Meesho's platform fee on each sale",
+              value: commAmt, pct: commPct,
+              accent: "#F59E0B", bg: "#FFFBEB", border: "#FDE68A",
+            },
+            {
+              icon: "🏛️", label: "TCS — Tax Collected at Source",
+              desc: "Govt-mandated 1% TCS on marketplace sales",
+              value: tcsAmt, pct: tcsPct,
+              accent: "#64748B", bg: "#F8FAFC", border: "#E2E8F0",
+            },
+            {
+              icon: "🏛️", label: "TDS — Tax Deducted at Source",
+              desc: "TDS deducted by Meesho before payout",
+              value: tdsAmt, pct: tdsPct,
+              accent: "#64748B", bg: "#F8FAFC", border: "#E2E8F0",
+            },
+            {
+              icon: "🚚", label: "Shipping Charges",
+              desc: "Forward / reverse logistics charged to account",
+              value: profit.total_shipping_cost, pct: null,
+              accent: "#D97706", bg: "#FFFBEB", border: "#FDE68A",
+            },
+            {
+              icon: "📢", label: "Ads Spend",
+              desc: "Smart Store / Performance ads cost",
+              value: profit.total_ads_cost, pct: null,
+              accent: "#DC2626", bg: "#FFF1F2", border: "#FECDD3",
+              bold: true,
+            },
+            {
+              icon: "🤝", label: "Affiliate Fee",
+              desc: "Influencer / affiliate partner payouts",
+              value: profit.total_affiliate_fee, pct: null,
+              accent: "#DC2626", bg: "#FFF1F2", border: "#FECDD3",
+            },
+          ];
+          const totalMeeshoDeduct = Number(commAmt) + Number(tcsAmt) + Number(tdsAmt);
+          const netSettle = Number(profit.net_settlement_revenue ?? profit.total_settled ?? 0);
+          const claimPos = claimNet >= 0;
+
+          // Revenue waterfall steps
+          const shippingAmt = Number(profit.total_shipping_cost || 0);
+          const waterfallSteps = [
+            { label: "Gross Revenue", value: grossRev, color: "#1E3A5F", bg: "#EFF6FF", arrow: false },
+            { label: "− Commission + GST", value: -Math.abs(commAmt), color: "#D97706", bg: "#FFFBEB", arrow: true },
+            { label: "− TCS + TDS", value: -(Math.abs(tcsAmt) + Math.abs(tdsAmt)), color: "#64748B", bg: "#F8FAFC", arrow: true },
+            { label: "− Shipping", value: -Math.abs(shippingAmt), color: "#D97706", bg: "#FFFBEB", arrow: true },
+            { label: "= Net Settlement", value: netSettle, color: netSettle >= 0 ? "#059669" : "#DC2626", bg: netSettle >= 0 ? "#ECFDF5" : "#FFF1F2", arrow: true, bold: true },
+          ].filter(s => s.value !== 0 || s.bold);
+
+          return (
+            <div style={{ ...T.card, padding: "0 0 0 0", overflow: "hidden" }}>
+              {/* Section header */}
+              <div style={{
+                display: "flex", alignItems: "center", justifyContent: "space-between",
+                padding: "16px 22px 14px", borderBottom: "1px solid #F1F5F9",
+                background: "linear-gradient(135deg,#FFFBEB 0%,#fff 100%)",
+              }}>
+                <div>
+                  <p style={{ ...T.label, color: "#D97706", marginBottom: 4 }}>Meesho Deductions</p>
+                  <p style={{ fontSize: 13, fontWeight: 600, color: "#475569" }}>
+                    Amounts already deducted by Meesho before paying you
+                  </p>
+                </div>
+                <div style={{ textAlign: "right" }}>
+                  <p style={{ fontSize: 10, fontWeight: 700, color: "#94A3B8", textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 4 }}>
+                    Total Platform Deductions
+                  </p>
+                  <p style={{ fontFamily: "monospace", fontWeight: 900, fontSize: 22, color: "#DC2626" }}>
+                    {fmt(totalMeeshoDeduct)}
+                    <span style={{ fontSize: 12, fontWeight: 600, color: "#94A3B8", marginLeft: 8 }}>{totalDeductPct}% of gross</span>
+                  </p>
+                </div>
+              </div>
+
+              <div style={{ display: "flex", gap: 0, flexWrap: "wrap" }}>
+
+                {/* ── Left: deduction rows ─────────────────────────────── */}
+                <div style={{ flex: "1 1 340px", padding: "16px 22px" }}>
+                  {deductItems.map(({ icon, label, desc, value, pct, accent, bg, border, bold }) => {
+                    const v = Number(value || 0);
+                    const barW = grossRev > 0 && v !== 0 ? Math.min(Math.abs(v) / Math.abs(grossRev) * 100, 100) : 0;
+                    return (
+                      <div key={label} style={{
+                        display: "flex", alignItems: "center", gap: 12,
+                        padding: "10px 12px", marginBottom: 6, borderRadius: 10,
+                        background: v !== 0 ? bg : "#F8FAFC",
+                        border: `1px solid ${v !== 0 ? border : "#E2E8F0"}`,
+                        opacity: v === 0 ? 0.55 : 1,
+                      }}>
+                        {/* Icon */}
+                        <div style={{
+                          width: 34, height: 34, borderRadius: 8, flexShrink: 0,
+                          background: "#fff", border: `1.5px solid ${border}`,
+                          display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16,
+                        }}>{icon}</div>
+                        {/* Label + bar */}
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 3 }}>
+                            <span style={{ fontSize: 13, fontWeight: bold ? 800 : 600, color: "#334155", whiteSpace: "nowrap" }}>{label}</span>
+                            {v === 0 && <span style={{ fontSize: 10, fontWeight: 700, color: "#CBD5E1", background: "#F8FAFC", padding: "1px 7px", borderRadius: 20 }}>nil</span>}
+                          </div>
+                          <p style={{ fontSize: 11, color: "#94A3B8", marginBottom: barW > 0 ? 5 : 0 }}>{desc}</p>
+                          {barW > 0 && (
+                            <div style={{ height: 4, borderRadius: 99, background: "#E2E8F0" }}>
+                              <div style={{ width: `${barW}%`, height: "100%", background: accent, borderRadius: 99, transition: "width 0.6s ease" }} />
+                            </div>
+                          )}
+                        </div>
+                        {/* Value + pct */}
+                        <div style={{ textAlign: "right", flexShrink: 0 }}>
+                          <p style={{ fontFamily: "monospace", fontWeight: bold ? 900 : 700, fontSize: 14, color: v === 0 ? "#CBD5E1" : accent }}>
+                            {v === 0 ? "—" : fmt(v)}
+                          </p>
+                          {pct !== null && v !== 0 && (
+                            <span style={{
+                              fontSize: 10, fontWeight: 700, padding: "1px 7px", borderRadius: 20,
+                              background: "#fff", color: accent, border: `1px solid ${border}`,
+                            }}>{pct}%</span>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+
+                  {/* Total strip */}
+                  <div style={{
+                    display: "flex", alignItems: "center", justifyContent: "space-between",
+                    marginTop: 10, padding: "12px 14px", borderRadius: 10,
+                    background: "#FFF1F2", border: "1.5px solid #FECDD3",
+                  }}>
+                    <div>
+                      <p style={{ fontSize: 11, fontWeight: 700, color: "#DC2626", textTransform: "uppercase", letterSpacing: "0.07em" }}>
+                        Total Platform Cut (Comm + TCS + TDS)
+                      </p>
+                      <p style={{ fontSize: 11, color: "#94A3B8", marginTop: 2 }}>subtracted by Meesho from your gross settlement</p>
+                    </div>
+                    <div style={{ textAlign: "right" }}>
+                      <p style={{ fontFamily: "monospace", fontWeight: 900, fontSize: 18, color: "#DC2626" }}>{fmt(totalMeeshoDeduct)}</p>
+                      <span style={{ fontSize: 11, fontWeight: 700, color: "#94A3B8" }}>{totalDeductPct}%</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* ── Divider ─────────────────────────────────────────── */}
+                <div style={{ width: 1, background: "#F1F5F9", flexShrink: 0, alignSelf: "stretch" }} />
+
+                {/* ── Right: Revenue waterfall + Claims ───────────────── */}
+                <div style={{ flex: "0 1 280px", padding: "16px 20px", display: "flex", flexDirection: "column", gap: 14 }}>
+
+                  {/* Revenue waterfall */}
+                  <div>
+                    <p style={{ ...T.label, marginBottom: 12 }}>Revenue Waterfall</p>
+                    {waterfallSteps.map(({ label, value, color, bg, arrow, bold: bld }, idx) => (
+                      <div key={label}>
+                        {arrow && (
+                          <div style={{ display: "flex", justifyContent: "center", margin: "2px 0" }}>
+                            <span style={{ fontSize: 14, color: "#CBD5E1" }}>↓</span>
+                          </div>
+                        )}
+                        <div style={{
+                          display: "flex", alignItems: "center", justifyContent: "space-between",
+                          padding: "8px 12px", borderRadius: 8, background: bg,
+                          border: `1.5px solid ${bld ? color + "44" : "#E2E8F0"}`,
+                        }}>
+                          <span style={{ fontSize: 12, fontWeight: bld ? 700 : 500, color: bld ? color : "#64748B" }}>{label}</span>
+                          <span style={{ fontFamily: "monospace", fontWeight: bld ? 900 : 700, fontSize: bld ? 16 : 13, color }}>
+                            {value > 0 && idx > 0 ? "+" : ""}{fmt(value)}
+                          </span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Claims card */}
+                  <div style={{
+                    borderRadius: 12, padding: "14px 16px",
+                    background: claimPos ? "#F0FDF4" : "#F5F3FF",
+                    border: `1.5px solid ${claimPos ? "#A7F3D0" : "#DDD6FE"}`,
+                  }}>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+                      <p style={{ fontSize: 10, fontWeight: 700, color: claimPos ? "#059669" : "#7C3AED", textTransform: "uppercase", letterSpacing: "0.07em" }}>
+                        ⚠ Claim Orders
+                      </p>
+                      <span style={{
+                        fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 20,
+                        background: claimPos ? "#D1FAE5" : "#EDE9FE",
+                        color: claimPos ? "#065F46" : "#5B21B6",
+                      }}>{claimRate}% of settled</span>
+                    </div>
+                    <p style={{ fontFamily: "monospace", fontWeight: 900, fontSize: 26, color: claimPos ? "#059669" : "#7C3AED", lineHeight: 1, marginBottom: 6 }}>
+                      {claimPos ? "+" : ""}{fmt(claimNet)}
+                    </p>
+                    <div style={{ height: 1, background: claimPos ? "#A7F3D0" : "#DDD6FE", margin: "10px 0" }} />
+                    <div style={{ display: "flex", justifyContent: "space-between" }}>
+                      <div>
+                        <p style={{ fontSize: 10, color: "#94A3B8", marginBottom: 2 }}>Orders</p>
+                        <p style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 16, color: "#334155" }}>{nClaim.toLocaleString()}</p>
+                      </div>
+                      <div style={{ textAlign: "right" }}>
+                        <p style={{ fontSize: 10, color: "#94A3B8", marginBottom: 2 }}>Item cost deducted</p>
+                        <p style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 16, color: "#DC2626" }}>−{fmt(Math.abs(claimCost))}</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
-            <div style={{ flex: "1 1 200px", display: "flex", flexDirection: "column", gap: 10 }}>
-              <div style={{ background: "#F8FAFC", borderRadius: 12, padding: "14px 16px" }}>
-                <p style={{ fontSize: 10, fontWeight: 700, color: C.gray400, textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 8 }}>Revenue Flow</p>
-                <p style={{ fontSize: 12, color: C.gray500, lineHeight: 1.7 }}>
-                  Gross Revenue <strong style={{ fontFamily: "monospace", color: C.gray800 }}>{fmt(grossRev)}</strong>
-                  <br />→ deduct commission, TCS, TDS, shipping
-                  <br />→ Net Settlement <strong style={{ fontFamily: "monospace", color: C.green }}>{fmt(profit.net_settlement_revenue)}</strong>
-                </p>
-              </div>
-              <div style={{ background: "#F5F3FF", borderRadius: 12, padding: "14px 16px", border: "1px solid #DDD6FE" }}>
-                <p style={{ fontSize: 10, fontWeight: 700, color: "#7C3AED", textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: 6 }}>Claim Orders (net P&L)</p>
-                <p style={{ fontSize: 18, fontWeight: 800, fontFamily: "monospace", color: claimNet >= 0 ? "#059669" : "#7C3AED" }}>{fmt(claimNet)}</p>
-                <p style={{ fontSize: 11, color: C.gray400, marginTop: 3 }}>{nClaim.toLocaleString()} orders · {claimRate}% of settled</p>
-                <p style={{ fontSize: 11, color: C.gray400 }}>Cost deducted: {fmt(Math.abs(claimCost))}</p>
-              </div>
-            </div>
-          </div>
-        </SectionCard>
+          );
+        })()}
 
         {/* ── 8. Rates + Order health ─────────────────────────────────────── */}
         <div style={{ display: "flex", gap: 18, flexWrap: "wrap" }}>
@@ -774,8 +960,8 @@ export function OverviewTab() {
               <LineChart dataset={timelineData}
                 xAxis={[{ dataKey: "date", scaleType: "point", tickLabelStyle: { fontSize: 10 } }]}
                 series={[
-                  { dataKey: "settlements", label: "Settlements", color: C.green, showMark: false, area: true },
-                  { dataKey: "orders", label: "Orders Placed", color: C.blue, showMark: false, area: true },
+                  { dataKey: "settlements", label: "Settlements", color: C.green, showMark: false },
+                  { dataKey: "orders", label: "Orders Placed", color: C.blue, showMark: false },
                 ]}
                 height={230} margin={{ left: 48, right: 10, top: 10, bottom: 30 }} />
             </SectionCard>

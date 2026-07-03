@@ -13,6 +13,7 @@ import { SKUAnalysisTab } from "./Components/Tabs/SKUProfitTab";
 import { LabelsTab } from "./Components/Tabs/LabelsTab";
 import { PurchasesTab } from "./Components/Tabs/PurchasesTab";
 import { InventoryTab } from "./Components/Tabs/InventoryTab";
+import { MeeshoStockTab } from "./Components/Tabs/MeeshoStockTab";
 import { FraudCustomersTab } from "./Components/Tabs/FraudCustomersTab";
 import { ProductPhotosTab } from "./Components/Tabs/ProductPhotosTab";
 import { MismatchTab } from "./Components/Tabs/MismatchTab";
@@ -52,7 +53,7 @@ export const C = {
   amberLight: "#FFFBEB",
   amberBorder: "#FDE68A",
   // Neutrals — slate scale (cooler, more premium than gray)
-  gray50:  "#F8FAFC",
+  gray50: "#F8FAFC",
   gray100: "#F1F5F9",
   gray200: "#E2E8F0",
   gray300: "#CBD5E1",
@@ -119,12 +120,12 @@ export function btn(variant = "primary", size = "md") {
     lg: { padding: "12px 28px", fontSize: 14 },
   };
   const variants = {
-    primary:     { background: C.orange,      color: C.white,   border: "none",                          boxShadow: "0 2px 6px rgba(109,40,217,0.3)" },
-    secondary:   { background: C.blue,        color: C.white,   border: "none",                          boxShadow: "0 2px 6px rgba(37,99,235,0.25)" },
-    success:     { background: C.green,       color: C.white,   border: "none",                          boxShadow: "0 2px 6px rgba(5,150,105,0.25)" },
-    danger:      { background: C.red,         color: C.white,   border: "none",                          boxShadow: "0 2px 6px rgba(225,29,72,0.25)" },
-    ghost:       { background: "transparent", color: C.gray600, border: `1.5px solid ${C.gray200}`,      boxShadow: "none" },
-    ghostOrange: { background: C.orangeLight, color: C.orange,  border: `1.5px solid ${C.orangeBorder}`, boxShadow: "none" },
+    primary: { background: C.orange, color: C.white, border: "none", boxShadow: "0 2px 6px rgba(109,40,217,0.3)" },
+    secondary: { background: C.blue, color: C.white, border: "none", boxShadow: "0 2px 6px rgba(37,99,235,0.25)" },
+    success: { background: C.green, color: C.white, border: "none", boxShadow: "0 2px 6px rgba(5,150,105,0.25)" },
+    danger: { background: C.red, color: C.white, border: "none", boxShadow: "0 2px 6px rgba(225,29,72,0.25)" },
+    ghost: { background: "transparent", color: C.gray600, border: `1.5px solid ${C.gray200}`, boxShadow: "none" },
+    ghostOrange: { background: C.orangeLight, color: C.orange, border: `1.5px solid ${C.orangeBorder}`, boxShadow: "none" },
   };
   return { ...variants[variant], ...sizes[size], borderRadius: 10, cursor: "pointer", fontWeight: 600, fontFamily: "inherit", transition: "opacity 0.15s, box-shadow 0.15s" };
 }
@@ -317,9 +318,9 @@ export function SKUTable({ data, mode, onRowClick }) {
                   <td style={{ ...S.td, textAlign: "right" }}>
                     {s.avg_profit_per_piece != null
                       ? <span style={{
-                          fontFamily: "monospace", fontWeight: 700, fontSize: 12,
-                          color: s.avg_profit_per_piece >= 0 ? C.green : C.red,
-                        }}>{s.avg_profit_per_piece >= 0 ? "+" : ""}{fmt(s.avg_profit_per_piece)}</span>
+                        fontFamily: "monospace", fontWeight: 700, fontSize: 12,
+                        color: s.avg_profit_per_piece >= 0 ? C.green : C.red,
+                      }}>{s.avg_profit_per_piece >= 0 ? "+" : ""}{fmt(s.avg_profit_per_piece)}</span>
                       : <span style={{ color: C.gray300 }}>—</span>}
                   </td>
 
@@ -373,7 +374,7 @@ const NAV_GROUPS = [
     label: "Analytics",
     color: "#A78BFA",
     items: [
-      { path: "/",             label: "Overview",     icon: "◈" , end: true },
+      { path: "/", label: "Overview", icon: "◈", end: true },
       { path: "/sku-analysis", label: "SKU Analysis", icon: "↗" },
     ],
   },
@@ -381,31 +382,31 @@ const NAV_GROUPS = [
     label: "Operations",
     color: "#34D399",
     items: [
-      { path: "/orders",        label: "Orders",          icon: "⊡" },
-      { path: "/payments",      label: "Payments",        icon: "◎" },
-      { path: "/unsettled",     label: "Unsettled",       icon: "⚡" },
-      { path: "/mismatch",      label: "Pay Mismatch",    icon: "⊝" },
-      { path: "/labels",        label: "Labels",          icon: "⊟" },
+      { path: "/orders", label: "Orders", icon: "⊡" },
+      { path: "/payments", label: "Payments", icon: "◎" },
+      { path: "/unsettled", label: "Unsettled", icon: "⚡" },
+      { path: "/mismatch", label: "Pay Mismatch", icon: "⊝" },
+      { path: "/labels", label: "Labels", icon: "⊟" },
     ],
   },
   {
     label: "Catalog",
     color: "#60A5FA",
     items: [
-      { path: "/pricing",   label: "SKU Pricing", icon: "⊞" },
-      { path: "/inventory",        label: "Inventory",        icon: "⊕" },
-      { path: "/meesho-inventory", label: "Meesho Stock",   icon: "⊞" },
-      { path: "/meesho-pricing",   label: "Price Update",  icon: "₹" },
-      { path: "/purchases",        label: "Purchases",         icon: "⊗" },
+      { path: "/pricing", label: "SKU Pricing", icon: "⊞" },
+      { path: "/inventory", label: "Inventory", icon: "⊕" },
+      { path: "/meesho-inventory", label: "Meesho Stock", icon: "⊞" },
+      { path: "/meesho-pricing", label: "Price Update", icon: "₹" },
+      { path: "/purchases", label: "Purchases", icon: "⊗" },
     ],
   },
   {
     label: "Tools",
     color: "#FBBF24",
     items: [
-      { path: "/upload",         label: "Upload Data", icon: "⇧" },
-      { path: "/product-photos", label: "AI Photos",   icon: "✦" },
-      { path: "/fraud",          label: "Fraud Watch", icon: "⊘" },
+      { path: "/upload", label: "Upload Data", icon: "⇧" },
+      { path: "/product-photos", label: "AI Photos", icon: "✦" },
+      { path: "/fraud", label: "Fraud Watch", icon: "⊘" },
     ],
   },
 ];
@@ -455,9 +456,9 @@ function NavItem({ item, collapsed }) {
 }
 
 // ── Sidebar ───────────────────────────────────────────────────────────────────
-const SIDEBAR_BG   = "#13111C";
-const SIDEBAR_BG2  = "#0E0C18";
-const DIVIDER      = "rgba(255,255,255,0.07)";
+const SIDEBAR_BG = "#13111C";
+const SIDEBAR_BG2 = "#0E0C18";
+const DIVIDER = "rgba(255,255,255,0.07)";
 
 function Sidebar({ collapsed, setCollapsed }) {
   const [btnHovered, setBtnHovered] = useState(false);
@@ -608,20 +609,20 @@ export default function App() {
         <TopBar />
         <div style={{ flex: 1, overflowY: "auto", padding: "28px 32px" }}>
           <Routes>
-            <Route path="/"               element={<OverviewTab />} />
-            <Route path="/orders"         element={<OrdersTab />} />
-            <Route path="/unsettled"       element={<UnsettledOrdersTab />} />
-            <Route path="/payments"        element={<PaymentsTab />} />
-            <Route path="/mismatch"        element={<MismatchTab />} />
-            <Route path="/sku-analysis"   element={<SKUAnalysisTab />} />
-            <Route path="/pricing"        element={<PricingTab />} />
-            <Route path="/upload"         element={<UploadTab />} />
-            <Route path="/labels"         element={<LabelsTab />} />
-            <Route path="/purchases"      element={<PurchasesTab />} />
-            <Route path="/inventory"         element={<InventoryTab />} />
-            <Route path="/meesho-inventory"  element={<MeeshoInventoryTab />} />
-            <Route path="/meesho-pricing"    element={<MeeshoPricingTab />} />
-            <Route path="/fraud"          element={<FraudCustomersTab />} />
+            <Route path="/" element={<OverviewTab />} />
+            <Route path="/orders" element={<OrdersTab />} />
+            <Route path="/unsettled" element={<UnsettledOrdersTab />} />
+            <Route path="/payments" element={<PaymentsTab />} />
+            <Route path="/mismatch" element={<MismatchTab />} />
+            <Route path="/sku-analysis" element={<SKUAnalysisTab />} />
+            <Route path="/pricing" element={<PricingTab />} />
+            <Route path="/upload" element={<UploadTab />} />
+            <Route path="/labels" element={<LabelsTab />} />
+            <Route path="/purchases" element={<PurchasesTab />} />
+            <Route path="/inventory" element={<InventoryTab />} />
+            <Route path="/meesho-inventory" element={<MeeshoInventoryTab />} />
+            <Route path="/meesho-pricing" element={<MeeshoPricingTab />} />
+            <Route path="/fraud" element={<FraudCustomersTab />} />
             <Route path="/product-photos" element={<ProductPhotosTab />} />
           </Routes>
         </div>

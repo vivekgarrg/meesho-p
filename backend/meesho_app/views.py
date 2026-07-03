@@ -326,7 +326,9 @@ def _classify_rows(payment_rows):
     _seen: dict = {}
     for r in main_all:
         _seen[r.live_order_status.upper()] = r
+        _seen[r.live_order_status.upper()] = r
     main = list(_seen.values())
+
 
     _seen2: dict = {}
     for r in adj:
@@ -335,6 +337,7 @@ def _classify_rows(payment_rows):
         elif r.recovery_reason and r.recovery_reason.lower() == "affiliate fee":
             _seen2["affiliate"] = r
         else:
+            _seen2["others"] = r
             _seen2["others"] = r
                 
         
@@ -1387,16 +1390,34 @@ def profit_summary(request):
         gross_revenue=Sum("total_sale_amount"),
         total_commission=Sum("meesho_commission_incl_gst"),
         total_tcs=Sum("tcs"),
-        total_tds=Sum("tds")
+        total_tds=Sum("tds"),
+        total_forward_shipping=Sum("shipping_charge_incl_gst"),
+        total_return_shipping=Sum("return_shipping_charge"),
     )
 
-    revenue          = agg["revenue"]          or Decimal("0")
-    gross_revenue    = agg["gross_revenue"]    or Decimal("0")
-    total_commission = agg["total_commission"] or Decimal("0")
-    total_tcs        = agg["total_tcs"]        or Decimal("0")
-    total_tds        = agg["total_tds"]        or Decimal("0")
+    revenue                  = agg["revenue"]                  or Decimal("0")
+    gross_revenue            = agg["gross_revenue"]            or Decimal("0")
+    total_commission         = agg["total_commission"]         or Decimal("0")
+    total_tcs                = agg["total_tcs"]                or Decimal("0")
+    total_tds                = agg["total_tds"]                or Decimal("0")
+    total_forward_shipping   = agg["total_forward_shipping"]   or Decimal("0")
+    total_return_shipping    = agg["total_return_shipping"]    or Decimal("0")
+    total_shipping_cost      = total_forward_shipping + total_return_shipping
 
     net_revenue = revenue - total_purchase_cost + ads + comp_recovery
+
+    # Ensure sum(sku.net_profit) == revenue - total_purchase_cost by absorbing the gap
+    # (settlement from missing-SKU orders) into a synthetic __unattributed__ bucket.
+    total_sku_net = sum(Decimal(str(v.get("net_profit", 0) or 0)) for v in order_wise_profit.values())
+    unattributed_gap = (revenue - total_purchase_cost) - total_sku_net
+    if abs(unattributed_gap) > Decimal("0.01"):
+        order_wise_profit["__unattributed__"] = {
+            "net_profit": float(unattributed_gap),
+            "order_count": orders_missing_price,
+            "sku_id": "__unattributed__",
+            "one_unit_price": 0,
+            "total_purchase_cost": 0,
+        }
 
     # Keep raw DB aggregate as informational (includes claims adj rows) — NOT used in P&L
     raw_settlement = revenue
@@ -1416,7 +1437,7 @@ def profit_summary(request):
         "total_packaging_cost":   round(total_packaging_cost, 2),
         "total_packaging_cost_for_returns": round(total_packaging_cost_for_return, 2),
         "total_tax_cost":         round(total_tax_cost, 2),
-        "net_profit_loss": round( revenue - total_purchase_cost, 2),
+        "net_profit_loss": round(float(revenue - total_purchase_cost), 2),
         "order_summary": order_status_summary,
         "total_loss":             round(total_loss, 2),
         "total_rto_loss":         round(total_rto_loss, 2),
@@ -1436,6 +1457,10 @@ def profit_summary(request):
         "total_commission_paid":        round(total_commission, 2),
         "total_tcs":                    round(total_tcs, 2),
         "total_tds":                    round(total_tds, 2),
+        "total_shipping_cost":          round(total_shipping_cost, 2),
+        "total_forward_shipping":       round(total_forward_shipping, 2),
+        "total_return_shipping":        round(total_return_shipping, 2),
+        "net_settlement_revenue":       round(revenue, 2),
         "total_claims":                 round(total_claims, 2),
         "total_affiliate_fee":          round(total_affiliate_fee, 2),
         "total_pure_returns":           total_return_count,
@@ -2048,19 +2073,41 @@ def upload_orders_csv(request):
 
 @api_view(["GET"])
 def full_orders_list(request):
-    """Paginated list of Order rows with date/status/sku filters."""
-    page = int(request.GET.get("page", 1))
+    """Paginated list of Order rows with date/status/sku/state/search/month filters."""
+    page      = int(request.GET.get("page", 1))
     page_size = int(request.GET.get("page_size", 50))
     status_filter = request.GET.get("status", "")
-    sku_filter = request.GET.get("sku", "")
-    date_from = request.GET.get("date_from", "")
-    date_to = request.GET.get("date_to", "")
+    sku_filter    = request.GET.get("sku", "")
+    state_filter  = request.GET.get("state", "")
+    search        = request.GET.get("search", "")
+    month         = request.GET.get("month", "")   # YYYY-MM
+    date_from     = request.GET.get("date_from", "")
+    date_to       = request.GET.get("date_to", "")
+
+    # month shortcut overrides explicit date_from/date_to
+    if month:
+        try:
+            y, m = int(month[:4]), int(month[5:7])
+            import calendar
+            last_day = calendar.monthrange(y, m)[1]
+            date_from = f"{y:04d}-{m:02d}-01"
+            date_to   = f"{y:04d}-{m:02d}-{last_day:02d}"
+        except (ValueError, IndexError):
+            pass
 
     qs = Order.objects.all()
     if status_filter:
         qs = qs.filter(reason_for_credit_entry__iexact=status_filter)
     if sku_filter:
         qs = qs.filter(sku__icontains=sku_filter)
+    if state_filter:
+        qs = qs.filter(customer_state__iexact=state_filter)
+    if search:
+        qs = qs.filter(
+            DQ(sub_order_no__icontains=search) |
+            DQ(product_name__icontains=search) |
+            DQ(sku__icontains=search)
+        )
     if date_from:
         qs = qs.filter(order_date__gte=date_from)
     if date_to:
@@ -2080,17 +2127,30 @@ def full_orders_list(request):
 @api_view(["GET"])
 def full_orders_analytics(request):
     """Aggregate stats for Order model — drives the Orders tab summary cards."""
-    date_from = request.GET.get("date_from", "")
-    date_to = request.GET.get("date_to", "")
+    date_from     = request.GET.get("date_from", "")
+    date_to       = request.GET.get("date_to", "")
+    status_filter = request.GET.get("status", "")
+    month         = request.GET.get("month", "")
 
-    date_filtered = Order.objects.all()
+    if month:
+        try:
+            y, m = int(month[:4]), int(month[5:7])
+            import calendar
+            last_day = calendar.monthrange(y, m)[1]
+            date_from = f"{y:04d}-{m:02d}-01"
+            date_to   = f"{y:04d}-{m:02d}-{last_day:02d}"
+        except (ValueError, IndexError):
+            pass
+
+    base = Order.objects.all()
     if date_from:
-        date_filtered = date_filtered.filter(order_date__gte=date_from)
+        base = base.filter(order_date__gte=date_from)
     if date_to:
-        date_filtered = date_filtered.filter(order_date__lte=date_to)
+        base = base.filter(order_date__lte=date_to)
+    if status_filter:
+        base = base.filter(reason_for_credit_entry__iexact=status_filter)
 
-    # Use latest status per order so lifecycle updates don't double-count
-    qs = Order.latest_per_order(base_qs=date_filtered)
+    qs = Order.latest_per_order(base_qs=base)
 
     by_status = list(
         qs.values("reason_for_credit_entry")
@@ -2110,7 +2170,7 @@ def full_orders_analytics(request):
     by_sku = list(
         qs.values("sku")
         .annotate(count=Count("sub_order_no", distinct=True), total_qty=Sum("quantity"))
-        .order_by("-count")[:20]
+        .order_by("-count")[:15]
     )
 
     daily = list(
@@ -2119,12 +2179,22 @@ def full_orders_analytics(request):
         .order_by("order_date")
     )
 
+    # Available months — always from unfiltered base for the month picker
+    all_months = list(
+        Order.objects.values_list("order_date", flat=True)
+        .exclude(order_date__isnull=True)
+        .order_by("order_date")
+        .distinct()
+    )
+    months = sorted({str(d)[:7] for d in all_months})
+
     return Response({
         "total": qs.count(),
         "by_status": by_status,
         "by_state": by_state,
         "by_sku": by_sku,
         "daily": daily,
+        "months": months,
     })
 
 
@@ -2509,8 +2579,19 @@ def upload_labels_pdf(request):
                     if qty > 1:
                         sku_data[sku]["high_qty_orders"] += 1
 
-                page_details.append({"page": page_num, "sku": sku, "qty": qty,
-                                     "courier": parsed["courier_name"], "awb": parsed["awb_number"]})
+                page_details.append({
+                    "page":             page_num,
+                    "sku":              sku,
+                    "qty":              qty,
+                    "courier":          parsed["courier_name"],
+                    "awb":              parsed["awb_number"],
+                    "order_id":         parsed["order_id"],
+                    "customer_name":    parsed["customer_name"],
+                    "customer_pincode": parsed["customer_pincode"],
+                    "customer_address": parsed["customer_address"],
+                    "customer_city":    parsed["customer_city"],
+                    "customer_state":   parsed["customer_state"],
+                })
 
                 # ── Queue DB row (only if we have an order_id) ────────────────
                 if parsed["order_id"]:
@@ -2563,8 +2644,30 @@ def upload_labels_pdf(request):
                 LabelOrder.objects.filter(order_id=oid).update(**row)
                 updated += 1
 
-    # ── Generate cropped PDF (label region only, sorted by SKU count desc) ──────
-    # Build SKU rank so PDF page order matches the table (most-ordered SKU first)
+    # ── Resolve parent SKU for each child SKU ────────────────────────────────────
+    _fp_qs = FinalPrice.objects.filter(
+        sku_id__in=list(sku_data.keys())
+    ).values("sku_id", "parent_id")
+    sku_to_parent = {row["sku_id"]: row["parent_id"] for row in _fp_qs}
+
+    # Enrich page_details with parent SKU
+    for _pd in page_details:
+        _pd["parent_sku"] = sku_to_parent.get(_pd.get("sku") or "")
+
+    # Build parent-level rank: aggregate child counts under each parent so the
+    # most-dispatched parent group appears first in the cropped PDF.
+    parent_count: dict = {}
+    for _sku, _data in sku_data.items():
+        _parent = sku_to_parent.get(_sku) or _sku
+        parent_count[_parent] = parent_count.get(_parent, 0) + _data["count"]
+    parent_rank = {
+        _p: _r for _r, (_p, _) in enumerate(
+            sorted(parent_count.items(), key=lambda x: -x[1])
+        )
+    }
+
+    # ── Generate cropped PDF (label region only, sorted by parent→child count) ─
+    # Sort: parent group (most labels first) → child SKU rank → original page idx
     sku_rank = {
         sku: rank
         for rank, (sku, _) in enumerate(
@@ -2577,11 +2680,15 @@ def upload_labels_pdf(request):
         try:
             reader = PdfReader(io.BytesIO(pdf_bytes))
             writer = PdfWriter()
-            # Sort pages: by SKU rank then original page index so within each SKU
-            # group the original ordering is preserved; no-SKU pages go last.
             page_order = sorted(
                 range(len(reader.pages)),
                 key=lambda i: (
+                    parent_rank.get(
+                        sku_to_parent.get(
+                            (page_details[i]["sku"] if i < len(page_details) else "") or ""
+                        ) or (page_details[i]["sku"] if i < len(page_details) else "") or "",
+                        len(parent_count),
+                    ),
                     sku_rank.get(
                         page_details[i]["sku"] if i < len(page_details) else "",
                         len(sku_data),
@@ -2608,7 +2715,8 @@ def upload_labels_pdf(request):
 
     # ── Build analytics response ──────────────────────────────────────────────
     sku_table = sorted(
-        [{"sku": k, "count": v["count"], "total_qty": v["total_qty"],
+        [{"sku": k, "parent_sku": sku_to_parent.get(k),
+          "count": v["count"], "total_qty": v["total_qty"],
           "max_qty": v["max_qty"], "high_qty_orders": v["high_qty_orders"]}
          for k, v in sku_data.items()],
         key=lambda x: -x["count"],
@@ -2621,20 +2729,157 @@ def upload_labels_pdf(request):
         .values_list("customer_name", "customer_pincode")
     )
     blocked_in_batch = []
-    for pd in page_details:
-        name    = pd.get("customer_name", "")
-        pincode = pd.get("customer_pincode", "")
-        if name and (name, pincode) in blocked_set:
+    for _pd in page_details:
+        _name    = _pd.get("customer_name", "")
+        _pincode = _pd.get("customer_pincode", "")
+        if _name and (_name, _pincode) in blocked_set:
             blocked_in_batch.append({
-                "order_id":       pd.get("order_id", ""),
-                "customer_name":  name,
-                "customer_pincode": pincode,
-                "sku":            pd.get("sku", ""),
+                "order_id":         _pd.get("order_id", ""),
+                "customer_name":    _name,
+                "customer_pincode": _pincode,
+                "sku":              _pd.get("sku", ""),
             })
+
+    # ── Repeated customers: find prior-history customers in this batch ────────
+    # Build (name, pincode) → batch info map
+    batch_customers: dict = {}
+    batch_order_ids: set  = set()
+    for _pd in page_details:
+        _name    = _pd.get("customer_name", "").strip()
+        _pincode = _pd.get("customer_pincode", "").strip()
+        _oid     = _pd.get("order_id", "")
+        if _oid:
+            batch_order_ids.add(_oid)
+        if not _name or not _pincode:
+            continue
+        _key = (_name, _pincode)
+        if _key not in batch_customers:
+            batch_customers[_key] = {
+                "customer_name":    _name,
+                "customer_pincode": _pincode,
+                "customer_address": _pd.get("customer_address", "") or "",
+                "customer_city":    _pd.get("customer_city", "") or "",
+                "customer_state":   _pd.get("customer_state", "") or "",
+                "batch_orders": [],
+            }
+        batch_customers[_key]["batch_orders"].append({
+            "order_id": _oid,
+            "sku":      _pd.get("sku", ""),
+            "qty":      _pd.get("qty", 1),
+        })
+
+    repeated_customers = []
+    if batch_customers:
+        _all_names    = [k[0] for k in batch_customers]
+        _all_pincodes = [k[1] for k in batch_customers]
+
+        # Prior orders = same customer, NOT in this batch
+        _prior_rows = list(
+            LabelOrder.objects
+            .filter(customer_name__in=_all_names, customer_pincode__in=_all_pincodes)
+            .exclude(order_id__in=list(batch_order_ids))
+            .values("order_id", "customer_name", "customer_pincode",
+                    "sku", "qty", "order_date", "uploaded_date")
+        )
+
+        # Group prior rows by customer key
+        _prior_by_customer: dict = {}
+        for _row in _prior_rows:
+            _k = (_row["customer_name"], _row["customer_pincode"])
+            _prior_by_customer.setdefault(_k, []).append(_row)
+
+        # Only process customers that actually have prior history
+        _prior_order_ids = [_r["order_id"] for _r in _prior_rows]
+        _outcomes: dict  = {}
+        if _prior_order_ids:
+            for _o in (Order.objects
+                       .filter(sub_order_no__in=_prior_order_ids)
+                       .values("sub_order_no", "reason_for_credit_entry")):
+                _outcomes.setdefault(_o["sub_order_no"], []).append(
+                    _o["reason_for_credit_entry"]
+                )
+
+        _RETURN_S = {"RETURN", "RETURNED"}
+
+        for _key, _prior in _prior_by_customer.items():
+            if not _prior:
+                continue
+            _bc = batch_customers[_key]
+
+            # Resolve status for each prior order
+            _enriched = []
+            for _r in _prior:
+                _sts = _outcomes.get(_r["order_id"], [])
+                if "DELIVERED" in _sts:
+                    _resolved = "DELIVERED"
+                elif any(_s in _RETURN_S for _s in _sts):
+                    _resolved = "RETURN"
+                elif "RTO_COMPLETE" in _sts:
+                    _resolved = "RTO"
+                elif "CANCELLED" in _sts:
+                    _resolved = "CANCELLED"
+                else:
+                    _resolved = "PENDING"
+                _enriched.append({
+                    "order_id":   _r["order_id"],
+                    "sku":        _r["sku"] or "",
+                    "qty":        _r["qty"] or 1,
+                    "order_date": str(_r["order_date"]) if _r["order_date"] else "",
+                    "status":     _resolved,
+                })
+
+            _enriched.sort(key=lambda x: x["order_date"], reverse=True)
+
+            _total     = len(_enriched)
+            _delivered = sum(1 for _o in _enriched if _o["status"] == "DELIVERED")
+            _returned  = sum(1 for _o in _enriched if _o["status"] == "RETURN")
+            _rto       = sum(1 for _o in _enriched if _o["status"] == "RTO")
+            _ret_rate  = round(_returned / _total, 3) if _total > 0 else 0.0
+
+            # SKU breakdown
+            _sku_stats: dict = {}
+            for _o in _enriched:
+                _s_sku = _o["sku"] or "Unknown"
+                _s     = _sku_stats.setdefault(_s_sku, {
+                    "sku": _s_sku, "orders": 0, "qty": 0,
+                    "delivered": 0, "returned": 0, "rto": 0,
+                })
+                _s["orders"] += 1
+                _s["qty"]    += int(_o["qty"] or 1)
+                if _o["status"] == "DELIVERED": _s["delivered"] += 1
+                elif _o["status"] == "RETURN":  _s["returned"]  += 1
+                elif _o["status"] == "RTO":     _s["rto"]       += 1
+
+            repeated_customers.append({
+                "customer_name":     _key[0],
+                "customer_pincode":  _key[1],
+                "customer_address":  _bc["customer_address"],
+                "customer_city":     _bc["customer_city"],
+                "customer_state":    _bc["customer_state"],
+                "batch_orders":      _bc["batch_orders"],
+                "prior_order_count": _total,
+                "delivered":         _delivered,
+                "returned":          _returned,
+                "rto":               _rto,
+                "return_rate":       _ret_rate,
+                "risk_level":        _risk_level(_ret_rate, _returned),
+                "is_blocked":        _key in blocked_set,
+                "sku_breakdown":     sorted(_sku_stats.values(), key=lambda x: -x["orders"]),
+                "orders":            _enriched[:50],
+                "last_seen":         _enriched[0]["order_date"] if _enriched else "",
+            })
+
+        # Sort: blocked first, then high risk, then by return rate desc
+        _rl_order = {"high": 0, "medium": 1, "low": 2}
+        repeated_customers.sort(key=lambda r: (
+            0 if r["is_blocked"] else 1,
+            _rl_order.get(r["risk_level"], 3),
+            -r["return_rate"],
+        ))
 
     return Response({
         "success": True,
-        "upload_date":      str(today),          # actual date used (may be back-dated)
+        "upload_date":      str(today),
         "total_pages":      total_pages,
         "total_unique_skus":len(sku_data),
         "total_labels":     total_labels,
@@ -2646,6 +2891,7 @@ def upload_labels_pdf(request):
         "db_saved":         saved,
         "db_updated":       updated,
         "blocked_customers_found": blocked_in_batch,
+        "repeated_customers":      repeated_customers,
     })
 
 
@@ -3958,11 +4204,11 @@ def label_unpacked(request):
 
 # ── Fraud Customers & Blocked Customers ──────────────────────────────────────
 
-def _risk_level(rto_rate, claim_count):
-    """Return 'high' / 'medium' / 'low' risk label."""
-    if rto_rate >= 0.75 or claim_count >= 3:
+def _risk_level(return_rate, return_count):
+    """Return 'high' / 'medium' / 'low' based on RETURN behaviour (not RTO)."""
+    if return_rate >= 0.5 or return_count >= 3:
         return "high"
-    if rto_rate >= 0.40 or claim_count >= 1:
+    if return_rate >= 0.25 or return_count >= 2:
         return "medium"
     return "low"
 
@@ -3970,51 +4216,49 @@ def _risk_level(rto_rate, claim_count):
 @api_view(["GET"])
 def fraud_customers(request):
     """
-    Compute per-customer fraud metrics using LabelOrder → Order join.
-
-    Identity key: customer_name + customer_pincode
-    Metrics per customer:
-      - total_orders  : distinct order_ids from LabelOrder
-      - delivered     : Order rows with DELIVERED
-      - rto           : Order rows with RTO_COMPLETE
-      - cancelled     : Order rows with CANCELLED
-      - rto_rate      : rto / (delivered + rto) if > 0
-      - claim_count   : distinct orders with a non-zero OrderPayment.claims
-      - risk_level    : high / medium / low
+    Per-customer analysis: identity = customer_name + customer_pincode.
+    Groups orders by same name + same address, returns full order history,
+    per-SKU breakdown, and return-based risk level.
     """
-    min_orders = int(request.GET.get("min_orders", 2))  # ignore customers with only 1 order
+    min_orders = int(request.GET.get("min_orders", 2))
 
-    # 1. All label orders grouped by customer identity
-    label_qs = (
+    # 1. Load every LabelOrder row with full detail in one query
+    all_label_rows = list(
         LabelOrder.objects
         .exclude(customer_name="")
-        .values("customer_name", "customer_pincode")
-        .annotate(
-            total_orders=Count("order_id", distinct=True),
-            last_order=Max("order_date"),
-            city=Min("customer_city"),
-            state=Min("customer_state"),
+        .values(
+            "order_id", "customer_name", "customer_pincode",
+            "customer_address", "customer_city", "customer_state",
+            "sku", "qty", "order_date",
         )
-        .filter(total_orders__gte=min_orders)
     )
-
-    if not label_qs.exists():
+    if not all_label_rows:
         return Response({"results": [], "total": 0})
 
-    # 2. All LabelOrder order_ids for these customers
-    all_order_ids = list(
-        LabelOrder.objects
-        .exclude(customer_name="")
-        .values_list("order_id", flat=True)
-    )
+    # 2. Group by (name, pincode); build per-order detail list
+    customer_orders = {}
+    all_order_ids   = []
+    for lo in all_label_rows:
+        key = (lo["customer_name"], lo["customer_pincode"])
+        customer_orders.setdefault(key, []).append({
+            "order_id":   lo["order_id"],
+            "sku":        lo["sku"] or "",
+            "qty":        lo["qty"] or 1,
+            "order_date": str(lo["order_date"]) if lo["order_date"] else "",
+            "address":    lo["customer_address"] or "",
+            "city":       lo["customer_city"] or "",
+            "state":      lo["customer_state"] or "",
+            "status":     "PENDING",
+        })
+        all_order_ids.append(lo["order_id"])
 
-    # 3. Order outcomes keyed by sub_order_no
+    # 3. Outcomes from Order table  (DELIVERED / RETURN / RETURNED / RTO_COMPLETE / CANCELLED)
     outcome_map = {}
     for row in Order.objects.filter(sub_order_no__in=all_order_ids).values("sub_order_no", "reason_for_credit_entry"):
         outcome_map.setdefault(row["sub_order_no"], []).append(row["reason_for_credit_entry"])
 
-    # 4. Orders with claims (non-zero claims amount)
-    claimed_order_ids = set(
+    # 4. Claims lookup
+    claimed_ids = set(
         OrderPayment.objects
         .filter(sub_order_no__in=all_order_ids, claims__isnull=False)
         .exclude(claims=0)
@@ -4022,53 +4266,93 @@ def fraud_customers(request):
         .distinct()
     )
 
-    # 5. Per customer: map order_ids → outcomes
-    customer_order_ids = {}
-    for lo in LabelOrder.objects.exclude(customer_name="").values("order_id", "customer_name", "customer_pincode"):
-        key = (lo["customer_name"], lo["customer_pincode"])
-        customer_order_ids.setdefault(key, []).append(lo["order_id"])
-
-    # 6. Build blocked lookup
+    # 5. Blocked lookup
     blocked_set = set(
         BlockedCustomer.objects.filter(is_active=True)
         .values_list("customer_name", "customer_pincode")
     )
 
+    RETURN_STATUSES = {"RETURN", "RETURNED"}
+
     results = []
-    for row in label_qs:
-        name    = row["customer_name"]
-        pincode = row["customer_pincode"]
-        key     = (name, pincode)
-        order_ids = customer_order_ids.get(key, [])
+    for (name, pincode), orders in customer_orders.items():
+        # Deduplicate order_ids (same order can appear twice if multi-item)
+        seen_ids: dict = {}
+        for o in orders:
+            oid = o["order_id"]
+            if oid not in seen_ids:
+                seen_ids[oid] = o
+        unique_orders = list(seen_ids.values())
+        if len(unique_orders) < min_orders:
+            continue
 
-        delivered  = sum(1 for oid in order_ids if "DELIVERED"    in outcome_map.get(oid, []))
-        rto        = sum(1 for oid in order_ids if "RTO_COMPLETE" in outcome_map.get(oid, []))
-        cancelled  = sum(1 for oid in order_ids if "CANCELLED"    in outcome_map.get(oid, []))
-        claim_count = sum(1 for oid in order_ids if oid in claimed_order_ids)
-        settled     = delivered + rto
-        rto_rate    = round(rto / settled, 3) if settled > 0 else 0.0
+        # Resolve statuses
+        enriched = []
+        for o in unique_orders:
+            statuses = outcome_map.get(o["order_id"], [])
+            if "DELIVERED" in statuses:
+                resolved = "DELIVERED"
+            elif any(s in RETURN_STATUSES for s in statuses):
+                resolved = "RETURN"
+            elif "RTO_COMPLETE" in statuses:
+                resolved = "RTO"
+            elif "CANCELLED" in statuses:
+                resolved = "CANCELLED"
+            else:
+                resolved = "PENDING"
+            enriched.append({**o, "status": resolved})
 
+        enriched.sort(key=lambda x: x["order_date"], reverse=True)
+
+        delivered = sum(1 for o in enriched if o["status"] == "DELIVERED")
+        returned  = sum(1 for o in enriched if o["status"] == "RETURN")
+        rto       = sum(1 for o in enriched if o["status"] == "RTO")
+        cancelled = sum(1 for o in enriched if o["status"] == "CANCELLED")
+        pending   = sum(1 for o in enriched if o["status"] == "PENDING")
+        total     = len(enriched)
+        claim_count = sum(1 for o in enriched if o["order_id"] in claimed_ids)
+
+        return_rate = round(returned / total, 3) if total > 0 else 0.0
+        rto_rate    = round(rto    / total, 3) if total > 0 else 0.0
+
+        # Per-SKU breakdown
+        sku_stats: dict = {}
+        for o in enriched:
+            sku = o["sku"] or "Unknown"
+            s   = sku_stats.setdefault(sku, {"sku": sku, "orders": 0, "qty": 0,
+                                              "delivered": 0, "returned": 0, "rto": 0})
+            s["orders"] += 1
+            s["qty"]    += int(o["qty"] or 1)
+            if o["status"] == "DELIVERED": s["delivered"] += 1
+            elif o["status"] == "RETURN":  s["returned"]  += 1
+            elif o["status"] == "RTO":     s["rto"]       += 1
+
+        sample = enriched[0] if enriched else {}
         results.append({
             "customer_name":    name,
             "customer_pincode": pincode,
-            "customer_city":    row["city"] or "",
-            "customer_state":   row["state"] or "",
-            "total_orders":     row["total_orders"],
+            "customer_address": sample.get("address", ""),
+            "customer_city":    sample.get("city", ""),
+            "customer_state":   sample.get("state", ""),
+            "total_orders":     total,
             "delivered":        delivered,
+            "returned":         returned,
             "rto":              rto,
             "cancelled":        cancelled,
-            "claim_count":      claim_count,
+            "pending":          pending,
+            "return_rate":      return_rate,
             "rto_rate":         rto_rate,
-            "risk_level":       _risk_level(rto_rate, claim_count),
-            "last_order":       str(row["last_order"]) if row["last_order"] else "",
-            "is_blocked":       key in blocked_set,
+            "claim_count":      claim_count,
+            "risk_level":       _risk_level(return_rate, returned),
+            "last_order":       enriched[0]["order_date"] if enriched else "",
+            "is_blocked":       (name, pincode) in blocked_set,
+            "sku_breakdown":    sorted(sku_stats.values(), key=lambda x: -x["orders"]),
+            "orders":           enriched[:60],
         })
 
-    # Sort: high risk first, then by rto_rate desc
     order_map = {"high": 0, "medium": 1, "low": 2}
-    results.sort(key=lambda r: (order_map[r["risk_level"]], -r["rto_rate"]))
+    results.sort(key=lambda r: (order_map[r["risk_level"]], -r["return_rate"], -r["returned"]))
 
-    # Filter to show only suspicious customers by default
     risk_filter = request.GET.get("risk", "")
     if risk_filter in ("high", "medium", "low"):
         results = [r for r in results if r["risk_level"] == risk_filter]
@@ -4082,10 +4366,12 @@ def blocked_customers_list(request):
         qs = BlockedCustomer.objects.filter(is_active=True).order_by("-blocked_at")
         results = [{
             "id":               bc.id,
+            "id":               bc.id,
             "customer_name":    bc.customer_name,
             "customer_pincode": bc.customer_pincode,
             "customer_city":    bc.customer_city,
             "customer_state":   bc.customer_state,
+            "customer_address": getattr(bc, "customer_address", ""),
             "reason":           bc.reason,
             "blocked_at":       bc.blocked_at.isoformat(),
         } for bc in qs]

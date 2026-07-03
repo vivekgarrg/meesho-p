@@ -8,6 +8,8 @@ import {
   Card,
   CardContent,
   Chip,
+  Collapse,
+  IconButton,
   LinearProgress,
   Paper,
   Table,
@@ -16,10 +18,30 @@ import {
   TableHead,
   TableRow,
   TextField,
+  Tooltip,
   Typography,
 } from "@mui/material";
+import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
+import KeyboardArrowUpIcon   from "@mui/icons-material/KeyboardArrowUp";
+import BlockIcon              from "@mui/icons-material/Block";
 import { C, API, fmt } from "../../App";
 import { PAGE_SIZE } from "../../lib/helper";
+
+// ── localStorage helpers — persist parsed label results by date ───────────────
+const _LS_PREFIX = "labels_parse_";
+function saveParseResult(date, fileName, result) {
+  try {
+    // Exclude cropped_pdf_b64 — it can be several MBs and would fill the quota
+    const { cropped_pdf_b64, ...rest } = result; // eslint-disable-line no-unused-vars
+    localStorage.setItem(_LS_PREFIX + date, JSON.stringify({ fileName, result: rest }));
+  } catch { /* quota exceeded — silently skip */ }
+}
+function loadParseResult(date) {
+  try {
+    const raw = localStorage.getItem(_LS_PREFIX + date);
+    return raw ? JSON.parse(raw) : null;
+  } catch { return null; }
+}
 
 const COURIER_COLORS = {
   Valmo:          { bg: "#EFF6FF", fg: "#2563EB", border: "#BFDBFE" },
@@ -915,6 +937,266 @@ function OrdersByPartnerTab({ availDates, activeRange, onRangeChange, onViewHist
   );
 }
 
+// ── Repeated-customer helpers ─────────────────────────────────────────────────
+const STATUS_STYLE_R = {
+  DELIVERED: { bg: "#D1FAE5", color: "#065F46", border: "#6EE7B7", label: "Delivered" },
+  RETURN:    { bg: "#FEE2E2", color: "#991B1B", border: "#FCA5A5", label: "Return"    },
+  RTO:       { bg: "#FEF3C7", color: "#92400E", border: "#FDE68A", label: "RTO"       },
+  CANCELLED: { bg: "#F3F4F6", color: "#6B7280", border: "#D1D5DB", label: "Cancelled" },
+  PENDING:   { bg: "#EFF6FF", color: "#1E40AF", border: "#BFDBFE", label: "Pending"   },
+};
+function RStatusChip({ status }) {
+  const s = STATUS_STYLE_R[status] || STATUS_STYLE_R.PENDING;
+  return (
+    <span style={{ display: "inline-block", background: s.bg, color: s.color,
+      border: `1px solid ${s.border}`, borderRadius: 4, fontSize: 10, fontWeight: 700,
+      padding: "1px 6px", lineHeight: "18px" }}>{s.label}</span>
+  );
+}
+function ReturnBar({ rate }) {
+  const pct   = Math.round(rate * 100);
+  const color = rate >= 0.5 ? "#DC2626" : rate >= 0.25 ? "#D97706" : "#16A34A";
+  return (
+    <Box sx={{ display: "flex", alignItems: "center", gap: "6px", minWidth: 100 }}>
+      <Box sx={{ flex: 1, height: 5, borderRadius: 3, background: "#E5E7EB", overflow: "hidden" }}>
+        <Box sx={{ width: `${pct}%`, height: "100%", borderRadius: 3, background: color }} />
+      </Box>
+      <span style={{ fontFamily: "monospace", fontWeight: 700, fontSize: 11, color, minWidth: 30 }}>{pct}%</span>
+    </Box>
+  );
+}
+const RISK_COLORS = {
+  high:   { bg: "#FEE2E2", color: "#DC2626", border: "#FCA5A5" },
+  medium: { bg: "#FEF3C7", color: "#D97706", border: "#FDE68A" },
+  low:    { bg: "#D1FAE5", color: "#059669", border: "#6EE7B7" },
+};
+
+function RepeatCustomerRow({ c, onBlock }) {
+  const [open, setOpen] = useState(false);
+  const rk = RISK_COLORS[c.risk_level] || RISK_COLORS.low;
+  return (
+    <>
+      <TableRow
+        sx={{ cursor: "pointer", background: c.is_blocked ? "#FFF0F0" : c.risk_level === "high" ? "#FFF5F5" : "#FFFBEB",
+          borderLeft: `4px solid ${rk.color}`, "&:hover": { background: "#FFF7ED" } }}
+        onClick={() => setOpen(o => !o)}
+      >
+        <TableCell sx={{ py: "8px", px: "10px", width: 32 }}>
+          {open ? <KeyboardArrowUpIcon sx={{ fontSize: 17, color: C.gray400 }} /> : <KeyboardArrowDownIcon sx={{ fontSize: 17, color: C.gray400 }} />}
+        </TableCell>
+        <TableCell sx={{ py: "8px", px: "12px" }}>
+          <Box sx={{ display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap" }}>
+            <Typography sx={{ fontWeight: 800, fontSize: 13, color: C.gray800 }}>{c.customer_name}</Typography>
+            {c.is_blocked && <span style={{ fontSize: 9, fontWeight: 800, background: "#FEE2E2", color: "#DC2626", border: "1px solid #FCA5A5", borderRadius: 3, padding: "1px 5px" }}>BLOCKED</span>}
+            <span style={{ fontSize: 11, color: C.gray400 }}>{[c.customer_city, c.customer_state].filter(Boolean).join(", ")} · {c.customer_pincode}</span>
+          </Box>
+          <Typography sx={{ fontSize: 11, color: C.gray400, mt: "2px" }}>{c.customer_address || ""}</Typography>
+        </TableCell>
+        {/* batch orders */}
+        <TableCell sx={{ py: "8px", px: "12px" }}>
+          <Box sx={{ display: "flex", flexWrap: "wrap", gap: "4px" }}>
+            {c.batch_orders?.map((bo, i) => (
+              <Tooltip key={i} title={bo.order_id} placement="top">
+                <span style={{ fontFamily: "monospace", fontSize: 10, background: C.orangeLight, color: C.orange,
+                  border: `1px solid ${C.orangeBorder}`, borderRadius: 4, padding: "1px 6px" }}>{bo.sku || "?"} ×{bo.qty}</span>
+              </Tooltip>
+            ))}
+          </Box>
+        </TableCell>
+        {/* prior orders */}
+        <TableCell sx={{ py: "8px", px: "12px", textAlign: "center", fontFamily: "monospace", fontWeight: 800, fontSize: 16, color: C.gray700 }}>
+          {c.prior_order_count}
+        </TableCell>
+        <TableCell sx={{ py: "8px", px: "12px", textAlign: "center", fontFamily: "monospace", fontSize: 14, color: "#16A34A", fontWeight: 700 }}>
+          {c.delivered}
+        </TableCell>
+        <TableCell sx={{ py: "8px", px: "12px", textAlign: "center" }}>
+          {c.returned > 0
+            ? <span style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 14, background: "#FEE2E2", color: "#DC2626", border: "1px solid #FCA5A5", borderRadius: 4, padding: "1px 10px" }}>{c.returned}</span>
+            : <span style={{ color: C.gray300 }}>0</span>}
+        </TableCell>
+        <TableCell sx={{ py: "8px", px: "12px", textAlign: "center" }}>
+          {c.rto > 0
+            ? <span style={{ fontFamily: "monospace", fontWeight: 700, fontSize: 13, background: "#FEF3C7", color: "#92400E", border: "1px solid #FDE68A", borderRadius: 4, padding: "1px 8px" }}>{c.rto}</span>
+            : <span style={{ color: C.gray300 }}>0</span>}
+        </TableCell>
+        <TableCell sx={{ py: "8px", px: "12px", minWidth: 120 }}>
+          <ReturnBar rate={c.return_rate} />
+        </TableCell>
+        <TableCell sx={{ py: "8px", px: "12px" }}>
+          <span style={{ fontSize: 11, fontWeight: 700, background: rk.bg, color: rk.color, border: `1px solid ${rk.border}`, borderRadius: 4, padding: "2px 8px" }}>
+            {c.risk_level === "high" ? "High Risk" : c.risk_level === "medium" ? "Medium" : "Low Risk"}
+          </span>
+        </TableCell>
+        <TableCell sx={{ py: "8px", px: "12px" }} onClick={e => e.stopPropagation()}>
+          {c.is_blocked
+            ? <span style={{ fontSize: 11, color: "#DC2626", fontWeight: 700 }}>Blocked</span>
+            : (
+              <Button size="small" variant="outlined" color="error" startIcon={<BlockIcon sx={{ fontSize: 12 }} />}
+                onClick={() => onBlock(c)}
+                sx={{ fontSize: 11, py: "2px", px: "8px", textTransform: "none", fontWeight: 700 }}>
+                Block
+              </Button>
+            )}
+        </TableCell>
+      </TableRow>
+
+      {/* Expanded detail */}
+      <TableRow>
+        <TableCell colSpan={10} sx={{ p: 0, border: 0 }}>
+          <Collapse in={open} unmountOnExit>
+            <Box sx={{ p: "14px 20px", background: "#FFFBEB", borderTop: "1px dashed #FDE68A", display: "flex", gap: "20px", flexWrap: "wrap" }}>
+
+              {/* SKU breakdown */}
+              <Box sx={{ flex: 1, minWidth: 280 }}>
+                <Typography sx={{ fontSize: 10, fontWeight: 700, color: C.gray400, textTransform: "uppercase", letterSpacing: "0.08em", mb: "8px" }}>
+                  Prior SKU Breakdown
+                </Typography>
+                <Table size="small" sx={{ borderCollapse: "collapse", border: `1px solid ${C.border}`, borderRadius: 8, overflow: "hidden" }}>
+                  <TableHead>
+                    <TableRow sx={{ background: C.gray50 }}>
+                      {["SKU","Qty","Orders","Delivered","Returned","RTO"].map(h => (
+                        <TableCell key={h} sx={{ py: "5px", px: "8px", fontSize: 10, fontWeight: 700, color: C.gray500, textTransform: "uppercase" }}>{h}</TableCell>
+                      ))}
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {(c.sku_breakdown || []).map(row => (
+                      <TableRow key={row.sku}>
+                        <TableCell sx={{ py: "5px", px: "8px" }}>
+                          <span style={{ fontFamily: "monospace", fontSize: 11, color: C.orange, fontWeight: 700, background: C.orangeLight, padding: "1px 5px", borderRadius: 3 }}>{row.sku}</span>
+                        </TableCell>
+                        <TableCell sx={{ py: "5px", px: "8px", fontFamily: "monospace", fontWeight: 700, fontSize: 13 }}>{row.qty}</TableCell>
+                        <TableCell sx={{ py: "5px", px: "8px", fontFamily: "monospace", fontSize: 12 }}>{row.orders}</TableCell>
+                        <TableCell sx={{ py: "5px", px: "8px" }}>
+                          {row.delivered > 0 ? <span style={{ fontSize: 11, color: "#065F46", fontWeight: 700 }}>{row.delivered}</span> : <span style={{ color: C.gray300 }}>—</span>}
+                        </TableCell>
+                        <TableCell sx={{ py: "5px", px: "8px" }}>
+                          {row.returned > 0 ? <span style={{ fontSize: 11, color: "#DC2626", fontWeight: 800 }}>{row.returned}</span> : <span style={{ color: C.gray300 }}>—</span>}
+                        </TableCell>
+                        <TableCell sx={{ py: "5px", px: "8px" }}>
+                          {row.rto > 0 ? <span style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>{row.rto}</span> : <span style={{ color: C.gray300 }}>—</span>}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </Box>
+
+              {/* Order history */}
+              <Box sx={{ flex: 1, minWidth: 320 }}>
+                <Typography sx={{ fontSize: 10, fontWeight: 700, color: C.gray400, textTransform: "uppercase", letterSpacing: "0.08em", mb: "8px" }}>
+                  Prior Order History ({c.orders?.length})
+                </Typography>
+                <Box sx={{ maxHeight: 220, overflowY: "auto", border: `1px solid ${C.border}`, borderRadius: 1 }}>
+                  <Table size="small" sx={{ borderCollapse: "collapse" }}>
+                    <TableHead>
+                      <TableRow sx={{ background: C.gray50, position: "sticky", top: 0, zIndex: 1 }}>
+                        {["Date","SKU","Qty","Status"].map(h => (
+                          <TableCell key={h} sx={{ py: "5px", px: "8px", fontSize: 10, fontWeight: 700, color: C.gray500, textTransform: "uppercase", whiteSpace: "nowrap" }}>{h}</TableCell>
+                        ))}
+                      </TableRow>
+                    </TableHead>
+                    <TableBody>
+                      {(c.orders || []).map((o, i) => (
+                        <TableRow key={`${o.order_id}-${i}`} sx={{ background: o.status === "RETURN" ? "#FFF5F5" : "white" }}>
+                          <TableCell sx={{ py: "4px", px: "8px", fontFamily: "monospace", fontSize: 11, color: C.gray500, whiteSpace: "nowrap" }}>
+                            {(o.order_date || "").slice(0, 10)}
+                          </TableCell>
+                          <TableCell sx={{ py: "4px", px: "8px" }}>
+                            <span style={{ fontFamily: "monospace", fontSize: 11, color: C.orange, fontWeight: 600 }}>{o.sku || "—"}</span>
+                          </TableCell>
+                          <TableCell sx={{ py: "4px", px: "8px", fontFamily: "monospace", fontSize: 12, textAlign: "center" }}>{o.qty}</TableCell>
+                          <TableCell sx={{ py: "4px", px: "8px" }}><RStatusChip status={o.status} /></TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </Box>
+              </Box>
+            </Box>
+          </Collapse>
+        </TableCell>
+      </TableRow>
+    </>
+  );
+}
+
+function RepeatedCustomersSection({ customers, onBlock }) {
+  const [collapsed, setCollapsed] = useState(false);
+  if (!customers?.length) return null;
+  const highCount = customers.filter(c => c.risk_level === "high").length;
+  const medCount  = customers.filter(c => c.risk_level === "medium").length;
+  const blockedCount = customers.filter(c => c.is_blocked).length;
+
+  return (
+    <Box sx={{ mb: "16px" }}>
+      {/* Header bar */}
+      <Box
+        onClick={() => setCollapsed(c => !c)}
+        sx={{ display: "flex", alignItems: "center", gap: "10px", cursor: "pointer",
+          background: highCount > 0 ? "#FFF5F5" : "#FFFBEB",
+          border: `1px solid ${highCount > 0 ? "#FCA5A5" : "#FDE68A"}`,
+          borderRadius: collapsed ? 2 : "8px 8px 0 0",
+          px: "16px", py: "10px", userSelect: "none" }}
+      >
+        <Typography sx={{ fontWeight: 800, fontSize: 14, color: highCount > 0 ? "#DC2626" : "#D97706" }}>
+          👤 {customers.length} Repeat Customer{customers.length > 1 ? "s" : ""} in This Batch
+        </Typography>
+        <Box sx={{ display: "flex", gap: "6px", flexWrap: "wrap", flex: 1 }}>
+          {highCount > 0   && <span style={{ fontSize: 11, fontWeight: 700, background: "#FEE2E2", color: "#DC2626", border: "1px solid #FCA5A5", borderRadius: 4, padding: "1px 7px" }}>{highCount} High Risk</span>}
+          {medCount > 0    && <span style={{ fontSize: 11, fontWeight: 700, background: "#FEF3C7", color: "#D97706", border: "1px solid #FDE68A", borderRadius: 4, padding: "1px 7px" }}>{medCount} Medium</span>}
+          {blockedCount > 0 && <span style={{ fontSize: 11, fontWeight: 700, background: "#FEE2E2", color: "#DC2626", borderRadius: 4, padding: "1px 7px" }}>{blockedCount} Blocked</span>}
+        </Box>
+        <Typography sx={{ fontSize: 11, color: C.gray400 }}>Based on RETURN rate · {collapsed ? "Show ▼" : "Hide ▲"}</Typography>
+      </Box>
+
+      {/* Table */}
+      {!collapsed && (
+        <Paper elevation={0} sx={{ border: `1px solid ${highCount > 0 ? "#FCA5A5" : "#FDE68A"}`, borderTop: 0, borderRadius: "0 0 8px 8px", overflow: "hidden" }}>
+          <Box sx={{ overflowX: "auto" }}>
+            <Table size="small" sx={{ borderCollapse: "collapse", width: "100%" }}>
+              <TableHead>
+                <TableRow sx={{ background: C.gray50 }}>
+                  {[
+                    ["",            "center", 32 ],
+                    ["Customer",    "left",   200],
+                    ["In This Batch","left",  180],
+                    ["Prior Orders","center", 80 ],
+                    ["Delivered",   "center", 80 ],
+                    ["Returned",    "center", 80 ],
+                    ["RTO",         "center", 60 ],
+                    ["Return Rate", "left",   130],
+                    ["Risk",        "center", 100],
+                    ["Action",      "center", 90 ],
+                  ].map(([h, a, w]) => (
+                    <TableCell key={h || "exp"}
+                      sx={{ textAlign: a, fontSize: 10, fontWeight: 700, color: C.gray500,
+                        textTransform: "uppercase", letterSpacing: "0.06em",
+                        py: "8px", px: "12px", minWidth: w, whiteSpace: "nowrap",
+                        borderBottom: `1px solid ${C.border}` }}>
+                      {h}
+                    </TableCell>
+                  ))}
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {customers.map(c => (
+                  <RepeatCustomerRow
+                    key={`${c.customer_name}|${c.customer_pincode}`}
+                    c={c}
+                    onBlock={onBlock}
+                  />
+                ))}
+              </TableBody>
+            </Table>
+          </Box>
+        </Paper>
+      )}
+    </Box>
+  );
+}
+
 // ── Main LabelsTab ────────────────────────────────────────────────────────────
 export function LabelsTab() {
   const today = todayISO();
@@ -950,6 +1232,20 @@ export function LabelsTab() {
   const [packedTarget,  setPackedTarget]  = useState("");
   const [packingOrders, setPackingOrders] = useState([]);
   const [packingShow,   setPackingShow]   = useState(false);
+
+  // ── Restore from localStorage when batchDate changes ─────────────────────
+  useEffect(() => {
+    const saved = loadParseResult(batchDate);
+    if (saved) {
+      setUploadResult(saved.result);
+      setFileName(saved.fileName);
+      setPackingOrders([]);
+      setPackingShow(false);
+    } else {
+      setUploadResult(null);
+      setFileName("");
+    }
+  }, [batchDate]); // eslint-disable-line
 
   // ── Init ──────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -998,6 +1294,7 @@ export function LabelsTab() {
         setUploadError(data.error || "Upload failed.");
       } else {
         setUploadResult(data);
+        saveParseResult(batchDate, file.name, data);
         setAvailDates(prev => prev.includes(batchDate) ? prev : [batchDate, ...prev].sort().reverse());
         setActiveRange(ar => ar ? { ...ar } : {});
         const ords = (data.page_details || []).filter(pd => pd.order_id)
@@ -1015,6 +1312,28 @@ export function LabelsTab() {
     setUploadResult(null); setUploadError(""); setFileName("");
     setShowPages(false); setSkuSearch(""); setBatchDate(todayISO());
     setPackedTarget(""); setPackingOrders([]); setPackingShow(false);
+  };
+
+  const handleBlockFromLabel = async (customer) => {
+    await fetch(`${API}/blocked-customers/`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        customer_name:    customer.customer_name,
+        customer_pincode: customer.customer_pincode,
+        customer_city:    customer.customer_city,
+        customer_state:   customer.customer_state,
+        reason:           `Blocked from label parse — ${customer.returned} returns out of ${customer.prior_order_count} prior orders (${Math.round(customer.return_rate * 100)}% return rate)`,
+      }),
+    });
+    // Mark the customer as blocked in-place so UI reflects immediately
+    setUploadResult(prev => ({
+      ...prev,
+      repeated_customers: (prev.repeated_customers || []).map(c =>
+        c.customer_name === customer.customer_name && c.customer_pincode === customer.customer_pincode
+          ? { ...c, is_blocked: true }
+          : c
+      ),
+    }));
   };
 
   const togglePacked = async (order_id) => {
@@ -1048,7 +1367,19 @@ export function LabelsTab() {
   };
 
   // ── Derived ───────────────────────────────────────────────────────────────
-  const filteredSku  = (uploadResult?.sku_table || []).filter(r => !skuSearch || r.sku.toLowerCase().includes(skuSearch.toLowerCase()));
+  const filteredSku  = (uploadResult?.sku_table || []).filter(r => !skuSearch || r.sku.toLowerCase().includes(skuSearch.toLowerCase()) || (r.parent_sku || "").toLowerCase().includes(skuSearch.toLowerCase()));
+  const skuGroups = (() => {
+    const map = {};
+    filteredSku.forEach(row => {
+      const hasParent = row.parent_sku && row.parent_sku !== row.sku;
+      const key = hasParent ? row.parent_sku : `__${row.sku}`;
+      if (!map[key]) map[key] = { parentSku: hasParent ? row.parent_sku : null, children: [] };
+      map[key].children.push(row);
+    });
+    return Object.values(map).sort((a, b) =>
+      b.children.reduce((s, r) => s + r.count, 0) - a.children.reduce((s, r) => s + r.count, 0)
+    );
+  })();
   const chartData    = (uploadResult?.sku_table || []).slice(0, 15).map(r => ({ sku: r.sku.length > 20 ? r.sku.slice(0, 18) + "…" : r.sku, fullSku: r.sku, count: r.count, totalQty: r.total_qty }));
   const highQtyCount = (uploadResult?.sku_table || []).reduce((s, r) => s + r.high_qty_orders, 0);
   const totalLabels  = uploadResult?.total_labels ?? 0;
@@ -1158,6 +1489,13 @@ export function LabelsTab() {
                       />
                     );
                   })()}
+                  {!uploadResult.cropped_pdf_b64 && (
+                    <Chip
+                      label="💾 Restored from saved data"
+                      size="small"
+                      sx={{ background: "#EFF6FF", border: "1px solid #BFDBFE", color: "#2563EB", fontWeight: 600, fontSize: 12, "& .MuiChip-label": { px: "10px" } }}
+                    />
+                  )}
                   {highQtyCount > 0 && (
                     <Chip
                       label={`⚠ ${highQtyCount} label${highQtyCount > 1 ? "s" : ""} with Qty > 1`}
@@ -1205,6 +1543,12 @@ export function LabelsTab() {
                     </Box>
                   </Alert>
                 )}
+
+                {/* Repeated customers */}
+                <RepeatedCustomersSection
+                  customers={uploadResult.repeated_customers}
+                  onBlock={handleBlockFromLabel}
+                />
 
                 {/* KPI cards */}
                 <Box sx={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: "12px", mb: "16px" }}>
@@ -1344,71 +1688,125 @@ export function LabelsTab() {
                 <Box sx={{ overflowX: "auto" }}>
                   <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mb: "10px" }}>
                     <Typography variant="subtitle2" sx={{ fontSize: 11, fontWeight: 700, color: C.gray400, textTransform: "uppercase", letterSpacing: "0.08em" }}>
-                      SKU Dispatch Count — {filteredSku.length} SKUs
+                      SKU Dispatch — {skuGroups.length} group{skuGroups.length !== 1 ? "s" : ""}, {filteredSku.length} SKU{filteredSku.length !== 1 ? "s" : ""}
                     </Typography>
                     <TextField
                       size="small"
                       value={skuSearch}
                       onChange={e => setSkuSearch(e.target.value)}
-                      placeholder="🔍 Search SKU…"
-                      sx={{ width: 180, "& input": { fontSize: 12 } }}
+                      placeholder="🔍 Search SKU / parent…"
+                      sx={{ width: 200, "& input": { fontSize: 12 } }}
                     />
                   </Box>
                   <Table size="small" sx={{ width: "100%", borderCollapse: "collapse" }}>
                     <TableHead>
                       <TableRow>
-                        {[["#","left"],["SKU","left"],["Orders","right"],["Items","right"],["Max Qty","center"],["Multi-Qty","center"],["% Share","right"],["Bar","left"]].map(([h, a]) => (
+                        {[["#","left"],["SKU","left"],["Orders","right"],["Units","right"],["Max Qty","center"],["Multi-Qty","center"],["% Share","right"],["Bar","left"]].map(([h, a]) => (
                           <TableCell key={h} sx={{ textAlign: a, fontSize: 11, fontWeight: 700, color: C.gray500, textTransform: "uppercase", letterSpacing: "0.06em", background: C.gray50, whiteSpace: "nowrap", borderBottom: `1px solid ${C.border}`, py: "10px", px: "14px" }}>{h}</TableCell>
                         ))}
                       </TableRow>
                     </TableHead>
                     <TableBody>
-                      {filteredSku.map((row, i) => {
-                        const pct   = totalLabels > 0 ? (row.count / totalLabels) * 100 : 0;
-                        const isHQ  = row.max_qty > 1;
-                        const rowBg = isHQ ? (i % 2 === 0 ? "#FFFBEB" : "#FEF3C7") : (i % 2 === 0 ? C.white : C.gray50);
+                      {skuGroups.map((group, groupIdx) => {
+                        const totalCount = group.children.reduce((s, r) => s + r.count, 0);
+                        const totalQty   = group.children.reduce((s, r) => s + r.total_qty, 0);
+                        const totalPct   = totalLabels > 0 ? (totalCount / totalLabels) * 100 : 0;
+                        const totalHQ    = group.children.reduce((s, r) => s + r.high_qty_orders, 0);
+                        const maxMaxQty  = Math.max(...group.children.map(r => r.max_qty));
+
+                        if (!group.parentSku) {
+                          const row = group.children[0];
+                          const pct = totalPct;
+                          const isHQ = row.max_qty > 1;
+                          return (
+                            <TableRow key={row.sku} sx={{ background: isHQ ? "#FFFBEB" : groupIdx % 2 === 0 ? C.white : C.gray50, "&:hover": { background: isHQ ? "#FDE68A55" : "#F0F7FF" } }}>
+                              <TableCell sx={{ color: C.gray400, fontSize: 11, width: 36, py: "10px", px: "14px" }}>{groupIdx + 1}</TableCell>
+                              <TableCell sx={{ py: "10px", px: "14px" }}>
+                                <Box sx={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                                  {isHQ && <span title="Multi-qty orders">⚠️</span>}
+                                  <span style={{ fontFamily: "monospace", fontSize: 12, color: C.orange, fontWeight: 700, background: C.orangeLight, padding: "3px 9px", borderRadius: 6 }}>{row.sku}</span>
+                                </Box>
+                              </TableCell>
+                              <TableCell sx={{ textAlign: "right", py: "10px", px: "14px" }}>
+                                <span style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 20, color: C.gray800 }}>{row.count}</span>
+                              </TableCell>
+                              <TableCell sx={{ textAlign: "right", fontFamily: "monospace", fontWeight: 600, color: C.blue, py: "10px", px: "14px" }}>{row.total_qty}</TableCell>
+                              <TableCell sx={{ textAlign: "center", py: "10px", px: "14px" }}>
+                                <Chip label={`× ${row.max_qty}`} size="small" sx={{ fontSize: 12, fontWeight: 700, background: row.max_qty > 1 ? C.amberLight : C.gray100, color: row.max_qty > 1 ? C.amber : C.gray500, border: `1px solid ${row.max_qty > 1 ? "#FDE68A" : C.gray200}`, "& .MuiChip-label": { px: "8px" } }} />
+                              </TableCell>
+                              <TableCell sx={{ textAlign: "center", py: "10px", px: "14px" }}>
+                                {row.high_qty_orders > 0 ? <Chip label={row.high_qty_orders} size="small" sx={{ background: C.amberLight, color: C.amber, border: "1px solid #FDE68A", fontWeight: 700, fontSize: 12, "& .MuiChip-label": { px: "8px" } }} /> : <span style={{ color: C.gray300 }}>—</span>}
+                              </TableCell>
+                              <TableCell sx={{ textAlign: "right", fontFamily: "monospace", color: C.gray500, fontSize: 12, py: "10px", px: "14px" }}>{pct.toFixed(1)}%</TableCell>
+                              <TableCell sx={{ minWidth: 80, py: "10px", px: "14px" }}>
+                                <div style={{ height: 8, background: C.gray100, borderRadius: 4, overflow: "hidden" }}>
+                                  <div style={{ width: `${pct}%`, height: "100%", borderRadius: 4, background: isHQ ? "linear-gradient(90deg,#D97706,#F59E0B)" : "linear-gradient(90deg,#E8510A,#F59E0B)" }} />
+                                </div>
+                              </TableCell>
+                            </TableRow>
+                          );
+                        }
+
                         return (
-                          <TableRow
-                            key={row.sku}
-                            sx={{ background: rowBg, "&:hover": { background: isHQ ? "#FDE68A55" : "#F0F7FF" } }}
-                          >
-                            <TableCell sx={{ color: C.gray400, fontSize: 11, width: 36, py: "10px", px: "14px" }}>{i + 1}</TableCell>
-                            <TableCell sx={{ py: "10px", px: "14px" }}>
-                              <Box sx={{ display: "flex", alignItems: "center", gap: "6px" }}>
-                                {isHQ && <span title="Multi-qty orders">⚠️</span>}
-                                <span style={{ fontFamily: "monospace", fontSize: 12, color: C.orange, fontWeight: 700, background: C.orangeLight, padding: "3px 9px", borderRadius: 6 }}>{row.sku}</span>
-                              </Box>
-                            </TableCell>
-                            <TableCell sx={{ textAlign: "right", py: "10px", px: "14px" }}>
-                              <span style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 20, color: C.gray800 }}>{row.count}</span>
-                            </TableCell>
-                            <TableCell sx={{ textAlign: "right", fontFamily: "monospace", fontWeight: 600, color: C.blue, py: "10px", px: "14px" }}>{row.total_qty}</TableCell>
-                            <TableCell sx={{ textAlign: "center", py: "10px", px: "14px" }}>
-                              <Chip
-                                label={`× ${row.max_qty}`}
-                                size="small"
-                                sx={{
-                                  fontSize: 12,
-                                  fontWeight: 700,
-                                  background: row.max_qty > 1 ? C.amberLight : C.gray100,
-                                  color: row.max_qty > 1 ? C.amber : C.gray500,
-                                  border: `1px solid ${row.max_qty > 1 ? "#FDE68A" : C.gray200}`,
-                                  "& .MuiChip-label": { px: "8px" },
-                                }}
-                              />
-                            </TableCell>
-                            <TableCell sx={{ textAlign: "center", py: "10px", px: "14px" }}>
-                              {row.high_qty_orders > 0
-                                ? <Chip label={row.high_qty_orders} size="small" sx={{ background: C.amberLight, color: C.amber, border: "1px solid #FDE68A", fontWeight: 700, fontSize: 12, "& .MuiChip-label": { px: "8px" } }} />
-                                : <span style={{ color: C.gray300 }}>—</span>}
-                            </TableCell>
-                            <TableCell sx={{ textAlign: "right", fontFamily: "monospace", color: C.gray500, fontSize: 12, py: "10px", px: "14px" }}>{pct.toFixed(1)}%</TableCell>
-                            <TableCell sx={{ minWidth: 80, py: "10px", px: "14px" }}>
-                              <div style={{ height: 8, background: C.gray100, borderRadius: 4, overflow: "hidden" }}>
-                                <div style={{ width: `${pct}%`, height: "100%", borderRadius: 4, background: isHQ ? "linear-gradient(90deg,#D97706,#F59E0B)" : "linear-gradient(90deg,#E8510A,#F59E0B)" }} />
-                              </div>
-                            </TableCell>
-                          </TableRow>
+                          <React.Fragment key={group.parentSku}>
+                            <TableRow sx={{ background: "#F5F3FF", borderTop: "2px solid #DDD6FE", "&:hover": { background: "#EDE9FE" } }}>
+                              <TableCell sx={{ color: C.gray400, fontSize: 11, width: 36, py: "10px", px: "14px" }}>{groupIdx + 1}</TableCell>
+                              <TableCell sx={{ py: "10px", px: "14px" }}>
+                                <Box sx={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                                  <span style={{ fontFamily: "monospace", fontSize: 12, color: "#7C3AED", fontWeight: 800, background: "#EDE9FE", padding: "3px 9px", borderRadius: 6, border: "1px solid #DDD6FE" }}>{group.parentSku}</span>
+                                  <Typography sx={{ fontSize: 10, color: "#A78BFA", fontWeight: 600 }}>{group.children.length} variant{group.children.length !== 1 ? "s" : ""}</Typography>
+                                </Box>
+                              </TableCell>
+                              <TableCell sx={{ textAlign: "right", py: "10px", px: "14px" }}>
+                                <span style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 20, color: "#7C3AED" }}>{totalCount}</span>
+                              </TableCell>
+                              <TableCell sx={{ textAlign: "right", fontFamily: "monospace", fontWeight: 700, color: "#7C3AED", py: "10px", px: "14px" }}>{totalQty}</TableCell>
+                              <TableCell sx={{ textAlign: "center", py: "10px", px: "14px" }}>
+                                <Chip label={`× ${maxMaxQty}`} size="small" sx={{ fontSize: 12, fontWeight: 700, background: maxMaxQty > 1 ? C.amberLight : C.gray100, color: maxMaxQty > 1 ? C.amber : C.gray500, border: `1px solid ${maxMaxQty > 1 ? "#FDE68A" : C.gray200}`, "& .MuiChip-label": { px: "8px" } }} />
+                              </TableCell>
+                              <TableCell sx={{ textAlign: "center", py: "10px", px: "14px" }}>
+                                {totalHQ > 0 ? <Chip label={totalHQ} size="small" sx={{ background: C.amberLight, color: C.amber, border: "1px solid #FDE68A", fontWeight: 700, fontSize: 12, "& .MuiChip-label": { px: "8px" } }} /> : <span style={{ color: C.gray300 }}>—</span>}
+                              </TableCell>
+                              <TableCell sx={{ textAlign: "right", fontFamily: "monospace", color: "#7C3AED", fontWeight: 700, fontSize: 12, py: "10px", px: "14px" }}>{totalPct.toFixed(1)}%</TableCell>
+                              <TableCell sx={{ minWidth: 80, py: "10px", px: "14px" }}>
+                                <div style={{ height: 8, background: C.gray100, borderRadius: 4, overflow: "hidden" }}>
+                                  <div style={{ width: `${totalPct}%`, height: "100%", borderRadius: 4, background: "linear-gradient(90deg,#7C3AED,#A855F7)" }} />
+                                </div>
+                              </TableCell>
+                            </TableRow>
+                            {group.children.map((row, ci) => {
+                              const pct  = totalLabels > 0 ? (row.count / totalLabels) * 100 : 0;
+                              const isHQ = row.max_qty > 1;
+                              return (
+                                <TableRow key={row.sku} sx={{ background: ci % 2 === 0 ? "#FAFAFF" : C.white, "&:hover": { background: "#EFECFF" } }}>
+                                  <TableCell sx={{ py: "7px", px: "14px" }} />
+                                  <TableCell sx={{ py: "7px", px: "14px" }}>
+                                    <Box sx={{ display: "flex", alignItems: "center", gap: "6px", pl: "16px" }}>
+                                      <span style={{ color: "#C4B5FD", fontSize: 14 }}>↳</span>
+                                      {isHQ && <span title="Multi-qty orders" style={{ fontSize: 12 }}>⚠️</span>}
+                                      <span style={{ fontFamily: "monospace", fontSize: 11, color: C.orange, fontWeight: 700, background: C.orangeLight, padding: "2px 7px", borderRadius: 5 }}>{row.sku}</span>
+                                    </Box>
+                                  </TableCell>
+                                  <TableCell sx={{ textAlign: "right", py: "7px", px: "14px" }}>
+                                    <span style={{ fontFamily: "monospace", fontWeight: 700, fontSize: 16, color: C.gray700 }}>{row.count}</span>
+                                  </TableCell>
+                                  <TableCell sx={{ textAlign: "right", fontFamily: "monospace", fontWeight: 600, color: C.blue, py: "7px", px: "14px" }}>{row.total_qty}</TableCell>
+                                  <TableCell sx={{ textAlign: "center", py: "7px", px: "14px" }}>
+                                    <Chip label={`× ${row.max_qty}`} size="small" sx={{ fontSize: 11, fontWeight: 700, background: row.max_qty > 1 ? C.amberLight : C.gray100, color: row.max_qty > 1 ? C.amber : C.gray500, border: `1px solid ${row.max_qty > 1 ? "#FDE68A" : C.gray200}`, "& .MuiChip-label": { px: "6px" } }} />
+                                  </TableCell>
+                                  <TableCell sx={{ textAlign: "center", py: "7px", px: "14px" }}>
+                                    {row.high_qty_orders > 0 ? <Chip label={row.high_qty_orders} size="small" sx={{ background: C.amberLight, color: C.amber, border: "1px solid #FDE68A", fontWeight: 700, fontSize: 11, "& .MuiChip-label": { px: "6px" } }} /> : <span style={{ color: C.gray300 }}>—</span>}
+                                  </TableCell>
+                                  <TableCell sx={{ textAlign: "right", fontFamily: "monospace", color: C.gray400, fontSize: 11, py: "7px", px: "14px" }}>{pct.toFixed(1)}%</TableCell>
+                                  <TableCell sx={{ minWidth: 80, py: "7px", px: "14px" }}>
+                                    <div style={{ height: 6, background: C.gray100, borderRadius: 4, overflow: "hidden" }}>
+                                      <div style={{ width: `${pct}%`, height: "100%", borderRadius: 4, background: isHQ ? "linear-gradient(90deg,#D97706,#F59E0B)" : "linear-gradient(90deg,#E8510A,#F59E0B)" }} />
+                                    </div>
+                                  </TableCell>
+                                </TableRow>
+                              );
+                            })}
+                          </React.Fragment>
                         );
                       })}
                       {filteredSku.length > 0 && (
@@ -1444,6 +1842,9 @@ export function LabelsTab() {
                           {d.sku
                             ? <Chip label={d.sku} size="small" sx={{ background: C.orangeLight, color: C.orange, border: `1px solid ${C.orangeBorder}`, fontWeight: 600, fontSize: 11, fontFamily: "monospace", "& .MuiChip-label": { px: "8px" } }} />
                             : <Typography sx={{ fontSize: 12, color: C.gray400 }}>No SKU</Typography>}
+                          {d.parent_sku && d.parent_sku !== d.sku && (
+                            <Chip label={`↳ ${d.parent_sku}`} size="small" sx={{ background: "#F5F3FF", color: "#7C3AED", border: "1px solid #DDD6FE", fontWeight: 600, fontSize: 11, fontFamily: "monospace", "& .MuiChip-label": { px: "8px" } }} />
+                          )}
                           {d.qty > 1 && (
                             <Chip label={`Qty: ${d.qty}`} size="small" sx={{ background: C.amberLight, color: C.amber, border: "1px solid #FDE68A", fontWeight: 700, fontSize: 11, "& .MuiChip-label": { px: "8px" } }} />
                           )}
