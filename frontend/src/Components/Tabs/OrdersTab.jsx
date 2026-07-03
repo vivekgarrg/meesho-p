@@ -45,7 +45,7 @@ function fmtDate(v) {
 }
 function fmtMonthShort(ym) {
   const [y, m] = ym.split("-").map(Number);
-  return new Date(y, m - 1, 1).toLocaleString("en-IN", { month: "short", year: "2-digit" });
+  return new Date(y, m - 1, 1)?.toLocaleString("en-IN", { month: "short", year: "2-digit" });
 }
 function monthToRange(ym) {
   const [y, m] = ym.split("-").map(Number);
@@ -241,7 +241,7 @@ export function OrdersTab() {
           <Box sx={{ display: "flex", alignItems: "center", gap: 1, mb: 0.25 }}>
             <Typography sx={{ fontSize: 20, fontWeight: 900, color: C.gray900 }}>Orders</Typography>
             {totalOrders > 0 && (
-              <Chip label={totalOrders.toLocaleString("en-IN")} size="small"
+              <Chip label={totalOrders?.toLocaleString("en-IN")} size="small"
                 sx={{ bgcolor: C.gray100, color: C.gray500, fontWeight: 700, fontSize: 11, border: `1px solid ${C.gray200}` }} />
             )}
             {listLoading && <CircularProgress size={13} sx={{ color: C.orange }} />}
@@ -380,7 +380,7 @@ export function OrdersTab() {
                 {m.icon} {m.label}
               </Typography>
               <Typography sx={{ fontSize: 26, fontWeight: 900, fontFamily: "monospace", lineHeight: 1, color: active ? "#fff" : m.color }}>
-                {typeof m.value === "number" ? m.value.toLocaleString("en-IN") : m.value}
+                {typeof m.value === "number" ? m.value?.toLocaleString("en-IN") : m.value}
               </Typography>
               <Typography sx={{ fontSize: 11, color: active ? "rgba(255,255,255,0.65)" : C.gray400, mt: 0.5 }}>
                 {m.sub}
@@ -450,7 +450,7 @@ export function OrdersTab() {
                           {s.customer_state || "Unknown"}
                         </Typography>
                         <Typography sx={{ fontSize: 11, fontFamily: "monospace", fontWeight: 700, color: C.gray500 }}>
-                          {s.count.toLocaleString()} · {p}%
+                          {s.count?.toLocaleString()} · {p}%
                         </Typography>
                       </Box>
                       <LinearProgress variant="determinate" value={p}
@@ -482,7 +482,7 @@ export function OrdersTab() {
           <Typography sx={{ fontSize: 14, fontWeight: 700, color: C.gray800 }}>
             {hasFilters ? "Filtered Results" : "All Orders"}
           </Typography>
-          <Chip label={total.toLocaleString("en-IN")} size="small"
+          <Chip label={total?.toLocaleString("en-IN")} size="small"
             sx={{ bgcolor: C.gray100, color: C.gray500, fontWeight: 700, fontSize: 11, border: `1px solid ${C.gray200}` }} />
           {hasFilters && (
             <Typography sx={{ fontSize: 11, color: C.amber, fontWeight: 600 }}>· filtered</Typography>
