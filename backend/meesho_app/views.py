@@ -15,6 +15,7 @@ import io
 import concurrent.futures
 from PIL import Image
 from .helpers.helper import status_wise_summary
+from .permissions import get_authorized_business
 
 from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, PurchaseBill, PurchaseItem, BlockedCustomer, InventoryAdjustment, ConsumableItem, ConsumablePurchase, ConsumableUsage, InventoryLog, MeeshoInventory, MeeshoPriceUpdate
 from .serializers import (
@@ -72,11 +73,12 @@ def safe_int(val):
 
 @api_view(["POST"])
 @parser_classes([MultiPartParser])
-def upload_excel(request):
+def upload_excel(request, business_id):
     """
     Upload a Meesho payment Excel file.
     Parses all 4 sheets and inserts/updates rows in the DB.
     """
+    business = get_authorized_business(request, business_id)
     file = request.FILES.get("file")
     if not file:
         return Response({"error": "No file provided."}, status=status.HTTP_400_BAD_REQUEST)
@@ -170,6 +172,7 @@ def upload_excel(request):
                 lookup_payment_date    = defaults.pop("payment_date")
                 lookup_live_status     = defaults.pop("live_order_status")
                 obj, was_created = OrderPayment.objects.update_or_create(
+                    business=business,
                     sub_order_no=pk,
                     payment_date=lookup_payment_date,
                     live_order_status=lookup_live_status,
@@ -196,6 +199,7 @@ def upload_excel(request):
         with transaction.atomic():
             for _, row in df.iterrows():
                 _, was_created = AdsCost.objects.update_or_create(
+                    business=business,
                     deduction_duration=safe_date(row.get("deduction_duration")),
                     deduction_date=safe_date(row.get("deduction_date")),
                     campaign_id=safe_str(row.get("campaign_id")),
@@ -230,6 +234,7 @@ def upload_excel(request):
                 if not pk:
                     continue
                 obj, was_created = ReferralPayment.objects.update_or_create(
+                    business=business,
                     reward_id=pk,
                     defaults={
                         "payment_date": safe_date(row.get("payment_date")),
@@ -256,6 +261,7 @@ def upload_excel(request):
         with transaction.atomic():
             for _, row in df.iterrows():
                 CompensationRecovery.objects.create(
+                    business=business,
                     date=safe_date(row.get("date")),
                     program_name=safe_str(row.get("program_name")),
                     reason=safe_str(row.get("reason")),
@@ -629,16 +635,18 @@ def accumulate_sku_profit(sku_id, obj, result, price_map, packaging_map, unique_
     
 
 @api_view(["GET"])
-def available_months(request):
+def available_months(request, business_id):
     """
     Returns distinct order months (YYYY-MM) newest first.
     Primary source: Order.order_date (DateField, reliable).
     Falls back to OrderPayment.order_date if Order table is empty.
     """
-    dates = list(Order.objects.dates("order_date", "month", order="DESC"))
+    business = get_authorized_business(request, business_id)
+    dates = list(Order.objects.filter(business=business).dates("order_date", "month", order="DESC"))
     if not dates:
         dates = list(
             OrderPayment.objects
+            .filter(business=business)
             .exclude(order_date=None)
             .dates("order_date", "month", order="DESC")
         )
@@ -646,15 +654,16 @@ def available_months(request):
 
 
 @api_view(["GET"])
-def unsettled_orders(request):
+def unsettled_orders(request, business_id):
     """Orders in the Order table that have no matching OrderPayment record."""
+    business = get_authorized_business(request, business_id)
     date_from = request.GET.get("date_from", "")
     date_to   = request.GET.get("date_to", "")
     page      = int(request.GET.get("page", 1))
     page_size = int(request.GET.get("page_size", 50))
     search    = request.GET.get("search", "")
 
-    order_qs = Order.objects.all()
+    order_qs = Order.objects.filter(business=business)
     if date_from:
         order_qs = order_qs.filter(order_date__gte=date_from)
     if date_to:
@@ -666,7 +675,7 @@ def unsettled_orders(request):
             DQ(product_name__icontains=search)
         )
 
-    settled_nos = set(OrderPayment.objects.values_list("sub_order_no", flat=True).distinct())
+    settled_nos = set(OrderPayment.objects.filter(business=business).values_list("sub_order_no", flat=True).distinct())
     # Deduplicate to latest status per sub_order_no before listing
     latest_qs    = Order.latest_per_order(base_qs=order_qs)
     unsettled_qs = (
@@ -691,7 +700,7 @@ def unsettled_orders(request):
 
 
 @api_view(["GET"])
-def payment_mismatch(request):
+def payment_mismatch(request, business_id):
     """
     Bi-directional mismatch:
       - orders_no_payment: Orders in Order table with no matching OrderPayment row
@@ -699,6 +708,7 @@ def payment_mismatch(request):
     """
     from collections import defaultdict
 
+    business = get_authorized_business(request, business_id)
     date_from = request.GET.get("date_from", "")
     date_to   = request.GET.get("date_to",   "")
     page      = int(request.GET.get("page",      1))
@@ -706,13 +716,13 @@ def payment_mismatch(request):
     view      = request.GET.get("view", "orders")  # "orders" | "payments"
 
     # ── Orders with no payment ────────────────────────────────────────────────
-    order_qs = Order.objects.all()
+    order_qs = Order.objects.filter(business=business)
     if date_from:
         order_qs = order_qs.filter(order_date__gte=date_from)
     if date_to:
         order_qs = order_qs.filter(order_date__lte=date_to)
 
-    payment_sub_nos = set(OrderPayment.objects.values_list("sub_order_no", flat=True).distinct())
+    payment_sub_nos = set(OrderPayment.objects.filter(business=business).values_list("sub_order_no", flat=True).distinct())
     latest_orders   = Order.latest_per_order(base_qs=order_qs)
     orders_no_pay   = (
         latest_orders
@@ -723,13 +733,13 @@ def payment_mismatch(request):
     onp_agg = orders_no_pay.aggregate(count=Count("sub_order_no"), total_value=Sum("supplier_discounted_price"))
 
     # ── Payments with no order ────────────────────────────────────────────────
-    pay_qs = OrderPayment.objects.all()
+    pay_qs = OrderPayment.objects.filter(business=business)
     if date_from:
         pay_qs = pay_qs.filter(order_date__date__gte=date_from)
     if date_to:
         pay_qs = pay_qs.filter(order_date__date__lte=date_to)
 
-    order_sub_nos = set(Order.objects.values_list("sub_order_no", flat=True).distinct())
+    order_sub_nos = set(Order.objects.filter(business=business).values_list("sub_order_no", flat=True).distinct())
     orphan_pays   = pay_qs.exclude(sub_order_no__in=order_sub_nos).order_by("-order_date")
     pno_agg       = orphan_pays.aggregate(
         count=Count("sub_order_no", distinct=True),
@@ -768,13 +778,14 @@ def payment_mismatch(request):
 
 
 @api_view(["GET"])
-def return_claims_detail(request):
+def return_claims_detail(request, business_id):
     """
     Grouped view of all RETURN / RTO / CLAIM orders.
     Returns one summary row per sub_order_no + all sub-payment rows.
     """
     from collections import defaultdict
 
+    business = get_authorized_business(request, business_id)
     date_from     = request.GET.get("date_from",  "")
     date_to       = request.GET.get("date_to",    "")
     page          = int(request.GET.get("page",      1))
@@ -784,7 +795,7 @@ def return_claims_detail(request):
 
     RETURN_STATUSES = ["RETURN", "RETURNED", "RTO", "RTO_COMPLETE"]
 
-    base_qs = OrderPayment.objects.all()
+    base_qs = OrderPayment.objects.filter(business=business)
     if date_from:
         base_qs = base_qs.filter(order_date__date__gte=date_from)
     if date_to:
@@ -802,6 +813,7 @@ def return_claims_detail(request):
         qualifying_ids = (
             OrderPayment.objects
             .filter(
+                business=business,
                 sub_order_no__in=qualifying_ids,
             )
             .filter(
@@ -816,14 +828,14 @@ def return_claims_detail(request):
     # Claim-first: orders with any claims row are CLAIM, not RETURN or RTO
     _claimed_sub_orders = (
         OrderPayment.objects
-        .filter(sub_order_no__in=qualifying_ids, claims__gt=0)
+        .filter(business=business, sub_order_no__in=qualifying_ids, claims__gt=0)
         .values_list("sub_order_no", flat=True)
     )
     if status_filter == "return":
         # Pure returns: have RETURN status AND no claim payment
         qualifying_ids = (
             OrderPayment.objects
-            .filter(sub_order_no__in=qualifying_ids, live_order_status__in=["RETURN", "RETURNED"])
+            .filter(business=business, sub_order_no__in=qualifying_ids, live_order_status__in=["RETURN", "RETURNED"])
             .exclude(sub_order_no__in=_claimed_sub_orders)
             .values_list("sub_order_no", flat=True).distinct()
         )
@@ -831,7 +843,7 @@ def return_claims_detail(request):
         # Pure RTOs: have RTO status AND no claim payment
         qualifying_ids = (
             OrderPayment.objects
-            .filter(sub_order_no__in=qualifying_ids, live_order_status__in=["RTO", "RTO_COMPLETE"])
+            .filter(business=business, sub_order_no__in=qualifying_ids, live_order_status__in=["RTO", "RTO_COMPLETE"])
             .exclude(sub_order_no__in=_claimed_sub_orders)
             .values_list("sub_order_no", flat=True).distinct()
         )
@@ -848,7 +860,7 @@ def return_claims_detail(request):
     # Fetch all payment rows for this page's orders
     all_rows = (
         OrderPayment.objects
-        .filter(sub_order_no__in=page_sub_orders)
+        .filter(business=business, sub_order_no__in=page_sub_orders)
         # payment_date sorts ascending so the Return row (latest payment) is last
         .order_by("sub_order_no", "payment_date", "live_order_status")
     )
@@ -911,7 +923,7 @@ def return_claims_detail(request):
 
 
 @api_view(["GET"])
-def claimed_orders(request):
+def claimed_orders(request, business_id):
     """
     Orders where Meesho paid a claim (claims > 0 in any payment row).
     Supports: date_from, date_to, page, page_size,
@@ -919,6 +931,7 @@ def claimed_orders(request):
     """
     from collections import defaultdict
 
+    business = get_authorized_business(request, business_id)
     date_from     = request.GET.get("date_from",  "")
     date_to       = request.GET.get("date_to",    "")
     page          = int(request.GET.get("page",      1))
@@ -929,7 +942,7 @@ def claimed_orders(request):
 
     RETURN_STATUSES = ["RETURN", "RETURNED", "RTO", "RTO_COMPLETE", "PREMIUM_RETURN"]
 
-    base_qs = OrderPayment.objects.all()
+    base_qs = OrderPayment.objects.filter(business=business)
     if date_from:
         base_qs = base_qs.filter(order_date__date__gte=date_from)
     if date_to:
@@ -942,13 +955,13 @@ def claimed_orders(request):
     if status_filter == "return":
         claimed_qs = (
             OrderPayment.objects
-            .filter(sub_order_no__in=claimed_qs, live_order_status__in=["RETURN", "RETURNED"])
+            .filter(business=business, sub_order_no__in=claimed_qs, live_order_status__in=["RETURN", "RETURNED"])
             .values_list("sub_order_no", flat=True).distinct()
         )
     elif status_filter == "rto":
         claimed_qs = (
             OrderPayment.objects
-            .filter(sub_order_no__in=claimed_qs, live_order_status__in=["RTO", "RTO_COMPLETE"])
+            .filter(business=business, sub_order_no__in=claimed_qs, live_order_status__in=["RTO", "RTO_COMPLETE"])
             .values_list("sub_order_no", flat=True).distinct()
         )
 
@@ -956,7 +969,7 @@ def claimed_orders(request):
     if sku_filter:
         claimed_qs = (
             OrderPayment.objects
-            .filter(sub_order_no__in=claimed_qs, supplier_sku__icontains=sku_filter)
+            .filter(business=business, sub_order_no__in=claimed_qs, supplier_sku__icontains=sku_filter)
             .values_list("sub_order_no", flat=True).distinct()
         )
 
@@ -964,18 +977,18 @@ def claimed_orders(request):
     total = len(claimed_list)
 
     # Summary stats across ALL matching orders (not just this page)
-    all_rows_qs = OrderPayment.objects.filter(sub_order_no__in=claimed_list)
+    all_rows_qs = OrderPayment.objects.filter(business=business, sub_order_no__in=claimed_list)
     total_claim_amount = float(
         all_rows_qs.aggregate(t=Sum("claims"))["t"] or 0
     )
     return_count = (
         OrderPayment.objects
-        .filter(sub_order_no__in=claimed_list, live_order_status__in=["RETURN", "RETURNED"])
+        .filter(business=business, sub_order_no__in=claimed_list, live_order_status__in=["RETURN", "RETURNED"])
         .values("sub_order_no").distinct().count()
     )
     rto_count = (
         OrderPayment.objects
-        .filter(sub_order_no__in=claimed_list, live_order_status__in=["RTO", "RTO_COMPLETE"])
+        .filter(business=business, sub_order_no__in=claimed_list, live_order_status__in=["RTO", "RTO_COMPLETE"])
         .values("sub_order_no").distinct().count()
     )
 
@@ -1033,7 +1046,7 @@ def claimed_orders(request):
 
     page_rows = (
         OrderPayment.objects
-        .filter(sub_order_no__in=page_sub_orders)
+        .filter(business=business, sub_order_no__in=page_sub_orders)
         .order_by("sub_order_no", "payment_date", "live_order_status")
     )
     groups: dict = defaultdict(list)
@@ -1180,21 +1193,22 @@ def _build_payout_breakdown(qs):
 
 
 @api_view(["GET"])
-def profit_summary(request):
+def profit_summary(request, business_id):
     """
     Calculate overall Meesho profit.
     Accepts date_from / date_to (YYYY-MM-DD).
     Filters OrderPayment via Order.order_date join; falls back to
     OrderPayment.order_date__date if Order table has no records for range.
     """
+    business = get_authorized_business(request, business_id)
     date_from = request.GET.get("date_from", "")
     date_to   = request.GET.get("date_to", "")
 
-    qs = OrderPayment.objects.all()
-    
+    qs = OrderPayment.objects.filter(business=business)
+
 
     if date_from or date_to:
-        ord_qs = Order.objects.all()
+        ord_qs = Order.objects.filter(business=business)
         if date_from:
             # qs = qs.filter(order_date__gte=date_from)
             ord_qs = ord_qs.filter(order_date__gte=date_from)
@@ -1212,17 +1226,24 @@ def profit_summary(request):
                 qs = qs.filter(order_date__date__lte=date_to)
 
     # Load pricing once (include item_price + tax_percent for tax cost calculation)
-    _fp_all        = list(FinalPrice.objects.only("sku_id", "final_price", "packaging_cost", "parent_id", "item_price", "tax_percent"))
+    _fp_all        = list(FinalPrice.objects.filter(business=business).only("sku_id", "final_price", "packaging_cost", "parent_id", "item_price", "tax_percent"))
     price_map      = {fp.sku_id: fp.final_price    or Decimal("0") for fp in _fp_all}
     packaging_map  = {fp.sku_id: fp.packaging_cost or Decimal("0") for fp in _fp_all}
     item_price_map = {fp.sku_id: fp.item_price     or Decimal("0") for fp in _fp_all}
     tax_map        = {fp.sku_id: fp.tax_percent    or 0            for fp in _fp_all}
     sku_parent_map = {fp.sku_id: fp.parent_id for fp in _fp_all if fp.parent_id}
+    
+    _fp_parent     = list(ParentItemPrice.objects.filter(business=business).only("item_id", "item_price", "tax_percent", "packaging_cost", "final_price"))
+    parent_price_map      = {fp.item_id: fp.final_price    or Decimal("0") for fp in _fp_parent}
+    parent_packaging_map  = {fp.item_id: fp.packaging_cost or Decimal("0") for fp in _fp_parent}
+    parent_item_price_map = {fp.item_id: fp.item_price     or Decimal("0") for fp in _fp_parent}
+    parent_tax_map        = {fp.item_id: fp.tax_percent    or 0            for fp in _fp_parent}
 
     # Build date-effective price history: {parent_id: [(effective_from, final_price, packaging_cost, item_price, tax_percent), ...]}
     from collections import defaultdict
     _hist = list(
         ParentPriceHistory.objects
+        .filter(business=business)
         .values("parent_id", "effective_from", "final_price", "packaging_cost", "item_price", "tax_percent")
         .order_by("effective_from")
     )
@@ -1247,6 +1268,14 @@ def profit_summary(request):
                 if applicable:
                     _, fp, pkg, ip, tax = applicable[-1]
                     return fp, pkg, ip, tax
+                else: 
+                    return (
+                    parent_price_map.get(pid,      Decimal("0")),
+                    parent_packaging_map.get(pid,  Decimal("0")),
+                    parent_item_price_map.get(pid, Decimal("0")),
+                    parent_tax_map.get(pid, 0),
+                    )
+                    
         return (
             price_map.get(sku_id,      Decimal("0")),
             packaging_map.get(sku_id,  Decimal("0")),
@@ -1277,13 +1306,13 @@ def profit_summary(request):
     for sub_no, payments in order_groups.items():
         order = (
             Order.objects
-            .filter(sub_order_no=sub_no)
+            .filter(business=business, sub_order_no=sub_no)
             .values("sub_order_no", "sku", "quantity")
             .first()
-            )
+            ) or {}
         primary = next((p for p in payments if p.live_order_status), payments[0])
-        sku = order["sku"] or primary.supplier_sku
-        qty = order["quantity"] or primary.quantity
+        sku = order.get("sku") or primary.supplier_sku
+        qty = order.get("quantity") or primary.quantity
 
         if not sku or sku not in price_map:
             missing_sku.append(sku)
@@ -1349,7 +1378,7 @@ def profit_summary(request):
         qs.filter(claims__gt=0).aggregate(total=Sum("claims"))["total"] or Decimal("0")
     )
 
-    ads_qs = AdsCost.objects.all()
+    ads_qs = AdsCost.objects.filter(business=business)
     if date_from:
         ads_qs = ads_qs.filter(deduction_date__gte=date_from)
     if date_to:
@@ -1360,14 +1389,14 @@ def profit_summary(request):
     # always subtracts the ad spend regardless of how it's stored.
     ads = -abs(raw_ads)
 
-    ref_qs = ReferralPayment.objects.all()
+    ref_qs = ReferralPayment.objects.filter(business=business)
     if date_from:
         ref_qs = ref_qs.filter(payment_date__gte=date_from)
     if date_to:
         ref_qs = ref_qs.filter(payment_date__lte=date_to)
     referral = ref_qs.aggregate(total=Sum("net_referral_amount"))["total"] or Decimal("0")
 
-    comp_qs = CompensationRecovery.objects.all()
+    comp_qs = CompensationRecovery.objects.filter(business=business)
     if date_from:
         comp_qs = comp_qs.filter(date__gte=date_from)
     if date_to:
@@ -1489,7 +1518,7 @@ def profit_summary(request):
 
 
 @api_view(["GET"])
-def orders_grouped(request):
+def orders_grouped(request, business_id):
     """
     Returns OrderPayment rows grouped by sub_order_no with a derived classified status.
     Filters: ?month=YYYY-MM, ?date_from=, ?date_to=, ?status=DELIVERED|RETURN|RTO|EXCHANGE|SHIPPED|UNKNOWN
@@ -1498,14 +1527,16 @@ def orders_grouped(request):
     from collections import defaultdict
     import calendar as _cal
 
+    business = get_authorized_business(request, business_id)
     month      = request.GET.get("month", "").strip()
     date_from  = request.GET.get("date_from", "").strip()
     date_to    = request.GET.get("date_to", "").strip()
     status_f   = request.GET.get("status", "").strip().upper()
     page       = int(request.GET.get("page", 1))
     page_size  = int(request.GET.get("page_size", 50))
+    search = request.GET.get("search", "").strip()
 
-    qs = OrderPayment.objects.all()
+    qs = OrderPayment.objects.filter(business=business)
 
     if month:
         year, mo = (int(x) for x in month.split("-"))
@@ -1522,6 +1553,13 @@ def orders_grouped(request):
         if date_to:
             d = datetime.strptime(date_to, "%Y-%m-%d").date()
             qs = qs.filter(order_date__lte=datetime.combine(d, time.max))
+            
+    if search:
+        qs = qs.filter(
+            DQ(sub_order_no__icontains=search) |
+            DQ(supplier_sku__icontains=search) | 
+            DQ(product_name__icontains=search)
+        )    
 
     all_rows = list(qs.order_by("sub_order_no", "payment_date", "id"))
 
@@ -1627,7 +1665,8 @@ def orders_grouped(request):
 
 
 @api_view(["GET"])
-def order_payments_list(request):
+def order_payments_list(request, business_id):
+    business = get_authorized_business(request, business_id)
     page = int(request.GET.get("page", 1))
     page_size = int(request.GET.get("page_size", 50))
     status_filter = request.GET.get("status", "")
@@ -1635,7 +1674,7 @@ def order_payments_list(request):
     date_from = request.GET.get("date_from", "")
     date_to = request.GET.get("date_to", "")
 
-    qs = OrderPayment.objects.all()
+    qs = OrderPayment.objects.filter(business=business)
     if status_filter:
         qs = qs.filter(live_order_status__iexact=status_filter)
     if sku_filter:
@@ -1659,27 +1698,32 @@ def order_payments_list(request):
 
 
 @api_view(["GET"])
-def ads_cost_list(request):
-    qs = AdsCost.objects.all()
+def ads_cost_list(request, business_id):
+    business = get_authorized_business(request, business_id)
+    qs = AdsCost.objects.filter(business=business)
     return Response(AdsCostSerializer(qs, many=True).data)
 
 
 @api_view(["GET"])
-def referral_list(request):
-    qs = ReferralPayment.objects.all()
+def referral_list(request, business_id):
+    business = get_authorized_business(request, business_id)
+    qs = ReferralPayment.objects.filter(business=business)
     return Response(ReferralPaymentSerializer(qs, many=True).data)
 
 
 @api_view(["GET"])
-def compensation_recovery_list(request):
-    qs = CompensationRecovery.objects.all()
+def compensation_recovery_list(request, business_id):
+    business = get_authorized_business(request, business_id)
+    qs = CompensationRecovery.objects.filter(business=business)
     return Response(CompensationRecoverySerializer(qs, many=True).data)
 
 
 @api_view(["GET"])
-def order_status_breakdown(request):
+def order_status_breakdown(request, business_id):
+    business = get_authorized_business(request, business_id)
     breakdown = (
         OrderPayment.objects
+        .filter(business=business)
         .values("live_order_status")
         .annotate(count=Count("sub_order_no"), total_revenue=Sum("final_settlement_amount"))
         .order_by("-count")
@@ -1711,10 +1755,11 @@ def _compute_purchase_cost():
 
 
 @api_view(["GET", "POST"])
-def final_price_list(request):
+def final_price_list(request, business_id):
+    business = get_authorized_business(request, business_id)
     if request.method == "GET":
         search = request.GET.get("search", "")
-        qs = FinalPrice.objects.all()
+        qs = FinalPrice.objects.filter(business=business)
         if search:
             qs = qs.filter(sku_id__icontains=search)
         items = qs
@@ -1724,14 +1769,15 @@ def final_price_list(request):
 
     serializer = FinalPriceSerializer(data=request.data)
     serializer.is_valid(raise_exception=True)
-    serializer.save()
+    serializer.save(business=business)
     return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 @api_view(["GET", "POST"])
-def parent_price_list(request):
+def parent_price_list(request, business_id):
+    business = get_authorized_business(request, business_id)
     if request.method == "GET":
         search = request.GET.get("search", "")
-        qs = ParentItemPrice.objects.all()
+        qs = ParentItemPrice.objects.filter(business=business)
         if search:
             qs = qs.filter(item_id__icontains=search)
         items = qs
@@ -1741,15 +1787,16 @@ def parent_price_list(request):
 
     serializer = ParentItemPriceSerializer(data=request.data)
     serializer.is_valid(raise_exception=True)
-    serializer.save()
+    serializer.save(business=business)
     return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
 
 @api_view(["GET", "PUT", "PATCH", "DELETE"])
-def final_price_detail(request, sku_id):
+def final_price_detail(request, business_id, sku_id):
+    business = get_authorized_business(request, business_id)
     try:
-        obj = FinalPrice.objects.get(pk=sku_id)
+        obj = FinalPrice.objects.get(pk=sku_id, business=business)
     except FinalPrice.DoesNotExist:
         return Response({"error": "Not found."}, status=status.HTTP_404_NOT_FOUND)
 
@@ -1767,10 +1814,11 @@ def final_price_detail(request, sku_id):
     return Response(serializer.data)
 
 @api_view(["GET", "PUT", "PATCH", "DELETE"])
-def parent_price_detail(request, item_id):
+def parent_price_detail(request, business_id, item_id):
+    business = get_authorized_business(request, business_id)
     print("is there")
     try:
-        obj = ParentItemPrice.objects.get(pk=item_id)
+        obj = ParentItemPrice.objects.get(pk=item_id, business=business)
     except ParentItemPrice.DoesNotExist:
         return Response({"error": "Not found."}, status=status.HTTP_404_NOT_FOUND)
 
@@ -1788,16 +1836,17 @@ def parent_price_detail(request, item_id):
     return Response(serializer.data)
 
 @api_view(["POST", "PUT"])
-def parent_linking_to_sku(request): 
+def parent_linking_to_sku(request, business_id):
+    business = get_authorized_business(request, business_id)
     try:
-        
+
         if request.method == "POST":
             serializer = ParentItemPriceSerializer(data=request.data)
         else:
-            obj = ParentItemPrice.objects.get(pk=request.data["item_id"])
+            obj = ParentItemPrice.objects.get(pk=request.data["item_id"], business=business)
             serializer = ParentItemPriceSerializer(obj, data=request.data, partial=True)
-        serializer.is_valid(raise_exception=True)    
-        parent = serializer.save()
+        serializer.is_valid(raise_exception=True)
+        parent = serializer.save(business=business)
     except Exception as e:
         return Response(
         {
@@ -1806,7 +1855,7 @@ def parent_linking_to_sku(request):
         },
         status=status.HTTP_400_BAD_REQUEST,
     )
-           
+
     if request.method == "PUT":
         sku_ids = request.data.get("sku_ids", "")
 
@@ -1815,9 +1864,9 @@ def parent_linking_to_sku(request):
             for sku in sku_ids.split(",")
             if sku.strip()
         ]
-        
+
         updated_count = FinalPrice.objects.filter(
-            sku_id__in=sku_ids
+            business=business, sku_id__in=sku_ids
         ).update(
             parent=parent,
             item_price=parent.item_price,
@@ -1842,18 +1891,18 @@ def parent_linking_to_sku(request):
             },
             status=status.HTTP_200_OK,
         )
-def _sync_parent_current_price(parent_id):
+def _sync_parent_current_price(parent_id, business):
     """After adding/deleting a history entry, keep ParentItemPrice + linked FinalPrices in sync."""
-    history = ParentPriceHistory.objects.filter(parent_id=parent_id).order_by("-effective_from").first()
+    history = ParentPriceHistory.objects.filter(parent_id=parent_id, business=business).order_by("-effective_from").first()
     if not history:
         return
-    ParentItemPrice.objects.filter(pk=parent_id).update(
+    ParentItemPrice.objects.filter(pk=parent_id, business=business).update(
         item_price=history.item_price,
         tax_percent=history.tax_percent,
         packaging_cost=history.packaging_cost,
         final_price=history.final_price,
     )
-    FinalPrice.objects.filter(parent_id=parent_id).update(
+    FinalPrice.objects.filter(parent_id=parent_id, business=business).update(
         item_price=history.item_price,
         tax_percent=history.tax_percent,
         packaging_cost=history.packaging_cost,
@@ -1862,9 +1911,10 @@ def _sync_parent_current_price(parent_id):
 
 
 @api_view(["GET", "POST"])
-def parent_price_history_list(request, item_id):
+def parent_price_history_list(request, business_id, item_id):
+    business = get_authorized_business(request, business_id)
     try:
-        parent = ParentItemPrice.objects.get(pk=item_id)
+        parent = ParentItemPrice.objects.get(pk=item_id, business=business)
     except ParentItemPrice.DoesNotExist:
         return Response({"error": "Parent not found."}, status=404)
 
@@ -1881,39 +1931,42 @@ def parent_price_history_list(request, item_id):
 
     serializer = ParentPriceHistorySerializer(data=data)
     serializer.is_valid(raise_exception=True)
-    serializer.save()
-    _sync_parent_current_price(item_id)
+    serializer.save(business=business)
+    _sync_parent_current_price(item_id, business)
     return Response(serializer.data, status=201)
 
 
 @api_view(["DELETE"])
-def parent_price_history_detail(request, item_id, pk):
+def parent_price_history_detail(request, business_id, item_id, pk):
+    business = get_authorized_business(request, business_id)
     try:
-        obj = ParentPriceHistory.objects.get(pk=pk, parent_id=item_id)
+        obj = ParentPriceHistory.objects.get(pk=pk, parent_id=item_id, business=business)
     except ParentPriceHistory.DoesNotExist:
         return Response({"error": "Not found."}, status=404)
     obj.delete()
-    _sync_parent_current_price(item_id)
+    _sync_parent_current_price(item_id, business)
     return Response({"deleted": True})
 
 
 @api_view(["GET"])
-def unlinked_skus(request):
+def unlinked_skus(request, business_id):
     """Return FinalPrice SKUs not linked to any parent — used for autocomplete suggestions."""
+    business = get_authorized_business(request, business_id)
     q = request.GET.get("q", "")
-    qs = FinalPrice.objects.filter(parent__isnull=True)
+    qs = FinalPrice.objects.filter(business=business)
     if q:
         qs = qs.filter(sku_id__icontains=q)
-    return Response({"results": list(qs.values("sku_id", "item_price", "final_price")[:80])})
+    return Response({"results": list(qs.values("sku_id", "item_price", "final_price"))})
 
 
 @api_view(["POST"])
 @parser_classes([MultiPartParser])
-def upload_final_price(request):
+def upload_final_price(request, business_id):
     """
     Upload an Excel or CSV sheet to upsert FinalPrice rows.
     Expected columns: sku_id, item_price, tax_percent, packaging_cost, final_price
     """
+    business = get_authorized_business(request, business_id)
     file = request.FILES.get("file")
     if not file:
         return Response({"error": "No file provided."}, status=status.HTTP_400_BAD_REQUEST)
@@ -1948,7 +2001,7 @@ def upload_final_price(request):
                         defaults[col] = safe_int(row.get(col))
                     defaults[col] = safe_decimal(row.get(col))  
             _, was_created = FinalPrice.objects.update_or_create(
-                sku_id=pk, defaults=defaults
+                business=business, sku_id=pk, defaults=defaults
             )
             if was_created:
                 created += 1
@@ -1963,10 +2016,11 @@ def upload_final_price(request):
 
 @api_view(["POST"])
 @parser_classes([MultiPartParser])
-def upload_orders_csv(request):
+def upload_orders_csv(request, business_id):
     """
     Upload Orders CSV file and create/update Order records.
     """
+    business = get_authorized_business(request, business_id)
 
     file = request.FILES.get("file")
 
@@ -2047,6 +2101,7 @@ def upload_orders_csv(request):
             lookup_status     = defaults.pop("reason_for_credit_entry")
             lookup_order_date = defaults.pop("order_date")
             _, was_created = Order.objects.update_or_create(
+                business=business,
                 sub_order_no=sub_order_no,
                 reason_for_credit_entry=lookup_status,
                 order_date=lookup_order_date,
@@ -2072,8 +2127,9 @@ def upload_orders_csv(request):
 # ── Full Orders (Order model) ─────────────────────────────────────────────────
 
 @api_view(["GET"])
-def full_orders_list(request):
+def full_orders_list(request, business_id):
     """Paginated list of Order rows with date/status/sku/state/search/month filters."""
+    business = get_authorized_business(request, business_id)
     page      = int(request.GET.get("page", 1))
     page_size = int(request.GET.get("page_size", 50))
     status_filter = request.GET.get("status", "")
@@ -2095,7 +2151,7 @@ def full_orders_list(request):
         except (ValueError, IndexError):
             pass
 
-    qs = Order.objects.all()
+    qs = Order.objects.filter(business=business)
     if status_filter:
         qs = qs.filter(reason_for_credit_entry__iexact=status_filter)
     if sku_filter:
@@ -2125,8 +2181,9 @@ def full_orders_list(request):
 
 
 @api_view(["GET"])
-def full_orders_analytics(request):
+def full_orders_analytics(request, business_id):
     """Aggregate stats for Order model — drives the Orders tab summary cards."""
+    business = get_authorized_business(request, business_id)
     date_from     = request.GET.get("date_from", "")
     date_to       = request.GET.get("date_to", "")
     status_filter = request.GET.get("status", "")
@@ -2142,7 +2199,7 @@ def full_orders_analytics(request):
         except (ValueError, IndexError):
             pass
 
-    base = Order.objects.all()
+    base = Order.objects.filter(business=business)
     if date_from:
         base = base.filter(order_date__gte=date_from)
     if date_to:
@@ -2181,7 +2238,7 @@ def full_orders_analytics(request):
 
     # Available months — always from unfiltered base for the month picker
     all_months = list(
-        Order.objects.values_list("order_date", flat=True)
+        Order.objects.filter(business=business).values_list("order_date", flat=True)
         .exclude(order_date__isnull=True)
         .order_by("order_date")
         .distinct()
@@ -2199,17 +2256,18 @@ def full_orders_analytics(request):
 
 
 @api_view(["GET"])
-def dashboard_analytics(request):
+def dashboard_analytics(request, business_id):
     """
     Primary filter: Order.order_date (reliable DateField).
     Then join OrderPayment by sub_order_no to find settled orders.
     Unsettled = orders in date range with no matching payment.
     """
+    business = get_authorized_business(request, business_id)
     date_from = request.GET.get("date_from", "")
     date_to   = request.GET.get("date_to", "")
 
     # ── Step 1: filter Orders by placement date, then deduplicate to latest ──
-    date_filtered_qs = Order.objects.all()
+    date_filtered_qs = Order.objects.filter(business=business)
     if date_from:
         date_filtered_qs = date_filtered_qs.filter(order_date__gte=date_from)
     if date_to:
@@ -2221,7 +2279,7 @@ def dashboard_analytics(request):
 
     # ── Step 2: find payments for those orders ────────────────────────────────
     payment_qs = (
-        OrderPayment.objects.filter(sub_order_no__in=order_nos)
+        OrderPayment.objects.filter(business=business, sub_order_no__in=order_nos)
         if order_nos
         else OrderPayment.objects.none()
     )
@@ -2480,7 +2538,7 @@ def _parse_label_page(label_text, full_text, tables):
 
 @api_view(["POST"])
 @parser_classes([MultiPartParser])
-def upload_labels_pdf(request):
+def upload_labels_pdf(request, business_id):
     """
     Upload a Meesho shipping labels PDF (one label per page).
 
@@ -2494,6 +2552,7 @@ def upload_labels_pdf(request):
       2. Locate "TAX INVOICE" text to determine crop boundary per page.
       3. Use pypdf to crop each page to the label-only region and return as base64 PDF.
     """
+    business = get_authorized_business(request, business_id)
     import io, re, base64
 
     try:
@@ -2635,18 +2694,19 @@ def upload_labels_pdf(request):
 
             _, created = LabelOrder.objects.get_or_create(
                 order_id=oid,
+                business=business,
                 defaults={"uploaded_date": upload_date, **row},
             )
             if created:
                 saved += 1
             else:
                 # Refresh all data fields — but leave uploaded_date alone
-                LabelOrder.objects.filter(order_id=oid).update(**row)
+                LabelOrder.objects.filter(order_id=oid, business=business).update(**row)
                 updated += 1
 
     # ── Resolve parent SKU for each child SKU ────────────────────────────────────
     _fp_qs = FinalPrice.objects.filter(
-        sku_id__in=list(sku_data.keys())
+        business=business, sku_id__in=list(sku_data.keys())
     ).values("sku_id", "parent_id")
     sku_to_parent = {row["sku_id"]: row["parent_id"] for row in _fp_qs}
 
@@ -2725,7 +2785,7 @@ def upload_labels_pdf(request):
 
     # ── Flag blocked customers found in this upload ───────────────────────────
     blocked_set = set(
-        BlockedCustomer.objects.filter(is_active=True)
+        BlockedCustomer.objects.filter(business=business, is_active=True)
         .values_list("customer_name", "customer_pincode")
     )
     blocked_in_batch = []
@@ -2745,9 +2805,9 @@ def upload_labels_pdf(request):
     batch_customers: dict = {}
     batch_order_ids: set  = set()
     for _pd in page_details:
-        _name    = _pd.get("customer_name", "").strip()
-        _pincode = _pd.get("customer_pincode", "").strip()
-        _oid     = _pd.get("order_id", "")
+        _name = (_pd.get("customer_name") or "").strip().lower()
+        _pincode = str(_pd.get("customer_pincode") or "").strip()
+        _oid    = _pd.get("order_id", "")
         if _oid:
             batch_order_ids.add(_oid)
         if not _name or not _pincode:
@@ -2776,7 +2836,7 @@ def upload_labels_pdf(request):
         # Prior orders = same customer, NOT in this batch
         _prior_rows = list(
             LabelOrder.objects
-            .filter(customer_name__in=_all_names, customer_pincode__in=_all_pincodes)
+            .filter(business=business, customer_name__in=_all_names, customer_pincode__in=_all_pincodes)
             .exclude(order_id__in=list(batch_order_ids))
             .values("order_id", "customer_name", "customer_pincode",
                     "sku", "qty", "order_date", "uploaded_date")
@@ -2793,7 +2853,7 @@ def upload_labels_pdf(request):
         _outcomes: dict  = {}
         if _prior_order_ids:
             for _o in (Order.objects
-                       .filter(sub_order_no__in=_prior_order_ids)
+                       .filter(business=business, sub_order_no__in=_prior_order_ids)
                        .values("sub_order_no", "reason_for_credit_entry")):
                 _outcomes.setdefault(_o["sub_order_no"], []).append(
                     _o["reason_for_credit_entry"]
@@ -2804,7 +2864,9 @@ def upload_labels_pdf(request):
         for _key, _prior in _prior_by_customer.items():
             if not _prior:
                 continue
-            _bc = batch_customers[_key]
+            print("Missing key:", repr(_key))
+            print("Available keys:")
+            # _bc = batch_customers[_key]
 
             # Resolve status for each prior order
             _enriched = []
@@ -2853,10 +2915,10 @@ def upload_labels_pdf(request):
             repeated_customers.append({
                 "customer_name":     _key[0],
                 "customer_pincode":  _key[1],
-                "customer_address":  _bc["customer_address"],
-                "customer_city":     _bc["customer_city"],
-                "customer_state":    _bc["customer_state"],
-                "batch_orders":      _bc["batch_orders"],
+                # "customer_address":  _bc["customer_address"],
+                # "customer_city":     _bc["customer_city"],
+                # "customer_state":    _bc["customer_state"],
+                # "batch_orders":      _bc["batch_orders"],
                 "prior_order_count": _total,
                 "delivered":         _delivered,
                 "returned":          _returned,
@@ -2898,12 +2960,13 @@ def upload_labels_pdf(request):
 # ── Label Orders — read endpoints ─────────────────────────────────────────────
 
 @api_view(["GET"])
-def label_orders_list(request):
+def label_orders_list(request, business_id):
     """
     Paginated LabelOrder list.
     Query params: date (YYYY-MM-DD), date_from, date_to, courier, payment_type,
                   page, page_size
     """
+    business = get_authorized_business(request, business_id)
     page        = int(request.GET.get("page", 1))
     page_size   = int(request.GET.get("page_size", 50))
     date_single = request.GET.get("date", "")
@@ -2912,7 +2975,7 @@ def label_orders_list(request):
     courier     = request.GET.get("courier", "")
     pay_type    = request.GET.get("payment_type", "")
 
-    qs = LabelOrder.objects.all()
+    qs = LabelOrder.objects.filter(business=business)
 
     if date_single:
         qs = qs.filter(uploaded_date=date_single)
@@ -2933,7 +2996,7 @@ def label_orders_list(request):
 
     # Annotate blocked status: build lookup set from active blocked customers
     blocked_set = set(
-        BlockedCustomer.objects.filter(is_active=True)
+        BlockedCustomer.objects.filter(business=business, is_active=True)
         .values_list("customer_name", "customer_pincode")
     )
 
@@ -2950,18 +3013,19 @@ def label_orders_list(request):
 
 
 @api_view(["GET"])
-def label_couriers_summary(request):
+def label_couriers_summary(request, business_id):
     """
     Courier-wise order count for a date range.
     Query params: date (single day), date_from, date_to
     No date params = return all records.
     Also returns the list of available uploaded dates for the date-picker.
     """
+    business = get_authorized_business(request, business_id)
     date_single = request.GET.get("date", "")
     date_from   = request.GET.get("date_from", "")
     date_to     = request.GET.get("date_to", "")
 
-    qs = LabelOrder.objects.all()
+    qs = LabelOrder.objects.filter(business=business)
     if date_single:
         qs = qs.filter(uploaded_date=date_single)
         filter_label = date_single
@@ -2993,6 +3057,7 @@ def label_couriers_summary(request):
 
     available_dates = list(
         LabelOrder.objects
+        .filter(business=business)
         .values_list("uploaded_date", flat=True)
         .distinct()
         .order_by("-uploaded_date")
@@ -3008,7 +3073,7 @@ def label_couriers_summary(request):
 
 
 @api_view(["GET"])
-def label_duplicate_customers(request):
+def label_duplicate_customers(request, business_id):
     """
     Find repeat customers by ADDRESS (city + state + pincode) — NOT by name.
     Returns addresses that appear in more than one LabelOrder.
@@ -3018,11 +3083,12 @@ def label_duplicate_customers(request):
 
     Query params: date_from, date_to (optional)
     """
+    business = get_authorized_business(request, business_id)
     date_from = request.GET.get("date_from", "")
     date_to   = request.GET.get("date_to",   "")
 
     # Step 1: addresses that appear in the selected period
-    period_qs = LabelOrder.objects.exclude(customer_pincode="").exclude(customer_city="")
+    period_qs = LabelOrder.objects.filter(business=business).exclude(customer_pincode="").exclude(customer_city="")
     if date_from:
         period_qs = period_qs.filter(uploaded_date__gte=date_from)
     if date_to:
@@ -3041,7 +3107,7 @@ def label_duplicate_customers(request):
     for pin, city, state in period_addrs:
         addr_filter |= Q(customer_pincode=pin, customer_city=city, customer_state=state)
 
-    all_time_qs = LabelOrder.objects.filter(addr_filter)
+    all_time_qs = LabelOrder.objects.filter(addr_filter, business=business)
 
     # Aggregate per address
     addr_agg = list(
@@ -3063,7 +3129,7 @@ def label_duplicate_customers(request):
         state = agg["customer_state"]
         orders = list(
             LabelOrder.objects
-            .filter(customer_pincode=pin, customer_city=city, customer_state=state)
+            .filter(business=business, customer_pincode=pin, customer_city=city, customer_state=state)
             .values(
                 "order_id", "customer_name", "customer_city", "customer_state",
                 "customer_pincode", "uploaded_date", "courier_name", "awb_number",
@@ -3086,7 +3152,7 @@ def label_duplicate_customers(request):
 
 
 @api_view(["GET"])
-def label_customer_history(request):
+def label_customer_history(request, business_id):
     """
     Full order + settlement history for one customer.
 
@@ -3100,13 +3166,14 @@ def label_customer_history(request):
     """
     from datetime import date as _date, datetime as _datetime
 
+    business = get_authorized_business(request, business_id)
     name    = request.GET.get("name", "").strip()
     pincode = request.GET.get("pincode", "").strip()
 
     if not name and not pincode:
         return Response({"error": "Provide at least name or pincode."}, status=400)
 
-    qs = LabelOrder.objects.all()
+    qs = LabelOrder.objects.filter(business=business)
     if name:
         qs = qs.filter(customer_name__iexact=name)
     if pincode:
@@ -3126,13 +3193,13 @@ def label_customer_history(request):
             "total_sale_amount":  float(p.total_sale_amount or 0),
             "payment_date":       str(p.payment_date) if p.payment_date else None,
         }
-        for p in OrderPayment.objects.filter(sub_order_no__in=order_ids)
+        for p in OrderPayment.objects.filter(business=business, sub_order_no__in=order_ids)
     }
 
     # Join Order (lifecycle status)
     status_map = {
         o.sub_order_no: o.reason_for_credit_entry
-        for o in Order.objects.filter(sub_order_no__in=order_ids)
+        for o in Order.objects.filter(business=business, sub_order_no__in=order_ids)
     }
 
     # ── Enrich and accumulate ────────────────────────────────────────────────
@@ -3199,10 +3266,11 @@ def label_customer_history(request):
     })
 
 
-def _log_inventory(entity_type, entity_id, action, description,
+def _log_inventory(business, entity_type, entity_id, action, description,
                    parent_sku_id="", quantity_change=None, metadata=None):
     """Write one immutable audit-log entry."""
     InventoryLog.objects.create(
+        business=business,
         entity_type=entity_type,
         entity_id=str(entity_id),
         action=action,
@@ -3243,9 +3311,10 @@ def _bill_to_dict(bill):
 
 
 @api_view(["GET", "POST"])
-def purchases_list(request):
+def purchases_list(request, business_id):
+    business = get_authorized_business(request, business_id)
     if request.method == "GET":
-        qs = PurchaseBill.objects.prefetch_related("items").order_by("-date", "-created_at")
+        qs = PurchaseBill.objects.filter(business=business).prefetch_related("items").order_by("-date", "-created_at")
         date_from = request.GET.get("date_from")
         date_to   = request.GET.get("date_to")
         seller    = request.GET.get("seller", "").strip()
@@ -3262,6 +3331,7 @@ def purchases_list(request):
     data = request.data
     with transaction.atomic():
         bill = PurchaseBill.objects.create(
+            business=business,
             date=data["date"],
             seller_name=data["seller_name"],
             bill_number=data.get("bill_number", ""),
@@ -3269,6 +3339,7 @@ def purchases_list(request):
         )
         for it in data.get("items", []):
             PurchaseItem.objects.create(
+                business=business,
                 bill=bill,
                 parent_sku_id=it.get("parent_sku_id") or None,
                 product_description=it.get("product_description", ""),
@@ -3280,19 +3351,21 @@ def purchases_list(request):
     for it in bill.items.all():
         if it.parent_sku_id:
             _log_inventory(
+                business,
                 "PURCHASE", it.id, "CREATE",
                 f"Added {it.quantity} units of {it.parent_sku_id} from {bill.seller_name}",
                 parent_sku_id=it.parent_sku_id,
                 quantity_change=it.quantity,
                 metadata={"bill_id": bill.id, "price_per_unit": str(it.price_per_unit), "is_exchange": it.is_exchange},
             )
-    return Response(_bill_to_dict(PurchaseBill.objects.prefetch_related("items").get(pk=bill.pk)), status=201)
+    return Response(_bill_to_dict(PurchaseBill.objects.prefetch_related("items").get(pk=bill.pk, business=business)), status=201)
 
 
 @api_view(["GET", "PUT", "DELETE"])
-def purchase_detail(request, bill_id):
+def purchase_detail(request, business_id, bill_id):
+    business = get_authorized_business(request, business_id)
     try:
-        bill = PurchaseBill.objects.prefetch_related("items").get(pk=bill_id)
+        bill = PurchaseBill.objects.prefetch_related("items").get(pk=bill_id, business=business)
     except PurchaseBill.DoesNotExist:
         return Response({"error": "Not found"}, status=404)
 
@@ -3311,6 +3384,7 @@ def purchase_detail(request, bill_id):
             bill.items.all().delete()
             for it in data.get("items", []):
                 PurchaseItem.objects.create(
+                    business=business,
                     bill=bill,
                     parent_sku_id=it.get("parent_sku_id") or None,
                     product_description=it.get("product_description", ""),
@@ -3318,7 +3392,7 @@ def purchase_detail(request, bill_id):
                     price_per_unit=Decimal(str(it["price_per_unit"])),
                     is_exchange=bool(it.get("is_exchange", False)),
                 )
-        bill = PurchaseBill.objects.prefetch_related("items").get(pk=bill_id)
+        bill = PurchaseBill.objects.prefetch_related("items").get(pk=bill_id, business=business)
         return Response(_bill_to_dict(bill))
 
     # DELETE
@@ -3327,7 +3401,7 @@ def purchase_detail(request, bill_id):
 
 
 @api_view(["GET"])
-def purchase_pdf(request, bill_id):
+def purchase_pdf(request, business_id, bill_id):
     """Generate and stream a PDF receipt for one purchase bill."""
     from io import BytesIO
     from django.http import HttpResponse
@@ -3340,8 +3414,9 @@ def purchase_pdf(request, bill_id):
     )
     from reportlab.lib.enums import TA_CENTER, TA_RIGHT
 
+    business = get_authorized_business(request, business_id)
     try:
-        bill = PurchaseBill.objects.prefetch_related("items").get(pk=bill_id)
+        bill = PurchaseBill.objects.prefetch_related("items").get(pk=bill_id, business=business)
     except PurchaseBill.DoesNotExist:
         return HttpResponse("Not found", status=404)
 
@@ -3465,7 +3540,7 @@ def purchase_pdf(request, bill_id):
 
 
 @api_view(["GET"])
-def inventory_view(request):
+def inventory_view(request, business_id):
     """
     Compute current stock per parent SKU:
       current_stock = purchased_qty (non-exchange) - sold_qty (DELIVERED) + rto_qty (RTO_COMPLETE) + net_adjustments
@@ -3473,10 +3548,12 @@ def inventory_view(request):
     """
     from django.db.models import ExpressionWrapper, F, DecimalField as DField
 
+    business = get_authorized_business(request, business_id)
+
     # 1. Purchases per parent SKU
     purchase_agg = (
         PurchaseItem.objects
-        .filter(is_exchange=False, parent_sku__isnull=False)
+        .filter(business=business, is_exchange=False, parent_sku__isnull=False)
         .values("parent_sku_id")
         .annotate(
             purchased_qty=Sum("quantity"),
@@ -3493,6 +3570,7 @@ def inventory_view(request):
     # 2. Manual adjustments per parent SKU
     adj_agg = (
         InventoryAdjustment.objects
+        .filter(business=business)
         .values("parent_sku_id")
         .annotate(net_adj=Sum("quantity"))
     )
@@ -3506,7 +3584,7 @@ def inventory_view(request):
     # 3. Map child SKU → parent SKU
     sku_to_parent = dict(
         FinalPrice.objects
-        .filter(parent_id__in=all_parent_ids)
+        .filter(business=business, parent_id__in=all_parent_ids)
         .values_list("sku_id", "parent_id")
     )
 
@@ -3514,14 +3592,14 @@ def inventory_view(request):
     child_skus = list(sku_to_parent.keys())
     delivered_by_sku = dict(
         Order.objects
-        .filter(reason_for_credit_entry="DELIVERED", sku__in=child_skus)
+        .filter(business=business, reason_for_credit_entry="DELIVERED", sku__in=child_skus)
         .values("sku")
         .annotate(qty=Sum("quantity"))
         .values_list("sku", "qty")
     )
     rto_by_sku = dict(
         Order.objects
-        .filter(reason_for_credit_entry="RTO_COMPLETE", sku__in=child_skus)
+        .filter(business=business, reason_for_credit_entry="RTO_COMPLETE", sku__in=child_skus)
         .values("sku")
         .annotate(qty=Sum("quantity"))
         .values_list("sku", "qty")
@@ -3542,7 +3620,7 @@ def inventory_view(request):
     # 6. Last purchase date per parent SKU
     last_purchase = dict(
         PurchaseItem.objects
-        .filter(parent_sku_id__in=all_parent_ids)
+        .filter(business=business, parent_sku_id__in=all_parent_ids)
         .values("parent_sku_id")
         .annotate(last=Max("bill__date"))
         .values_list("parent_sku_id", "last")
@@ -3571,14 +3649,15 @@ def inventory_view(request):
 
 
 @api_view(["GET", "POST"])
-def inventory_adjustment_list(request):
+def inventory_adjustment_list(request, business_id):
     """List or create manual inventory adjustments for a parent SKU."""
+    business = get_authorized_business(request, business_id)
     parent_sku_id = request.GET.get("parent_sku", "").strip() if request.method == "GET" else request.data.get("parent_sku_id", "").strip()
 
     if request.method == "GET":
         if not parent_sku_id:
             return Response({"error": "parent_sku required"}, status=400)
-        adjs = InventoryAdjustment.objects.filter(parent_sku_id=parent_sku_id).order_by("-date", "-created_at")
+        adjs = InventoryAdjustment.objects.filter(business=business, parent_sku_id=parent_sku_id).order_by("-date", "-created_at")
         results = [{
             "id":         a.id,
             "quantity":   a.quantity,
@@ -3602,11 +3681,12 @@ def inventory_adjustment_list(request):
     if qty == 0:
         return Response({"error": "quantity cannot be zero"}, status=400)
 
-    parent = ParentItemPrice.objects.filter(pk=parent_sku_id).first()
+    parent = ParentItemPrice.objects.filter(pk=parent_sku_id, business=business).first()
     if not parent:
         return Response({"error": f"Parent SKU '{parent_sku_id}' not found"}, status=404)
 
     adj = InventoryAdjustment.objects.create(
+        business=business,
         parent_sku=parent,
         quantity=qty,
         reason=data.get("reason", "OTHER"),
@@ -3614,6 +3694,7 @@ def inventory_adjustment_list(request):
         date=data.get("date"),
     )
     _log_inventory(
+        business,
         "ADJUSTMENT", adj.id, "CREATE",
         f"Manual adjustment: {'+' if adj.quantity >= 0 else ''}{adj.quantity} units of {parent_sku_id} ({adj.reason})",
         parent_sku_id=parent_sku_id,
@@ -3632,10 +3713,11 @@ def inventory_adjustment_list(request):
 
 
 @api_view(["PUT", "DELETE"])
-def inventory_adjustment_detail(request, adj_id):
+def inventory_adjustment_detail(request, business_id, adj_id):
     """Update or delete a single inventory adjustment."""
+    business = get_authorized_business(request, business_id)
     try:
-        adj = InventoryAdjustment.objects.get(pk=adj_id)
+        adj = InventoryAdjustment.objects.get(pk=adj_id, business=business)
     except InventoryAdjustment.DoesNotExist:
         return Response({"error": "Not found"}, status=404)
 
@@ -3654,6 +3736,7 @@ def inventory_adjustment_detail(request, adj_id):
             adj.date = data["date"]
         adj.save()
         _log_inventory(
+            business,
             "ADJUSTMENT", adj.id, "UPDATE",
             f"Updated adjustment for {adj.parent_sku_id}: qty→{adj.quantity} reason={adj.reason}",
             parent_sku_id=adj.parent_sku_id,
@@ -3671,6 +3754,7 @@ def inventory_adjustment_detail(request, adj_id):
 
     # DELETE
     _log_inventory(
+        business,
         "ADJUSTMENT", adj.id, "DELETE",
         f"Deleted adjustment: {adj.parent_sku_id} {adj.quantity} ({adj.reason})",
         parent_sku_id=adj.parent_sku_id,
@@ -3681,35 +3765,39 @@ def inventory_adjustment_detail(request, adj_id):
 
 
 @api_view(["POST"])
-def inventory_create_sku(request):
+def inventory_create_sku(request, business_id):
     """Create a new Parent SKU directly from the inventory screen."""
+    business = get_authorized_business(request, business_id)
     data = request.data
     sku_id = (data.get("sku_id") or "").strip()
     if not sku_id:
         return Response({"error": "sku_id is required"}, status=400)
-    if ParentItemPrice.objects.filter(pk=sku_id).exists():
+    if ParentItemPrice.objects.filter(pk=sku_id, business=business).exists():
         return Response({"error": f"Parent SKU '{sku_id}' already exists"}, status=409)
 
     with transaction.atomic():
         parent = ParentItemPrice.objects.create(
+            business=business,
             item_id=sku_id,
             item_price=data.get("item_price") or None,
             tax_percent=data.get("tax_percent") or None,
             packaging_cost=data.get("packaging_cost") or None,
             final_price=data.get("final_price") or None,
         )
-        _log_inventory("SKU", parent.item_id, "CREATE", f"Created Parent SKU: {parent.item_id}", parent_sku_id=parent.item_id)
+        _log_inventory(business, "SKU", parent.item_id, "CREATE", f"Created Parent SKU: {parent.item_id}", parent_sku_id=parent.item_id)
         # Optional: add initial stock as a purchase bill
         init_qty = int(data.get("initial_qty") or 0)
         if init_qty > 0:
             price_per_unit = Decimal(str(data.get("initial_price") or "0"))
             bill = PurchaseBill.objects.create(
+                business=business,
                 date=data.get("initial_date") or timezone.now().date(),
                 seller_name=data.get("initial_seller") or "Opening Stock",
                 bill_number="",
                 notes="Initial stock — created from Inventory",
             )
             PurchaseItem.objects.create(
+                business=business,
                 bill=bill,
                 parent_sku=parent,
                 product_description="Opening stock",
@@ -3724,14 +3812,15 @@ def inventory_create_sku(request):
 # ── Purchase item-level CRUD ──────────────────────────────────────────────────
 
 @api_view(["GET"])
-def purchase_sku_items(request):
+def purchase_sku_items(request, business_id):
     """All PurchaseItems for a given parent_sku, with bill metadata."""
+    business = get_authorized_business(request, business_id)
     parent_sku = request.GET.get("parent_sku", "").strip()
     if not parent_sku:
         return Response({"error": "parent_sku required"}, status=400)
     items = (
         PurchaseItem.objects
-        .filter(parent_sku_id=parent_sku)
+        .filter(business=business, parent_sku_id=parent_sku)
         .select_related("bill")
         .order_by("-bill__date", "-bill__id")
     )
@@ -3753,9 +3842,10 @@ def purchase_sku_items(request):
 
 
 @api_view(["PUT", "DELETE"])
-def purchase_item_detail(request, item_id):
+def purchase_item_detail(request, business_id, item_id):
+    business = get_authorized_business(request, business_id)
     try:
-        item = PurchaseItem.objects.select_related("bill").get(pk=item_id)
+        item = PurchaseItem.objects.select_related("bill").get(pk=item_id, business=business)
     except PurchaseItem.DoesNotExist:
         return Response({"error": "Not found"}, status=404)
 
@@ -3767,6 +3857,7 @@ def purchase_item_detail(request, item_id):
         item.is_exchange         = bool(data.get("is_exchange", item.is_exchange))
         item.save()
         _log_inventory(
+            business,
             "PURCHASE", item.id, "UPDATE",
             f"Updated purchase item: {item.parent_sku_id} qty→{item.quantity} price→{item.price_per_unit}",
             parent_sku_id=item.parent_sku_id or "",
@@ -3783,6 +3874,7 @@ def purchase_item_detail(request, item_id):
     # DELETE
     bill = item.bill
     _log_inventory(
+        business,
         "PURCHASE", item.id, "DELETE",
         f"Deleted purchase item: {item.parent_sku_id} ×{item.quantity}",
         parent_sku_id=item.parent_sku_id or "",
@@ -3796,8 +3888,9 @@ def purchase_item_detail(request, item_id):
 
 
 @api_view(["GET"])
-def purchase_sku_monthly(request):
+def purchase_sku_monthly(request, business_id):
     """Monthly purchase aggregates for a parent SKU."""
+    business = get_authorized_business(request, business_id)
     parent_sku = request.GET.get("parent_sku", "").strip()
     if not parent_sku:
         return Response({"error": "parent_sku required"}, status=400)
@@ -3805,7 +3898,7 @@ def purchase_sku_monthly(request):
     from django.db.models import ExpressionWrapper as EW, F as Fld, DecimalField as DField
     rows = (
         PurchaseItem.objects
-        .filter(parent_sku_id=parent_sku, is_exchange=False)
+        .filter(business=business, parent_sku_id=parent_sku, is_exchange=False)
         .annotate(month=TruncMonth("bill__date"))
         .values("month")
         .annotate(
@@ -3830,9 +3923,10 @@ def purchase_sku_monthly(request):
 # ── Consumable Items ──────────────────────────────────────────────────────────
 
 @api_view(["GET", "POST"])
-def consumable_items_list(request):
+def consumable_items_list(request, business_id):
+    business = get_authorized_business(request, business_id)
     if request.method == "GET":
-        items = ConsumableItem.objects.all()
+        items = ConsumableItem.objects.filter(business=business)
         results = []
         for item in items:
             purchased  = item.purchases.aggregate(t=Sum("quantity"))["t"] or Decimal("0")
@@ -3862,19 +3956,21 @@ def consumable_items_list(request):
     if not data.get("name"):
         return Response({"error": "name is required"}, status=400)
     item = ConsumableItem.objects.create(
+        business=business,
         name=data["name"],
         category=data.get("category", "OTHER"),
         unit=data.get("unit", "pieces"),
         notes=data.get("notes", ""),
     )
-    _log_inventory("CONSUMABLE_ITEM", item.id, "CREATE", f"Created consumable item: {item.name}")
+    _log_inventory(business, "CONSUMABLE_ITEM", item.id, "CREATE", f"Created consumable item: {item.name}")
     return Response({"id": item.id, "name": item.name, "category": item.category, "unit": item.unit}, status=201)
 
 
 @api_view(["GET", "PUT", "DELETE"])
-def consumable_item_detail(request, item_id):
+def consumable_item_detail(request, business_id, item_id):
+    business = get_authorized_business(request, business_id)
     try:
-        item = ConsumableItem.objects.get(pk=item_id)
+        item = ConsumableItem.objects.get(pk=item_id, business=business)
     except ConsumableItem.DoesNotExist:
         return Response({"error": "Not found"}, status=404)
 
@@ -3890,20 +3986,21 @@ def consumable_item_detail(request, item_id):
         item.unit     = request.data.get("unit", item.unit)
         item.notes    = request.data.get("notes", item.notes)
         item.save()
-        _log_inventory("CONSUMABLE_ITEM", item.id, "UPDATE", f"Updated consumable: {old_name} → {item.name}")
+        _log_inventory(business, "CONSUMABLE_ITEM", item.id, "UPDATE", f"Updated consumable: {old_name} → {item.name}")
         return Response({"id": item.id, "name": item.name, "category": item.category, "unit": item.unit})
 
     name = item.name
     item.delete()
-    _log_inventory("CONSUMABLE_ITEM", item_id, "DELETE", f"Deleted consumable item: {name}")
+    _log_inventory(business, "CONSUMABLE_ITEM", item_id, "DELETE", f"Deleted consumable item: {name}")
     return Response({"message": "Deleted"})
 
 
 @api_view(["GET", "POST"])
-def consumable_purchases_list(request):
+def consumable_purchases_list(request, business_id):
+    business = get_authorized_business(request, business_id)
     if request.method == "GET":
         item_id = request.GET.get("item_id")
-        qs = ConsumablePurchase.objects.select_related("item").order_by("-date")
+        qs = ConsumablePurchase.objects.filter(business=business).select_related("item").order_by("-date")
         if item_id:
             qs = qs.filter(item_id=item_id)
         results = [{
@@ -3917,11 +4014,12 @@ def consumable_purchases_list(request):
 
     data = request.data
     try:
-        item = ConsumableItem.objects.get(pk=data.get("item_id"))
+        item = ConsumableItem.objects.get(pk=data.get("item_id"), business=business)
     except ConsumableItem.DoesNotExist:
         return Response({"error": "Consumable item not found"}, status=404)
 
     p = ConsumablePurchase.objects.create(
+        business=business,
         item=item,
         date=data["date"],
         quantity=Decimal(str(data.get("quantity", 1))),
@@ -3930,6 +4028,7 @@ def consumable_purchases_list(request):
         notes=data.get("notes", ""),
     )
     _log_inventory(
+        business,
         "CONSUMABLE_PURCHASE", p.id, "CREATE",
         f"Purchased {float(p.quantity)} {item.unit} of {item.name} from {p.seller_name or 'unknown'}",
         quantity_change=int(p.quantity),
@@ -3939,9 +4038,10 @@ def consumable_purchases_list(request):
 
 
 @api_view(["PUT", "DELETE"])
-def consumable_purchase_detail(request, purchase_id):
+def consumable_purchase_detail(request, business_id, purchase_id):
+    business = get_authorized_business(request, business_id)
     try:
-        p = ConsumablePurchase.objects.select_related("item").get(pk=purchase_id)
+        p = ConsumablePurchase.objects.select_related("item").get(pk=purchase_id, business=business)
     except ConsumablePurchase.DoesNotExist:
         return Response({"error": "Not found"}, status=404)
 
@@ -3954,23 +4054,24 @@ def consumable_purchase_detail(request, purchase_id):
         p.seller_name    = data.get("seller_name", p.seller_name)
         p.notes          = data.get("notes", p.notes)
         p.save()
-        _log_inventory("CONSUMABLE_PURCHASE", p.id, "UPDATE",
+        _log_inventory(business, "CONSUMABLE_PURCHASE", p.id, "UPDATE",
             f"Updated {p.item.name} purchase: qty {old_qty} → {float(p.quantity)}", quantity_change=int(p.quantity) - int(old_qty))
         return Response({"id": p.id, "quantity": float(p.quantity), "price_per_unit": str(p.price_per_unit)})
 
     item_name = p.item.name
     qty = float(p.quantity)
     p.delete()
-    _log_inventory("CONSUMABLE_PURCHASE", purchase_id, "DELETE",
+    _log_inventory(business, "CONSUMABLE_PURCHASE", purchase_id, "DELETE",
         f"Deleted purchase of {qty} {item_name}", quantity_change=-int(qty))
     return Response({"message": "Deleted"})
 
 
 @api_view(["GET", "POST"])
-def consumable_usages_list(request):
+def consumable_usages_list(request, business_id):
+    business = get_authorized_business(request, business_id)
     if request.method == "GET":
         item_id = request.GET.get("item_id")
-        qs = ConsumableUsage.objects.select_related("item").order_by("-date")
+        qs = ConsumableUsage.objects.filter(business=business).select_related("item").order_by("-date")
         if item_id:
             qs = qs.filter(item_id=item_id)
         results = [{
@@ -3983,13 +4084,14 @@ def consumable_usages_list(request):
 
     data = request.data
     try:
-        item = ConsumableItem.objects.get(pk=data.get("item_id"))
+        item = ConsumableItem.objects.get(pk=data.get("item_id"), business=business)
     except ConsumableItem.DoesNotExist:
         return Response({"error": "Consumable item not found"}, status=404)
 
     event_type = data.get("event_type", "USE")
     qty = Decimal(str(data.get("quantity", 1)))
     u = ConsumableUsage.objects.create(
+        business=business,
         item=item, date=data["date"], event_type=event_type, quantity=qty,
         notes=data.get("notes", ""),
     )
@@ -3998,7 +4100,7 @@ def consumable_usages_list(request):
         "OPEN":  f"Opened new package of {item.name} ({float(qty)} {item.unit})",
         "WASTE": f"Wasted/damaged {float(qty)} {item.unit} of {item.name}",
     }
-    _log_inventory("CONSUMABLE_USAGE", u.id, "CREATE",
+    _log_inventory(business, "CONSUMABLE_USAGE", u.id, "CREATE",
         desc_map.get(event_type, f"Used {float(qty)} of {item.name}"),
         quantity_change=-int(qty) if event_type in ["USE", "WASTE"] else 0,
         metadata={"item_id": item.id, "item_name": item.name, "event_type": event_type, "quantity": float(qty)})
@@ -4006,14 +4108,15 @@ def consumable_usages_list(request):
 
 
 @api_view(["DELETE"])
-def consumable_usage_detail(request, usage_id):
+def consumable_usage_detail(request, business_id, usage_id):
+    business = get_authorized_business(request, business_id)
     try:
-        u = ConsumableUsage.objects.select_related("item").get(pk=usage_id)
+        u = ConsumableUsage.objects.select_related("item").get(pk=usage_id, business=business)
     except ConsumableUsage.DoesNotExist:
         return Response({"error": "Not found"}, status=404)
     item_name, qty, event_type = u.item.name, float(u.quantity), u.event_type
     u.delete()
-    _log_inventory("CONSUMABLE_USAGE", usage_id, "DELETE",
+    _log_inventory(business, "CONSUMABLE_USAGE", usage_id, "DELETE",
         f"Deleted usage record: {qty} of {item_name} ({event_type})")
     return Response({"message": "Deleted"})
 
@@ -4021,8 +4124,9 @@ def consumable_usage_detail(request, usage_id):
 # ── Inventory Audit Log ───────────────────────────────────────────────────────
 
 @api_view(["GET"])
-def inventory_logs_list(request):
-    qs = InventoryLog.objects.all()
+def inventory_logs_list(request, business_id):
+    business = get_authorized_business(request, business_id)
+    qs = InventoryLog.objects.filter(business=business)
     parent_sku  = request.GET.get("parent_sku",  "").strip()
     entity_type = request.GET.get("entity_type", "").strip()
     action      = request.GET.get("action",      "").strip()
@@ -4058,15 +4162,17 @@ def inventory_logs_list(request):
 # ── Inventory Charts ──────────────────────────────────────────────────────────
 
 @api_view(["GET"])
-def inventory_charts(request):
+def inventory_charts(request, business_id):
     """Aggregated data for inventory dashboard charts."""
     import datetime
     from django.db.models.functions import TruncMonth
     from django.db.models import ExpressionWrapper as EW, F as Fld, DecimalField as DField2
 
+    business = get_authorized_business(request, business_id)
+
     # ── 1. Current stock by SKU ───────────────────────────────────────────────
     purchase_agg = (
-        PurchaseItem.objects.filter(is_exchange=False, parent_sku__isnull=False)
+        PurchaseItem.objects.filter(business=business, is_exchange=False, parent_sku__isnull=False)
         .values("parent_sku_id")
         .annotate(
             purchased_qty=Sum("quantity"),
@@ -4075,14 +4181,14 @@ def inventory_charts(request):
     )
     purchased_by_parent = {r["parent_sku_id"]: {"qty": r["purchased_qty"], "value": float(r["purchase_value"] or 0)} for r in purchase_agg}
 
-    adj_agg = {r["parent_sku_id"]: r["net_adj"] for r in InventoryAdjustment.objects.values("parent_sku_id").annotate(net_adj=Sum("quantity"))}
+    adj_agg = {r["parent_sku_id"]: r["net_adj"] for r in InventoryAdjustment.objects.filter(business=business).values("parent_sku_id").annotate(net_adj=Sum("quantity"))}
 
     all_parents = set(purchased_by_parent.keys()) | set(adj_agg.keys())
-    sku_to_parent = dict(FinalPrice.objects.filter(parent_id__in=all_parents).values_list("sku_id", "parent_id"))
+    sku_to_parent = dict(FinalPrice.objects.filter(business=business, parent_id__in=all_parents).values_list("sku_id", "parent_id"))
     child_skus = list(sku_to_parent.keys())
 
-    del_by_sku = dict(Order.objects.filter(reason_for_credit_entry="DELIVERED", sku__in=child_skus).values("sku").annotate(q=Sum("quantity")).values_list("sku", "q"))
-    rto_by_sku = dict(Order.objects.filter(reason_for_credit_entry="RTO_COMPLETE", sku__in=child_skus).values("sku").annotate(q=Sum("quantity")).values_list("sku", "q"))
+    del_by_sku = dict(Order.objects.filter(business=business, reason_for_credit_entry="DELIVERED", sku__in=child_skus).values("sku").annotate(q=Sum("quantity")).values_list("sku", "q"))
+    rto_by_sku = dict(Order.objects.filter(business=business, reason_for_credit_entry="RTO_COMPLETE", sku__in=child_skus).values("sku").annotate(q=Sum("quantity")).values_list("sku", "q"))
 
     sold_by_parent = {}
     rto_by_parent  = {}
@@ -4110,7 +4216,7 @@ def inventory_charts(request):
     # ── 2. Monthly purchases last 12 months ───────────────────────────────────
     twelve_ago = datetime.date.today() - datetime.timedelta(days=365)
     monthly_qs = (
-        PurchaseItem.objects.filter(is_exchange=False, bill__date__gte=twelve_ago)
+        PurchaseItem.objects.filter(business=business, is_exchange=False, bill__date__gte=twelve_ago)
         .annotate(month=TruncMonth("bill__date"))
         .values("month")
         .annotate(total_qty=Sum("quantity"), total_value=Sum(EW(Fld("quantity") * Fld("price_per_unit"), output_field=DField2(max_digits=14, decimal_places=2))), bill_count=Count("bill_id", distinct=True))
@@ -4121,9 +4227,9 @@ def inventory_charts(request):
     # ── 3. Consumable monthly spend last 6 months ─────────────────────────────
     six_ago = datetime.date.today() - datetime.timedelta(days=180)
     consumable_monthly = []
-    if ConsumableItem.objects.exists():
+    if ConsumableItem.objects.filter(business=business).exists():
         cons_qs = (
-            ConsumablePurchase.objects.filter(date__gte=six_ago)
+            ConsumablePurchase.objects.filter(business=business, date__gte=six_ago)
             .annotate(month=TruncMonth("date"))
             .values("month", "item__category")
             .annotate(total_spend=Sum(EW(Fld("quantity") * Fld("price_per_unit"), output_field=DField2(max_digits=14, decimal_places=2))))
@@ -4157,10 +4263,11 @@ def inventory_charts(request):
 # ── Label packing ──────────────────────────────────────────────────────────────
 
 @api_view(["PATCH"])
-def label_order_pack(request, order_id):
+def label_order_pack(request, business_id, order_id):
     """Toggle or set is_packed on a LabelOrder."""
+    business = get_authorized_business(request, business_id)
     try:
-        lo = LabelOrder.objects.get(pk=order_id)
+        lo = LabelOrder.objects.get(pk=order_id, business=business)
     except LabelOrder.DoesNotExist:
         return Response({"error": "Not found"}, status=404)
 
@@ -4176,21 +4283,23 @@ def label_order_pack(request, order_id):
 
 
 @api_view(["POST"])
-def label_bulk_pack(request):
+def label_bulk_pack(request, business_id):
     """Mark a list of order_ids as packed=True/False."""
+    business = get_authorized_business(request, business_id)
     order_ids = request.data.get("order_ids", [])
     packed    = bool(request.data.get("packed", True))
     packed_at = timezone.now() if packed else None
-    updated   = LabelOrder.objects.filter(order_id__in=order_ids).update(
+    updated   = LabelOrder.objects.filter(business=business, order_id__in=order_ids).update(
         is_packed=packed, packed_at=packed_at
     )
     return Response({"updated": updated, "packed": packed})
 
 
 @api_view(["GET"])
-def label_unpacked(request):
+def label_unpacked(request, business_id):
     """List unpacked LabelOrders, optionally filtered by uploaded_date."""
-    qs = LabelOrder.objects.filter(is_packed=False)
+    business = get_authorized_business(request, business_id)
+    qs = LabelOrder.objects.filter(business=business, is_packed=False)
     date = request.GET.get("date", "").strip()
     if date:
         qs = qs.filter(uploaded_date=date)
@@ -4214,17 +4323,19 @@ def _risk_level(return_rate, return_count):
 
 
 @api_view(["GET"])
-def fraud_customers(request):
+def fraud_customers(request, business_id):
     """
     Per-customer analysis: identity = customer_name + customer_pincode.
     Groups orders by same name + same address, returns full order history,
     per-SKU breakdown, and return-based risk level.
     """
+    business = get_authorized_business(request, business_id)
     min_orders = int(request.GET.get("min_orders", 2))
 
     # 1. Load every LabelOrder row with full detail in one query
     all_label_rows = list(
         LabelOrder.objects
+        .filter(business=business)
         .exclude(customer_name="")
         .values(
             "order_id", "customer_name", "customer_pincode",
@@ -4254,13 +4365,13 @@ def fraud_customers(request):
 
     # 3. Outcomes from Order table  (DELIVERED / RETURN / RETURNED / RTO_COMPLETE / CANCELLED)
     outcome_map = {}
-    for row in Order.objects.filter(sub_order_no__in=all_order_ids).values("sub_order_no", "reason_for_credit_entry"):
+    for row in Order.objects.filter(business=business, sub_order_no__in=all_order_ids).values("sub_order_no", "reason_for_credit_entry"):
         outcome_map.setdefault(row["sub_order_no"], []).append(row["reason_for_credit_entry"])
 
     # 4. Claims lookup
     claimed_ids = set(
         OrderPayment.objects
-        .filter(sub_order_no__in=all_order_ids, claims__isnull=False)
+        .filter(business=business, sub_order_no__in=all_order_ids, claims__isnull=False)
         .exclude(claims=0)
         .values_list("sub_order_no", flat=True)
         .distinct()
@@ -4268,7 +4379,7 @@ def fraud_customers(request):
 
     # 5. Blocked lookup
     blocked_set = set(
-        BlockedCustomer.objects.filter(is_active=True)
+        BlockedCustomer.objects.filter(business=business, is_active=True)
         .values_list("customer_name", "customer_pincode")
     )
 
@@ -4361,9 +4472,10 @@ def fraud_customers(request):
 
 
 @api_view(["GET", "POST"])
-def blocked_customers_list(request):
+def blocked_customers_list(request, business_id):
+    business = get_authorized_business(request, business_id)
     if request.method == "GET":
-        qs = BlockedCustomer.objects.filter(is_active=True).order_by("-blocked_at")
+        qs = BlockedCustomer.objects.filter(business=business, is_active=True).order_by("-blocked_at")
         results = [{
             "id":               bc.id,
             "id":               bc.id,
@@ -4385,6 +4497,7 @@ def blocked_customers_list(request):
         return Response({"error": "customer_name and customer_pincode are required."}, status=400)
 
     bc, created = BlockedCustomer.objects.update_or_create(
+        business=business,
         customer_name=name,
         customer_pincode=pincode,
         defaults={
@@ -4402,9 +4515,10 @@ def blocked_customers_list(request):
 
 
 @api_view(["DELETE", "PATCH"])
-def blocked_customer_detail(request, bc_id):
+def blocked_customer_detail(request, business_id, bc_id):
+    business = get_authorized_business(request, business_id)
     try:
-        bc = BlockedCustomer.objects.get(pk=bc_id)
+        bc = BlockedCustomer.objects.get(pk=bc_id, business=business)
     except BlockedCustomer.DoesNotExist:
         return Response({"error": "Not found"}, status=404)
 
@@ -4421,16 +4535,17 @@ def blocked_customer_detail(request, bc_id):
 
 
 @api_view(["DELETE"])
-def inventory_delete_sku(request, sku_id):
+def inventory_delete_sku(request, business_id, sku_id):
     """Delete all purchase items for a parent SKU; also delete bills that become empty."""
-    items = PurchaseItem.objects.filter(parent_sku_id=sku_id)
+    business = get_authorized_business(request, business_id)
+    items = PurchaseItem.objects.filter(business=business, parent_sku_id=sku_id)
     bill_ids = list(items.values_list("bill_id", flat=True).distinct())
     count = items.count()
-    _log_inventory("SKU", sku_id, "DELETE", f"Deleted all {count} purchase entries for {sku_id}", parent_sku_id=sku_id, quantity_change=-count)
+    _log_inventory(business, "SKU", sku_id, "DELETE", f"Deleted all {count} purchase entries for {sku_id}", parent_sku_id=sku_id, quantity_change=-count)
     items.delete()
     for bid in bill_ids:
-        if not PurchaseItem.objects.filter(bill_id=bid).exists():
-            PurchaseBill.objects.filter(pk=bid).delete()
+        if not PurchaseItem.objects.filter(bill_id=bid, business=business).exists():
+            PurchaseBill.objects.filter(pk=bid, business=business).delete()
     return Response({"deleted": True})
 
 
@@ -4491,7 +4606,8 @@ def _call_stability(api_key, image_bytes, style):
 
 @api_view(["POST"])
 @parser_classes([MultiPartParser])
-def generate_product_images(request):
+def generate_product_images(request, business_id):
+    business = get_authorized_business(request, business_id)
     image_file = request.FILES.get("image")
     api_key = request.data.get("api_key", "").strip()
 
@@ -4559,7 +4675,8 @@ def _safe_inv_int(val, default=None):
 
 @api_view(["POST"])
 @parser_classes([MultiPartParser])
-def meesho_inventory_upload(request):
+def meesho_inventory_upload(request, business_id):
+    business = get_authorized_business(request, business_id)
     file = request.FILES.get("file")
     if not file:
         return Response({"error": "No file provided."}, status=status.HTTP_400_BAD_REQUEST)
@@ -4621,7 +4738,7 @@ def meesho_inventory_upload(request):
                 "seller_stock_count": seller_count,
             }
             _, was_created = MeeshoInventory.objects.update_or_create(
-                serial_no=sno, defaults=defaults,
+                business=business, serial_no=sno, defaults=defaults,
             )
             if was_created:
                 created += 1
@@ -4635,7 +4752,8 @@ def meesho_inventory_upload(request):
 
 
 @api_view(["GET", "PATCH"])
-def meesho_inventory_list(request):
+def meesho_inventory_list(request, business_id):
+    business = get_authorized_business(request, business_id)
     if request.method == "PATCH":
         updates = request.data if isinstance(request.data, list) else []
         count = 0
@@ -4645,13 +4763,13 @@ def meesho_inventory_list(request):
                 val = item.get("seller_stock_count")
                 if pk is None:
                     continue
-                MeeshoInventory.objects.filter(pk=pk).update(
+                MeeshoInventory.objects.filter(pk=pk, business=business).update(
                     seller_stock_count=_safe_inv_int(val)
                 )
                 count += 1
         return Response({"updated": count})
 
-    qs = MeeshoInventory.objects.all().order_by("serial_no")
+    qs = MeeshoInventory.objects.filter(business=business).order_by("serial_no")
     if request.GET.get("low_stock") == "1":
         qs = qs.filter(system_stock_count__lt=100)
 
@@ -4669,19 +4787,20 @@ def meesho_inventory_list(request):
         "variation_id", "variation", "stock_type",
         "system_stock_count", "seller_stock_count",
     ))
-    total           = MeeshoInventory.objects.count()
-    low_stock_count = MeeshoInventory.objects.filter(system_stock_count__lt=100).count()
+    total           = MeeshoInventory.objects.filter(business=business).count()
+    low_stock_count = MeeshoInventory.objects.filter(business=business, system_stock_count__lt=100).count()
     return Response({"items": data, "total": total, "low_stock_count": low_stock_count})
 
 
 @api_view(["GET"])
-def meesho_inventory_download(request):
+def meesho_inventory_download(request, business_id):
     from io import BytesIO
     from django.http import HttpResponse
     import openpyxl
     from openpyxl.styles import Font, PatternFill, Alignment
 
-    qs = MeeshoInventory.objects.all().order_by("serial_no")
+    business = get_authorized_business(request, business_id)
+    qs = MeeshoInventory.objects.filter(business=business).order_by("serial_no")
 
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -4739,13 +4858,14 @@ def meesho_inventory_download(request):
 # ── Meesho Price Update ────────────────────────────────────────────────────────
 
 @api_view(["GET", "PATCH"])
-def meesho_price_update_list(request):
+def meesho_price_update_list(request, business_id):
     """
     GET  — return all inventory items enriched with profit data.
            ?max_profit=<n>  filters to SKUs with avg_profit_per_unit < n
            ?q=<search>      filters by catalog/product/style
     PATCH — bulk-save price updates: [{inventory_id, new_msp, new_wdrp, new_mrp}, ...]
     """
+    business = get_authorized_business(request, business_id)
     if request.method == "PATCH":
         updates = request.data if isinstance(request.data, list) else []
         count = 0
@@ -4755,14 +4875,14 @@ def meesho_price_update_list(request):
                 if inv_id is None:
                     continue
                 try:
-                    inv = MeeshoInventory.objects.get(pk=inv_id)
+                    inv = MeeshoInventory.objects.get(pk=inv_id, business=business)
                 except MeeshoInventory.DoesNotExist:
                     continue
                 defaults = {}
                 for field in ("new_msp", "new_wdrp", "new_mrp"):
                     raw = item.get(field)
                     defaults[field] = safe_decimal(raw) if raw not in (None, "", "null") else None
-                MeeshoPriceUpdate.objects.update_or_create(inventory=inv, defaults=defaults)
+                MeeshoPriceUpdate.objects.update_or_create(business=business, inventory=inv, defaults=defaults)
                 count += 1
         return Response({"updated": count})
 
@@ -4772,7 +4892,7 @@ def meesho_price_update_list(request):
     # Per-SKU delivery stats from OrderPayment
     delivered_agg = (
         OrderPayment.objects
-        .filter(live_order_status__iexact="delivered")
+        .filter(business=business, live_order_status__iexact="delivered")
         .values("supplier_sku")
         .annotate(
             avg_settlement=Avg("final_settlement_amount"),
@@ -4784,6 +4904,7 @@ def meesho_price_update_list(request):
     # Current listing price per SKU
     listing_agg = (
         OrderPayment.objects
+        .filter(business=business)
         .exclude(listing_price_incl_taxes=None)
         .values("supplier_sku")
         .annotate(last_price=Avg("listing_price_incl_taxes"))
@@ -4792,13 +4913,13 @@ def meesho_price_update_list(request):
 
     # Cost from FinalPrice
     fp_map = {fp.sku_id: float(fp.final_price or 0)
-              for fp in FinalPrice.objects.only("sku_id", "final_price")}
+              for fp in FinalPrice.objects.filter(business=business).only("sku_id", "final_price")}
 
     # Existing price updates
     pu_map = {pu.inventory_id: pu
-              for pu in MeeshoPriceUpdate.objects.select_related("inventory")}
+              for pu in MeeshoPriceUpdate.objects.filter(business=business).select_related("inventory")}
 
-    qs = MeeshoInventory.objects.all().order_by("serial_no")
+    qs = MeeshoInventory.objects.filter(business=business).order_by("serial_no")
 
     search = request.GET.get("q", "").strip()
     if search:
@@ -4865,7 +4986,7 @@ def meesho_price_update_list(request):
 
 
 @api_view(["GET"])
-def meesho_price_update_download(request):
+def meesho_price_update_download(request, business_id):
     """
     Download the Meesho price update sheet.
     Only rows where new_msp has been set are included.
@@ -4875,9 +4996,10 @@ def meesho_price_update_download(request):
     from django.http import HttpResponse
     import openpyxl
 
+    business = get_authorized_business(request, business_id)
     rows = (
         MeeshoPriceUpdate.objects
-        .filter(new_msp__isnull=False)
+        .filter(business=business, new_msp__isnull=False)
         .select_related("inventory")
         .order_by("inventory__serial_no")
     )

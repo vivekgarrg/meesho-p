@@ -1,6 +1,6 @@
 import React from "react";
 import { useState, useEffect } from "react";
-import { Routes, Route, NavLink, useLocation } from "react-router-dom";
+import { Routes, Route, NavLink, useLocation, Navigate, useNavigate } from "react-router-dom";
 
 // ── Tab components ─────────────────────────────────────────────────────────────
 import { OverviewTab } from "./Components/Tabs/OverviewTab";
@@ -21,9 +21,13 @@ import { MeeshoInventoryTab } from "./Components/Tabs/MeeshoInventoryTab";
 import { MeeshoPricingTab } from "./Components/Tabs/MeeshoPricingTab";
 import { SKU_PAGE_SIZE as skuPageSize } from "./lib/helper";
 import TableData from "./Components/Table/TableData";
+import LoginPage from "./Components/Login/LoginPage";
+import BusinessProfilePage from "./Components/BusinessProfile/BusinessProfilePage";
+import BusinessSwitcher from "./Components/BusinessSwitcher";
+import { useAuth } from "./contexts/AuthContext";
 
 // ── API base (re-exported for tabs that import directly from App) ───────────
-export const API = "/api";
+export { API_BASE as API } from "./lib/apiBase";
 
 // ── Formatters ─────────────────────────────────────────────────────────────────
 export const fmt = (n) =>
@@ -407,6 +411,7 @@ const NAV_GROUPS = [
       { path: "/upload", label: "Upload Data", icon: "⇧" },
       { path: "/product-photos", label: "AI Photos", icon: "✦" },
       { path: "/fraud", label: "Fraud Watch", icon: "⊘" },
+      { path: "/business-profile", label: "Business Profile", icon: "⌂" },
     ],
   },
 ];
@@ -547,12 +552,19 @@ function Sidebar({ collapsed, setCollapsed }) {
 // ── Top bar ───────────────────────────────────────────────────────────────────
 function TopBar() {
   const loc = useLocation();
+  const navigate = useNavigate();
+  const { logout } = useAuth();
   const current = ALL_NAV.find(item =>
     item.end ? loc.pathname === item.path : loc.pathname.startsWith(item.path)
   );
   const dateStr = new Date().toLocaleDateString("en-IN", {
     weekday: "short", day: "numeric", month: "long", year: "numeric",
   });
+
+  const handleLogout = () => {
+    logout();
+    navigate("/login", { replace: true });
+  };
 
   return (
     <div style={{
@@ -573,22 +585,15 @@ function TopBar() {
       {/* Right section */}
       <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
         <span style={{ fontSize: 12, color: C.gray400, fontWeight: 500 }}>{dateStr}</span>
-        {/* Brand pill */}
-        <div style={{
-          display: "flex", alignItems: "center", gap: 8,
-          background: C.orangeLight, border: `1px solid ${C.orangeBorder}`,
-          borderRadius: 20, padding: "5px 12px",
-        }}>
-          <div style={{ width: 18, height: 18, borderRadius: 6, background: "linear-gradient(135deg, #7C3AED 0%, #4F46E5 100%)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 900, color: "#fff" }}>R</div>
-          <span style={{ fontSize: 12, fontWeight: 700, color: C.orange }}>Rudam</span>
-        </div>
+        <BusinessSwitcher />
+        <button onClick={handleLogout} style={btn("ghost", "sm")}>Logout</button>
       </div>
     </div>
   );
 }
 
-// ── App shell ─────────────────────────────────────────────────────────────────
-export default function App() {
+// ── Authenticated app shell ───────────────────────────────────────────────────
+function AppShell() {
   const [collapsed, setCollapsed] = useState(() =>
     localStorage.getItem("sidebar_collapsed") === "true"
   );
@@ -624,9 +629,41 @@ export default function App() {
             <Route path="/meesho-pricing" element={<MeeshoPricingTab />} />
             <Route path="/fraud" element={<FraudCustomersTab />} />
             <Route path="/product-photos" element={<ProductPhotosTab />} />
+            <Route path="/business-profile" element={<BusinessProfilePage />} />
+            <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </div>
       </div>
     </div>
   );
+}
+
+function LoadingScreen() {
+  return (
+    <div style={{
+      height: "100vh", display: "flex", alignItems: "center", justifyContent: "center",
+      background: C.bg, color: C.gray400, fontFamily: "'Inter', 'Segoe UI', system-ui, sans-serif",
+      fontSize: 13, fontWeight: 600,
+    }}>
+      Loading…
+    </div>
+  );
+}
+
+// ── App root ──────────────────────────────────────────────────────────────────
+export default function App() {
+  const { user, loading } = useAuth();
+  const loc = useLocation();
+
+  if (loading) return <LoadingScreen />;
+
+  if (loc.pathname === "/login") {
+    return user ? <Navigate to="/" replace /> : <LoginPage />;
+  }
+
+  if (!user) {
+    return <Navigate to="/login" replace />;
+  }
+
+  return <AppShell />;
 }

@@ -9,16 +9,16 @@ import { CircularProgress } from "@mui/material";
 
 const STATUS_META = {
   DELIVERED: { label: "Delivered", bg: "#059669", light: "#D1FAE5", border: "#6EE7B7" },
-  RETURN:    { label: "Returned",  bg: "#E11D48", light: "#FFF1F2", border: "#FECDD3" },
-  RTO:       { label: "RTO",       bg: "#7C3AED", light: "#F5F3FF", border: "#DDD6FE" },
-  EXCHANGE:  { label: "Exchange",  bg: "#2563EB", light: "#EFF6FF", border: "#BFDBFE" },
-  CLAIM:     { label: "Claim",     bg: "#D97706", light: "#FFFBEB", border: "#FDE68A" },
-  SHIPPED:   { label: "Shipped",   bg: "#64748B", light: "#F1F5F9", border: "#CBD5E1" },
-  UNKNOWN:   { label: "Unknown",   bg: "#94A3B8", light: "#F8FAFC", border: "#E2E8F0" },
+  RETURN: { label: "Returned", bg: "#E11D48", light: "#FFF1F2", border: "#FECDD3" },
+  RTO: { label: "RTO", bg: "#7C3AED", light: "#F5F3FF", border: "#DDD6FE" },
+  EXCHANGE: { label: "Exchange", bg: "#2563EB", light: "#EFF6FF", border: "#BFDBFE" },
+  CLAIM: { label: "Claim", bg: "#D97706", light: "#FFFBEB", border: "#FDE68A" },
+  SHIPPED: { label: "Shipped", bg: "#64748B", light: "#F1F5F9", border: "#CBD5E1" },
+  UNKNOWN: { label: "Unknown", bg: "#94A3B8", light: "#F8FAFC", border: "#E2E8F0" },
 };
 
 const ALL_STATUSES = ["DELIVERED", "RETURN", "RTO", "EXCHANGE", "CLAIM", "SHIPPED", "UNKNOWN"];
-const PAGE_SIZE    = 50;
+const PAGE_SIZE = 50;
 
 const fmt2 = (n) =>
   n === null || n === undefined
@@ -98,8 +98,8 @@ function ExpandedRows({ rows }) {
         <td style={{ ...S.td, fontFamily: "monospace", fontSize: 11, color: C.orange }}>{fmt2(r.meesho_commission_incl_gst)}</td>
         <td style={{ ...S.td }}>
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-            {r.tcs  ? <span style={{ fontSize: 10, color: C.gray400 }}>TCS {fmt2(r.tcs)}</span>   : null}
-            {r.tds  ? <span style={{ fontSize: 10, color: C.gray400 }}>TDS {fmt2(r.tds)}</span>   : null}
+            {r.tcs ? <span style={{ fontSize: 10, color: C.gray400 }}>TCS {fmt2(r.tcs)}</span> : null}
+            {r.tds ? <span style={{ fontSize: 10, color: C.gray400 }}>TDS {fmt2(r.tds)}</span> : null}
             {r.claims > 0 ? <span style={{ fontSize: 10, fontWeight: 700, color: "#D97706" }}>Claim {fmt2(r.claims)}</span> : null}
             {r.return_shipping_charge ? <span style={{ fontSize: 10, color: C.red }}>RetShip {fmt2(r.return_shipping_charge)}</span> : null}
           </div>
@@ -111,13 +111,13 @@ function ExpandedRows({ rows }) {
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 export function PaymentsTab() {
-  const [months, setMonths]   = useState([]);
+  const [months, setMonths] = useState([]);
   // All filter+pagination in ONE object — changes are atomic, no stale page issues
-  const [query, setQuery]     = useState({ month: null, status: "", search: "", page: 1 });
+  const [query, setQuery] = useState({ month: null, status: "", search: "", page: 1 });
 
-  const [groups, setGroups]   = useState([]);
-  const [total, setTotal]     = useState(0);
-  const [kpi, setKpi]         = useState(null);
+  const [groups, setGroups] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [kpi, setKpi] = useState(null);
   const [loading, setLoading] = useState(false);
   const [expanded, setExpanded] = useState(new Set());
 
@@ -135,7 +135,7 @@ export function PaymentsTab() {
           setQuery(q => ({ ...q, month: ms[0], page: 1 }));
         }
       })
-      .catch(() => {});
+      .catch(() => { });
   }, []);
 
   // Single effect — fires whenever query object changes (one render, one fetch)
@@ -149,8 +149,9 @@ export function PaymentsTab() {
     setExpanded(new Set()); // collapse rows on filter change
 
     const p = new URLSearchParams({ page: query.page, page_size: PAGE_SIZE });
-    if (query.month)  p.set("month",  query.month);
+    if (query.month) p.set("month", query.month);
     if (query.status) p.set("status", query.status);
+    if (query.search) p.set("search", query.search)
 
     fetch(`${API}/orders/grouped/?${p}`, { signal: ctrl.signal })
       .then(r => r.json())
@@ -159,14 +160,14 @@ export function PaymentsTab() {
         if (query.search.trim()) {
           const q = query.search.trim().toLowerCase();
           gs = gs.filter(g =>
-            (g.sub_order_no  || "").toLowerCase().includes(q) ||
-            (g.sku           || "").toLowerCase().includes(q) ||
-            (g.product_name  || "").toLowerCase().includes(q)
+            (g.sub_order_no || "").toLowerCase().includes(q) ||
+            (g.sku || "").toLowerCase().includes(q) ||
+            (g.product_name || "").toLowerCase().includes(q)
           );
         }
         setGroups(gs);
-        setTotal(data.total  || 0);
-        setKpi(data.kpi      || null);
+        setTotal(data.total || 0);
+        setKpi(data.kpi || null);
       })
       .catch(err => { if (err.name !== "AbortError") console.error(err); })
       .finally(() => { if (!ctrl.signal.aborted) setLoading(false); });
@@ -175,17 +176,17 @@ export function PaymentsTab() {
   }, [query]);
 
   // Helpers that reset page to 1 atomically when filter changes
-  const setMonth  = (m) => setQuery(q => ({ ...q, month:  m, page: 1 }));
+  const setMonth = (m) => setQuery(q => ({ ...q, month: m, page: 1 }));
   const setStatus = (s) => setQuery(q => ({ ...q, status: s, page: 1 }));
   const setSearch = (s) => setQuery(q => ({ ...q, search: s, page: 1 }));
-  const setPage   = (p) => setQuery(q => ({ ...q, page:   p }));
+  const setPage = (p) => setQuery(q => ({ ...q, page: p }));
 
   const toggleExpand = (id) => setExpanded(prev => {
     const s = new Set(prev); s.has(id) ? s.delete(id) : s.add(id); return s;
   });
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
-  const byStatus   = kpi?.by_status || [];
+  const byStatus = kpi?.by_status || [];
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
@@ -319,7 +320,7 @@ export function PaymentsTab() {
                   </td></tr>
                 ) : groups.map((g, idx) => {
                   const isOpen = expanded.has(g.sub_order_no);
-                  const rowBg  = idx % 2 === 0 ? C.white : C.gray50;
+                  const rowBg = idx % 2 === 0 ? C.white : C.gray50;
                   return (
                     <React.Fragment key={g.sub_order_no}>
                       <tr style={{ background: rowBg, borderBottom: isOpen ? "none" : `1px solid ${C.gray100}` }}>

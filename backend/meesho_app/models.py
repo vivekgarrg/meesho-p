@@ -6,6 +6,10 @@ class ParentItemPrice(models.Model):
     tax_percent = models.IntegerField(null=True, blank=True)
     packaging_cost = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     final_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    business = models.ForeignKey(
+        "accounts.Business", on_delete=models.PROTECT,
+    )
+
     class Meta:
         db_table = "parent_item_price"
         ordering = ["item_id"]
@@ -25,6 +29,10 @@ class FinalPrice(models.Model):
                                     db_column="parent_id",
                                 )
     final_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+
+    business = models.ForeignKey(
+        "accounts.Business", on_delete=models.PROTECT,
+    )
 
     class Meta:
         db_table = "final_price"
@@ -101,6 +109,10 @@ class OrderPayment(models.Model):
 
     uploaded_at = models.DateTimeField(auto_now_add=True)
 
+    business = models.ForeignKey(
+        "accounts.Business", on_delete=models.PROTECT,
+    )
+
     class Meta:
         db_table = "order_payments"
         ordering = ["-order_date"]
@@ -123,6 +135,10 @@ class AdsCost(models.Model):
     total_ads_cost = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
 
     uploaded_at = models.DateTimeField(auto_now_add=True)
+
+    business = models.ForeignKey(
+        "accounts.Business", on_delete=models.PROTECT,
+    )
 
     class Meta:
         db_table = "ads_cost"
@@ -152,6 +168,10 @@ class ParentPriceHistory(models.Model):
     notes = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
+    business = models.ForeignKey(
+        "accounts.Business", on_delete=models.PROTECT,
+    )
+
     class Meta:
         db_table = "parent_price_history"
         unique_together = [("parent", "effective_from")]
@@ -173,6 +193,10 @@ class ReferralPayment(models.Model):
 
     uploaded_at = models.DateTimeField(auto_now_add=True)
 
+    business = models.ForeignKey(
+        "accounts.Business", on_delete=models.PROTECT,
+    )
+
     class Meta:
         db_table = "referral_payments"
         ordering = ["-payment_date"]
@@ -190,6 +214,10 @@ class CompensationRecovery(models.Model):
     amount_incl_gst = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
 
     uploaded_at = models.DateTimeField(auto_now_add=True)
+
+    business = models.ForeignKey(
+        "accounts.Business", on_delete=models.PROTECT,
+    )
 
     class Meta:
         db_table = "compensation_recovery"
@@ -238,6 +266,10 @@ class Order(models.Model):
         )
         return qs.filter(id=Subquery(latest_id))
 
+    business = models.ForeignKey(
+        "accounts.Business", on_delete=models.PROTECT,
+    )
+
     class Meta:
         db_table = "orders"
         ordering = ["-order_date"]
@@ -261,6 +293,10 @@ class BlockedCustomer(models.Model):
     blocked_at       = models.DateTimeField(auto_now_add=True)
     is_active        = models.BooleanField(default=True, db_index=True)
 
+    business = models.ForeignKey(
+        "accounts.Business", on_delete=models.PROTECT,
+    )
+
     class Meta:
         db_table = "blocked_customers"
         unique_together = [("customer_name", "customer_pincode")]
@@ -278,6 +314,10 @@ class PurchaseBill(models.Model):
     notes       = models.TextField(blank=True)
     created_at  = models.DateTimeField(auto_now_add=True)
     updated_at  = models.DateTimeField(auto_now=True)
+
+    business = models.ForeignKey(
+        "accounts.Business", on_delete=models.PROTECT,
+    )
 
     class Meta:
         db_table = "purchase_bills"
@@ -298,6 +338,10 @@ class PurchaseItem(models.Model):
     quantity           = models.PositiveIntegerField()
     price_per_unit     = models.DecimalField(max_digits=10, decimal_places=2)
     is_exchange        = models.BooleanField(default=False)
+
+    business = models.ForeignKey(
+        "accounts.Business", on_delete=models.PROTECT,
+    )
 
     class Meta:
         db_table = "purchase_items"
@@ -326,6 +370,10 @@ class InventoryAdjustment(models.Model):
     date       = models.DateField()
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    business = models.ForeignKey(
+        "accounts.Business", on_delete=models.PROTECT,
+    )
 
     class Meta:
         db_table = "inventory_adjustments"
@@ -362,6 +410,10 @@ class ConsumableItem(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    business = models.ForeignKey(
+        "accounts.Business", on_delete=models.PROTECT,
+    )
+
     class Meta:
         db_table = "consumable_items"
         ordering = ["category", "name"]
@@ -379,6 +431,10 @@ class ConsumablePurchase(models.Model):
     seller_name    = models.CharField(max_length=255, blank=True)
     notes          = models.TextField(blank=True)
     created_at     = models.DateTimeField(auto_now_add=True)
+
+    business = models.ForeignKey(
+        "accounts.Business", on_delete=models.PROTECT,
+    )
 
     class Meta:
         db_table = "consumable_purchases"
@@ -401,6 +457,10 @@ class ConsumableUsage(models.Model):
     quantity   = models.DecimalField(max_digits=10, decimal_places=2, default=1)
     notes      = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
+    business = models.ForeignKey(
+        "accounts.Business", on_delete=models.PROTECT,
+    )
 
     class Meta:
         db_table = "consumable_usages"
@@ -433,6 +493,10 @@ class InventoryLog(models.Model):
     description     = models.TextField()
     metadata        = models.JSONField(default=dict, blank=True)
     created_at      = models.DateTimeField(auto_now_add=True)
+
+    business = models.ForeignKey(
+        "accounts.Business", on_delete=models.PROTECT,
+    )
 
     class Meta:
         db_table = "inventory_logs"
@@ -484,6 +548,10 @@ class LabelOrder(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    business = models.ForeignKey(
+        "accounts.Business", on_delete=models.PROTECT,
+    )
+
     class Meta:
         db_table = "label_orders"
         ordering = ["-uploaded_date", "courier_name"]
@@ -520,6 +588,10 @@ class MeeshoInventory(models.Model):
     uploaded_at        = models.DateTimeField(auto_now_add=True)
     updated_at         = models.DateTimeField(auto_now=True)
 
+    business = models.ForeignKey(
+        "accounts.Business", on_delete=models.PROTECT,
+    )
+
     class Meta:
         db_table = "meesho_inventory"
         ordering = ["serial_no"]
@@ -545,6 +617,10 @@ class MeeshoPriceUpdate(models.Model):
     new_mrp  = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True,
                                    help_text="New Maximum Retail Price (optional)")
     updated_at = models.DateTimeField(auto_now=True)
+
+    business = models.ForeignKey(
+        "accounts.Business", on_delete=models.PROTECT,
+    )
 
     class Meta:
         db_table = "meesho_price_updates"
