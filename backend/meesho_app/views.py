@@ -2425,6 +2425,168 @@ def download_final_price(request, business_id):
     return response
 
 
+@api_view(["GET"])
+def download_pricing_workbook(request, business_id):
+    """
+    Download parents AND child SKUs together in a single Excel workbook.
+
+    Two sheets:
+      - "Parents": Item ID, Item Price, Tax Percent, Packaging Cost, Final Price
+      - "SKUs":    SKU ID, Item Price, Tax Percent, Packaging Cost, Final Price, Parent ID
+
+    Column headers normalize to the columns `upload_pricing_workbook` expects,
+    so a downloaded file can be edited and re-uploaded as-is. Empty tables
+    yield header-only sheets (a blank template).
+    """
+    from io import BytesIO
+    from django.http import HttpResponse
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment
+
+    business = get_authorized_business(request, business_id)
+    parents = ParentItemPrice.objects.filter(business=business).order_by("item_id")
+    skus = FinalPrice.objects.filter(business=business).order_by("sku_id")
+
+    header_fill = PatternFill("solid", fgColor="4F46E5")
+    header_font = Font(bold=True, color="FFFFFF")
+
+    def style_header(ws):
+        for cell in ws[1]:
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center")
+        ws.freeze_panes = "A2"
+
+    wb = openpyxl.Workbook()
+
+    ws_p = wb.active
+    ws_p.title = "Parents"
+    ws_p.append(["Item ID", "Item Price", "Tax Percent", "Packaging Cost", "Final Price"])
+    for p in parents:
+        ws_p.append([p.item_id, p.item_price, p.tax_percent, p.packaging_cost, p.final_price])
+    for i, w in enumerate([30, 14, 14, 16, 14], 1):
+        ws_p.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
+    style_header(ws_p)
+
+    ws_s = wb.create_sheet("SKUs")
+    ws_s.append(["SKU ID", "Item Price", "Tax Percent", "Packaging Cost", "Final Price", "Parent ID"])
+    for s in skus:
+        ws_s.append([s.sku_id, s.item_price, s.tax_percent, s.packaging_cost, s.final_price, s.parent_id])
+    for i, w in enumerate([30, 14, 14, 16, 14, 20], 1):
+        ws_s.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
+    style_header(ws_s)
+
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    response = HttpResponse(
+        buf.read(),
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    response["Content-Disposition"] = 'attachment; filename="pricing_parents_and_skus.xlsx"'
+    return response
+
+
+@api_view(["POST"])
+@parser_classes([MultiPartParser])
+def upload_pricing_workbook(request, business_id):
+    """
+    Upload the combined workbook to upsert parents AND child SKUs in one go.
+
+    Sheets are identified by their columns, not their names: a sheet with an
+    `item_id` column is treated as parents; a sheet with a `sku_id` column as
+    SKUs. Parents are upserted first so SKUs can link to them via `parent_id`.
+    A single-sheet .csv is also accepted and routed the same way.
+    """
+    business = get_authorized_business(request, business_id)
+    file = request.FILES.get("file")
+    if not file:
+        return Response({"error": "No file provided."}, status=status.HTTP_400_BAD_REQUEST)
+
+    def normalize(df):
+        df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
+        return df
+
+    try:
+        if file.name.lower().endswith(".csv"):
+            sheets = {"sheet1": pd.read_csv(file)}
+        else:
+            sheets = pd.read_excel(file, sheet_name=None)  # dict of all sheets
+    except Exception as e:
+        return Response({"error": f"Could not read file: {e}"}, status=status.HTTP_400_BAD_REQUEST)
+
+    sheets = {name: normalize(df) for name, df in sheets.items()}
+    parent_sheets = [df for df in sheets.values() if "item_id" in df.columns]
+    sku_sheets = [df for df in sheets.values() if "sku_id" in df.columns]
+
+    if not parent_sheets and not sku_sheets:
+        return Response(
+            {"error": "No recognizable sheet found. Expected a column named 'item_id' (parents) or 'sku_id' (SKUs)."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    p_created = p_updated = s_created = s_updated = skipped = unlinked = 0
+
+    with transaction.atomic():
+        # Parents first, so SKUs can resolve parent_id against them.
+        for df in parent_sheets:
+            for _, row in df.iterrows():
+                pk = safe_str(row.get("item_id"))
+                if not pk:
+                    skipped += 1
+                    continue
+                defaults = {}
+                for col in ("item_price", "packaging_cost", "final_price", "tax_percent"):
+                    if col in df.columns:
+                        defaults[col] = safe_int(row.get(col)) if col == "tax_percent" else safe_decimal(row.get(col))
+                _, created = ParentItemPrice.objects.update_or_create(
+                    business=business, item_id=pk, defaults=defaults
+                )
+                p_created += 1 if created else 0
+                p_updated += 0 if created else 1
+
+        # Then SKUs, linking to parents by parent_id where possible.
+        for df in sku_sheets:
+            for _, row in df.iterrows():
+                pk = safe_str(row.get("sku_id"))
+                if not pk:
+                    skipped += 1
+                    continue
+                defaults = {}
+                for col in ("item_price", "packaging_cost", "final_price", "tax_percent"):
+                    if col in df.columns:
+                        defaults[col] = safe_int(row.get(col)) if col == "tax_percent" else safe_decimal(row.get(col))
+                if "parent_id" in df.columns:
+                    parent_id = safe_str(row.get("parent_id"))
+                    if parent_id:
+                        parent = ParentItemPrice.objects.filter(business=business, item_id=parent_id).first()
+                        if parent:
+                            defaults["parent"] = parent
+                        else:
+                            unlinked += 1  # parent_id given but no matching parent
+                    else:
+                        defaults["parent"] = None
+                _, created = FinalPrice.objects.update_or_create(
+                    business=business, sku_id=pk, defaults=defaults
+                )
+                s_created += 1 if created else 0
+                s_updated += 0 if created else 1
+
+    return Response(
+        {
+            "success": True,
+            "parents_created": p_created,
+            "parents_updated": p_updated,
+            "skus_created": s_created,
+            "skus_updated": s_updated,
+            "skipped": skipped,
+            "unlinked_parent_refs": unlinked,
+        },
+        status=status.HTTP_201_CREATED,
+    )
+
+
 @api_view(["POST"])
 @parser_classes([MultiPartParser])
 def upload_orders_csv(request, business_id):
