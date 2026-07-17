@@ -57,9 +57,20 @@ def safe_datetime(val):
     if val is None or (isinstance(val, float) and np.isnan(val)):
         return None
     try:
-        return pd.to_datetime(val)
+        dt = pd.to_datetime(val)
     except Exception:
         return None
+    if dt is None or pd.isna(dt):
+        return None
+    # pandas Timestamp -> stdlib datetime
+    if hasattr(dt, "to_pydatetime"):
+        dt = dt.to_pydatetime()
+    # With USE_TZ active, attach the project timezone so Django stores an
+    # aware datetime instead of warning about a naive one.
+    from django.conf import settings
+    if getattr(settings, "USE_TZ", False) and timezone.is_naive(dt):
+        dt = timezone.make_aware(dt, timezone.get_current_timezone())
+    return dt
 
 
 def safe_int(val):
