@@ -97,7 +97,9 @@ else:
     DATABASES = {
         "default": {
             "ENGINE": "django.db.backends.sqlite3",
-            "NAME": BASE_DIR / "db.sqlite3",
+            # SQLITE_PATH points at a persistent disk in prod (e.g.
+            # /var/data/db.sqlite3); falls back to the repo path locally.
+            "NAME": os.environ.get("SQLITE_PATH", str(BASE_DIR / "db.sqlite3")),
         }
     }
 

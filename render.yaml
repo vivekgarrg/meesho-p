@@ -11,7 +11,11 @@ services:
       pip install -r backend/requirements.txt
       cd backend && python manage.py collectstatic --noinput
     startCommand: |
-      cd backend && [ -z "$DATABASE_URL" ] && rm -f db.sqlite3 || true; python manage.py migrate && python manage.py create_seed_users && gunicorn meesho_project.wsgi:application --bind 0.0.0.0:$PORT
+      cd backend && python manage.py migrate && python manage.py load_initial_data && python manage.py create_seed_users && gunicorn meesho_project.wsgi:application --bind 0.0.0.0:$PORT
+    disk:
+      name: sqlite-data
+      mountPath: /var/data
+      sizeGB: 1
     envVars:
       - key: PYTHON_VERSION
         value: "3.12.6"
@@ -27,3 +31,6 @@ services:
         generateValue: true
       - key: DB_ENGINE
         value: "sqlite"
+      # SQLite lives on the persistent disk so data survives deploys/restarts.
+      - key: SQLITE_PATH
+        value: "/var/data/db.sqlite3"
