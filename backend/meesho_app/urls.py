@@ -20,6 +20,7 @@ urlpatterns = [
     path("parent-prices/<str:item_id>/price-history/", views.parent_price_history_list, name="parent_price_history_list"),
     path("parent-prices/<str:item_id>/price-history/<int:pk>/", views.parent_price_history_detail, name="parent_price_history_detail"),
     path("final-prices/unlinked/", views.unlinked_skus, name="unlinked_skus"),
+    path("link-sku/", views.link_sku_to_parent, name="link_sku_to_parent"),
     path("parent-linking/", views.parent_linking_to_sku, name="parent_linking"),
     path("final-prices/", views.final_price_list, name="final_price_list"),
     path("final-prices/upload/", views.upload_final_price, name="upload_final_price"),

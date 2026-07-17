@@ -155,13 +155,10 @@ function AddHistoryForm({ parentId, onSaved, onCancel }) {
 }
 
 // ── SKU autocomplete dropdown ─────────────────────────────────────────────────
-function SkuDropdown({ parentId, onSelect }) {
-  const [q, setQ] = useState(""); const [unlinked, setUnlinked] = useState([]); const [open, setOpen] = useState(false);
+function SkuDropdown({ parentId, onSelect, unlinked = [] }) {
+  const [q, setQ] = useState(""); const [open, setOpen] = useState(false);
   const ref = useRef();
 
-  useEffect(() => {
-    fetch(`${API}/final-prices/unlinked/`).then(r => r.json()).then(d => setUnlinked(d.results || []));
-  }, []);
   useEffect(() => {
     const h = e => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
     document.addEventListener("mousedown", h); return () => document.removeEventListener("mousedown", h);
@@ -188,7 +185,12 @@ function SkuDropdown({ parentId, onSelect }) {
                 <span style={{ fontFamily: "monospace", fontWeight: 600, color: isSugg(s.sku_id) ? C.green : C.orange }}>
                   {isSugg(s.sku_id) && "★ "}{s.sku_id}
                 </span>
-                <span style={{ color: C.gray400, fontSize: 11 }}>{fmt(s.final_price)}</span>
+                <span style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 11 }}>
+                  {s.order_count > 0 && <span style={{ color: C.gray400 }}>📦 {s.order_count}</span>}
+                  {s.has_price
+                    ? <span style={{ color: C.gray400 }}>{fmt(s.final_price)}</span>
+                    : <span style={{ color: C.green, fontWeight: 700, fontSize: 9, background: C.greenLight, border: `1px solid ${C.greenBorder}`, padding: "1px 5px", borderRadius: 10 }}>NEW</span>}
+                </span>
               </div>
             ))
           }
@@ -245,9 +247,10 @@ function CreateChildForm({ parentId, parentPrice, onSaved, onCancel }) {
 }
 
 // ── parent card ───────────────────────────────────────────────────────────────
-function ParentCard({ parent, onRefresh, notify }) {
+function ParentCard({ parent, onRefresh, notify, onLink, dragging, unlinked = [] }) {
   const [open, setOpen] = useState(false);
   const [panel, setPanel] = useState(null); // null | "history" | "link" | "create" | "edit"
+  const [dragOver, setDragOver] = useState(false);
   const [editForm, setEditForm] = useState({ item_price: String(parent.item_price || ""), tax_percent: String(parent.tax_percent || "0"), packaging_cost: String(parent.packaging_cost || "0") });
 
   const histories   = parent.price_history || [];
@@ -269,12 +272,28 @@ function ParentCard({ parent, onRefresh, notify }) {
   };
 
   const linkSku = async skuId => {
-    const r = await fetch(`${API}/final-prices/${encodeURIComponent(skuId)}/`, {
-      method: "PATCH", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ parent: parent.item_id }),
-    });
-    if (r.ok) { notify("ok", `${skuId} linked.`); setPanel(null); onRefresh(); }
-    else notify("err", "Link failed.");
+    await onLink(skuId, parent.item_id);
+    setPanel(null);
+  };
+
+  // ── drop-target handlers (drag a SKU chip from the tray onto this card) ──
+  const canDrop = !!dragging;
+  const handleDragOver = e => {
+    if (!dragging) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    if (!dragOver) setDragOver(true);
+  };
+  const handleDragLeave = e => {
+    // only clear when leaving the card, not when moving over a child element
+    if (e.currentTarget.contains(e.relatedTarget)) return;
+    setDragOver(false);
+  };
+  const handleDrop = e => {
+    e.preventDefault();
+    setDragOver(false);
+    const skuId = e.dataTransfer.getData("text/plain");
+    if (skuId) onLink(skuId, parent.item_id);
   };
 
   const unlinkSku = async skuId => {
@@ -305,7 +324,22 @@ function ParentCard({ parent, onRefresh, notify }) {
   };
 
   return (
-    <div style={{ background: C.white, border: `1px solid ${open ? "#BFDBFE" : C.border}`, borderRadius: 12, overflow: "hidden", boxShadow: "0 1px 4px rgba(0,0,0,0.05)", transition: "border-color 0.15s" }}>
+    <div
+      onDragOver={handleDragOver} onDragLeave={handleDragLeave} onDrop={handleDrop}
+      style={{
+        background: dragOver ? C.greenLight : C.white,
+        border: `${dragOver ? 2 : 1}px ${canDrop ? "dashed" : "solid"} ${dragOver ? C.green : canDrop ? C.orangeBorder : open ? "#BFDBFE" : C.border}`,
+        borderRadius: 12, overflow: "hidden",
+        boxShadow: dragOver ? `0 0 0 4px ${C.greenLight}` : "0 1px 4px rgba(0,0,0,0.05)",
+        transition: "border-color 0.15s, background 0.15s",
+      }}>
+
+      {/* Drop hint overlay while a SKU is being dragged */}
+      {dragOver && (
+        <div style={{ padding: "8px 16px", background: C.green, color: C.white, fontSize: 12, fontWeight: 700, display: "flex", alignItems: "center", gap: 8 }}>
+          🔗 Drop to link into <span style={{ fontFamily: "monospace" }}>{parent.item_id}</span>
+        </div>
+      )}
 
       {/* ── Card header ───────────────────────────────────────────────────────── */}
       <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", cursor: "pointer" }}
@@ -397,8 +431,8 @@ function ParentCard({ parent, onRefresh, notify }) {
               )}
               {panel === "link" && (
                 <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                  <p style={{ fontSize: 12, color: C.gray600, whiteSpace: "nowrap" }}>★ = name-match suggestions</p>
-                  <SkuDropdown parentId={parent.item_id} onSelect={linkSku} />
+                  <p style={{ fontSize: 12, color: C.gray600, whiteSpace: "nowrap" }}>★ = name-match suggestions · or drag a SKU from the tray above</p>
+                  <SkuDropdown parentId={parent.item_id} onSelect={linkSku} unlinked={unlinked} />
                 </div>
               )}
               {panel === "create" && (
@@ -540,6 +574,104 @@ function AddParentForm({ onSaved, onCancel, notify }) {
   );
 }
 
+// ── draggable unlinked-SKU chip ───────────────────────────────────────────────
+function SkuChip({ sku, dragging, onDragStart, onDragEnd }) {
+  const isDragging = dragging === sku.sku_id;
+  const isNew = !sku.has_price;
+  return (
+    <div
+      draggable
+      onDragStart={e => { e.dataTransfer.setData("text/plain", sku.sku_id); e.dataTransfer.effectAllowed = "move"; onDragStart(sku.sku_id); }}
+      onDragEnd={onDragEnd}
+      title={`Drag "${sku.sku_id}" onto a parent card to link it${sku.order_count ? ` · ${sku.order_count} order(s)` : ""}`}
+      style={{
+        display: "inline-flex", alignItems: "center", gap: 6,
+        padding: "5px 10px", borderRadius: 8, cursor: "grab",
+        background: isDragging ? C.orange : C.white,
+        border: `1px solid ${isNew ? C.greenBorder : C.orangeBorder}`,
+        boxShadow: isDragging ? "0 4px 12px rgba(232,81,10,0.3)" : "0 1px 2px rgba(0,0,0,0.05)",
+        opacity: isDragging ? 0.6 : 1,
+        userSelect: "none", transition: "box-shadow 0.1s",
+      }}>
+      <span style={{ fontSize: 11, color: C.gray300 }}>⠿</span>
+      <span style={{ fontFamily: "monospace", fontSize: 12, fontWeight: 600, color: isDragging ? C.white : isNew ? C.green : C.orange }}>
+        {sku.sku_id}
+      </span>
+      {isNew
+        ? <span style={{ fontSize: 8, fontWeight: 800, color: C.white, background: C.green, padding: "1px 5px", borderRadius: 10, letterSpacing: "0.04em" }}>NEW</span>
+        : <span style={{ fontSize: 10, fontFamily: "monospace", color: C.gray400 }}>{fmt(sku.final_price)}</span>}
+      {sku.order_count > 0 && (
+        <span style={{ fontSize: 10, color: isDragging ? C.white : C.gray400, whiteSpace: "nowrap" }}>📦 {sku.order_count}</span>
+      )}
+    </div>
+  );
+}
+
+// ── unlinked-SKU tray — drag source for the drag-and-drop linking ─────────────
+function UnlinkedSkuTray({ unlinked, dragging, setDragging }) {
+  const [open, setOpen] = useState(true);
+  const [q, setQ] = useState("");
+  const [onlyNew, setOnlyNew] = useState(false);
+
+  const filtered = unlinked.filter(s =>
+    (!q || s.sku_id.toLowerCase().includes(q.toLowerCase())) &&
+    (!onlyNew || !s.has_price)
+  );
+  const newCount = unlinked.filter(s => !s.has_price).length;
+
+  return (
+    <div style={{ background: "#FFFBF7", border: `1px solid ${C.orangeBorder}`, borderRadius: 12, overflow: "hidden" }}>
+      {/* Header */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 16px", cursor: "pointer", flexWrap: "wrap" }}
+        onClick={() => setOpen(o => !o)}>
+        <span style={{ fontSize: 12, color: C.gray400, minWidth: 14 }}>{open ? "▼" : "▶"}</span>
+        <span style={{ fontSize: 13, fontWeight: 800, color: C.gray800 }}>🧲 Unlinked SKUs</span>
+        <span style={{ background: C.orangeLight, color: C.orange, border: `1px solid ${C.orangeBorder}`, padding: "3px 10px", borderRadius: 20, fontSize: 11, fontWeight: 700 }}>
+          {unlinked.length} available
+        </span>
+        {newCount > 0 && (
+          <span style={{ background: C.greenLight, color: C.green, border: `1px solid ${C.greenBorder}`, padding: "3px 10px", borderRadius: 20, fontSize: 11, fontWeight: 700 }}>
+            {newCount} new from orders
+          </span>
+        )}
+        <span style={{ fontSize: 11, color: C.gray400 }}>— drag any chip onto a parent card below to link it</span>
+      </div>
+
+      {open && (
+        <div style={{ padding: "0 16px 14px", borderTop: `1px solid ${C.orangeBorder}` }}>
+          {/* Controls */}
+          <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 0", flexWrap: "wrap" }} onClick={e => e.stopPropagation()}>
+            <input value={q} onChange={e => setQ(e.target.value)} placeholder="Filter unlinked SKUs…"
+              style={{ ...S.inp, maxWidth: 240, fontSize: 12 }} />
+            {q && <button onClick={() => setQ("")} style={btn("ghost", "sm")}>✕</button>}
+            {newCount > 0 && (
+              <button onClick={() => setOnlyNew(v => !v)}
+                style={{ ...btn(onlyNew ? "success" : "ghost", "sm"), fontSize: 11 }}>
+                {onlyNew ? "✓ New-from-orders only" : "Show new-from-orders only"}
+              </button>
+            )}
+            <span style={{ fontSize: 11, color: C.gray400 }}>{filtered.length} shown</span>
+          </div>
+
+          {/* Chips */}
+          {filtered.length === 0 ? (
+            <p style={{ fontSize: 12, color: C.gray400, fontStyle: "italic", padding: "8px 0" }}>
+              {unlinked.length === 0 ? "🎉 Every SKU is linked to a parent." : "No SKUs match your filter."}
+            </p>
+          ) : (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, maxHeight: 200, overflowY: "auto", padding: 2 }}>
+              {filtered.map(s => (
+                <SkuChip key={s.sku_id} sku={s} dragging={dragging}
+                  onDragStart={setDragging} onDragEnd={() => setDragging(null)} />
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── main tab ──────────────────────────────────────────────────────────────────
 export function PricingTab() {
   const [parents,     setParents]     = useState([]);
@@ -549,9 +681,16 @@ export function PricingTab() {
   const [msg,         setMsg]         = useState(null);
   const [missingSkus, setMissingSkus] = useState([]);
   const [showMissing, setShowMissing] = useState(false);
+  const [unlinked,    setUnlinked]    = useState([]);
+  const [dragging,    setDragging]    = useState(null); // sku_id currently being dragged
 
   const notify = useCallback((type, text) => {
     setMsg({ type, text }); setTimeout(() => setMsg(null), 4000);
+  }, []);
+
+  const loadUnlinked = useCallback(async () => {
+    const r = await fetch(`${API}/final-prices/unlinked/`).catch(() => null);
+    if (r?.ok) { const d = await r.json(); setUnlinked(d.results || []); }
   }, []);
 
   const load = useCallback(async () => {
@@ -564,7 +703,22 @@ export function PricingTab() {
     setLoading(false);
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  const refresh = useCallback(() => { load(); loadUnlinked(); }, [load, loadUnlinked]);
+
+  useEffect(() => { load(); loadUnlinked(); }, [load, loadUnlinked]);
+
+  // Shared linking handler — used by both drag-and-drop and the autocomplete dropdown.
+  // Uses /link-sku/ so a SKU that only exists in the orders table (no FinalPrice
+  // row yet) is created and linked in one step.
+  const linkSku = useCallback(async (skuId, parentId) => {
+    setDragging(null);
+    const r = await fetch(`${API}/link-sku/`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sku_id: skuId, parent_id: parentId }),
+    });
+    if (r.ok) { notify("ok", `${skuId} → ${parentId} linked.`); refresh(); }
+    else notify("err", `Could not link ${skuId}.`);
+  }, [notify, refresh]);
 
   const filtered = parents.filter(p =>
     !search || p.item_id.toLowerCase().includes(search.toLowerCase()) ||
@@ -636,6 +790,13 @@ export function PricingTab() {
       {/* Add parent form */}
       {showAdd && <AddParentForm notify={notify} onSaved={() => { setShowAdd(false); load(); }} onCancel={() => setShowAdd(false)} />}
 
+      {/* Unlinked SKU tray — drag source; sticky so it stays visible while dragging onto cards */}
+      {!loading && (
+        <div style={{ position: "sticky", top: 0, zIndex: 50 }}>
+          <UnlinkedSkuTray unlinked={unlinked} dragging={dragging} setDragging={setDragging} />
+        </div>
+      )}
+
       {/* Search + stats row */}
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
         <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search parent ID or child SKU…"
@@ -653,7 +814,10 @@ export function PricingTab() {
         </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-          {filtered.map(p => <ParentCard key={p.item_id} parent={p} onRefresh={load} notify={notify} />)}
+          {filtered.map(p => (
+            <ParentCard key={p.item_id} parent={p} onRefresh={refresh} notify={notify}
+              onLink={linkSku} dragging={dragging} unlinked={unlinked} />
+          ))}
         </div>
       )}
     </div>

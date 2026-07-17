@@ -56,8 +56,40 @@ export function AuthProvider({ children }) {
     setUser(null);
   }, []);
 
+  // Re-fetch the current user (e.g. after an admin creates/edits businesses so
+  // the business switcher and permissions reflect the latest state).
+  const refreshUser = useCallback(async () => {
+    if (!getAccessToken()) return null;
+    const me = await fetchMe();
+    setUser(me);
+    return me;
+  }, []);
+
+  const changePassword = useCallback(async (oldPassword, newPassword) => {
+    const res = await fetch("/api/auth/change-password/", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ old_password: oldPassword, new_password: newPassword }),
+    });
+    if (!res.ok) {
+      let message = "Could not change password";
+      try {
+        const body = await res.json();
+        message = body.old_password || body.new_password || body.detail || message;
+      } catch {
+        // ignore body parse errors
+      }
+      throw new Error(message);
+    }
+    return true;
+  }, []);
+
+  const isSuperAdmin = user?.role === "super_admin";
+
   return (
-    <AuthContext.Provider value={{ user, loading, login, logout }}>
+    <AuthContext.Provider
+      value={{ user, loading, login, logout, refreshUser, changePassword, isSuperAdmin }}
+    >
       {children}
     </AuthContext.Provider>
   );

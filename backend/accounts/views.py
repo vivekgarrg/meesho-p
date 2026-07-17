@@ -6,7 +6,9 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 from .models import Business, Membership, User
 from .permissions import IsSuperAdmin
 from .serializers import (
+    AdminUserSerializer,
     BusinessSerializer,
+    ChangePasswordSerializer,
     CustomTokenObtainPairSerializer,
     MembershipSerializer,
     MeSerializer,
@@ -22,6 +24,64 @@ class LoginView(TokenObtainPairView):
 @permission_classes([IsAuthenticated])
 def me(request):
     return Response(MeSerializer(request.user).data)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def change_password(request):
+    """Any authenticated user can change their own password."""
+    serializer = ChangePasswordSerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+    user = request.user
+    if not user.check_password(serializer.validated_data["old_password"]):
+        return Response({"old_password": "Current password is incorrect."}, status=400)
+    user.set_password(serializer.validated_data["new_password"])
+    user.save()
+    return Response({"detail": "Password updated successfully."})
+
+
+@api_view(["GET", "POST"])
+@permission_classes([IsSuperAdmin])
+def user_list(request):
+    """Super-admin: list all users or create a new one."""
+    if request.method == "GET":
+        qs = User.objects.all().order_by("id").prefetch_related("memberships")
+        return Response(AdminUserSerializer(qs, many=True).data)
+
+    serializer = AdminUserSerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+    if User.objects.filter(username=serializer.validated_data["username"]).exists():
+        return Response({"username": "A user with that username already exists."}, status=400)
+    user = serializer.save()
+    return Response(AdminUserSerializer(user).data, status=201)
+
+
+@api_view(["PUT", "DELETE"])
+@permission_classes([IsSuperAdmin])
+def user_detail(request, user_id):
+    """Super-admin: update a user (role / reset password / profile) or delete."""
+    target = User.objects.filter(pk=user_id).first()
+    if target is None:
+        return Response({"error": "User not found."}, status=404)
+
+    if request.method == "DELETE":
+        if target.pk == request.user.pk:
+            return Response({"error": "You cannot delete your own account."}, status=400)
+        target.delete()
+        return Response(status=204)
+
+    serializer = AdminUserSerializer(target, data=request.data, partial=True)
+    serializer.is_valid(raise_exception=True)
+    # Guard: don't let an admin demote the last remaining super admin.
+    new_role = serializer.validated_data.get("role", target.role)
+    if (
+        target.role == User.ROLE_SUPER_ADMIN
+        and new_role != User.ROLE_SUPER_ADMIN
+        and User.objects.filter(role=User.ROLE_SUPER_ADMIN).count() <= 1
+    ):
+        return Response({"role": "Cannot demote the only super admin."}, status=400)
+    user = serializer.save()
+    return Response(AdminUserSerializer(user).data)
 
 
 @api_view(["GET", "POST"])
@@ -90,3 +150,14 @@ def membership_create(request, business_id):
     serializer.is_valid(raise_exception=True)
     serializer.save(user=target_user, business=business)
     return Response(serializer.data, status=201)
+
+
+@api_view(["DELETE"])
+@permission_classes([IsSuperAdmin])
+def membership_delete(request, business_id, membership_id):
+    """Super-admin: remove a user's membership from a business."""
+    membership = Membership.objects.filter(pk=membership_id, business_id=business_id).first()
+    if membership is None:
+        return Response({"error": "Membership not found."}, status=404)
+    membership.delete()
+    return Response(status=204)

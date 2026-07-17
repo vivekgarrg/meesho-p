@@ -24,6 +24,8 @@ import TableData from "./Components/Table/TableData";
 import LoginPage from "./Components/Login/LoginPage";
 import BusinessProfilePage from "./Components/BusinessProfile/BusinessProfilePage";
 import BusinessSwitcher from "./Components/BusinessSwitcher";
+import ChangePasswordModal from "./Components/ChangePasswordModal";
+import AdminPanel from "./Components/Admin/AdminPanel";
 import { useAuth } from "./contexts/AuthContext";
 
 // ── API base (re-exported for tabs that import directly from App) ───────────
@@ -414,6 +416,14 @@ const NAV_GROUPS = [
       { path: "/business-profile", label: "Business Profile", icon: "⌂" },
     ],
   },
+  {
+    label: "Administration",
+    color: "#F472B6",
+    adminOnly: true,
+    items: [
+      { path: "/admin", label: "Admin Panel", icon: "⚙", adminOnly: true },
+    ],
+  },
 ];
 
 const ALL_NAV = NAV_GROUPS.flatMap(g => g.items);
@@ -467,6 +477,8 @@ const DIVIDER = "rgba(255,255,255,0.07)";
 
 function Sidebar({ collapsed, setCollapsed }) {
   const [btnHovered, setBtnHovered] = useState(false);
+  const { isSuperAdmin } = useAuth();
+  const navGroups = NAV_GROUPS.filter((g) => !g.adminOnly || isSuperAdmin);
   const W = collapsed ? 60 : 232;
 
   return (
@@ -510,7 +522,7 @@ function Sidebar({ collapsed, setCollapsed }) {
 
       {/* Nav */}
       <div style={{ flex: 1, overflowY: "auto", padding: "16px 0 8px", scrollbarWidth: "none" }}>
-        {NAV_GROUPS.map((group, gi) => (
+        {navGroups.map((group, gi) => (
           <div key={group.label} style={{ marginBottom: collapsed ? 4 : 8 }}>
             {collapsed ? (
               <div style={{ height: 1, background: DIVIDER, margin: gi === 0 ? "0 10px 8px" : "8px 10px" }} />
@@ -549,22 +561,96 @@ function Sidebar({ collapsed, setCollapsed }) {
   );
 }
 
+// ── User menu (top-right) ─────────────────────────────────────────────────────
+function UserMenu({ onChangePassword }) {
+  const navigate = useNavigate();
+  const { user, logout } = useAuth();
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    const close = () => setOpen(false);
+    window.addEventListener("click", close);
+    return () => window.removeEventListener("click", close);
+  }, [open]);
+
+  const handleLogout = () => {
+    logout();
+    navigate("/login", { replace: true });
+  };
+
+  const initial = (user?.username || "?").charAt(0).toUpperCase();
+
+  return (
+    <div style={{ position: "relative" }} onClick={(e) => e.stopPropagation()}>
+      <button
+        onClick={() => setOpen((o) => !o)}
+        style={{
+          display: "flex", alignItems: "center", gap: 8, cursor: "pointer",
+          background: "transparent", border: "none", fontFamily: "inherit",
+        }}
+      >
+        <div style={{
+          width: 30, height: 30, borderRadius: "50%",
+          background: "linear-gradient(135deg, #7C3AED 0%, #4F46E5 100%)",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          fontSize: 13, fontWeight: 800, color: "#fff",
+        }}>{initial}</div>
+        <div style={{ textAlign: "left", lineHeight: 1.2 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: C.gray800 }}>{user?.username}</div>
+          <div style={{ fontSize: 10, color: C.gray400 }}>
+            {user?.role === "super_admin" ? "Super Admin" : "Business User"}
+          </div>
+        </div>
+        <span style={{ fontSize: 10, color: C.gray400 }}>▾</span>
+      </button>
+
+      {open && (
+        <div style={{
+          position: "absolute", top: "calc(100% + 8px)", right: 0, minWidth: 180,
+          background: C.white, border: `1px solid ${C.border}`, borderRadius: 12,
+          boxShadow: "0 8px 28px rgba(0,0,0,0.14)", padding: 6, zIndex: 500,
+        }}>
+          <button
+            onClick={() => { setOpen(false); onChangePassword(); }}
+            style={{
+              width: "100%", textAlign: "left", padding: "9px 12px", borderRadius: 8,
+              background: "transparent", border: "none", cursor: "pointer",
+              fontFamily: "inherit", fontSize: 13, color: C.gray700,
+            }}
+            onMouseEnter={(e) => (e.currentTarget.style.background = C.gray100)}
+            onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+          >
+            🔑 Change password
+          </button>
+          <button
+            onClick={handleLogout}
+            style={{
+              width: "100%", textAlign: "left", padding: "9px 12px", borderRadius: 8,
+              background: "transparent", border: "none", cursor: "pointer",
+              fontFamily: "inherit", fontSize: 13, color: C.red,
+            }}
+            onMouseEnter={(e) => (e.currentTarget.style.background = C.redLight)}
+            onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+          >
+            ⎋ Logout
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Top bar ───────────────────────────────────────────────────────────────────
 function TopBar() {
   const loc = useLocation();
-  const navigate = useNavigate();
-  const { logout } = useAuth();
+  const [showChangePassword, setShowChangePassword] = useState(false);
   const current = ALL_NAV.find(item =>
     item.end ? loc.pathname === item.path : loc.pathname.startsWith(item.path)
   );
   const dateStr = new Date().toLocaleDateString("en-IN", {
     weekday: "short", day: "numeric", month: "long", year: "numeric",
   });
-
-  const handleLogout = () => {
-    logout();
-    navigate("/login", { replace: true });
-  };
 
   return (
     <div style={{
@@ -573,21 +659,24 @@ function TopBar() {
       display: "flex", alignItems: "center", justifyContent: "space-between",
       boxShadow: "0 1px 0 rgba(0,0,0,0.06)",
     }}>
-      {/* Breadcrumb */}
-      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-        <span style={{ fontSize: 12, color: C.gray400, fontWeight: 500 }}>Rudam</span>
-        <span style={{ fontSize: 12, color: C.gray300 }}>/</span>
-        <span style={{ fontSize: 14, fontWeight: 700, color: C.gray800 }}>
-          {current?.label ?? "Dashboard"}
-        </span>
+      {/* Left section — business selector + breadcrumb */}
+      <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+        <BusinessSwitcher />
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{ fontSize: 12, color: C.gray300 }}>/</span>
+          <span style={{ fontSize: 14, fontWeight: 700, color: C.gray800 }}>
+            {current?.label ?? "Dashboard"}
+          </span>
+        </div>
       </div>
 
       {/* Right section */}
       <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
         <span style={{ fontSize: 12, color: C.gray400, fontWeight: 500 }}>{dateStr}</span>
-        <BusinessSwitcher />
-        <button onClick={handleLogout} style={btn("ghost", "sm")}>Logout</button>
+        <UserMenu onChangePassword={() => setShowChangePassword(true)} />
       </div>
+
+      {showChangePassword && <ChangePasswordModal onClose={() => setShowChangePassword(false)} />}
     </div>
   );
 }
@@ -630,6 +719,7 @@ function AppShell() {
             <Route path="/fraud" element={<FraudCustomersTab />} />
             <Route path="/product-photos" element={<ProductPhotosTab />} />
             <Route path="/business-profile" element={<BusinessProfilePage />} />
+            <Route path="/admin" element={<AdminPanel />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </div>

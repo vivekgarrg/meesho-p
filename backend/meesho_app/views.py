@@ -1950,13 +1950,119 @@ def parent_price_history_detail(request, business_id, item_id, pk):
 
 @api_view(["GET"])
 def unlinked_skus(request, business_id):
-    """Return FinalPrice SKUs not linked to any parent — used for autocomplete suggestions."""
+    """SKUs available to link to a parent.
+
+    Two sources, merged:
+      1. FinalPrice rows that have no parent yet (priced but unlinked).
+      2. SKUs seen in the orders table that have no linked FinalPrice entry —
+         i.e. brand-new SKUs that were never priced/linked ("new" SKUs).
+
+    Each result carries `order_count` (how many orders reference the SKU) and
+    `has_price` (whether a FinalPrice row already exists). Response shape stays
+    backward compatible ({"results": [{sku_id, item_price, final_price, ...}]}).
+    """
     business = get_authorized_business(request, business_id)
-    q = request.GET.get("q", "")
-    qs = FinalPrice.objects.filter(business=business)
+    q = request.GET.get("q", "").strip().lower()
+
+    linked = set(
+        FinalPrice.objects
+        .filter(business=business, parent__isnull=False)
+        .values_list("sku_id", flat=True)
+    )
+
+    results = {}
+
+    # 1) Priced FinalPrice rows not yet attached to a parent.
+    for row in (
+        FinalPrice.objects
+        .filter(business=business, parent__isnull=True)
+        .values("sku_id", "item_price", "final_price")
+    ):
+        results[row["sku_id"]] = {
+            "sku_id": row["sku_id"],
+            "item_price": row["item_price"],
+            "final_price": row["final_price"],
+            "has_price": True,
+            "order_count": 0,
+        }
+
+    # 2) SKUs from the orders table with no linked entry — the "new" SKUs.
+    order_counts = (
+        Order.objects
+        .filter(business=business)
+        .exclude(sku__isnull=True)
+        .exclude(sku="")
+        .values("sku")
+        .annotate(n=Count("sku"))
+    )
+    for row in order_counts:
+        sku = row["sku"]
+        if sku in linked:
+            continue
+        if sku in results:
+            results[sku]["order_count"] = row["n"]
+        else:
+            results[sku] = {
+                "sku_id": sku,
+                "item_price": None,
+                "final_price": None,
+                "has_price": False,
+                "order_count": row["n"],
+            }
+
+    out = list(results.values())
     if q:
-        qs = qs.filter(sku_id__icontains=q)
-    return Response({"results": list(qs.values("sku_id", "item_price", "final_price"))})
+        out = [r for r in out if q in r["sku_id"].lower()]
+    # Most-ordered first, then alphabetical — surfaces the SKUs that matter most.
+    out.sort(key=lambda r: (-r["order_count"], r["sku_id"]))
+    return Response({"results": out})
+
+
+@api_view(["POST"])
+def link_sku_to_parent(request, business_id):
+    """Link a single SKU to a parent, creating the FinalPrice row if it does not
+    exist yet (e.g. a SKU that only appears in the orders table). The child
+    inherits the parent's current pricing. Used by the drag-and-drop UI.
+
+    Body: {"sku_id": "...", "parent_id": "..."}
+    """
+    business = get_authorized_business(request, business_id)
+    sku_id = (request.data.get("sku_id") or "").strip()
+    parent_id = (request.data.get("parent_id") or "").strip()
+
+    if not sku_id:
+        return Response({"error": "sku_id is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        parent = ParentItemPrice.objects.get(pk=parent_id, business=business)
+    except ParentItemPrice.DoesNotExist:
+        return Response({"error": "Parent not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    obj, created = FinalPrice.objects.get_or_create(
+        sku_id=sku_id,
+        business=business,
+        defaults={
+            "parent": parent,
+            "item_price": parent.item_price,
+            "tax_percent": parent.tax_percent,
+            "packaging_cost": parent.packaging_cost,
+            "final_price": parent.final_price,
+        },
+    )
+    if not created:
+        obj.parent = parent
+        obj.item_price = parent.item_price
+        obj.tax_percent = parent.tax_percent
+        obj.packaging_cost = parent.packaging_cost
+        obj.final_price = parent.final_price
+        obj.save()
+
+    return Response({
+        "message": f"{sku_id} linked to {parent.item_id}",
+        "sku_id": sku_id,
+        "parent_id": parent.item_id,
+        "created": created,
+    }, status=status.HTTP_200_OK)
 
 
 @api_view(["POST"])

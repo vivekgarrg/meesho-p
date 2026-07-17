@@ -5,9 +5,64 @@ from .models import MAX_BUSINESSES_PER_USER, Business, Membership, User
 
 
 class UserSerializer(serializers.ModelSerializer):
+    business_ids = serializers.SerializerMethodField()
+
     class Meta:
         model = User
-        fields = ["id", "username", "email", "first_name", "last_name", "role"]
+        fields = ["id", "username", "email", "first_name", "last_name", "role", "business_ids"]
+
+    def get_business_ids(self, obj):
+        return list(obj.memberships.values_list("business_id", flat=True))
+
+
+class AdminUserSerializer(serializers.ModelSerializer):
+    """Create / update users from the super-admin panel."""
+
+    password = serializers.CharField(write_only=True, required=False, allow_blank=False, min_length=4)
+    business_ids = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = User
+        fields = ["id", "username", "email", "first_name", "last_name", "role", "password", "business_ids"]
+
+    def get_business_ids(self, obj):
+        return list(obj.memberships.values_list("business_id", flat=True))
+
+    def validate_role(self, value):
+        if value not in (User.ROLE_SUPER_ADMIN, User.ROLE_BUSINESS_USER):
+            raise serializers.ValidationError("Invalid role.")
+        return value
+
+    def create(self, validated_data):
+        password = validated_data.pop("password", None)
+        if not password:
+            raise serializers.ValidationError({"password": "Password is required for a new user."})
+        role = validated_data.get("role", User.ROLE_BUSINESS_USER)
+        user = User(**validated_data)
+        user.role = role
+        if role == User.ROLE_SUPER_ADMIN:
+            user.is_staff = True
+            user.is_superuser = True
+        user.set_password(password)
+        user.save()
+        return user
+
+    def update(self, instance, validated_data):
+        password = validated_data.pop("password", None)
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        if instance.role == User.ROLE_SUPER_ADMIN:
+            instance.is_staff = True
+            instance.is_superuser = True
+        if password:
+            instance.set_password(password)
+        instance.save()
+        return instance
+
+
+class ChangePasswordSerializer(serializers.Serializer):
+    old_password = serializers.CharField(write_only=True)
+    new_password = serializers.CharField(write_only=True, min_length=4)
 
 
 class BusinessSerializer(serializers.ModelSerializer):

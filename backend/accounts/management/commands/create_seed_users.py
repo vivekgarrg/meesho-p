@@ -14,12 +14,14 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument("--admin-username", default="admin")
-        parser.add_argument("--admin-password", default=os.environ.get("SEED_ADMIN_PASSWORD", "changeme123"))
+        parser.add_argument("--admin-password", default=os.environ.get("SEED_ADMIN_PASSWORD", "Vivek@123"))
         parser.add_argument("--business-username", default="rudam_user")
         parser.add_argument(
             "--business-password", default=os.environ.get("SEED_BUSINESS_USER_PASSWORD", "changeme123")
         )
         parser.add_argument("--business-name", default="Rudam")
+        # Extra businesses to ensure exist (in addition to --business-name).
+        parser.add_argument("--extra-businesses", nargs="*", default=["Rudam 2"])
 
     @transaction.atomic
     def handle(self, *args, **options):
@@ -31,19 +33,33 @@ class Command(BaseCommand):
                                 + ("created" if created else "already existed"))
         )
 
+        for extra_name in options["extra_businesses"]:
+            extra, created = Business.objects.get_or_create(
+                name=extra_name, defaults={"is_active": True}
+            )
+            self.stdout.write(
+                self.style.SUCCESS(f"Business '{extra.name}' (id={extra.id}) "
+                                    + ("created" if created else "already existed"))
+            )
+
         admin_user, created = User.objects.get_or_create(
             username=options["admin_username"],
             defaults={"role": User.ROLE_SUPER_ADMIN, "is_staff": True, "is_superuser": True},
         )
-        if created:
-            admin_user.set_password(options["admin_password"])
-            admin_user.role = User.ROLE_SUPER_ADMIN
-            admin_user.is_staff = True
-            admin_user.is_superuser = True
-            admin_user.save()
-            self.stdout.write(self.style.SUCCESS(f"Super admin '{admin_user.username}' created"))
-        else:
-            self.stdout.write(f"Super admin '{admin_user.username}' already existed")
+        # The master admin password is authoritative: always (re)set it so the
+        # documented credentials stay valid even if the account already existed.
+        admin_user.set_password(options["admin_password"])
+        admin_user.role = User.ROLE_SUPER_ADMIN
+        admin_user.is_staff = True
+        admin_user.is_superuser = True
+        admin_user.save()
+        self.stdout.write(
+            self.style.SUCCESS(
+                f"Super admin '{admin_user.username}' "
+                + ("created" if created else "updated")
+                + " (password set)"
+            )
+        )
 
         biz_user, created = User.objects.get_or_create(
             username=options["business_username"],
