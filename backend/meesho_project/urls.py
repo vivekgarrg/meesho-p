@@ -7,5 +7,5 @@ urlpatterns = [
     path("api/auth/", include("accounts.urls")),
     path("api/businesses/", include("accounts.business_urls")),
     path("api/business/<int:business_id>/", include("meesho_app.urls")),
-    re_path(r"^(?!api/|admin/).*$", TemplateView.as_view(template_name="index.html"), name="spa"),
+    re_path(r"^(?!api/|admin/|static/).*$", TemplateView.as_view(template_name="index.html"), name="spa"),
 ]

@@ -49,3 +49,7 @@ backend/uploads/
 *.xlsx
 *.xls
 *.csv
+
+# Build artifacts (regenerated on deploy)
+backend/staticfiles/
+backend/frontend_build/

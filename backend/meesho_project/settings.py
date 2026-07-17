@@ -118,9 +118,15 @@ STATIC_ROOT = BASE_DIR / "staticfiles"
 STATICFILES_DIRS = []
 _frontend_build = BASE_DIR / "frontend_build"
 if _frontend_build.exists():
-    STATICFILES_DIRS.append(_frontend_build)
+    # Vite builds with base "/static/frontend/", so the emitted index.html
+    # references assets at /static/frontend/assets/...  Collect the build
+    # under a matching "frontend" prefix so those URLs resolve.
+    STATICFILES_DIRS.append(("frontend", _frontend_build))
 if any(m == "whitenoise.middleware.WhiteNoiseMiddleware" for m in MIDDLEWARE):
-    STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
+    # Vite already fingerprints asset filenames for cache-busting, so use
+    # the non-manifest storage: files are served under their real on-disk
+    # names, which is exactly what the built index.html references.
+    STATICFILES_STORAGE = "whitenoise.storage.CompressedStaticFilesStorage"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
