@@ -268,18 +268,26 @@ def upload_excel(request, business_id):
         df = df[df["date"].notna()]
         df = df[~df["date"].astype(str).str.startswith("No data")]
 
-        created = 0
+        created = skipped = 0
         with transaction.atomic():
             for _, row in df.iterrows():
-                CompensationRecovery.objects.create(
+                # The sheet has no id column, so treat the full row
+                # (date + program + reason + amount, scoped to the business)
+                # as its natural key. Skip rows that already exist so
+                # re-uploading the same sheet doesn't duplicate entries.
+                lookup = dict(
                     business=business,
                     date=safe_date(row.get("date")),
                     program_name=safe_str(row.get("program_name")),
                     reason=safe_str(row.get("reason")),
                     amount_incl_gst=safe_decimal(row.get("amount_incl_gst")),
                 )
+                if CompensationRecovery.objects.filter(**lookup).exists():
+                    skipped += 1
+                    continue
+                CompensationRecovery.objects.create(**lookup)
                 created += 1
-        results["compensation_recovery"] = {"created": created}
+        results["compensation_recovery"] = {"created": created, "skipped": skipped}
 
     return Response({"success": True, "results": results}, status=status.HTTP_201_CREATED)
 
