@@ -674,15 +674,20 @@ function UnlinkedSkuTray({ unlinked, dragging, setDragging }) {
 
 // ── main tab ──────────────────────────────────────────────────────────────────
 export function PricingTab() {
-  const [parents,     setParents]     = useState([]);
-  const [loading,     setLoading]     = useState(true);
-  const [showAdd,     setShowAdd]     = useState(false);
-  const [search,      setSearch]      = useState("");
-  const [msg,         setMsg]         = useState(null);
+  const [parents, setParents] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [showAdd, setShowAdd] = useState(false);
+  const [search, setSearch] = useState("");
+  const [msg, setMsg] = useState(null);
   const [missingSkus, setMissingSkus] = useState([]);
   const [showMissing, setShowMissing] = useState(false);
-  const [unlinked,    setUnlinked]    = useState([]);
-  const [dragging,    setDragging]    = useState(null); // sku_id currently being dragged
+  const [unlinked, setUnlinked] = useState([]);
+  const [dragging, setDragging] = useState(null);
+
+  const [linkParentId, setLinkParentId] = useState("");
+  const [linkQuery, setLinkQuery] = useState("");
+  const [selectedUnlinked, setSelectedUnlinked] = useState(new Set());
+  const [bulkLinking, setBulkLinking] = useState(false);
 
   const notify = useCallback((type, text) => {
     setMsg({ type, text }); setTimeout(() => setMsg(null), 4000);
@@ -707,6 +712,14 @@ export function PricingTab() {
 
   useEffect(() => { load(); loadUnlinked(); }, [load, loadUnlinked]);
 
+  useEffect(() => {
+    setSelectedUnlinked(prev => {
+      const available = new Set(unlinked.map(u => u.sku_id));
+      const next = new Set([...prev].filter(sku => available.has(sku)));
+      return next;
+    });
+  }, [unlinked]);
+
   // Shared linking handler — used by both drag-and-drop and the autocomplete dropdown.
   // Uses /link-sku/ so a SKU that only exists in the orders table (no FinalPrice
   // row yet) is created and linked in one step.
@@ -725,44 +738,116 @@ export function PricingTab() {
     (p.sku_ids || []).some(s => s.toLowerCase().includes(search.toLowerCase()))
   );
 
-  const totalSkus    = parents.reduce((a, p) => a + (p.sku_ids || []).length, 0);
-  const withHistory  = parents.filter(p => (p.price_history || []).length > 0).length;
+  const quickUnlinked = unlinked.filter(s =>
+    !linkQuery || s.sku_id.toLowerCase().includes(linkQuery.toLowerCase())
+  );
+
+  const toggleUnlinked = skuId => {
+    setSelectedUnlinked(prev => {
+      const next = new Set(prev);
+      if (next.has(skuId)) next.delete(skuId);
+      else next.add(skuId);
+      return next;
+    });
+  };
+
+  const selectVisibleUnlinked = () => {
+    setSelectedUnlinked(prev => {
+      const next = new Set(prev);
+      quickUnlinked.slice(0, 120).forEach(s => next.add(s.sku_id));
+      return next;
+    });
+  };
+
+  const clearSelectedUnlinked = () => setSelectedUnlinked(new Set());
+
+  const bulkLinkSelected = async () => {
+    if (!linkParentId || selectedUnlinked.size === 0) return;
+    setBulkLinking(true);
+    try {
+      const r = await fetch(`${API}/link-sku/bulk/`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ parent_id: linkParentId, sku_ids: [...selectedUnlinked] }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (r.ok) {
+        const failed = d.failed || 0;
+        notify(
+          failed ? "err" : "ok",
+          failed
+            ? `Linked ${d.linked || 0} SKU(s); ${failed} failed.`
+            : `Linked ${d.linked || 0} SKU(s) to ${linkParentId}.`
+        );
+        setSelectedUnlinked(new Set());
+        refresh();
+      } else {
+        notify("err", d.error || "Bulk link failed.");
+      }
+    } catch {
+      notify("err", "Bulk link failed.");
+    } finally {
+      setBulkLinking(false);
+    }
+  };
+
+  const totalSkus = parents.reduce((a, p) => a + (p.sku_ids || []).length, 0);
+  const withHistory = parents.filter(p => (p.price_history || []).length > 0).length;
+  const noHistory = parents.length - withHistory;
+  const selectedCount = selectedUnlinked.size;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
 
-      {/* Header */}
-      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
-        <div>
-          <h2 style={{ fontSize: 18, fontWeight: 800, color: C.gray800, marginBottom: 3 }}>⚙️ SKU Pricing</h2>
-          <p style={{ fontSize: 12, color: C.gray400 }}>
-            Parent-centric · price history enables date-accurate profit calculation
-          </p>
-        </div>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-          {/* Summary pills */}
-          <span style={{ background: C.orangeLight, color: C.orange, border: `1px solid ${C.orangeBorder}`, padding: "5px 14px", borderRadius: 20, fontSize: 12, fontWeight: 700 }}>
-            {parents.length} parents
-          </span>
-          <span style={{ background: C.blueLight, color: C.blue, border: "1px solid #BFDBFE", padding: "5px 14px", borderRadius: 20, fontSize: 12, fontWeight: 700 }}>
-            {totalSkus} child SKUs
-          </span>
-          <span style={{ background: C.greenLight, color: C.green, border: `1px solid ${C.greenBorder}`, padding: "5px 14px", borderRadius: 20, fontSize: 12, fontWeight: 700 }}>
-            {withHistory} with history
-          </span>
-          {missingSkus.length > 0 && (
-            <button onClick={() => setShowMissing(o => !o)}
-              style={{ background: "#FEF2F2", color: C.red, border: "1px solid #FECACA", padding: "5px 14px", borderRadius: 20, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
-              ⚠ {missingSkus.length} unpriced
+      <div style={{
+        borderRadius: 16,
+        border: `1px solid ${C.border}`,
+        padding: "18px 20px",
+        background: "linear-gradient(135deg, #E0EAFF 0%, #F7F3FF 45%, #FFF8F1 100%)",
+      }}>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 14, flexWrap: "wrap", alignItems: "center" }}>
+          <div>
+            <h2 style={{ fontSize: 22, fontWeight: 900, color: C.gray900, marginBottom: 4 }}>SKU Pricing Studio</h2>
+            <p style={{ fontSize: 13, color: C.gray600 }}>
+              Modern parent-SKU workspace: quick linking, clean pricing control, and visual grouping.
+            </p>
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button onClick={() => setShowAdd(o => !o)} style={btn(showAdd ? "ghost" : "primary", "md")}>
+              {showAdd ? "Close New Parent" : "+ New Parent Group"}
             </button>
-          )}
-          <button onClick={() => setShowAdd(o => !o)} style={btn(showAdd ? "ghost" : "primary")}>
-            {showAdd ? "✕ Cancel" : "+ New Parent"}
-          </button>
+            {missingSkus.length > 0 && (
+              <button onClick={() => setShowMissing(o => !o)} style={btn("danger", "md")}>
+                {showMissing ? "Hide" : "Show"} Unpriced ({missingSkus.length})
+              </button>
+            )}
+          </div>
         </div>
       </div>
 
-      {/* Toast */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 10 }}>
+        <div style={{ ...S.card, padding: "12px 14px", borderTop: `3px solid ${C.orange}` }}>
+          <div style={{ fontSize: 11, color: C.gray500, fontWeight: 700 }}>Parent Groups</div>
+          <div style={{ fontSize: 24, fontWeight: 900, color: C.gray900 }}>{parents.length}</div>
+        </div>
+        <div style={{ ...S.card, padding: "12px 14px", borderTop: `3px solid ${C.blue}` }}>
+          <div style={{ fontSize: 11, color: C.gray500, fontWeight: 700 }}>Linked SKUs</div>
+          <div style={{ fontSize: 24, fontWeight: 900, color: C.blue }}>{totalSkus}</div>
+        </div>
+        <div style={{ ...S.card, padding: "12px 14px", borderTop: `3px solid ${C.green}` }}>
+          <div style={{ fontSize: 11, color: C.gray500, fontWeight: 700 }}>With Price History</div>
+          <div style={{ fontSize: 24, fontWeight: 900, color: C.green }}>{withHistory}</div>
+        </div>
+        <div style={{ ...S.card, padding: "12px 14px", borderTop: `3px solid ${C.amber}` }}>
+          <div style={{ fontSize: 11, color: C.gray500, fontWeight: 700 }}>No History</div>
+          <div style={{ fontSize: 24, fontWeight: 900, color: C.amber }}>{noHistory}</div>
+        </div>
+        <div style={{ ...S.card, padding: "12px 14px", borderTop: `3px solid ${C.red}` }}>
+          <div style={{ fontSize: 11, color: C.gray500, fontWeight: 700 }}>Unlinked SKUs</div>
+          <div style={{ fontSize: 24, fontWeight: 900, color: C.red }}>{unlinked.length}</div>
+        </div>
+      </div>
+
       {msg && (
         <div style={{ padding: "10px 16px", borderRadius: 8, fontSize: 13, fontWeight: 500,
           background: msg.type === "ok" ? C.greenLight : "#FEF2F2",
@@ -772,7 +857,6 @@ export function PricingTab() {
         </div>
       )}
 
-      {/* Missing SKUs */}
       {showMissing && missingSkus.length > 0 && (
         <div style={{ background: "#FEF2F2", border: "1px solid #FECACA", borderLeft: `4px solid ${C.red}`, borderRadius: 10, padding: "12px 16px" }}>
           <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
@@ -787,39 +871,116 @@ export function PricingTab() {
         </div>
       )}
 
-      {/* Add parent form */}
       {showAdd && <AddParentForm notify={notify} onSaved={() => { setShowAdd(false); load(); }} onCancel={() => setShowAdd(false)} />}
 
-      {/* Unlinked SKU tray — drag source; sticky so it stays visible while dragging onto cards */}
-      {!loading && (
-        <div style={{ position: "sticky", top: 0, zIndex: 50 }}>
-          <UnlinkedSkuTray unlinked={unlinked} dragging={dragging} setDragging={setDragging} />
-        </div>
-      )}
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(300px, 360px) minmax(0, 1fr)", gap: 14 }}>
 
-      {/* Search + stats row */}
-      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-        <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search parent ID or child SKU…"
-          style={{ ...S.inp, maxWidth: 280, fontSize: 12 }} />
-        {search && <button onClick={() => setSearch("")} style={btn("ghost", "sm")}>✕ Clear</button>}
-        <span style={{ fontSize: 12, color: C.gray400 }}>{filtered.length} of {parents.length} shown</span>
+        <div style={{ ...S.card, padding: 14, position: "sticky", top: 8, height: "fit-content" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+            <h3 style={{ fontSize: 14, fontWeight: 800, color: C.gray800 }}>Link Studio</h3>
+            <span style={{ fontSize: 11, color: C.gray500 }}>{selectedCount} selected</span>
+          </div>
+
+          <label style={S.label}>Target Parent Group</label>
+          <select value={linkParentId} onChange={e => setLinkParentId(e.target.value)} style={{ ...S.inp, marginBottom: 10 }}>
+            <option value="">Select parent...</option>
+            {parents.map(p => (
+              <option key={p.item_id} value={p.item_id}>{p.item_id} ({(p.sku_ids || []).length})</option>
+            ))}
+          </select>
+
+          <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+            <input
+              value={linkQuery}
+              onChange={e => setLinkQuery(e.target.value)}
+              placeholder="Find unlinked SKU"
+              style={{ ...S.inp, fontSize: 12 }}
+            />
+          </div>
+
+          <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+            <button onClick={selectVisibleUnlinked} style={btn("ghost", "sm")}>Select Visible</button>
+            <button onClick={clearSelectedUnlinked} style={btn("ghost", "sm")}>Clear</button>
+          </div>
+
+          <button
+            onClick={bulkLinkSelected}
+            disabled={!linkParentId || selectedCount === 0 || bulkLinking}
+            style={{ ...btn("primary", "md"), width: "100%", marginBottom: 10 }}
+          >
+            {bulkLinking ? "Linking..." : `Link ${selectedCount} SKU${selectedCount !== 1 ? "s" : ""}`}
+          </button>
+
+          <div style={{ border: `1px solid ${C.gray100}`, borderRadius: 10, padding: 8, maxHeight: 260, overflowY: "auto" }}>
+            {quickUnlinked.length === 0 ? (
+              <div style={{ fontSize: 12, color: C.gray400, padding: 6 }}>No unlinked SKUs.</div>
+            ) : (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {quickUnlinked.slice(0, 180).map(s => {
+                  const selected = selectedUnlinked.has(s.sku_id);
+                  return (
+                    <button
+                      key={s.sku_id}
+                      onClick={() => toggleUnlinked(s.sku_id)}
+                      draggable
+                      onDragStart={e => {
+                        e.dataTransfer.setData("text/plain", s.sku_id);
+                        setDragging(s.sku_id);
+                      }}
+                      onDragEnd={() => setDragging(null)}
+                      style={{
+                        border: `1px solid ${selected ? C.blue : C.gray200}`,
+                        background: selected ? C.blueLight : C.white,
+                        color: selected ? C.blue : C.gray700,
+                        borderRadius: 16,
+                        fontFamily: "monospace",
+                        fontSize: 11,
+                        fontWeight: 600,
+                        padding: "4px 8px",
+                        cursor: "pointer",
+                      }}
+                    >
+                      {s.sku_id}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          <div style={{ marginTop: 8, fontSize: 11, color: C.gray400 }}>
+            Tip: click chips to multi-select, or drag a chip and drop on any parent card.
+          </div>
+        </div>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <div style={{ ...S.card, padding: 12, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            <input
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              placeholder="Search parent ID or child SKU"
+              style={{ ...S.inp, maxWidth: 300, fontSize: 12 }}
+            />
+            {search && <button onClick={() => setSearch("")} style={btn("ghost", "sm")}>Clear</button>}
+            <span style={{ fontSize: 12, color: C.gray500 }}>{filtered.length} of {parents.length} groups shown</span>
+          </div>
+
+          {loading ? (
+            <div style={{ textAlign: "center", padding: 48, color: C.gray400 }}>Loading pricing data...</div>
+          ) : filtered.length === 0 ? (
+            <div style={{ textAlign: "center", padding: 48, color: C.gray400, fontSize: 13 }}>
+              {parents.length === 0 ? 'No parent SKUs yet - create your first parent group.' : "No results matching your search."}
+            </div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {filtered.map(p => (
+                <ParentCard key={p.item_id} parent={p} onRefresh={refresh} notify={notify}
+                  onLink={linkSku} dragging={dragging} unlinked={unlinked} />
+              ))}
+            </div>
+          )}
+        </div>
       </div>
-
-      {/* List */}
-      {loading ? (
-        <div style={{ textAlign: "center", padding: 48, color: C.gray400 }}>Loading pricing data…</div>
-      ) : filtered.length === 0 ? (
-        <div style={{ textAlign: "center", padding: 48, color: C.gray400, fontSize: 13 }}>
-          {parents.length === 0 ? 'No parent SKUs yet — click "+ New Parent" to create one.' : "No results matching your search."}
-        </div>
-      ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-          {filtered.map(p => (
-            <ParentCard key={p.item_id} parent={p} onRefresh={refresh} notify={notify}
-              onLink={linkSku} dragging={dragging} unlinked={unlinked} />
-          ))}
-        </div>
-      )}
     </div>
   );
 }

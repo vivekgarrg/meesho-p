@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 from decimal import Decimal, InvalidOperation
-from django.db import transaction
+from django.db import transaction, IntegrityError
 from django.db.models import Sum, Count, Min, Max, ExpressionWrapper, F, DecimalField as DjDecimalField, Q as DQ
 from django.utils import timezone
 from rest_framework import status
@@ -2038,30 +2038,276 @@ def link_sku_to_parent(request, business_id):
     except ParentItemPrice.DoesNotExist:
         return Response({"error": "Parent not found."}, status=status.HTTP_404_NOT_FOUND)
 
-    obj, created = FinalPrice.objects.get_or_create(
-        sku_id=sku_id,
-        business=business,
-        defaults={
-            "parent": parent,
-            "item_price": parent.item_price,
-            "tax_percent": parent.tax_percent,
-            "packaging_cost": parent.packaging_cost,
-            "final_price": parent.final_price,
-        },
-    )
-    if not created:
-        obj.parent = parent
-        obj.item_price = parent.item_price
-        obj.tax_percent = parent.tax_percent
-        obj.packaging_cost = parent.packaging_cost
-        obj.final_price = parent.final_price
-        obj.save()
+    result = _bulk_link_skus_to_parent(business=business, parent=parent, sku_ids=[sku_id])
+    if result["failed"]:
+        return Response({
+            "error": "SKU belongs to another business and cannot be linked here.",
+            "sku_id": sku_id,
+            "parent_id": parent.item_id,
+        }, status=status.HTTP_409_CONFLICT)
 
     return Response({
         "message": f"{sku_id} linked to {parent.item_id}",
         "sku_id": sku_id,
         "parent_id": parent.item_id,
+        "created": result["created"] > 0,
+    }, status=status.HTTP_200_OK)
+
+
+def _normalize_sku_ids(raw_sku_ids):
+    seen = set()
+    out = []
+    for sku in raw_sku_ids or []:
+        s = (sku or "").strip()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+    return out
+
+
+def _bulk_link_skus_to_parent(*, business, parent, sku_ids):
+    """Fast in-memory planning + bulk DB writes for linking SKUs to a parent."""
+    sku_ids = _normalize_sku_ids(sku_ids)
+    if not sku_ids:
+        return {"requested": 0, "linked": 0, "created": 0, "updated": 0, "failed": 0, "failed_skus": []}
+
+    existing_global = dict(
+        FinalPrice.objects
+        .filter(sku_id__in=sku_ids)
+        .values_list("sku_id", "business_id")
+    )
+    conflicts = [sku for sku in sku_ids if sku in existing_global and existing_global[sku] != business.id]
+    allowed_ids = [sku for sku in sku_ids if sku not in conflicts]
+
+    existing_business_rows = {
+        row.sku_id: row
+        for row in FinalPrice.objects.filter(business=business, sku_id__in=allowed_ids)
+    }
+
+    to_create_ids = [sku for sku in allowed_ids if sku not in existing_business_rows and sku not in existing_global]
+    to_update = [existing_business_rows[sku] for sku in allowed_ids if sku in existing_business_rows]
+
+    for row in to_update:
+        row.parent = parent
+        row.item_price = parent.item_price
+        row.tax_percent = parent.tax_percent
+        row.packaging_cost = parent.packaging_cost
+        row.final_price = parent.final_price
+
+    created = 0
+    updated = 0
+    with transaction.atomic():
+        if to_update:
+            FinalPrice.objects.bulk_update(
+                to_update,
+                ["parent", "item_price", "tax_percent", "packaging_cost", "final_price"],
+                batch_size=500,
+            )
+            updated = len(to_update)
+
+        if to_create_ids:
+            to_create = [
+                FinalPrice(
+                    sku_id=sku,
+                    business=business,
+                    parent=parent,
+                    item_price=parent.item_price,
+                    tax_percent=parent.tax_percent,
+                    packaging_cost=parent.packaging_cost,
+                    final_price=parent.final_price,
+                )
+                for sku in to_create_ids
+            ]
+            try:
+                FinalPrice.objects.bulk_create(to_create, batch_size=500)
+                created = len(to_create)
+            except IntegrityError:
+                # Graceful fallback for race/conflict edges.
+                for obj in to_create:
+                    try:
+                        FinalPrice.objects.create(
+                            sku_id=obj.sku_id,
+                            business=business,
+                            parent=parent,
+                            item_price=parent.item_price,
+                            tax_percent=parent.tax_percent,
+                            packaging_cost=parent.packaging_cost,
+                            final_price=parent.final_price,
+                        )
+                        created += 1
+                    except IntegrityError:
+                        conflicts.append(obj.sku_id)
+
+    linked = created + updated
+    return {
+        "requested": len(sku_ids),
+        "linked": linked,
         "created": created,
+        "updated": updated,
+        "failed": len(conflicts),
+        "failed_skus": sorted(set(conflicts)),
+    }
+
+
+@api_view(["POST"])
+def bulk_link_skus_to_parent(request, business_id):
+    """Bulk-link many SKUs to a parent in one fast request.
+
+    Body:
+      {
+        "parent_id": "PARENT_1",
+        "sku_ids": ["SKU1", "SKU2", ...]
+      }
+    """
+    business = get_authorized_business(request, business_id)
+    parent_id = (request.data.get("parent_id") or "").strip()
+    sku_ids = request.data.get("sku_ids") or []
+
+    if not parent_id:
+        return Response({"error": "parent_id is required."}, status=status.HTTP_400_BAD_REQUEST)
+    if not isinstance(sku_ids, list):
+        return Response({"error": "sku_ids must be a list."}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        parent = ParentItemPrice.objects.get(pk=parent_id, business=business)
+    except ParentItemPrice.DoesNotExist:
+        return Response({"error": "Parent not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    result = _bulk_link_skus_to_parent(business=business, parent=parent, sku_ids=sku_ids)
+    return Response({
+        "message": f"Linked {result['linked']} SKU(s) to {parent_id}",
+        "parent_id": parent_id,
+        **result,
+    }, status=status.HTTP_200_OK)
+
+
+def _safe_target_parent_id(raw_parent_id, target_business_id):
+    base = (raw_parent_id or "").strip() or f"PARENT_{target_business_id}"
+    existing = ParentItemPrice.objects.filter(pk=base).first()
+    if not existing:
+        return base
+    if existing.business_id == target_business_id:
+        return base
+
+    i = 1
+    while True:
+        candidate = f"{base}__B{target_business_id}_{i}"
+        if not ParentItemPrice.objects.filter(pk=candidate).exists():
+            return candidate
+        i += 1
+
+
+@api_view(["POST"])
+def import_parent_groups(request, business_id):
+    """Copy parent grouping pattern from another business into the current business.
+
+    Body:
+      {
+        "source_business_id": 2,
+        "parent_ids": ["PARENT_A", "PARENT_B"]   # optional
+      }
+    """
+    target_business = get_authorized_business(request, business_id)
+    started_at = timezone.now()
+    source_business_id = request.data.get("source_business_id")
+    parent_ids = request.data.get("parent_ids") or []
+
+    if source_business_id in (None, ""):
+        return Response({"error": "source_business_id is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        source_business = get_authorized_business(request, int(source_business_id))
+    except Exception:
+        return Response({"error": "Invalid source business."}, status=status.HTTP_400_BAD_REQUEST)
+
+    if source_business.id == target_business.id:
+        return Response({"error": "source_business_id must be different from target business."}, status=status.HTTP_400_BAD_REQUEST)
+
+    if parent_ids and not isinstance(parent_ids, list):
+        return Response({"error": "parent_ids must be a list when provided."}, status=status.HTTP_400_BAD_REQUEST)
+
+    source_qs = ParentItemPrice.objects.filter(business=source_business).prefetch_related("sku_prices")
+    if isinstance(parent_ids, list) and parent_ids:
+        source_qs = source_qs.filter(item_id__in=parent_ids)
+    source_parents = list(source_qs)
+
+    # Build import candidates against SKUs visible to target business.
+    target_skus = set(
+        FinalPrice.objects.filter(business=target_business).values_list("sku_id", flat=True)
+    )
+    target_skus.update(
+        sku for sku in Order.objects.filter(business=target_business).exclude(sku__isnull=True).exclude(sku="").values_list("sku", flat=True)
+    )
+    target_skus.update(
+        sid for sid in MeeshoInventory.objects.filter(business=target_business).exclude(style_id="").values_list("style_id", flat=True)
+    )
+
+    imported_groups = []
+    total_linked = 0
+    total_created = 0
+    total_updated = 0
+    total_failed = 0
+    skipped_groups = 0
+
+    with transaction.atomic():
+        for sp in source_parents:
+            source_skus = [fp.sku_id for fp in sp.sku_prices.all()]
+            matched_skus = [sku for sku in source_skus if sku in target_skus]
+            if not matched_skus:
+                skipped_groups += 1
+                continue
+
+            target_parent_id = _safe_target_parent_id(sp.item_id, target_business.id)
+            target_parent, _ = ParentItemPrice.objects.get_or_create(
+                item_id=target_parent_id,
+                defaults={
+                    "business": target_business,
+                    "item_price": sp.item_price,
+                    "tax_percent": sp.tax_percent,
+                    "packaging_cost": sp.packaging_cost,
+                    "final_price": sp.final_price,
+                },
+            )
+
+            if target_parent.business_id != target_business.id:
+                skipped_groups += 1
+                continue
+
+            result = _bulk_link_skus_to_parent(
+                business=target_business,
+                parent=target_parent,
+                sku_ids=matched_skus,
+            )
+
+            total_linked += result["linked"]
+            total_created += result["created"]
+            total_updated += result["updated"]
+            total_failed += result["failed"]
+
+            imported_groups.append({
+                "source_parent_id": sp.item_id,
+                "target_parent_id": target_parent.item_id,
+                "matched_skus": len(matched_skus),
+                "linked": result["linked"],
+                "failed": result["failed"],
+                "failed_skus": result["failed_skus"][:20],
+            })
+
+    elapsed_ms = int((timezone.now() - started_at).total_seconds() * 1000)
+
+    return Response({
+        "source_business_id": source_business.id,
+        "target_business_id": target_business.id,
+        "groups_requested": len(source_parents),
+        "groups_imported": len(imported_groups),
+        "groups_skipped": skipped_groups,
+        "linked": total_linked,
+        "created": total_created,
+        "updated": total_updated,
+        "failed": total_failed,
+        "elapsed_ms": elapsed_ms,
+        "results": imported_groups,
     }, status=status.HTTP_200_OK)
 
 
@@ -4974,23 +5220,53 @@ def meesho_price_update_list(request, business_id):
     business = get_authorized_business(request, business_id)
     if request.method == "PATCH":
         updates = request.data if isinstance(request.data, list) else []
-        count = 0
+        inv_ids = [u.get("inventory_id") for u in updates if u.get("inventory_id") is not None]
+        inv_ids = list({int(i) for i in inv_ids})
+
+        inventory_map = {
+            inv.id: inv
+            for inv in MeeshoInventory.objects.filter(business=business, id__in=inv_ids)
+        }
+        existing_updates = {
+            pu.inventory_id: pu
+            for pu in MeeshoPriceUpdate.objects.filter(business=business, inventory_id__in=inv_ids)
+        }
+
+        to_create = []
+        to_update = []
+        touched_ids = set()
+
+        for item in updates:
+            inv_id = item.get("inventory_id")
+            if inv_id is None:
+                continue
+            inv_id = int(inv_id)
+            inv = inventory_map.get(inv_id)
+            if not inv:
+                continue
+
+            payload = {}
+            for field in ("new_msp", "new_wdrp", "new_mrp"):
+                raw = item.get(field)
+                payload[field] = safe_decimal(raw) if raw not in (None, "", "null") else None
+
+            existing = existing_updates.get(inv_id)
+            if existing:
+                existing.new_msp = payload["new_msp"]
+                existing.new_wdrp = payload["new_wdrp"]
+                existing.new_mrp = payload["new_mrp"]
+                to_update.append(existing)
+            else:
+                to_create.append(MeeshoPriceUpdate(business=business, inventory=inv, **payload))
+            touched_ids.add(inv_id)
+
         with transaction.atomic():
-            for item in updates:
-                inv_id = item.get("inventory_id")
-                if inv_id is None:
-                    continue
-                try:
-                    inv = MeeshoInventory.objects.get(pk=inv_id, business=business)
-                except MeeshoInventory.DoesNotExist:
-                    continue
-                defaults = {}
-                for field in ("new_msp", "new_wdrp", "new_mrp"):
-                    raw = item.get(field)
-                    defaults[field] = safe_decimal(raw) if raw not in (None, "", "null") else None
-                MeeshoPriceUpdate.objects.update_or_create(business=business, inventory=inv, defaults=defaults)
-                count += 1
-        return Response({"updated": count})
+            if to_create:
+                MeeshoPriceUpdate.objects.bulk_create(to_create, batch_size=500)
+            if to_update:
+                MeeshoPriceUpdate.objects.bulk_update(to_update, ["new_msp", "new_wdrp", "new_mrp"], batch_size=500)
+
+        return Response({"updated": len(touched_ids)})
 
     # ── GET ──────────────────────────────────────────────────────────────────
     from django.db.models import Avg, Count, Sum as DjSum
