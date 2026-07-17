@@ -1,3 +1,22 @@
+# Deploy For Free (Render)
+
+This repo now includes a ready-to-use `render.yaml` for one-service deployment
+where Django serves both API and React UI.
+
+## Steps
+
+1. Push this repo to GitHub.
+2. Go to Render dashboard.
+3. Click `New +` -> `Blueprint` and connect this repository.
+4. Render will detect `render.yaml` and create web service `meesho-p`.
+5. Wait for first deploy to finish.
+
+## Notes
+
+- Current default deploy uses SQLite (`DB_ENGINE=sqlite`) for zero-cost setup.
+- Free instances may sleep when inactive.
+- For persistent production data, use a managed DB and set `DATABASE_URL`.
+
 # Meesho Profit Calculator
 
 A full-stack Django + React application that parses Meesho's SP_ORDER_ADS_REFERRAL_PAYMENT Excel files and calculates your net profit.

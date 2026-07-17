@@ -2,13 +2,19 @@ from datetime import timedelta
 from pathlib import Path
 import os
 
+try:
+    import dj_database_url
+except ImportError:  # optional locally until requirements are installed
+    dj_database_url = None
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "django-insecure-change-me-in-production-use-env-var")
 
-DEBUG = True
+DEBUG = os.environ.get("DJANGO_DEBUG", "true").lower() == "true"
 
-ALLOWED_HOSTS = ["*"]
+raw_hosts = os.environ.get("DJANGO_ALLOWED_HOSTS", "*")
+ALLOWED_HOSTS = [h.strip() for h in raw_hosts.split(",") if h.strip()]
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -37,12 +43,18 @@ MIDDLEWARE = [
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
 
+try:
+    import whitenoise  # noqa: F401
+    MIDDLEWARE.insert(2, "whitenoise.middleware.WhiteNoiseMiddleware")
+except ImportError:
+    pass
+
 ROOT_URLCONF = "meesho_project.urls"
 
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
-        "DIRS": [],
+        "DIRS": [BASE_DIR / "templates"],
         "APP_DIRS": True,
         "OPTIONS": {
             "context_processors": [
@@ -58,21 +70,36 @@ TEMPLATES = [
 WSGI_APPLICATION = "meesho_project.wsgi.application"
 
 # ── Database ─────────────────────────────────────────────────────────────────
-# MySQL — override any value via environment variable.
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.mysql",
-        "NAME":     os.environ.get("DB_NAME",     "meesho_profit"),
-        "USER":     os.environ.get("DB_USER",     "root"),
-        "PASSWORD": os.environ.get("DB_PASSWORD", "root"),
-        "HOST":     os.environ.get("DB_HOST",     "localhost"),
-        "PORT":     os.environ.get("DB_PORT",     "3306"),
-        "OPTIONS": {
-            "charset": "utf8mb4",
-            "init_command": "SET sql_mode='STRICT_TRANS_TABLES'",
-        },
+# Priority:
+# 1) DATABASE_URL (recommended for deployment)
+# 2) DB_ENGINE=mysql with DB_* vars
+# 3) SQLite fallback (works out-of-the-box on local and simple free deploys)
+if os.environ.get("DATABASE_URL") and dj_database_url:
+    DATABASES = {
+        "default": dj_database_url.parse(os.environ["DATABASE_URL"], conn_max_age=600, ssl_require=False)
     }
-}
+elif os.environ.get("DB_ENGINE", "sqlite").lower() == "mysql":
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.mysql",
+            "NAME": os.environ.get("DB_NAME", "meesho_profit"),
+            "USER": os.environ.get("DB_USER", "root"),
+            "PASSWORD": os.environ.get("DB_PASSWORD", "root"),
+            "HOST": os.environ.get("DB_HOST", "localhost"),
+            "PORT": os.environ.get("DB_PORT", "3306"),
+            "OPTIONS": {
+                "charset": "utf8mb4",
+                "init_command": "SET sql_mode='STRICT_TRANS_TABLES'",
+            },
+        }
+    }
+else:
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": BASE_DIR / "db.sqlite3",
+        }
+    }
 
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
@@ -87,10 +114,25 @@ USE_TZ = True
 USE_I18N = True
 
 STATIC_URL = "/static/"
+STATIC_ROOT = BASE_DIR / "staticfiles"
+STATICFILES_DIRS = []
+_frontend_build = BASE_DIR / "frontend_build"
+if _frontend_build.exists():
+    STATICFILES_DIRS.append(_frontend_build)
+if any(m == "whitenoise.middleware.WhiteNoiseMiddleware" for m in MIDDLEWARE):
+    STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
+
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
-# CORS — allow React dev server
-CORS_ALLOW_ALL_ORIGINS = True
+# CORS/CSRF
+CORS_ALLOW_ALL_ORIGINS = os.environ.get("CORS_ALLOW_ALL", "true").lower() == "true"
+raw_cors = os.environ.get("CORS_ALLOWED_ORIGINS", "")
+if raw_cors:
+    CORS_ALLOWED_ORIGINS = [u.strip() for u in raw_cors.split(",") if u.strip()]
+
+raw_csrf = os.environ.get("CSRF_TRUSTED_ORIGINS", "")
+if raw_csrf:
+    CSRF_TRUSTED_ORIGINS = [u.strip() for u in raw_csrf.split(",") if u.strip()]
 
 REST_FRAMEWORK = {
     "DEFAULT_RENDERER_CLASSES": ["rest_framework.renderers.JSONRenderer"],
