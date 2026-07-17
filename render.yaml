@@ -11,10 +11,12 @@ services:
       pip install -r backend/requirements.txt
       cd backend && python manage.py collectstatic --noinput
     startCommand: |
-      cd backend && python manage.py migrate && gunicorn meesho_project.wsgi:application --bind 0.0.0.0:$PORT
+      cd backend && python manage.py migrate && python manage.py create_seed_users && gunicorn meesho_project.wsgi:application --bind 0.0.0.0:$PORT
     envVars:
       - key: PYTHON_VERSION
         value: "3.12.6"
+      - key: SEED_ADMIN_PASSWORD
+        sync: false
       - key: DJANGO_DEBUG
         value: "false"
       - key: DJANGO_ALLOWED_HOSTS
