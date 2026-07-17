@@ -688,6 +688,8 @@ export function PricingTab() {
   const [linkQuery, setLinkQuery] = useState("");
   const [selectedUnlinked, setSelectedUnlinked] = useState(new Set());
   const [bulkLinking, setBulkLinking] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const fileRef = useRef(null);
 
   const notify = useCallback((type, text) => {
     setMsg({ type, text }); setTimeout(() => setMsg(null), 4000);
@@ -709,6 +711,50 @@ export function PricingTab() {
   }, []);
 
   const refresh = useCallback(() => { load(); loadUnlinked(); }, [load, loadUnlinked]);
+
+  // Export every SKU price row to Excel. Uses fetch + blob (not a plain
+  // navigation) so the patched fetch attaches the auth token.
+  const handleDownload = useCallback(async () => {
+    try {
+      const res = await fetch(`${API}/final-prices/download/`);
+      if (!res.ok) { notify("err", "Could not download the pricing sheet."); return; }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "sku_pricing.xlsx";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch {
+      notify("err", "Could not download the pricing sheet.");
+    }
+  }, [notify]);
+
+  // Upload an edited/exported sheet to upsert SKU prices. The exported
+  // file's columns match what the backend expects, so it round-trips.
+  const handleUpload = useCallback(async (file) => {
+    if (!file) return;
+    const form = new FormData();
+    form.append("file", file);
+    setUploading(true);
+    try {
+      const res = await fetch(`${API}/final-prices/upload/`, { method: "POST", body: form });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.success) {
+        notify("ok", `Uploaded — ${data.created} new, ${data.updated} updated, ${data.skipped} skipped.`);
+        refresh();
+      } else {
+        notify("err", data.error || "Upload failed.");
+      }
+    } catch {
+      notify("err", "Network error during upload.");
+    } finally {
+      setUploading(false);
+      if (fileRef.current) fileRef.current.value = "";
+    }
+  }, [notify, refresh]);
 
   useEffect(() => { load(); loadUnlinked(); }, [load, loadUnlinked]);
 
@@ -813,6 +859,24 @@ export function PricingTab() {
             </p>
           </div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button onClick={handleDownload} style={btn("ghost", "md")} title="Export all SKU prices to Excel">
+              ⬇ Download Excel
+            </button>
+            <button
+              onClick={() => fileRef.current && fileRef.current.click()}
+              disabled={uploading}
+              style={{ ...btn("ghost", "md"), opacity: uploading ? 0.6 : 1 }}
+              title="Upload an Excel/CSV sheet to add or update SKU prices"
+            >
+              {uploading ? "Uploading…" : "⬆ Upload Excel"}
+            </button>
+            <input
+              ref={fileRef}
+              type="file"
+              accept=".xlsx,.xls,.csv"
+              style={{ display: "none" }}
+              onChange={(e) => handleUpload(e.target.files?.[0])}
+            />
             <button onClick={() => setShowAdd(o => !o)} style={btn(showAdd ? "ghost" : "primary", "md")}>
               {showAdd ? "Close New Parent" : "+ New Parent Group"}
             </button>

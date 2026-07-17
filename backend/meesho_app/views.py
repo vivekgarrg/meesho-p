@@ -2348,10 +2348,10 @@ def upload_final_price(request, business_id):
             defaults = {}
             for col in ("item_price", "packaging_cost", "final_price", "tax_percent"):
                 if col in df.columns:
-                    if col == "tax_percent" : 
-                        print(row.get(col))
+                    if col == "tax_percent":
                         defaults[col] = safe_int(row.get(col))
-                    defaults[col] = safe_decimal(row.get(col))  
+                    else:
+                        defaults[col] = safe_decimal(row.get(col))
             _, was_created = FinalPrice.objects.update_or_create(
                 business=business, sku_id=pk, defaults=defaults
             )
@@ -2364,6 +2364,65 @@ def upload_final_price(request, business_id):
         {"success": True, "created": created, "updated": updated, "skipped": skipped},
         status=status.HTTP_201_CREATED,
     )
+
+
+@api_view(["GET"])
+def download_final_price(request, business_id):
+    """
+    Download all SKU pricing rows as an Excel sheet.
+
+    The column headers normalize (lower-cased, spaces -> underscores) to
+    exactly the columns `upload_final_price` expects, so a downloaded file
+    can be edited and re-uploaded as-is. An empty DB yields a header-only
+    template.
+    """
+    from io import BytesIO
+    from django.http import HttpResponse
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment
+
+    business = get_authorized_business(request, business_id)
+    qs = FinalPrice.objects.filter(business=business).order_by("sku_id")
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "SKU Pricing"
+
+    headers = ["SKU ID", "Item Price", "Tax Percent", "Packaging Cost", "Final Price", "Parent ID"]
+    ws.append(headers)
+
+    header_fill = PatternFill("solid", fgColor="4F46E5")
+    header_font = Font(bold=True, color="FFFFFF")
+    for cell in ws[1]:
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center")
+
+    for fp in qs:
+        ws.append([
+            fp.sku_id,
+            fp.item_price,
+            fp.tax_percent,
+            fp.packaging_cost,
+            fp.final_price,
+            fp.parent_id,
+        ])
+
+    col_widths = [30, 14, 14, 16, 14, 20]
+    for i, w in enumerate(col_widths, 1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
+    ws.freeze_panes = "A2"
+
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    response = HttpResponse(
+        buf.read(),
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    response["Content-Disposition"] = 'attachment; filename="sku_pricing.xlsx"'
+    return response
 
 
 @api_view(["POST"])

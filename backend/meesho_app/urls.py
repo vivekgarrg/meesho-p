@@ -26,6 +26,7 @@ urlpatterns = [
     path("parent-linking/", views.parent_linking_to_sku, name="parent_linking"),
     path("final-prices/", views.final_price_list, name="final_price_list"),
     path("final-prices/upload/", views.upload_final_price, name="upload_final_price"),
+    path("final-prices/download/", views.download_final_price, name="download_final_price"),
     path("final-prices/<str:sku_id>/", views.final_price_detail, name="final_price_detail"),
     path("upload-orders/", views.upload_orders_csv, name="upload_orders"),
     path("full-orders/", views.full_orders_list, name="full_orders_list"),
