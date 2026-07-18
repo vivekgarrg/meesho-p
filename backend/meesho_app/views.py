@@ -1252,11 +1252,13 @@ def profit_summary(request, business_id):
     tax_map        = {fp.sku_id: fp.tax_percent    or 0            for fp in _fp_all}
     sku_parent_map = {fp.sku_id: fp.parent_id for fp in _fp_all if fp.parent_id}
     
+    # Key parent maps by the parent's surrogate id, matching FinalPrice.parent_id
+    # and ParentPriceHistory.parent_id (both now store the integer id).
     _fp_parent     = list(ParentItemPrice.objects.filter(business=business).only("item_id", "item_price", "tax_percent", "packaging_cost", "final_price"))
-    parent_price_map      = {fp.item_id: fp.final_price    or Decimal("0") for fp in _fp_parent}
-    parent_packaging_map  = {fp.item_id: fp.packaging_cost or Decimal("0") for fp in _fp_parent}
-    parent_item_price_map = {fp.item_id: fp.item_price     or Decimal("0") for fp in _fp_parent}
-    parent_tax_map        = {fp.item_id: fp.tax_percent    or 0            for fp in _fp_parent}
+    parent_price_map      = {fp.id: fp.final_price    or Decimal("0") for fp in _fp_parent}
+    parent_packaging_map  = {fp.id: fp.packaging_cost or Decimal("0") for fp in _fp_parent}
+    parent_item_price_map = {fp.id: fp.item_price     or Decimal("0") for fp in _fp_parent}
+    parent_tax_map        = {fp.id: fp.tax_percent    or 0            for fp in _fp_parent}
 
     # Build date-effective price history: {parent_id: [(effective_from, final_price, packaging_cost, item_price, tax_percent), ...]}
     from collections import defaultdict
@@ -1788,8 +1790,17 @@ def final_price_list(request, business_id):
 
     serializer = FinalPriceSerializer(data=request.data)
     serializer.is_valid(raise_exception=True)
-    serializer.save(business=business)
+    serializer.save(business=business, parent=_resolve_parent(request.data.get("parent"), business))
     return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+def _resolve_parent(parent_item_id, business):
+    """Resolve an incoming `parent` value (a parent item_id string, or falsy for
+    unlink) to the business-scoped ParentItemPrice object (or None)."""
+    if not parent_item_id:
+        return None
+    return ParentItemPrice.objects.filter(business=business, item_id=parent_item_id).first()
+
 
 @api_view(["GET", "POST"])
 def parent_price_list(request, business_id):
@@ -1815,7 +1826,7 @@ def parent_price_list(request, business_id):
 def final_price_detail(request, business_id, sku_id):
     business = get_authorized_business(request, business_id)
     try:
-        obj = FinalPrice.objects.get(pk=sku_id, business=business)
+        obj = FinalPrice.objects.get(sku_id=sku_id, business=business)
     except FinalPrice.DoesNotExist:
         return Response({"error": "Not found."}, status=status.HTTP_404_NOT_FOUND)
 
@@ -1829,15 +1840,19 @@ def final_price_detail(request, business_id, sku_id):
     partial = request.method == "PATCH"
     serializer = FinalPriceSerializer(obj, data=request.data, partial=partial)
     serializer.is_valid(raise_exception=True)
-    serializer.save()
+    # Only touch parent when the caller sent it (supports partial PATCH unlink
+    # with {"parent": null} as well as re-parenting by item_id).
+    if "parent" in request.data:
+        serializer.save(parent=_resolve_parent(request.data.get("parent"), business))
+    else:
+        serializer.save()
     return Response(serializer.data)
 
 @api_view(["GET", "PUT", "PATCH", "DELETE"])
 def parent_price_detail(request, business_id, item_id):
     business = get_authorized_business(request, business_id)
-    print("is there")
     try:
-        obj = ParentItemPrice.objects.get(pk=item_id, business=business)
+        obj = ParentItemPrice.objects.get(item_id=item_id, business=business)
     except ParentItemPrice.DoesNotExist:
         return Response({"error": "Not found."}, status=status.HTTP_404_NOT_FOUND)
 
@@ -1862,7 +1877,7 @@ def parent_linking_to_sku(request, business_id):
         if request.method == "POST":
             serializer = ParentItemPriceSerializer(data=request.data)
         else:
-            obj = ParentItemPrice.objects.get(pk=request.data["item_id"], business=business)
+            obj = ParentItemPrice.objects.get(item_id=request.data["item_id"], business=business)
             serializer = ParentItemPriceSerializer(obj, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         parent = serializer.save(business=business)
@@ -1910,18 +1925,25 @@ def parent_linking_to_sku(request, business_id):
             },
             status=status.HTTP_200_OK,
         )
-def _sync_parent_current_price(parent_id, business):
-    """After adding/deleting a history entry, keep ParentItemPrice + linked FinalPrices in sync."""
-    history = ParentPriceHistory.objects.filter(parent_id=parent_id, business=business).order_by("-effective_from").first()
+def _sync_parent_current_price(item_id, business):
+    """After adding/deleting a history entry, keep ParentItemPrice + linked FinalPrices in sync.
+
+    `item_id` is the parent's item_id string (scoped to the business).
+    """
+    history = (
+        ParentPriceHistory.objects
+        .filter(parent__item_id=item_id, business=business)
+        .order_by("-effective_from").first()
+    )
     if not history:
         return
-    ParentItemPrice.objects.filter(pk=parent_id, business=business).update(
+    ParentItemPrice.objects.filter(item_id=item_id, business=business).update(
         item_price=history.item_price,
         tax_percent=history.tax_percent,
         packaging_cost=history.packaging_cost,
         final_price=history.final_price,
     )
-    FinalPrice.objects.filter(parent_id=parent_id, business=business).update(
+    FinalPrice.objects.filter(parent__item_id=item_id, business=business).update(
         item_price=history.item_price,
         tax_percent=history.tax_percent,
         packaging_cost=history.packaging_cost,
@@ -1933,7 +1955,7 @@ def _sync_parent_current_price(parent_id, business):
 def parent_price_history_list(request, business_id, item_id):
     business = get_authorized_business(request, business_id)
     try:
-        parent = ParentItemPrice.objects.get(pk=item_id, business=business)
+        parent = ParentItemPrice.objects.get(item_id=item_id, business=business)
     except ParentItemPrice.DoesNotExist:
         return Response({"error": "Parent not found."}, status=404)
 
@@ -1941,7 +1963,7 @@ def parent_price_history_list(request, business_id, item_id):
         return Response(ParentPriceHistorySerializer(parent.price_history.all(), many=True).data)
 
     data = request.data.copy()
-    data["parent"] = item_id
+    data["parent"] = parent.pk
     if "item_price" in data and "final_price" not in data:
         ip  = Decimal(str(data.get("item_price") or 0))
         tax = Decimal(str(data.get("tax_percent") or 0)) / 100
@@ -1959,7 +1981,7 @@ def parent_price_history_list(request, business_id, item_id):
 def parent_price_history_detail(request, business_id, item_id, pk):
     business = get_authorized_business(request, business_id)
     try:
-        obj = ParentPriceHistory.objects.get(pk=pk, parent_id=item_id, business=business)
+        obj = ParentPriceHistory.objects.get(pk=pk, parent__item_id=item_id, business=business)
     except ParentPriceHistory.DoesNotExist:
         return Response({"error": "Not found."}, status=404)
     obj.delete()
@@ -2053,7 +2075,7 @@ def link_sku_to_parent(request, business_id):
         return Response({"error": "sku_id is required."}, status=status.HTTP_400_BAD_REQUEST)
 
     try:
-        parent = ParentItemPrice.objects.get(pk=parent_id, business=business)
+        parent = ParentItemPrice.objects.get(item_id=parent_id, business=business)
     except ParentItemPrice.DoesNotExist:
         return Response({"error": "Parent not found."}, status=status.HTTP_404_NOT_FOUND)
 
@@ -2091,21 +2113,16 @@ def _bulk_link_skus_to_parent(*, business, parent, sku_ids):
     if not sku_ids:
         return {"requested": 0, "linked": 0, "created": 0, "updated": 0, "failed": 0, "failed_skus": []}
 
-    existing_global = dict(
-        FinalPrice.objects
-        .filter(sku_id__in=sku_ids)
-        .values_list("sku_id", "business_id")
-    )
-    conflicts = [sku for sku in sku_ids if sku in existing_global and existing_global[sku] != business.id]
-    allowed_ids = [sku for sku in sku_ids if sku not in conflicts]
-
+    # sku_id is unique per-business now, so a SKU existing in another business
+    # is not a conflict — we only look at this business's rows.
+    conflicts = []
     existing_business_rows = {
         row.sku_id: row
-        for row in FinalPrice.objects.filter(business=business, sku_id__in=allowed_ids)
+        for row in FinalPrice.objects.filter(business=business, sku_id__in=sku_ids)
     }
 
-    to_create_ids = [sku for sku in allowed_ids if sku not in existing_business_rows and sku not in existing_global]
-    to_update = [existing_business_rows[sku] for sku in allowed_ids if sku in existing_business_rows]
+    to_create_ids = [sku for sku in sku_ids if sku not in existing_business_rows]
+    to_update = [existing_business_rows[sku] for sku in sku_ids if sku in existing_business_rows]
 
     for row in to_update:
         row.parent = parent
@@ -2189,7 +2206,7 @@ def bulk_link_skus_to_parent(request, business_id):
         return Response({"error": "sku_ids must be a list."}, status=status.HTTP_400_BAD_REQUEST)
 
     try:
-        parent = ParentItemPrice.objects.get(pk=parent_id, business=business)
+        parent = ParentItemPrice.objects.get(item_id=parent_id, business=business)
     except ParentItemPrice.DoesNotExist:
         return Response({"error": "Parent not found."}, status=status.HTTP_404_NOT_FOUND)
 
@@ -2198,135 +2215,6 @@ def bulk_link_skus_to_parent(request, business_id):
         "message": f"Linked {result['linked']} SKU(s) to {parent_id}",
         "parent_id": parent_id,
         **result,
-    }, status=status.HTTP_200_OK)
-
-
-def _safe_target_parent_id(raw_parent_id, target_business_id):
-    base = (raw_parent_id or "").strip() or f"PARENT_{target_business_id}"
-    existing = ParentItemPrice.objects.filter(pk=base).first()
-    if not existing:
-        return base
-    if existing.business_id == target_business_id:
-        return base
-
-    i = 1
-    while True:
-        candidate = f"{base}__B{target_business_id}_{i}"
-        if not ParentItemPrice.objects.filter(pk=candidate).exists():
-            return candidate
-        i += 1
-
-
-@api_view(["POST"])
-def import_parent_groups(request, business_id):
-    """Copy parent grouping pattern from another business into the current business.
-
-    Body:
-      {
-        "source_business_id": 2,
-        "parent_ids": ["PARENT_A", "PARENT_B"]   # optional
-      }
-    """
-    target_business = get_authorized_business(request, business_id)
-    started_at = timezone.now()
-    source_business_id = request.data.get("source_business_id")
-    parent_ids = request.data.get("parent_ids") or []
-
-    if source_business_id in (None, ""):
-        return Response({"error": "source_business_id is required."}, status=status.HTTP_400_BAD_REQUEST)
-
-    try:
-        source_business = get_authorized_business(request, int(source_business_id))
-    except Exception:
-        return Response({"error": "Invalid source business."}, status=status.HTTP_400_BAD_REQUEST)
-
-    if source_business.id == target_business.id:
-        return Response({"error": "source_business_id must be different from target business."}, status=status.HTTP_400_BAD_REQUEST)
-
-    if parent_ids and not isinstance(parent_ids, list):
-        return Response({"error": "parent_ids must be a list when provided."}, status=status.HTTP_400_BAD_REQUEST)
-
-    source_qs = ParentItemPrice.objects.filter(business=source_business).prefetch_related("sku_prices")
-    if isinstance(parent_ids, list) and parent_ids:
-        source_qs = source_qs.filter(item_id__in=parent_ids)
-    source_parents = list(source_qs)
-
-    # Build import candidates against SKUs visible to target business.
-    target_skus = set(
-        FinalPrice.objects.filter(business=target_business).values_list("sku_id", flat=True)
-    )
-    target_skus.update(
-        sku for sku in Order.objects.filter(business=target_business).exclude(sku__isnull=True).exclude(sku="").values_list("sku", flat=True)
-    )
-    target_skus.update(
-        sid for sid in MeeshoInventory.objects.filter(business=target_business).exclude(style_id="").values_list("style_id", flat=True)
-    )
-
-    imported_groups = []
-    total_linked = 0
-    total_created = 0
-    total_updated = 0
-    total_failed = 0
-    skipped_groups = 0
-
-    with transaction.atomic():
-        for sp in source_parents:
-            source_skus = [fp.sku_id for fp in sp.sku_prices.all()]
-            matched_skus = [sku for sku in source_skus if sku in target_skus]
-            if not matched_skus:
-                skipped_groups += 1
-                continue
-
-            target_parent_id = _safe_target_parent_id(sp.item_id, target_business.id)
-            target_parent, _ = ParentItemPrice.objects.get_or_create(
-                item_id=target_parent_id,
-                defaults={
-                    "business": target_business,
-                    "item_price": sp.item_price,
-                    "tax_percent": sp.tax_percent,
-                    "packaging_cost": sp.packaging_cost,
-                    "final_price": sp.final_price,
-                },
-            )
-
-            if target_parent.business_id != target_business.id:
-                skipped_groups += 1
-                continue
-
-            result = _bulk_link_skus_to_parent(
-                business=target_business,
-                parent=target_parent,
-                sku_ids=matched_skus,
-            )
-
-            total_linked += result["linked"]
-            total_created += result["created"]
-            total_updated += result["updated"]
-            total_failed += result["failed"]
-
-            imported_groups.append({
-                "source_parent_id": sp.item_id,
-                "target_parent_id": target_parent.item_id,
-                "matched_skus": len(matched_skus),
-                "linked": result["linked"],
-                "failed": result["failed"],
-                "failed_skus": result["failed_skus"][:20],
-            })
-
-    elapsed_ms = int((timezone.now() - started_at).total_seconds() * 1000)
-
-    return Response({
-        "source_business_id": source_business.id,
-        "target_business_id": target_business.id,
-        "groups_requested": len(source_parents),
-        "groups_imported": len(imported_groups),
-        "groups_skipped": skipped_groups,
-        "linked": total_linked,
-        "created": total_created,
-        "updated": total_updated,
-        "failed": total_failed,
-        "elapsed_ms": elapsed_ms,
-        "results": imported_groups,
     }, status=status.HTTP_200_OK)
 
 
@@ -2401,7 +2289,7 @@ def download_final_price(request, business_id):
     from openpyxl.styles import Font, PatternFill, Alignment
 
     business = get_authorized_business(request, business_id)
-    qs = FinalPrice.objects.filter(business=business).order_by("sku_id")
+    qs = FinalPrice.objects.filter(business=business).select_related("parent").order_by("sku_id")
 
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -2424,7 +2312,9 @@ def download_final_price(request, business_id):
             fp.tax_percent,
             fp.packaging_cost,
             fp.final_price,
-            fp.parent_id,
+            # export the parent's item_id (not the surrogate id) so the file
+            # round-trips on import.
+            fp.parent.item_id if fp.parent_id else None,
         ])
 
     col_widths = [30, 14, 14, 16, 14, 20]
@@ -2464,7 +2354,7 @@ def download_pricing_workbook(request, business_id):
 
     business = get_authorized_business(request, business_id)
     parents = ParentItemPrice.objects.filter(business=business).order_by("item_id")
-    skus = FinalPrice.objects.filter(business=business).order_by("sku_id")
+    skus = FinalPrice.objects.filter(business=business).select_related("parent").order_by("sku_id")
 
     header_fill = PatternFill("solid", fgColor="4F46E5")
     header_font = Font(bold=True, color="FFFFFF")
@@ -2490,7 +2380,10 @@ def download_pricing_workbook(request, business_id):
     ws_s = wb.create_sheet("SKUs")
     ws_s.append(["SKU ID", "Item Price", "Tax Percent", "Packaging Cost", "Final Price", "Parent ID"])
     for s in skus:
-        ws_s.append([s.sku_id, s.item_price, s.tax_percent, s.packaging_cost, s.final_price, s.parent_id])
+        # export the parent's item_id (not the surrogate id) so the file
+        # round-trips on import.
+        parent_item = s.parent.item_id if s.parent_id else None
+        ws_s.append([s.sku_id, s.item_price, s.tax_percent, s.packaging_cost, s.final_price, parent_item])
     for i, w in enumerate([30, 14, 14, 16, 14, 20], 1):
         ws_s.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
     style_header(ws_s)

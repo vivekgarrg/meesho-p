@@ -22,7 +22,6 @@ urlpatterns = [
     path("final-prices/unlinked/", views.unlinked_skus, name="unlinked_skus"),
     path("link-sku/", views.link_sku_to_parent, name="link_sku_to_parent"),
     path("link-sku/bulk/", views.bulk_link_skus_to_parent, name="bulk_link_skus_to_parent"),
-    path("parent-groups/import/", views.import_parent_groups, name="import_parent_groups"),
     path("parent-linking/", views.parent_linking_to_sku, name="parent_linking"),
     path("final-prices/", views.final_price_list, name="final_price_list"),
     path("final-prices/upload/", views.upload_final_price, name="upload_final_price"),

@@ -30,10 +30,18 @@ class CompensationRecoverySerializer(serializers.ModelSerializer):
         read_only_fields = ["business"]
         
 class FinalPriceSerializer(serializers.ModelSerializer):
+    # parent is now a surrogate-keyed FK; expose/consume it as the parent's
+    # item_id string so the API contract (and the frontend) is unchanged.
+    # Writes are resolved to the ParentItemPrice object in the view.
+    parent = serializers.SerializerMethodField()
+
     class Meta:
         model = FinalPrice
         fields = "__all__"
         read_only_fields = ["business"]
+
+    def get_parent(self, obj):
+        return obj.parent.item_id if obj.parent_id else None
         
 class ParentPriceHistorySerializer(serializers.ModelSerializer):
     class Meta:

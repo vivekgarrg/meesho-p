@@ -1,7 +1,9 @@
 from django.db import models
 
 class ParentItemPrice(models.Model):
-    item_id = models.CharField(max_length=200, unique=True, primary_key=True)
+    # item_id is unique per business (not globally) so the same parent id can
+    # exist in more than one business — see unique_together below.
+    item_id = models.CharField(max_length=200, db_index=True)
     item_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     tax_percent = models.IntegerField(null=True, blank=True)
     packaging_cost = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
@@ -13,13 +15,16 @@ class ParentItemPrice(models.Model):
     class Meta:
         db_table = "parent_item_price"
         ordering = ["item_id"]
+        unique_together = [("business", "item_id")]
     def __str__(self):
-        return self.item_id   
+        return self.item_id
 
 class FinalPrice(models.Model):
     """Purchase price per SKU — used to compute profit vs settlement amount."""
 
-    sku_id = models.CharField(max_length=200, unique=True, primary_key=True)
+    # sku_id is unique per business (not globally) so the same SKU can exist in
+    # more than one business — see unique_together below.
+    sku_id = models.CharField(max_length=200, db_index=True)
     item_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     tax_percent = models.IntegerField(null=True, blank=True)
     packaging_cost = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
@@ -37,6 +42,7 @@ class FinalPrice(models.Model):
     class Meta:
         db_table = "final_price"
         ordering = ["sku_id"]
+        unique_together = [("business", "sku_id")]
 
     def __str__(self):
         return self.sku_id
