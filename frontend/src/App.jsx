@@ -24,6 +24,7 @@ import TableData from "./Components/Table/TableData";
 import LoginPage from "./Components/Login/LoginPage";
 import BusinessProfilePage from "./Components/BusinessProfile/BusinessProfilePage";
 import BusinessSwitcher from "./Components/BusinessSwitcher";
+import { useBusiness } from "./contexts/BusinessContext";
 import ChangePasswordModal from "./Components/ChangePasswordModal";
 import AdminPanel from "./Components/Admin/AdminPanel";
 import { useAuth } from "./contexts/AuthContext";
@@ -683,6 +684,7 @@ function TopBar() {
 
 // ── Authenticated app shell ───────────────────────────────────────────────────
 function AppShell() {
+  const { activeBusinessId } = useBusiness();
   const [collapsed, setCollapsed] = useState(() =>
     localStorage.getItem("sidebar_collapsed") === "true"
   );
@@ -701,7 +703,10 @@ function AppShell() {
 
       <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
         <TopBar />
-        <div style={{ flex: 1, overflowY: "auto", padding: "28px 32px" }}>
+        {/* key by active business so switching businesses remounts the routed
+            view, forcing every tab (dashboard included) to refetch fresh data
+            against the newly-set business-scoped API base. */}
+        <div key={activeBusinessId ?? "none"} style={{ flex: 1, overflowY: "auto", padding: "28px 32px" }}>
           <Routes>
             <Route path="/" element={<OverviewTab />} />
             <Route path="/orders" element={<OrdersTab />} />
