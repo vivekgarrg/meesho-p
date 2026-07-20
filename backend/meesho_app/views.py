@@ -719,6 +719,154 @@ def unsettled_orders(request, business_id):
 
 
 @api_view(["GET"])
+def unscheduled_payments(request, business_id):
+    """Expected ("unscheduled") payments for shipped-but-not-yet-settled orders.
+
+    These are orders whose settlement hasn't landed yet (no OrderPayment row).
+    For each we estimate the *gross* payout from the order's own discounted
+    price and compare it against the SKU's landed cost (FinalPrice) to surface
+    a rough margin — so low-margin products can be spotted and stopped before
+    the money comes in. This is an estimate, not the final settlement (Meesho
+    deductions are not applied here).
+
+    Query params: month (YYYY-MM) or date_from/date_to, search, threshold
+    (per-unit margin below which a row/product is flagged; default 50),
+    page, page_size.
+    """
+    business = get_authorized_business(request, business_id)
+    date_from = request.GET.get("date_from", "")
+    date_to   = request.GET.get("date_to", "")
+    month     = request.GET.get("month", "")
+    search    = request.GET.get("search", "")
+    page      = int(request.GET.get("page", 1))
+    page_size = int(request.GET.get("page_size", 50))
+    try:
+        threshold = Decimal(str(request.GET.get("threshold", "50")))
+    except Exception:
+        threshold = Decimal("50")
+
+    if month:
+        # Convert YYYY-MM to an inclusive date range.
+        y, m = (int(x) for x in month.split("-"))
+        date_from = f"{y:04d}-{m:02d}-01"
+        date_to = f"{y + (m // 12):04d}-{(m % 12) + 1:02d}-01"  # first of next month (exclusive-ish)
+
+    order_qs = Order.objects.filter(business=business)
+    if date_from:
+        order_qs = order_qs.filter(order_date__gte=date_from)
+    if date_to:
+        order_qs = order_qs.filter(order_date__lt=date_to) if month else order_qs.filter(order_date__lte=date_to)
+    if search:
+        order_qs = order_qs.filter(
+            DQ(sub_order_no__icontains=search) |
+            DQ(sku__icontains=search) |
+            DQ(product_name__icontains=search)
+        )
+
+    settled_nos = set(OrderPayment.objects.filter(business=business).values_list("sub_order_no", flat=True).distinct())
+    unsettled_qs = (
+        Order.latest_per_order(base_qs=order_qs)
+        .exclude(sub_order_no__in=settled_nos)
+        .exclude(reason_for_credit_entry__iexact="cancelled")
+        .order_by("-order_date")
+    )
+
+    # SKU -> per-unit landed cost (final_price already bakes in item price,
+    # tax and packaging; fall back to item_price when final_price is unset).
+    cost_by_sku = {}
+    for fp in FinalPrice.objects.filter(business=business).only("sku_id", "final_price", "item_price"):
+        cost_by_sku[fp.sku_id] = fp.final_price if fp.final_price is not None else fp.item_price
+
+    def estimate(order):
+        qty = order.quantity or 1
+        expected = (order.supplier_discounted_price or order.supplier_listed_price or Decimal("0")) * qty
+        unit_cost = cost_by_sku.get(order.sku)
+        has_cost = unit_cost is not None
+        cost = (unit_cost or Decimal("0")) * qty
+        margin = expected - cost if has_cost else None
+        margin_pu = (margin / qty) if (has_cost and qty) else None
+        return expected, unit_cost, cost, margin, margin_pu, has_cost
+
+    # ── Per-product aggregation across the WHOLE unsettled set ──
+    agg = {}
+    for o in unsettled_qs.only("sku", "product_name", "quantity",
+                               "supplier_discounted_price", "supplier_listed_price").iterator():
+        expected, unit_cost, cost, margin, margin_pu, has_cost = estimate(o)
+        key = o.sku or "—"
+        a = agg.setdefault(key, {
+            "sku": key, "product_name": o.product_name or "",
+            "order_count": 0, "total_quantity": 0,
+            "total_expected": Decimal("0"), "total_cost": Decimal("0"),
+            "total_margin": Decimal("0"), "has_cost": has_cost,
+        })
+        a["order_count"] += 1
+        a["total_quantity"] += (o.quantity or 1)
+        a["total_expected"] += expected
+        if has_cost:
+            a["total_cost"] += cost
+            a["total_margin"] += margin
+            a["has_cost"] = True
+
+    by_product = []
+    for a in agg.values():
+        qty = a["total_quantity"] or 1
+        avg_pu = (a["total_margin"] / qty) if a["has_cost"] else None
+        by_product.append({
+            "sku": a["sku"],
+            "product_name": a["product_name"],
+            "order_count": a["order_count"],
+            "total_quantity": a["total_quantity"],
+            "total_expected": float(a["total_expected"]),
+            "total_cost": float(a["total_cost"]) if a["has_cost"] else None,
+            "total_margin": float(a["total_margin"]) if a["has_cost"] else None,
+            "avg_margin_per_unit": float(avg_pu) if avg_pu is not None else None,
+            "has_cost": a["has_cost"],
+            "is_low_margin": bool(a["has_cost"] and avg_pu is not None and avg_pu < threshold),
+        })
+    # Low-margin (and priced) products first, worst margin at the top.
+    by_product.sort(key=lambda p: (p["avg_margin_per_unit"] is None, p["avg_margin_per_unit"] if p["avg_margin_per_unit"] is not None else 0))
+
+    total = unsettled_qs.count()
+    total_expected = sum((p["total_expected"] for p in by_product), 0.0)
+    at_risk_margin = sum((p["total_margin"] for p in by_product if p["is_low_margin"] and p["total_margin"] is not None), 0.0)
+    low_product_count = sum(1 for p in by_product if p["is_low_margin"])
+
+    # ── Page of order rows ──
+    start = (page - 1) * page_size
+    results = []
+    for o in unsettled_qs[start: start + page_size]:
+        expected, unit_cost, cost, margin, margin_pu, has_cost = estimate(o)
+        results.append({
+            "sub_order_no": o.sub_order_no,
+            "order_date": o.order_date.strftime("%Y-%m-%d") if o.order_date else None,
+            "sku": o.sku,
+            "product_name": o.product_name,
+            "size": o.size,
+            "quantity": o.quantity,
+            "status": o.reason_for_credit_entry or "SHIPPED",
+            "expected_payout": float(expected),
+            "unit_cost": float(unit_cost) if has_cost else None,
+            "cost": float(cost) if has_cost else None,
+            "est_margin": float(margin) if has_cost else None,
+            "est_margin_per_unit": float(margin_pu) if margin_pu is not None else None,
+            "has_cost": has_cost,
+            "is_low_margin": bool(has_cost and margin_pu is not None and margin_pu < threshold),
+        })
+
+    return Response({
+        "total": total,
+        "total_expected": total_expected,
+        "at_risk_margin": at_risk_margin,
+        "low_product_count": low_product_count,
+        "threshold": float(threshold),
+        "page": page,
+        "page_size": page_size,
+        "results": results,
+        "by_product": by_product,
+    })
+
+
+@api_view(["GET"])
 def payment_mismatch(request, business_id):
     """
     Bi-directional mismatch:

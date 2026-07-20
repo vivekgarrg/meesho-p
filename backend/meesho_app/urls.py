@@ -9,6 +9,7 @@ urlpatterns = [
     path("orders/grouped/",          views.orders_grouped,         name="orders_grouped"),
     path("orders/status-breakdown/", views.order_status_breakdown, name="order_status_breakdown"),
     path("orders/unsettled/",       views.unsettled_orders,    name="unsettled_orders"),
+    path("orders/unscheduled/",     views.unscheduled_payments, name="unscheduled_payments"),
     path("orders/payment-mismatch/", views.payment_mismatch,     name="payment_mismatch"),
     path("orders/return-claims/",    views.return_claims_detail, name="return_claims_detail"),
     path("orders/claimed/",          views.claimed_orders,        name="claimed_orders"),

@@ -7,6 +7,7 @@ import { OverviewTab } from "./Components/Tabs/OverviewTab";
 import { UnsettledOrdersTab } from "./Components/Tabs/UnsettledOrdersTab";
 import { OrdersTab } from "./Components/Tabs/OrdersTab";
 import { PaymentsTab } from "./Components/Tabs/PaymentsTab";
+import { UnscheduledPaymentTab } from "./Components/Tabs/UnscheduledPaymentTab";
 import { PricingTab } from "./Components/Tabs/PricingTab";
 import { UploadTab } from "./Components/Tabs/UploadTab";
 import { SKUAnalysisTab } from "./Components/Tabs/SKUProfitTab";
@@ -391,6 +392,7 @@ const NAV_GROUPS = [
     items: [
       { path: "/orders", label: "Orders", icon: "⊡" },
       { path: "/payments", label: "Payments", icon: "◎" },
+      { path: "/unscheduled", label: "Unscheduled Pay", icon: "◷" },
       { path: "/unsettled", label: "Unsettled", icon: "⚡" },
       { path: "/mismatch", label: "Pay Mismatch", icon: "⊝" },
       { path: "/labels", label: "Labels", icon: "⊟" },
@@ -712,6 +714,7 @@ function AppShell() {
             <Route path="/orders" element={<OrdersTab />} />
             <Route path="/unsettled" element={<UnsettledOrdersTab />} />
             <Route path="/payments" element={<PaymentsTab />} />
+            <Route path="/unscheduled" element={<UnscheduledPaymentTab />} />
             <Route path="/mismatch" element={<MismatchTab />} />
             <Route path="/sku-analysis" element={<SKUAnalysisTab />} />
             <Route path="/pricing" element={<PricingTab />} />
