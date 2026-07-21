@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 from decimal import Decimal, InvalidOperation
 from django.db import transaction, IntegrityError
-from django.db.models import Sum, Count, Min, Max, ExpressionWrapper, F, DecimalField as DjDecimalField, Q as DQ
+from django.db.models import Sum, Count, Min, Max, ExpressionWrapper, F, DecimalField as DjDecimalField, Q as DQ, Prefetch
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.decorators import api_view, parser_classes
@@ -3929,8 +3929,20 @@ def _log_inventory(business, entity_type, entity_id, action, description,
 
 # ── Purchases & Inventory ─────────────────────────────────────────────────────
 
+def _purchase_bills_qs(business):
+    """Bills with items and each item's parent preloaded (avoids N+1 when
+    resolving the parent's item_id name for display)."""
+    return PurchaseBill.objects.filter(business=business).prefetch_related(
+        Prefetch("items", queryset=PurchaseItem.objects.select_related("parent_sku"))
+    )
+
+
 def _bill_to_dict(bill):
-    """Serialize a PurchaseBill (with pre-fetched items) to a plain dict."""
+    """Serialize a PurchaseBill (with pre-fetched items) to a plain dict.
+
+    parent_sku_id is exposed as the parent's item_id string (the human name),
+    not the surrogate FK id, so the UI shows/round-trips the SKU name.
+    """
     total = Decimal("0")
     items = []
     for item in bill.items.all():
@@ -3938,7 +3950,7 @@ def _bill_to_dict(bill):
         total += item_total
         items.append({
             "id":                  item.id,
-            "parent_sku_id":       item.parent_sku_id,
+            "parent_sku_id":       item.parent_sku.item_id if item.parent_sku_id else None,
             "product_description": item.product_description,
             "quantity":            item.quantity,
             "price_per_unit":      str(item.price_per_unit),
@@ -3961,7 +3973,7 @@ def _bill_to_dict(bill):
 def purchases_list(request, business_id):
     business = get_authorized_business(request, business_id)
     if request.method == "GET":
-        qs = PurchaseBill.objects.filter(business=business).prefetch_related("items").order_by("-date", "-created_at")
+        qs = _purchase_bills_qs(business).order_by("-date", "-created_at")
         date_from = request.GET.get("date_from")
         date_to   = request.GET.get("date_to")
         seller    = request.GET.get("seller", "").strip()
@@ -3985,27 +3997,30 @@ def purchases_list(request, business_id):
             notes=data.get("notes", ""),
         )
         for it in data.get("items", []):
+            # parent_sku arrives as the parent's item_id string; resolve it to
+            # the business-scoped ParentItemPrice object (None if unlinked/new).
             PurchaseItem.objects.create(
                 business=business,
                 bill=bill,
-                parent_sku_id=it.get("parent_sku_id") or None,
+                parent_sku=_resolve_parent(it.get("parent_sku_id"), business),
                 product_description=it.get("product_description", ""),
                 quantity=int(it["quantity"]),
                 price_per_unit=Decimal(str(it["price_per_unit"])),
                 is_exchange=bool(it.get("is_exchange", False)),
             )
     bill.refresh_from_db()
-    for it in bill.items.all():
+    for it in bill.items.select_related("parent_sku").all():
         if it.parent_sku_id:
+            parent_name = it.parent_sku.item_id
             _log_inventory(
                 business,
                 "PURCHASE", it.id, "CREATE",
-                f"Added {it.quantity} units of {it.parent_sku_id} from {bill.seller_name}",
-                parent_sku_id=it.parent_sku_id,
+                f"Added {it.quantity} units of {parent_name} from {bill.seller_name}",
+                parent_sku_id=parent_name,
                 quantity_change=it.quantity,
                 metadata={"bill_id": bill.id, "price_per_unit": str(it.price_per_unit), "is_exchange": it.is_exchange},
             )
-    return Response(_bill_to_dict(PurchaseBill.objects.prefetch_related("items").get(pk=bill.pk, business=business)), status=201)
+    return Response(_bill_to_dict(_purchase_bills_qs(business).get(pk=bill.pk)), status=201)
 
 
 @api_view(["GET", "PUT", "DELETE"])
@@ -4033,13 +4048,13 @@ def purchase_detail(request, business_id, bill_id):
                 PurchaseItem.objects.create(
                     business=business,
                     bill=bill,
-                    parent_sku_id=it.get("parent_sku_id") or None,
+                    parent_sku=_resolve_parent(it.get("parent_sku_id"), business),
                     product_description=it.get("product_description", ""),
                     quantity=int(it["quantity"]),
                     price_per_unit=Decimal(str(it["price_per_unit"])),
                     is_exchange=bool(it.get("is_exchange", False)),
                 )
-        bill = PurchaseBill.objects.prefetch_related("items").get(pk=bill_id, business=business)
+        bill = _purchase_bills_qs(business).get(pk=bill_id)
         return Response(_bill_to_dict(bill))
 
     # DELETE
@@ -4137,11 +4152,11 @@ def purchase_pdf(request, business_id, bill_id):
     ]
     rows = [hdr]
     grand_total = Decimal("0")
-    for item in bill.items.all():
+    for item in bill.items.select_related("parent_sku").all():
         line_total = item.quantity * item.price_per_unit if not item.is_exchange else Decimal("0")
         grand_total += line_total
         rows.append([
-            Paragraph(item.parent_sku_id or "—", value_style),
+            Paragraph((item.parent_sku.item_id if item.parent_sku_id else None) or "—", value_style),
             Paragraph(item.product_description or "—", value_style),
             Paragraph(str(item.quantity), value_style),
             Paragraph(f"₹{item.price_per_unit}", value_style),
@@ -4228,6 +4243,12 @@ def inventory_view(request, business_id):
     if not all_parent_ids:
         return Response({"results": [], "total": 0})
 
+    # Map surrogate parent id -> human item_id (name) for display.
+    parent_name = dict(
+        ParentItemPrice.objects.filter(business=business, id__in=all_parent_ids)
+        .values_list("id", "item_id")
+    )
+
     # 3. Map child SKU → parent SKU
     sku_to_parent = dict(
         FinalPrice.objects
@@ -4281,7 +4302,7 @@ def inventory_view(request, business_id):
         rto       = rto_by_parent.get(parent_id, 0)
         net_adj   = adj_by_parent.get(parent_id, 0)
         results.append({
-            "sku_id":          parent_id,
+            "sku_id":          parent_name.get(parent_id, str(parent_id)),
             "purchased_qty":   purchased,
             "sold_qty":        sold,
             "rto_qty":         rto,
@@ -4304,7 +4325,7 @@ def inventory_adjustment_list(request, business_id):
     if request.method == "GET":
         if not parent_sku_id:
             return Response({"error": "parent_sku required"}, status=400)
-        adjs = InventoryAdjustment.objects.filter(business=business, parent_sku_id=parent_sku_id).order_by("-date", "-created_at")
+        adjs = InventoryAdjustment.objects.filter(business=business, parent_sku__item_id=parent_sku_id).order_by("-date", "-created_at")
         results = [{
             "id":         a.id,
             "quantity":   a.quantity,
@@ -4328,7 +4349,7 @@ def inventory_adjustment_list(request, business_id):
     if qty == 0:
         return Response({"error": "quantity cannot be zero"}, status=400)
 
-    parent = ParentItemPrice.objects.filter(pk=parent_sku_id, business=business).first()
+    parent = ParentItemPrice.objects.filter(item_id=parent_sku_id, business=business).first()
     if not parent:
         return Response({"error": f"Parent SKU '{parent_sku_id}' not found"}, status=404)
 
@@ -4368,6 +4389,8 @@ def inventory_adjustment_detail(request, business_id, adj_id):
     except InventoryAdjustment.DoesNotExist:
         return Response({"error": "Not found"}, status=404)
 
+    apname = adj.parent_sku.item_id if adj.parent_sku_id else ""
+
     if request.method == "PUT":
         data = request.data
         try:
@@ -4385,8 +4408,8 @@ def inventory_adjustment_detail(request, business_id, adj_id):
         _log_inventory(
             business,
             "ADJUSTMENT", adj.id, "UPDATE",
-            f"Updated adjustment for {adj.parent_sku_id}: qty→{adj.quantity} reason={adj.reason}",
-            parent_sku_id=adj.parent_sku_id,
+            f"Updated adjustment for {apname}: qty→{adj.quantity} reason={adj.reason}",
+            parent_sku_id=apname,
             quantity_change=adj.quantity,
         )
         return Response({
@@ -4403,8 +4426,8 @@ def inventory_adjustment_detail(request, business_id, adj_id):
     _log_inventory(
         business,
         "ADJUSTMENT", adj.id, "DELETE",
-        f"Deleted adjustment: {adj.parent_sku_id} {adj.quantity} ({adj.reason})",
-        parent_sku_id=adj.parent_sku_id,
+        f"Deleted adjustment: {apname} {adj.quantity} ({adj.reason})",
+        parent_sku_id=apname,
         quantity_change=-adj.quantity,
     )
     adj.delete()
@@ -4419,7 +4442,7 @@ def inventory_create_sku(request, business_id):
     sku_id = (data.get("sku_id") or "").strip()
     if not sku_id:
         return Response({"error": "sku_id is required"}, status=400)
-    if ParentItemPrice.objects.filter(pk=sku_id, business=business).exists():
+    if ParentItemPrice.objects.filter(item_id=sku_id, business=business).exists():
         return Response({"error": f"Parent SKU '{sku_id}' already exists"}, status=409)
 
     with transaction.atomic():
@@ -4467,7 +4490,7 @@ def purchase_sku_items(request, business_id):
         return Response({"error": "parent_sku required"}, status=400)
     items = (
         PurchaseItem.objects
-        .filter(business=business, parent_sku_id=parent_sku)
+        .filter(business=business, parent_sku__item_id=parent_sku)
         .select_related("bill")
         .order_by("-bill__date", "-bill__id")
     )
@@ -4496,6 +4519,8 @@ def purchase_item_detail(request, business_id, item_id):
     except PurchaseItem.DoesNotExist:
         return Response({"error": "Not found"}, status=404)
 
+    pname = item.parent_sku.item_id if item.parent_sku_id else ""
+
     if request.method == "PUT":
         data = request.data
         item.product_description = data.get("product_description", item.product_description)
@@ -4506,8 +4531,8 @@ def purchase_item_detail(request, business_id, item_id):
         _log_inventory(
             business,
             "PURCHASE", item.id, "UPDATE",
-            f"Updated purchase item: {item.parent_sku_id} qty→{item.quantity} price→{item.price_per_unit}",
-            parent_sku_id=item.parent_sku_id or "",
+            f"Updated purchase item: {pname} qty→{item.quantity} price→{item.price_per_unit}",
+            parent_sku_id=pname,
             quantity_change=item.quantity,
         )
         return Response({
@@ -4523,8 +4548,8 @@ def purchase_item_detail(request, business_id, item_id):
     _log_inventory(
         business,
         "PURCHASE", item.id, "DELETE",
-        f"Deleted purchase item: {item.parent_sku_id} ×{item.quantity}",
-        parent_sku_id=item.parent_sku_id or "",
+        f"Deleted purchase item: {pname} ×{item.quantity}",
+        parent_sku_id=pname,
         quantity_change=-item.quantity,
     )
     item.delete()
@@ -4545,7 +4570,7 @@ def purchase_sku_monthly(request, business_id):
     from django.db.models import ExpressionWrapper as EW, F as Fld, DecimalField as DField
     rows = (
         PurchaseItem.objects
-        .filter(business=business, parent_sku_id=parent_sku, is_exchange=False)
+        .filter(business=business, parent_sku__item_id=parent_sku, is_exchange=False)
         .annotate(month=TruncMonth("bill__date"))
         .values("month")
         .annotate(
@@ -4831,6 +4856,7 @@ def inventory_charts(request, business_id):
     adj_agg = {r["parent_sku_id"]: r["net_adj"] for r in InventoryAdjustment.objects.filter(business=business).values("parent_sku_id").annotate(net_adj=Sum("quantity"))}
 
     all_parents = set(purchased_by_parent.keys()) | set(adj_agg.keys())
+    parent_name = dict(ParentItemPrice.objects.filter(business=business, id__in=all_parents).values_list("id", "item_id"))
     sku_to_parent = dict(FinalPrice.objects.filter(business=business, parent_id__in=all_parents).values_list("sku_id", "parent_id"))
     child_skus = list(sku_to_parent.keys())
 
@@ -4851,7 +4877,7 @@ def inventory_charts(request, business_id):
         pdata   = purchased_by_parent.get(parent_id, {"qty": 0, "value": 0})
         current = pdata["qty"] - sold_by_parent.get(parent_id, 0) + rto_by_parent.get(parent_id, 0) + adj_agg.get(parent_id, 0)
         status  = "out" if current <= 0 else "low" if current <= 3 else "instock"
-        stock_by_sku.append({"sku_id": parent_id, "current_stock": current, "purchase_value": pdata["value"], "status": status})
+        stock_by_sku.append({"sku_id": parent_name.get(parent_id, str(parent_id)), "current_stock": current, "purchase_value": pdata["value"], "status": status})
     stock_by_sku.sort(key=lambda x: -x["current_stock"])
 
     stock_status = {
