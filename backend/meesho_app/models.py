@@ -634,3 +634,73 @@ class MeeshoPriceUpdate(models.Model):
 
     def __str__(self):
         return f"PriceUpdate {self.inventory.style_id}: MSP={self.new_msp}"
+
+class ExpenseInvoice(models.Model):
+    """A business expense invoice — packaging material and other running costs.
+
+    Line-item based (see ExpenseInvoiceItem); the total is computed from items.
+    """
+    invoice_no = models.CharField(max_length=100, blank=True)
+    vendor     = models.CharField(max_length=255, blank=True)
+    title      = models.CharField(max_length=255, blank=True)
+    date       = models.DateField()
+    notes      = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    business = models.ForeignKey(
+        "accounts.Business", on_delete=models.PROTECT,
+    )
+
+    class Meta:
+        db_table = "expense_invoices"
+        ordering = ["-date", "-created_at"]
+
+    def __str__(self):
+        return f"Expense {self.invoice_no or self.id} — {self.vendor} ({self.date})"
+
+
+class ExpenseInvoiceItem(models.Model):
+    """One line on an ExpenseInvoice. amount = quantity * unit_rate (computed)."""
+    CATEGORY_CHOICES = [
+        ("packaging", "Packaging Material"),
+        ("other", "Other Expense"),
+    ]
+    invoice     = models.ForeignKey(ExpenseInvoice, on_delete=models.CASCADE, related_name="items")
+    description = models.CharField(max_length=500)
+    category    = models.CharField(max_length=20, choices=CATEGORY_CHOICES, default="packaging")
+    quantity    = models.DecimalField(max_digits=12, decimal_places=2, default=1)
+    unit_rate   = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+
+    business = models.ForeignKey(
+        "accounts.Business", on_delete=models.PROTECT,
+    )
+
+    class Meta:
+        db_table = "expense_invoice_items"
+
+    @property
+    def amount(self):
+        return (self.quantity or 0) * (self.unit_rate or 0)
+
+    def __str__(self):
+        return f"{self.description} ({self.category})"
+
+
+class TransportCharge(models.Model):
+    """A daily transportation / logistics charge for the business."""
+    date       = models.DateField()
+    amount     = models.DecimalField(max_digits=12, decimal_places=2)
+    note       = models.CharField(max_length=255, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    business = models.ForeignKey(
+        "accounts.Business", on_delete=models.PROTECT,
+    )
+
+    class Meta:
+        db_table = "transport_charges"
+        ordering = ["-date", "-created_at"]
+
+    def __str__(self):
+        return f"Transport {self.date}: ₹{self.amount}"

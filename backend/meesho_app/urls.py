@@ -63,6 +63,12 @@ urlpatterns = [
     path("consumables/purchases/<int:purchase_id>/", views.consumable_purchase_detail, name="consumable_purchase_detail"),
     path("consumables/usages/",         views.consumable_usages_list,      name="consumable_usages_list"),
     path("consumables/usages/<int:usage_id>/", views.consumable_usage_detail, name="consumable_usage_detail"),
+    # Expenses: invoices (packaging / other) + daily transport charges
+    path("expenses/invoices/",              views.expense_invoices_list,  name="expense_invoices_list"),
+    path("expenses/invoices/<int:invoice_id>/", views.expense_invoice_detail, name="expense_invoice_detail"),
+    path("expenses/transport/",             views.transport_charges_list, name="transport_charges_list"),
+    path("expenses/transport/<int:charge_id>/", views.transport_charge_detail, name="transport_charge_detail"),
+    path("expenses/summary/",               views.expenses_summary,       name="expenses_summary"),
     # Product Photography AI
     path("product-photos/generate/", views.generate_product_images, name="generate_product_images"),
     # Meesho Inventory

@@ -17,7 +17,7 @@ from PIL import Image
 from .helpers.helper import status_wise_summary
 from .permissions import get_authorized_business
 
-from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, PurchaseBill, PurchaseItem, BlockedCustomer, InventoryAdjustment, ConsumableItem, ConsumablePurchase, ConsumableUsage, InventoryLog, MeeshoInventory, MeeshoPriceUpdate
+from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, PurchaseBill, PurchaseItem, BlockedCustomer, InventoryAdjustment, ConsumableItem, ConsumablePurchase, ConsumableUsage, InventoryLog, MeeshoInventory, MeeshoPriceUpdate, ExpenseInvoice, ExpenseInvoiceItem, TransportCharge
 from .serializers import (
     OrderPaymentSerializer, AdsCostSerializer,
     ReferralPaymentSerializer, CompensationRecoverySerializer,
@@ -5730,3 +5730,236 @@ def meesho_price_update_download(request, business_id):
     )
     resp["Content-Disposition"] = 'attachment; filename="meesho_price_update.xlsx"'
     return resp
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Expenses: packaging / other expense invoices + daily transport charges
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _month_range(month):
+    """'YYYY-MM' -> (first_of_month, first_of_next_month) as ISO strings, or (None, None)."""
+    if not month:
+        return None, None
+    y, m = (int(x) for x in month.split("-"))
+    start = f"{y:04d}-{m:02d}-01"
+    ny, nm = (y + 1, 1) if m == 12 else (y, m + 1)
+    end = f"{ny:04d}-{nm:02d}-01"
+    return start, end
+
+
+def _expense_invoice_to_dict(inv):
+    """Serialize an ExpenseInvoice (with prefetched items) + computed totals."""
+    _q = Decimal("0.01")
+    total = Decimal("0")
+    by_category = {}
+    items = []
+    for it in inv.items.all():
+        amt = ((it.quantity or Decimal("0")) * (it.unit_rate or Decimal("0"))).quantize(_q)
+        total += amt
+        by_category[it.category] = by_category.get(it.category, Decimal("0")) + amt
+        items.append({
+            "id": it.id,
+            "description": it.description,
+            "category": it.category,
+            "quantity": str(it.quantity),
+            "unit_rate": str(it.unit_rate),
+            "amount": str(amt),
+        })
+    return {
+        "id": inv.id,
+        "invoice_no": inv.invoice_no,
+        "vendor": inv.vendor,
+        "title": inv.title,
+        "date": str(inv.date),
+        "notes": inv.notes,
+        "items": items,
+        "total_amount": str(total),
+        "by_category": {k: str(v) for k, v in by_category.items()},
+        "created_at": inv.created_at.isoformat(),
+    }
+
+
+@api_view(["GET", "POST"])
+def expense_invoices_list(request, business_id):
+    business = get_authorized_business(request, business_id)
+
+    if request.method == "GET":
+        qs = ExpenseInvoice.objects.filter(business=business).prefetch_related("items")
+        month = request.GET.get("month", "")
+        search = request.GET.get("search", "").strip()
+        start, end = _month_range(month)
+        if start:
+            qs = qs.filter(date__gte=start, date__lt=end)
+        if request.GET.get("date_from"):
+            qs = qs.filter(date__gte=request.GET["date_from"])
+        if request.GET.get("date_to"):
+            qs = qs.filter(date__lte=request.GET["date_to"])
+        if search:
+            qs = qs.filter(
+                DQ(vendor__icontains=search) | DQ(title__icontains=search) |
+                DQ(invoice_no__icontains=search) | DQ(items__description__icontains=search)
+            ).distinct()
+        invoices = [_expense_invoice_to_dict(i) for i in qs.order_by("-date", "-created_at")]
+        grand_total = sum((Decimal(i["total_amount"]) for i in invoices), Decimal("0"))
+        cat_total = {}
+        for i in invoices:
+            for k, v in i["by_category"].items():
+                cat_total[k] = cat_total.get(k, Decimal("0")) + Decimal(v)
+        return Response({
+            "results": invoices,
+            "total": len(invoices),
+            "grand_total": str(grand_total),
+            "by_category": {k: str(v) for k, v in cat_total.items()},
+        })
+
+    # POST — create invoice with nested line items
+    data = request.data
+    with transaction.atomic():
+        inv = ExpenseInvoice.objects.create(
+            business=business,
+            invoice_no=data.get("invoice_no", ""),
+            vendor=data.get("vendor", ""),
+            title=data.get("title", ""),
+            date=data["date"],
+            notes=data.get("notes", ""),
+        )
+        for it in data.get("items", []):
+            if not (it.get("description") or "").strip():
+                continue
+            ExpenseInvoiceItem.objects.create(
+                business=business,
+                invoice=inv,
+                description=it.get("description", ""),
+                category=it.get("category", "packaging"),
+                quantity=Decimal(str(it.get("quantity") or 0)),
+                unit_rate=Decimal(str(it.get("unit_rate") or 0)),
+            )
+    inv = ExpenseInvoice.objects.prefetch_related("items").get(pk=inv.pk, business=business)
+    return Response(_expense_invoice_to_dict(inv), status=status.HTTP_201_CREATED)
+
+
+@api_view(["GET", "PUT", "DELETE"])
+def expense_invoice_detail(request, business_id, invoice_id):
+    business = get_authorized_business(request, business_id)
+    try:
+        inv = ExpenseInvoice.objects.prefetch_related("items").get(pk=invoice_id, business=business)
+    except ExpenseInvoice.DoesNotExist:
+        return Response({"error": "Not found"}, status=404)
+
+    if request.method == "GET":
+        return Response(_expense_invoice_to_dict(inv))
+
+    if request.method == "DELETE":
+        inv.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    # PUT — replace fields + items
+    data = request.data
+    with transaction.atomic():
+        inv.invoice_no = data.get("invoice_no", inv.invoice_no)
+        inv.vendor = data.get("vendor", inv.vendor)
+        inv.title = data.get("title", inv.title)
+        inv.date = data.get("date", inv.date)
+        inv.notes = data.get("notes", inv.notes)
+        inv.save()
+        inv.items.all().delete()
+        for it in data.get("items", []):
+            if not (it.get("description") or "").strip():
+                continue
+            ExpenseInvoiceItem.objects.create(
+                business=business,
+                invoice=inv,
+                description=it.get("description", ""),
+                category=it.get("category", "packaging"),
+                quantity=Decimal(str(it.get("quantity") or 0)),
+                unit_rate=Decimal(str(it.get("unit_rate") or 0)),
+            )
+    inv = ExpenseInvoice.objects.prefetch_related("items").get(pk=inv.pk, business=business)
+    return Response(_expense_invoice_to_dict(inv))
+
+
+@api_view(["GET", "POST"])
+def transport_charges_list(request, business_id):
+    business = get_authorized_business(request, business_id)
+
+    if request.method == "GET":
+        qs = TransportCharge.objects.filter(business=business)
+        month = request.GET.get("month", "")
+        start, end = _month_range(month)
+        if start:
+            qs = qs.filter(date__gte=start, date__lt=end)
+        if request.GET.get("date_from"):
+            qs = qs.filter(date__gte=request.GET["date_from"])
+        if request.GET.get("date_to"):
+            qs = qs.filter(date__lte=request.GET["date_to"])
+        rows = list(qs.order_by("-date", "-created_at"))
+        total = sum((r.amount for r in rows), Decimal("0"))
+        return Response({
+            "results": [
+                {"id": r.id, "date": str(r.date), "amount": str(r.amount), "note": r.note}
+                for r in rows
+            ],
+            "total": len(rows),
+            "total_amount": str(total),
+        })
+
+    # POST — add a daily transport charge
+    data = request.data
+    r = TransportCharge.objects.create(
+        business=business,
+        date=data["date"],
+        amount=Decimal(str(data.get("amount") or 0)),
+        note=data.get("note", ""),
+    )
+    return Response({"id": r.id, "date": str(r.date), "amount": str(r.amount), "note": r.note},
+                    status=status.HTTP_201_CREATED)
+
+
+@api_view(["PUT", "DELETE"])
+def transport_charge_detail(request, business_id, charge_id):
+    business = get_authorized_business(request, business_id)
+    try:
+        r = TransportCharge.objects.get(pk=charge_id, business=business)
+    except TransportCharge.DoesNotExist:
+        return Response({"error": "Not found"}, status=404)
+    if request.method == "DELETE":
+        r.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+    data = request.data
+    r.date = data.get("date", r.date)
+    if "amount" in data:
+        r.amount = Decimal(str(data.get("amount") or 0))
+    r.note = data.get("note", r.note)
+    r.save()
+    return Response({"id": r.id, "date": str(r.date), "amount": str(r.amount), "note": r.note})
+
+
+@api_view(["GET"])
+def expenses_summary(request, business_id):
+    """Combined expense totals (invoices + transport) for a period."""
+    business = get_authorized_business(request, business_id)
+    month = request.GET.get("month", "")
+    start, end = _month_range(month)
+
+    inv_items = ExpenseInvoiceItem.objects.filter(business=business)
+    transport = TransportCharge.objects.filter(business=business)
+    if start:
+        inv_items = inv_items.filter(invoice__date__gte=start, invoice__date__lt=end)
+        transport = transport.filter(date__gte=start, date__lt=end)
+
+    packaging = Decimal("0")
+    other = Decimal("0")
+    for it in inv_items.only("category", "quantity", "unit_rate"):
+        amt = ((it.quantity or Decimal("0")) * (it.unit_rate or Decimal("0"))).quantize(Decimal("0.01"))
+        if it.category == "packaging":
+            packaging += amt
+        else:
+            other += amt
+    transport_total = transport.aggregate(s=Sum("amount"))["s"] or Decimal("0")
+    grand = packaging + other + transport_total
+    return Response({
+        "packaging": str(packaging),
+        "other": str(other),
+        "transport": str(transport_total),
+        "grand_total": str(grand),
+    })

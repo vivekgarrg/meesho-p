@@ -8,6 +8,7 @@ import { UnsettledOrdersTab } from "./Components/Tabs/UnsettledOrdersTab";
 import { OrdersTab } from "./Components/Tabs/OrdersTab";
 import { PaymentsTab } from "./Components/Tabs/PaymentsTab";
 import { UnscheduledPaymentTab } from "./Components/Tabs/UnscheduledPaymentTab";
+import { ExpensesTab } from "./Components/Tabs/ExpensesTab";
 import { PricingTab } from "./Components/Tabs/PricingTab";
 import { UploadTab } from "./Components/Tabs/UploadTab";
 import { SKUAnalysisTab } from "./Components/Tabs/SKUProfitTab";
@@ -407,6 +408,7 @@ const NAV_GROUPS = [
       { path: "/meesho-inventory", label: "Meesho Stock", icon: "⊞" },
       { path: "/meesho-pricing", label: "Price Update", icon: "₹" },
       { path: "/purchases", label: "Purchases", icon: "⊗" },
+      { path: "/expenses", label: "Expenses", icon: "⊜" },
     ],
   },
   {
@@ -721,6 +723,7 @@ function AppShell() {
             <Route path="/upload" element={<UploadTab />} />
             <Route path="/labels" element={<LabelsTab />} />
             <Route path="/purchases" element={<PurchasesTab />} />
+            <Route path="/expenses" element={<ExpensesTab />} />
             <Route path="/inventory" element={<InventoryTab />} />
             <Route path="/meesho-inventory" element={<MeeshoInventoryTab />} />
             <Route path="/meesho-pricing" element={<MeeshoPricingTab />} />
