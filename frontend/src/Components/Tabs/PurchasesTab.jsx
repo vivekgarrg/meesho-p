@@ -140,14 +140,13 @@ function PurchaseFormDrawer({ open, initial, sellers, onClose, onSaved }) {
       PaperProps={{ sx: { width: { xs: "100%", sm: 620 } } }}>
       <Box sx={{ height: "100%", display: "flex", flexDirection: "column" }}>
         {/* Header */}
-        <Box sx={{ px: 3, py: 2.5, background: `linear-gradient(135deg, ${C.orange} 0%, #7C3AED 100%)`, color: "#fff" }}>
-          <Stack direction="row" justifyContent="space-between" alignItems="center">
-            <Box>
-              <Typography fontWeight={800} fontSize={19}>{initial?.id ? "Edit Purchase" : "New Purchase"}</Typography>
-              <Typography variant="caption" sx={{ opacity: 0.85 }}>Stock purchases auto-update inventory</Typography>
-            </Box>
-            <IconButton onClick={onClose} sx={{ color: "#fff" }}><CloseIcon /></IconButton>
-          </Stack>
+        <Box sx={{ position: "relative", px: 3, py: 2.5, pr: 7, background: `linear-gradient(135deg, ${C.orange} 0%, #7C3AED 100%)`, color: "#fff" }}>
+          <Typography fontWeight={800} fontSize={19}>{initial?.id ? "Edit Purchase" : "New Purchase"}</Typography>
+          <Typography variant="caption" sx={{ opacity: 0.85 }}>Stock purchases auto-update inventory</Typography>
+          <IconButton onClick={onClose} aria-label="Close"
+            sx={{ position: "absolute", top: 10, right: 10, color: "#fff", bgcolor: "rgba(255,255,255,0.18)", "&:hover": { bgcolor: "rgba(255,255,255,0.30)" } }}>
+            <CloseIcon />
+          </IconButton>
         </Box>
 
         {/* Body */}
