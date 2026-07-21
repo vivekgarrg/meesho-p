@@ -310,7 +310,7 @@ function ConfirmDelete({ open, onConfirm, onCancel }) {
 
 function Kpi({ label, value, sub, icon, color }) {
   return (
-    <Paper variant="outlined" sx={{ flex: "1 1 170px", borderRadius: 3, borderColor: "#E2E8F0", p: 2 }}>
+    <Paper variant="outlined" sx={{ borderRadius: 3, borderColor: "#E2E8F0", p: 2, minWidth: 0 }}>
       <Stack direction="row" justifyContent="space-between" alignItems="flex-start">
         <Typography variant="caption" fontWeight={700} color="text.secondary" textTransform="uppercase" letterSpacing={0.5} fontSize={10}>{label}</Typography>
         <Box sx={{ color, opacity: 0.7 }}>{icon}</Box>
@@ -372,24 +372,24 @@ export function PurchasesTab() {
       <ConfirmDelete open={!!deletingId} onConfirm={doDelete} onCancel={() => setDeletingId(null)} />
 
       {/* Header */}
-      <Stack direction="row" justifyContent="space-between" alignItems="center" mb={3} flexWrap="wrap" gap={2}>
-        <Box>
+      <Box sx={{ display: "flex", flexWrap: "wrap", gap: 2, alignItems: "center", justifyContent: "space-between", mb: 3 }}>
+        <Box sx={{ minWidth: 0 }}>
           <Typography variant="h5" fontWeight={800}>Purchases</Typography>
           <Typography variant="caption" color="text.secondary">Record stock buys fast · inventory auto-updates · PDF bills</Typography>
         </Box>
-        <Button variant="contained" size="large" startIcon={<AddIcon />} onClick={() => setDrawer({ open: true, initial: null })}
-          sx={{ bgcolor: C.orange, "&:hover": { bgcolor: "#5B21B6" }, fontWeight: 800, borderRadius: 2.5, textTransform: "none", px: 3, boxShadow: "0 6px 18px rgba(109,40,217,0.30)" }}>
+        <Button variant="contained" startIcon={<AddIcon />} onClick={() => setDrawer({ open: true, initial: null })}
+          sx={{ bgcolor: C.orange, "&:hover": { bgcolor: "#5B21B6" }, fontWeight: 700, borderRadius: 2, textTransform: "none", px: 2.5, py: 1, whiteSpace: "nowrap", flexShrink: 0 }}>
           New Purchase
         </Button>
-      </Stack>
+      </Box>
 
       {/* KPIs */}
-      <Stack direction="row" spacing={2} mb={3} flexWrap="wrap">
+      <Box sx={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 2, mb: 3 }}>
         <Kpi label="Total Spend" value={money(totalSpend).replace(/\.00$/, "")} sub={`${total} bill${total !== 1 ? "s" : ""}`} icon={<PaymentsIcon />} color={C.orange} />
         <Kpi label="Units Purchased" value={totalQty.toLocaleString("en-IN")} sub="excl. exchanges" icon={<InventoryIcon />} color={C.blue} />
         <Kpi label="Vendors" value={sellers.length} sub="unique sellers" icon={<StorefrontIcon />} color={C.green} />
         <Kpi label="Bills" value={total} sub={hasFilters ? "filtered" : "all time"} icon={<ReceiptLongIcon />} color={C.amber} />
-      </Stack>
+      </Box>
 
       {/* Filter + list */}
       <Paper variant="outlined" sx={{ borderRadius: 3, borderColor: "#E2E8F0", overflow: "hidden" }}>
