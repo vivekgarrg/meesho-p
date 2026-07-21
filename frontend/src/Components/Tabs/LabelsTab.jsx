@@ -471,7 +471,7 @@ function DuplicateAddressDrawer({ entry, onClose }) {
             <Table size="small" sx={{ width: "100%", borderCollapse: "collapse" }}>
               <TableHead>
                 <TableRow>
-                  {["#", "Upload Date", "Order ID", "Customer Name", "City", "State", "Pincode", "Courier", "AWB", "Payment", "SKU", "Qty", "Packed"].map(h => (
+                  {["#", "Upload Date", "Order ID", "Customer Name", "City", "State", "Pincode", "Courier", "AWB", "Payment", "Product", "Qty", "Packed"].map(h => (
                     <TableCell key={h} sx={{ fontSize: 11, fontWeight: 700, color: C.gray500, textTransform: "uppercase", letterSpacing: "0.06em", background: C.gray50, whiteSpace: "nowrap", borderBottom: `1px solid ${C.border}` }}>{h}</TableCell>
                   ))}
                 </TableRow>
@@ -505,8 +505,8 @@ function DuplicateAddressDrawer({ entry, onClose }) {
                           : <span style={{ color: C.gray300 }}>—</span>}
                       </TableCell>
                       <TableCell sx={{ py: "8px", px: "12px" }}>
-                        {o.sku
-                          ? <span style={{ fontFamily: "monospace", fontSize: 10, color: C.orange, fontWeight: 700, background: C.orangeLight, padding: "2px 6px", borderRadius: 4 }}>{o.sku}</span>
+                        {(o.parent_sku || o.sku)
+                          ? <span style={{ fontFamily: "monospace", fontSize: 10, color: C.orange, fontWeight: 700, background: C.orangeLight, padding: "2px 6px", borderRadius: 4 }}>{o.parent_sku || o.sku}</span>
                           : <span style={{ color: C.gray300 }}>—</span>}
                       </TableCell>
                       <TableCell sx={{ textAlign: "center", fontFamily: "monospace", py: "8px", px: "12px" }}>{o.qty || 1}</TableCell>
@@ -866,7 +866,7 @@ function OrdersByPartnerTab({ availDates, activeRange, onRangeChange, onViewHist
                       <Table size="small" sx={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
                         <TableHead>
                           <TableRow sx={{ background: C.gray50 }}>
-                            {["Order ID", "Customer", "City / State", "AWB", "Payment", "SKU", "Qty", "Date", "Packed"].map(h => (
+                            {["Order ID", "Customer", "City / State", "AWB", "Payment", "Product", "Qty", "Date", "Packed"].map(h => (
                               <TableCell key={h} sx={{ fontSize: 10, fontWeight: 700, color: C.gray500, textTransform: "uppercase", letterSpacing: "0.06em", background: C.gray50, whiteSpace: "nowrap", borderBottom: `1px solid ${C.border}` }}>{h}</TableCell>
                             ))}
                           </TableRow>
@@ -894,7 +894,7 @@ function OrdersByPartnerTab({ availDates, activeRange, onRangeChange, onViewHist
                                   ? <CTag bg="#F0FDF4" fg="#16A34A" border="#BBF7D0">PP</CTag>
                                   : <span style={{ color: C.gray300 }}>—</span>}
                               </TableCell>
-                              <TableCell sx={{ fontFamily: "monospace", fontSize: 10, color: C.orange, fontWeight: 700, py: "8px", px: "12px" }}>{o.sku || "—"}</TableCell>
+                              <TableCell sx={{ fontFamily: "monospace", fontSize: 10, color: C.orange, fontWeight: 700, py: "8px", px: "12px" }}>{o.parent_sku || o.sku || "—"}</TableCell>
                               <TableCell sx={{ textAlign: "center", fontFamily: "monospace", py: "8px", px: "12px" }}>{o.qty || 1}</TableCell>
                               <TableCell sx={{ color: C.gray400, fontSize: 11, whiteSpace: "nowrap", py: "8px", px: "12px" }}>{o.uploaded_date || "—"}</TableCell>
                               <TableCell
@@ -1839,11 +1839,11 @@ export function LabelsTab() {
                       {uploadResult.page_details.map(d => (
                         <Box key={d.page} sx={{ display: "flex", alignItems: "center", gap: "12px", p: "8px 14px", borderBottom: `1px solid ${C.gray100}` }}>
                           <Typography sx={{ fontSize: 11, color: C.gray400, fontFamily: "monospace", minWidth: 48 }}>pg {d.page}</Typography>
-                          {d.sku
-                            ? <Chip label={d.sku} size="small" sx={{ background: C.orangeLight, color: C.orange, border: `1px solid ${C.orangeBorder}`, fontWeight: 600, fontSize: 11, fontFamily: "monospace", "& .MuiChip-label": { px: "8px" } }} />
+                          {(d.parent_sku || d.sku)
+                            ? <Chip label={d.parent_sku || d.sku} size="small" sx={{ background: d.parent_sku ? "#EDE9FE" : C.orangeLight, color: d.parent_sku ? "#7C3AED" : C.orange, border: `1px solid ${d.parent_sku ? "#DDD6FE" : C.orangeBorder}`, fontWeight: 700, fontSize: 11, fontFamily: "monospace", "& .MuiChip-label": { px: "8px" } }} />
                             : <Typography sx={{ fontSize: 12, color: C.gray400 }}>No SKU</Typography>}
-                          {d.parent_sku && d.parent_sku !== d.sku && (
-                            <Chip label={`↳ ${d.parent_sku}`} size="small" sx={{ background: "#F5F3FF", color: "#7C3AED", border: "1px solid #DDD6FE", fontWeight: 600, fontSize: 11, fontFamily: "monospace", "& .MuiChip-label": { px: "8px" } }} />
+                          {d.parent_sku && d.sku && d.parent_sku !== d.sku && (
+                            <Typography sx={{ fontSize: 10, color: C.gray400, fontFamily: "monospace" }}>variant: {d.sku}</Typography>
                           )}
                           {d.qty > 1 && (
                             <Chip label={`Qty: ${d.qty}`} size="small" sx={{ background: C.amberLight, color: C.amber, border: "1px solid #FDE68A", fontWeight: 700, fontSize: 11, "& .MuiChip-label": { px: "8px" } }} />

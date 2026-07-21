@@ -3337,11 +3337,13 @@ def upload_labels_pdf(request, business_id):
                 LabelOrder.objects.filter(order_id=oid, business=business).update(**row)
                 updated += 1
 
-    # ── Resolve parent SKU for each child SKU ────────────────────────────────────
+    # ── Resolve parent NAME (ParentItemPrice.item_id) for each child SKU ─────────
+    # Use the human parent name (not the surrogate parent_id) so the upload
+    # preview/analytics group and label by parent instead of the variant SKU.
     _fp_qs = FinalPrice.objects.filter(
         business=business, sku_id__in=list(sku_data.keys())
-    ).values("sku_id", "parent_id")
-    sku_to_parent = {row["sku_id"]: row["parent_id"] for row in _fp_qs}
+    ).select_related("parent").values("sku_id", "parent__item_id")
+    sku_to_parent = {row["sku_id"]: row["parent__item_id"] for row in _fp_qs}
 
     # Enrich page_details with parent SKU
     for _pd in page_details:
@@ -3634,8 +3636,20 @@ def label_orders_list(request, business_id):
     )
 
     serialized = LabelOrderSerializer(items, many=True).data
+
+    # Resolve each label's SKU to its parent name (ParentItemPrice.item_id) so
+    # the UI can show the parent instead of the variant-level SKU. Bulk map to
+    # avoid N+1; falls back to None when the SKU isn't linked to a parent.
+    skus = {row.get("sku") for row in serialized if row.get("sku")}
+    sku_to_parent = dict(
+        FinalPrice.objects.filter(business=business, sku_id__in=skus)
+        .select_related("parent")
+        .values_list("sku_id", "parent__item_id")
+    ) if skus else {}
+
     for row in serialized:
         row["is_blocked"] = (row.get("customer_name", ""), row.get("customer_pincode", "")) in blocked_set
+        row["parent_sku"] = sku_to_parent.get(row.get("sku")) or None
 
     return Response({
         "total":     total,
