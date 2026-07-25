@@ -26,6 +26,7 @@ import { UnsettledOrdersTab } from "./UnsettledOrdersTab";
 import { PAGE_SIZE } from "../../lib/helper";
 import { colors } from "@mui/material";
 import SkuWiseChart from "../Charts/SkuWiseChart";
+import { useDateFilter } from "../../contexts/DateFilterContext";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const STATUS = {
@@ -42,15 +43,6 @@ function fmtDate(v) {
   if (!v) return "—";
   const [y, m, d] = v.split("-");
   return `${d}/${m}/${y?.slice(2)}`;
-}
-function fmtMonthShort(ym) {
-  const [y, m] = ym.split("-").map(Number);
-  return new Date(y, m - 1, 1)?.toLocaleString("en-IN", { month: "short", year: "2-digit" });
-}
-function monthToRange(ym) {
-  const [y, m] = ym.split("-").map(Number);
-  const last = new Date(y, m, 0).getDate();
-  return { date_from: `${ym}-01`, date_to: `${ym}-${String(last).padStart(2, "0")}` };
 }
 
 // ── DataGrid columns ──────────────────────────────────────────────────────────
@@ -125,22 +117,18 @@ const COLUMNS = [
 export function OrdersTab() {
   const [searchParams, setSearchParams] = useSearchParams();
   const view = searchParams.get("view") || "all";
+  const { range: dateRange, label: periodLabel } = useDateFilter();
 
   const setView = v => {
     setSearchParams(prev => {
       const next = new URLSearchParams(prev);
-      if (v === "all") { next.delete("view"); next.delete("month"); }
+      if (v === "all") next.delete("view");
       else next.set("view", v);
       return next;
     }, { replace: true });
   };
 
   // ── State ────────────────────────────────────────────────────────────────────
-  const [selMonth, setSelMonth] = useState(() => {
-    const n = new Date();
-    n.setMonth(n.getMonth() - 1);
-    return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}`;
-  });
   const [statusFilter, setStatusFilter] = useState("");
   const [stateFilter, setStateFilter] = useState("");
   const [search, setSearch] = useState("");
@@ -149,10 +137,8 @@ export function OrdersTab() {
   const [rows, setRows] = useState([]);
   const [total, setTotal] = useState(0);
   const [analytics, setAnalytics] = useState(null);
-  const [months, setMonths] = useState([]);
   const [listLoading, setListLoading] = useState(true);
 
-  const dateRange = selMonth ? monthToRange(selMonth) : {};
   const resetPage = () => setPage(1);
 
   // Debounce search
@@ -172,8 +158,7 @@ export function OrdersTab() {
     if (!r.ok) return;
     const d = await r.json();
     setAnalytics(d);
-    if (d.months?.length) setMonths([...d.months].sort((a, b) => b.localeCompare(a))); // descending
-  }, [selMonth, statusFilter]); // eslint-disable-line
+  }, [JSON.stringify(dateRange), statusFilter]); // eslint-disable-line
 
   const loadList = useCallback(async () => {
     setListLoading(true);
@@ -188,10 +173,11 @@ export function OrdersTab() {
     const r = await fetch(`${API}/full-orders/?${p}`);
     if (r.ok) { const d = await r.json(); setRows(d.results); setTotal(d.total); }
     setListLoading(false);
-  }, [page, selMonth, statusFilter, stateFilter, searchQ]); // eslint-disable-line
+  }, [page, JSON.stringify(dateRange), statusFilter, stateFilter, searchQ]); // eslint-disable-line
 
   useEffect(() => { if (view === "all") loadList(); }, [loadList, view]);
   useEffect(() => { if (view === "all") loadAnalytics(); }, [loadAnalytics, view]);
+  useEffect(() => { resetPage(); }, [JSON.stringify(dateRange)]); // eslint-disable-line
 
   // ── Derived ──────────────────────────────────────────────────────────────────
   const getCount = s => analytics?.by_status?.find(x => x.reason_for_credit_entry === s)?.count ?? 0;
@@ -205,11 +191,10 @@ export function OrdersTab() {
   const topStates = analytics?.by_state?.slice(0, 6) || [];
   const topSkus = analytics?.by_sku?.slice(0, 10) || [];
   const dailyData = (analytics?.daily || []).map(d => ({ label: fmtDate(d.order_date), count: d.count }));
-  const currMonth = (() => { const n = new Date(); return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}`; })();
-  const hasFilters = !!(statusFilter || stateFilter || searchQ || (selMonth && selMonth !== currMonth));
+  const hasFilters = !!(statusFilter || stateFilter || searchQ);
 
   const clearAll = () => {
-    setStatusFilter(""); setStateFilter(""); setSearch(""); setSearchQ(""); setSelMonth(currMonth); resetPage();
+    setStatusFilter(""); setStateFilter(""); setSearch(""); setSearchQ(""); resetPage();
   };
 
   // ── View toggle ──────────────────────────────────────────────────────────────
@@ -227,7 +212,7 @@ export function OrdersTab() {
     return (
       <Stack spacing={2.5}>
         <Box display="flex" justifyContent="flex-end">{ViewToggle}</Box>
-        <UnsettledOrdersTab initialMonth={searchParams.get("month")} />
+        <UnsettledOrdersTab />
       </Stack>
     );
   }
@@ -247,7 +232,7 @@ export function OrdersTab() {
             {listLoading && <CircularProgress size={13} sx={{ color: C.orange }} />}
           </Box>
           <Typography sx={{ fontSize: 12, color: C.gray400 }}>
-            {selMonth ? fmtMonthShort(selMonth) : "All time"} · order lifecycle
+            {periodLabel} · order lifecycle
           </Typography>
         </Box>
         {ViewToggle}
@@ -255,37 +240,6 @@ export function OrdersTab() {
 
       {/* ── Controls card ────────────────────────────────────────────────────── */}
       <Box sx={{ ...card, overflow: "hidden" }}>
-
-        {/* Month row */}
-        {months.length > 0 && (
-          <Box sx={{ px: 2.5, pt: 1.75, pb: 1.5, borderBottom: `1px solid ${C.gray100}` }}>
-            <Box sx={{
-              display: "flex", alignItems: "center", gap: 0.75, overflowX: "auto",
-              scrollbarWidth: "none", "&::-webkit-scrollbar": { display: "none" },
-            }}>
-              <Typography sx={{ fontSize: 10, fontWeight: 800, color: C.gray300, letterSpacing: "0.08em", textTransform: "uppercase", flexShrink: 0, mr: 0.5 }}>
-                MONTH
-              </Typography>
-              {[null, ...months].map(m => {
-                const active = selMonth === m;
-                return (
-                  <Chip key={m ?? "__all__"} label={m === null ? "All" : fmtMonthShort(m)} size="small"
-                    onClick={() => { setSelMonth(m); resetPage(); }}
-                    sx={{
-                      flexShrink: 0, height: 26, fontSize: 11,
-                      fontWeight: active ? 800 : 500,
-                      bgcolor: active ? C.orange : "transparent",
-                      color: active ? "#fff" : C.gray500,
-                      border: `1.5px solid ${active ? C.orange : C.gray200}`,
-                      transition: "all 0.12s",
-                      "&:hover": { borderColor: C.orange, color: active ? "#fff" : C.orange },
-                    }}
-                  />
-                );
-              })}
-            </Box>
-          </Box>
-        )}
 
         {/* Filter row */}
         <Box sx={{ px: 2.5, py: 1.5, display: "flex", alignItems: "center", gap: 1.5, flexWrap: "wrap" }}>
@@ -358,7 +312,7 @@ export function OrdersTab() {
       {/* ── Metric band ──────────────────────────────────────────────────────── */}
       <Box sx={{ ...card, p: 0, display: "flex", overflow: "hidden" }}>
         {[
-          { label: "Total", value: totalOrders, icon: "📦", color: C.blue, sub: selMonth ? fmtMonthShort(selMonth) : "all time", clickKey: null },
+          { label: "Total", value: totalOrders, icon: "📦", color: C.blue, sub: periodLabel, clickKey: null },
           { label: "Delivered", value: delCount, icon: "✅", color: C.green, sub: `${pct(delCount, totalOrders)}% of total`, clickKey: "DELIVERED" },
           { label: "RTO", value: rtoCount, icon: "🔄", color: C.red, sub: `${pct(rtoCount, totalOrders)}% RTO rate`, clickKey: "RTO_COMPLETE" },
           { label: "Cancelled", value: canCount, icon: "✕", color: C.gray500, sub: `${pct(canCount, totalOrders)}% cancelled`, clickKey: "CANCELLED" },
@@ -412,7 +366,7 @@ export function OrdersTab() {
         <Box sx={{ ...card, p: 2.5 }}>
           <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", mb: 0.5 }}>
             <Typography sx={{ fontSize: 13, fontWeight: 700, color: C.gray800 }}>Daily Order Volume</Typography>
-            <Typography sx={{ fontSize: 11, color: C.gray400 }}>{dailyData.length} active days · {selMonth ? fmtMonthShort(selMonth) : "all time"}</Typography>
+            <Typography sx={{ fontSize: 11, color: C.gray400 }}>{dailyData.length} active days · {periodLabel}</Typography>
           </Box>
           <BarChart
             dataset={dailyData}

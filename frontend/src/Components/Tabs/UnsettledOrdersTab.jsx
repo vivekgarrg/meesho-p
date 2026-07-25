@@ -1,8 +1,7 @@
 import React, { useState, useEffect, useMemo } from "react";
-import { useSearchParams } from "react-router-dom";
 import { API, C, fmt } from "../../App";
 import { PAGE_SIZE as pageSize } from "../../lib/helper";
-import { FilterBar, fmtMonth, monthToRange } from "../shared/FilterBar";
+import { useDateFilter } from "../../contexts/DateFilterContext";
 
 import {
   Box,
@@ -26,60 +25,24 @@ const STATUS_CHIP_COLOR = {
 };
 
 // ── Main Tab ─────────────────────────────────────────────────────────────────
-export function UnsettledOrdersTab({ initialMonth }) {
-  const [searchParams] = useSearchParams();
-  const urlDateFrom = searchParams.get("date_from") || "";
-  const urlDateTo   = searchParams.get("date_to")   || "";
+export function UnsettledOrdersTab() {
+  const { range: activeRange, label: filterLabel } = useDateFilter();
 
-  const [months,   setMonths]   = useState([]);
-  const [mode,     setMode]     = useState("all");
-  const [selMonth, setSelMonth] = useState("");
-  const [custFrom, setCustFrom] = useState(urlDateFrom);
-  const [custTo,   setCustTo]   = useState(urlDateTo);
-
-  const [activeRange, setActiveRange] = useState(null); // null = waiting
   const [page,    setPage]    = useState(0);            // DataGrid is 0-indexed
   const [search,  setSearch]  = useState("");
   const [data,    setData]    = useState(null);
   const [loading, setLoading] = useState(true);
 
-  // Load available months; use URL date range if provided, else initialMonth
-  useEffect(() => {
-    fetch(`${API}/profit/available-months/`)
-      .then((r) => r.json())
-      .then((ms) => {
-        setMonths(ms);
-        if (urlDateFrom && urlDateTo) {
-          // Pre-set custom range from URL params
-          setMode("custom");
-          setCustFrom(urlDateFrom);
-          setCustTo(urlDateTo);
-          setActiveRange({ date_from: urlDateFrom, date_to: urlDateTo });
-        } else {
-          const target = (initialMonth && ms.includes(initialMonth)) ? initialMonth : (ms[0] || null);
-          if (target) {
-            setMode("month");
-            setSelMonth(target);
-            setActiveRange(monthToRange(target));
-          } else {
-            setActiveRange({});
-          }
-        }
-      })
-      .catch(() => setActiveRange({}));
-  }, []); // eslint-disable-line
-
   // Reset to page 0 when filter or search changes
-  useEffect(() => { setPage(0); }, [activeRange, search]);
+  useEffect(() => { setPage(0); }, [JSON.stringify(activeRange), search]);
 
   // Stable query key — prevents double fetch when page reset races activeRange change
   const queryKey = useMemo(
-    () => activeRange === null ? null : JSON.stringify({ activeRange, page, search }),
+    () => JSON.stringify({ activeRange, page, search }),
     [activeRange, page, search]
   );
 
   useEffect(() => {
-    if (queryKey === null) return;
     setLoading(true);
     const params = { ...activeRange, page: page + 1, page_size: PAGE_SIZE }; // API is 1-indexed
     if (search) params.search = search;
@@ -88,11 +51,6 @@ export function UnsettledOrdersTab({ initialMonth }) {
       .then((d) => { setData(d); setLoading(false); })
       .catch(() => setLoading(false));
   }, [queryKey]);
-
-  const filterLabel =
-    mode === "month"  ? fmtMonth(selMonth) :
-    mode === "custom" ? `${custFrom} → ${custTo}` :
-    "All Time";
 
   // ── DataGrid columns ──────────────────────────────────────────────────────
   const columns = [
@@ -214,16 +172,6 @@ export function UnsettledOrdersTab({ initialMonth }) {
           Orders placed but not yet settled by Meesho — no payment record found.
         </Typography>
       </Box>
-
-      {/* Shared filter bar */}
-      <FilterBar
-        months={months}
-        mode={mode}           setMode={setMode}
-        selectedMonth={selMonth}   setSelectedMonth={setSelMonth}
-        customFrom={custFrom}      setCustomFrom={setCustFrom}
-        customTo={custTo}          setCustomTo={setCustTo}
-        onApply={(range) => setActiveRange(range)}
-      />
 
       {/* Hero summary cards */}
       {data && !loading && (

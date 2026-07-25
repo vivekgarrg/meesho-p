@@ -23,6 +23,7 @@ import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import CheckCircleOutlinedIcon from "@mui/icons-material/CheckCircleOutlined";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import { API, C, fmt } from "../../App";
+import { useDateFilter } from "../../contexts/DateFilterContext";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const ADJUSTMENT_REASONS = [
@@ -995,11 +996,12 @@ const ACTION_COLORS = { CREATE: "#059669", UPDATE: "#D97706", DELETE: "#E11D48" 
 const ACTION_BG = { CREATE: "#ECFDF5", UPDATE: "#FFFBEB", DELETE: "#FFF1F2" };
 
 function HistorySection() {
+  const { range } = useDateFilter();
   const [logs, setLogs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
-  const [filters, setFilters] = useState({ entity_type: "", action: "", parent_sku: "", date_from: "", date_to: "" });
+  const [filters, setFilters] = useState({ entity_type: "", action: "", parent_sku: "" });
 
   const PAGE_SIZE = 25;
 
@@ -1008,15 +1010,18 @@ function HistorySection() {
     try {
       const params = new URLSearchParams({ page, page_size: PAGE_SIZE });
       Object.entries(filters).forEach(([k, v]) => { if (v) params.set(k, v); });
+      if (range.date_from) params.set("date_from", range.date_from);
+      if (range.date_to) params.set("date_to", range.date_to);
       const r = await fetch(`${API}/inventory/logs/?${params}`);
       const d = await r.json();
       setLogs(d.results || []);
       setTotal(d.count || 0);
     } catch { }
     setLoading(false);
-  }, [page, filters]);
+  }, [page, filters, JSON.stringify(range)]);
 
   useEffect(() => { load(); }, [load]);
+  useEffect(() => { setPage(1); }, [JSON.stringify(range)]);
 
   const setFilter = (k, v) => { setFilters(f => ({ ...f, [k]: v })); setPage(1); };
 
@@ -1054,10 +1059,6 @@ function HistorySection() {
             <MenuItem value="DELETE">Delete</MenuItem>
           </Select>
         </FormControl>
-        <TextField label="From Date" type="date" size="small" value={filters.date_from}
-          onChange={e => setFilter("date_from", e.target.value)} InputLabelProps={{ shrink: true }} sx={{ minWidth: 150 }} />
-        <TextField label="To Date" type="date" size="small" value={filters.date_to}
-          onChange={e => setFilter("date_to", e.target.value)} InputLabelProps={{ shrink: true }} sx={{ minWidth: 150 }} />
         <IconButton onClick={load} sx={{ alignSelf: "center" }}>
           <RefreshIcon fontSize="small" />
         </IconButton>

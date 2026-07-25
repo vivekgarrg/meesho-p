@@ -15,6 +15,8 @@ import { SKUAnalysisTab } from "./Components/Tabs/SKUProfitTab";
 import { LabelsTab } from "./Components/Tabs/LabelsTab";
 import { PurchasesTab } from "./Components/Tabs/PurchasesTab";
 import { InventoryTab } from "./Components/Tabs/InventoryTab";
+import { InventoryLabelsTab } from "./Components/Tabs/InventoryLabelsTab";
+import { AdsAnalysisTab } from "./Components/Tabs/AdsAnalysisTab";
 import { MeeshoStockTab } from "./Components/Tabs/MeeshoStockTab";
 import { FraudCustomersTab } from "./Components/Tabs/FraudCustomersTab";
 import { ProductPhotosTab } from "./Components/Tabs/ProductPhotosTab";
@@ -27,6 +29,8 @@ import LoginPage from "./Components/Login/LoginPage";
 import BusinessProfilePage from "./Components/BusinessProfile/BusinessProfilePage";
 import BusinessSwitcher from "./Components/BusinessSwitcher";
 import { useBusiness } from "./contexts/BusinessContext";
+import { DateFilterProvider } from "./contexts/DateFilterContext";
+import { GlobalDateFilterBar } from "./Components/shared/GlobalDateFilterBar";
 import ChangePasswordModal from "./Components/ChangePasswordModal";
 import AdminPanel from "./Components/Admin/AdminPanel";
 import { useAuth } from "./contexts/AuthContext";
@@ -385,6 +389,7 @@ const NAV_GROUPS = [
     items: [
       { path: "/", label: "Overview", icon: "◈", end: true },
       { path: "/sku-analysis", label: "SKU Analysis", icon: "↗" },
+      { path: "/ads-analysis", label: "Ads Analysis", icon: "◬" },
     ],
   },
   {
@@ -405,6 +410,7 @@ const NAV_GROUPS = [
     items: [
       { path: "/pricing", label: "SKU Pricing", icon: "⊞" },
       { path: "/inventory", label: "Inventory", icon: "⊕" },
+      { path: "/inventory-labels", label: "Labels & Barcodes", icon: "▥" },
       { path: "/meesho-inventory", label: "Meesho Stock", icon: "⊞" },
       { path: "/meesho-pricing", label: "Price Update", icon: "₹" },
       { path: "/purchases", label: "Purchases", icon: "⊗" },
@@ -707,6 +713,10 @@ function AppShell() {
 
       <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
         <TopBar />
+        {/* Global period filter — stays mounted across route changes and
+            business switches so it's never remounted, only its context value
+            changes. Every tab reads the active range from useDateFilter(). */}
+        <GlobalDateFilterBar />
         {/* key by active business so switching businesses remounts the routed
             view, forcing every tab (dashboard included) to refetch fresh data
             against the newly-set business-scoped API base. */}
@@ -719,12 +729,14 @@ function AppShell() {
             <Route path="/unscheduled" element={<UnscheduledPaymentTab />} />
             <Route path="/mismatch" element={<MismatchTab />} />
             <Route path="/sku-analysis" element={<SKUAnalysisTab />} />
+            <Route path="/ads-analysis" element={<AdsAnalysisTab />} />
             <Route path="/pricing" element={<PricingTab />} />
             <Route path="/upload" element={<UploadTab />} />
             <Route path="/labels" element={<LabelsTab />} />
             <Route path="/purchases" element={<PurchasesTab />} />
             <Route path="/expenses" element={<ExpensesTab />} />
             <Route path="/inventory" element={<InventoryTab />} />
+            <Route path="/inventory-labels" element={<InventoryLabelsTab />} />
             <Route path="/meesho-inventory" element={<MeeshoInventoryTab />} />
             <Route path="/meesho-pricing" element={<MeeshoPricingTab />} />
             <Route path="/fraud" element={<FraudCustomersTab />} />
@@ -766,5 +778,9 @@ export default function App() {
     return <Navigate to="/login" replace />;
   }
 
-  return <AppShell />;
+  return (
+    <DateFilterProvider>
+      <AppShell />
+    </DateFilterProvider>
+  );
 }

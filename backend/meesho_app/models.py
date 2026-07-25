@@ -490,6 +490,7 @@ class InventoryLog(models.Model):
         ("CONSUMABLE_PURCHASE", "Consumable Purchase"),
         ("CONSUMABLE_USAGE",    "Consumable Usage"),
         ("CONSUMABLE_ITEM",     "Consumable Item"),
+        ("PACKED_STOCK",        "Packed Stock Entry"),
     ]
     entity_type     = models.CharField(max_length=25, choices=ENTITY_CHOICES)
     entity_id       = models.CharField(max_length=50, blank=True)
@@ -704,3 +705,32 @@ class TransportCharge(models.Model):
 
     def __str__(self):
         return f"Transport {self.date}: ₹{self.amount}"
+
+
+class PackedStockEvent(models.Model):
+    """
+    One scan/entry event against a printed inventory label. The barcode on
+    the label encodes the Parent SKU id directly — scanning (or typing) it
+    here adds (or, with a negative quantity, removes) units from that SKU's
+    packed & ready-to-ship stock count, separate from purchased/sold stock.
+    """
+    parent_sku = models.ForeignKey(
+        ParentItemPrice, on_delete=models.CASCADE,
+        related_name="packed_stock_events", db_column="parent_sku_id",
+    )
+    quantity     = models.IntegerField()  # positive = packed, negative = unpacked/correction
+    code_scanned = models.CharField(max_length=200, blank=True)
+    notes        = models.TextField(blank=True)
+    created_at   = models.DateTimeField(auto_now_add=True)
+
+    business = models.ForeignKey(
+        "accounts.Business", on_delete=models.PROTECT,
+    )
+
+    class Meta:
+        db_table = "packed_stock_events"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        sign = "+" if self.quantity >= 0 else ""
+        return f"{self.parent_sku_id} {sign}{self.quantity} packed"

@@ -17,7 +17,7 @@ from PIL import Image
 from .helpers.helper import status_wise_summary
 from .permissions import get_authorized_business
 
-from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, PurchaseBill, PurchaseItem, BlockedCustomer, InventoryAdjustment, ConsumableItem, ConsumablePurchase, ConsumableUsage, InventoryLog, MeeshoInventory, MeeshoPriceUpdate, ExpenseInvoice, ExpenseInvoiceItem, TransportCharge
+from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, PurchaseBill, PurchaseItem, BlockedCustomer, InventoryAdjustment, ConsumableItem, ConsumablePurchase, ConsumableUsage, InventoryLog, MeeshoInventory, MeeshoPriceUpdate, ExpenseInvoice, ExpenseInvoiceItem, TransportCharge, PackedStockEvent
 from .serializers import (
     OrderPaymentSerializer, AdsCostSerializer,
     ReferralPaymentSerializer, CompensationRecoverySerializer,
@@ -616,7 +616,7 @@ def accumulate_sku_profit(sku_id, obj, result, price_map, packaging_map, unique_
     if sku_id not in obj:
         obj[sku_id] = {
             "order_count":    0,
-            "one_unit_price": price_map[sku_id],
+            "one_unit_price": price_map.get(sku_id, Decimal("0")),
             "total_purchase_cost":  0,
             "settled_amount":       0,
             "affiliate_adj":        0,
@@ -1683,6 +1683,255 @@ def profit_summary(request, business_id):
             "total_deduction_rate_pct": total_deduction_rate_pct,
         },
         "payout_breakdown": _build_payout_breakdown(qs),
+    })
+
+
+@api_view(["GET"])
+def ads_sku_analysis(request, business_id):
+    """
+    Per-SKU breakdown of orders placed through Meesho Ads (OrderPayment.order_source
+    == "Ad order") vs organic — order counts, delivery outcome, and profit, computed
+    with the same P&L engine as /profit/. Also reports total ads spend for the period.
+
+    Meesho's Ads Cost export only has a campaign_id (no SKU/catalog link), so ad
+    spend can only be compared in aggregate against total ad-driven profit — not
+    attributed to individual SKUs.
+    """
+    business = get_authorized_business(request, business_id)
+    date_from = request.GET.get("date_from", "")
+    date_to   = request.GET.get("date_to", "")
+
+    qs = OrderPayment.objects.filter(business=business)
+    if date_from or date_to:
+        ord_qs = Order.objects.filter(business=business)
+        if date_from:
+            ord_qs = ord_qs.filter(order_date__gte=date_from)
+        if date_to:
+            ord_qs = ord_qs.filter(order_date__lte=date_to)
+        if ord_qs.exists():
+            qs = qs.filter(sub_order_no__in=ord_qs.values("sub_order_no"))
+        else:
+            if date_from:
+                qs = qs.filter(order_date__date__gte=date_from)
+            if date_to:
+                qs = qs.filter(order_date__date__lte=date_to)
+
+    # sub_order_nos where any row is flagged as coming through ads
+    ad_sub_orders = set(qs.filter(order_source="Ad order").values_list("sub_order_no", flat=True))
+
+    # Pricing lookups — mirrors profit_summary
+    _fp_all        = list(FinalPrice.objects.filter(business=business).only("sku_id", "final_price", "packaging_cost", "parent_id", "item_price", "tax_percent"))
+    price_map      = {fp.sku_id: fp.final_price    or Decimal("0") for fp in _fp_all}
+    packaging_map  = {fp.sku_id: fp.packaging_cost or Decimal("0") for fp in _fp_all}
+    item_price_map = {fp.sku_id: fp.item_price     or Decimal("0") for fp in _fp_all}
+    tax_map        = {fp.sku_id: fp.tax_percent    or 0            for fp in _fp_all}
+    sku_parent_map = {fp.sku_id: fp.parent_id for fp in _fp_all if fp.parent_id}
+
+    _fp_parent     = list(ParentItemPrice.objects.filter(business=business).only("item_id", "item_price", "tax_percent", "packaging_cost", "final_price"))
+    parent_price_map      = {fp.id: fp.final_price    or Decimal("0") for fp in _fp_parent}
+    parent_packaging_map  = {fp.id: fp.packaging_cost or Decimal("0") for fp in _fp_parent}
+    parent_item_price_map = {fp.id: fp.item_price     or Decimal("0") for fp in _fp_parent}
+    parent_tax_map        = {fp.id: fp.tax_percent    or 0            for fp in _fp_parent}
+    parent_name_map        = {fp.id: fp.item_id for fp in _fp_parent}
+
+    from collections import defaultdict
+    _hist = list(
+        ParentPriceHistory.objects
+        .filter(business=business)
+        .values("parent_id", "effective_from", "final_price", "packaging_cost", "item_price", "tax_percent")
+        .order_by("effective_from")
+    )
+    _parent_histories = defaultdict(list)
+    for h in _hist:
+        _parent_histories[h["parent_id"]].append((
+            h["effective_from"],
+            h["final_price"]    or Decimal("0"),
+            h["packaging_cost"] or Decimal("0"),
+            h["item_price"]     or Decimal("0"),
+            h["tax_percent"]    or 0,
+        ))
+
+    def get_eff_price(sku_id, order_date):
+        if order_date:
+            if hasattr(order_date, "date"):
+                order_date = order_date.date()
+            pid = sku_parent_map.get(sku_id)
+            if pid:
+                applicable = [(d, fp, pkg, ip, tax) for d, fp, pkg, ip, tax in _parent_histories[pid] if d <= order_date]
+                if applicable:
+                    _, fp, pkg, ip, tax = applicable[-1]
+                    return fp, pkg, ip, tax
+                return (
+                    parent_price_map.get(pid,      Decimal("0")),
+                    parent_packaging_map.get(pid,  Decimal("0")),
+                    parent_item_price_map.get(pid, Decimal("0")),
+                    parent_tax_map.get(pid, 0),
+                )
+        return (
+            price_map.get(sku_id,      Decimal("0")),
+            packaging_map.get(sku_id,  Decimal("0")),
+            item_price_map.get(sku_id, Decimal("0")),
+            tax_map.get(sku_id, 0),
+        )
+
+    unique_statuses = ["Claim", "Cancelled", "Delivered", "Return", "RTO", "Shipped", "Exchange", "Unknown"]
+
+    _FIELDS = (
+        "sub_order_no", "supplier_sku", "quantity",
+        "final_settlement_amount", "live_order_status",
+        "recovery_reason", "claims", "return_shipping_charge",
+        "order_date", "payment_date",
+    )
+
+    order_groups = defaultdict(list)
+    for payment in qs.only(*_FIELDS).order_by("-payment_date"):
+        order_groups[payment.sub_order_no].append(payment)
+
+    ad_profit  = {}
+    org_profit = {}
+    ad_monthly  = {}
+    org_monthly = {}
+
+    for sub_no, payments in order_groups.items():
+        order = (
+            Order.objects
+            .filter(business=business, sub_order_no=sub_no)
+            .values("sub_order_no", "sku", "quantity")
+            .first()
+        ) or {}
+        primary = next((p for p in payments if p.live_order_status), payments[0])
+        sku = order.get("sku") or primary.supplier_sku
+        qty = order.get("quantity") or primary.quantity
+
+        if not sku or sku not in price_map:
+            continue
+
+        eff_price, eff_pkg, eff_item_price, eff_tax_pct = get_eff_price(sku, primary.order_date)
+        result = compute_order_net(payments, eff_price, eff_pkg, qty, unique_statuses, eff_item_price, eff_tax_pct)
+
+        is_ad = sub_no in ad_sub_orders
+        bucket = ad_profit if is_ad else org_profit
+        accumulate_sku_profit(sku, bucket, result, price_map, packaging_map, unique_statuses)
+
+        # Same order, grouped by month instead of SKU — reuses the identical
+        # accumulator so the monthly trend stays consistent with the per-SKU totals.
+        od = primary.order_date
+        month_key = od.strftime("%Y-%m") if od else "Unknown"
+        monthly_bucket = ad_monthly if is_ad else org_monthly
+        accumulate_sku_profit(month_key, monthly_bucket, result, price_map, packaging_map, unique_statuses)
+
+    def build_rows(bucket):
+        rows = []
+        for sku_id, v in bucket.items():
+            del_qty    = float(v.get("delivered_quantity", 0) or 0)
+            del_profit = float(v.get("delivered_profit", 0) or 0)
+            rows.append({
+                "sku_id":                sku_id,
+                "parent_sku":            parent_name_map.get(sku_parent_map.get(sku_id)),
+                "order_count":           v.get("order_count", 0),
+                "delivered_count":       v.get("delivered_count", 0),
+                "return_count":          v.get("return_count", 0),
+                "rto_count":             v.get("rto_count", 0),
+                "exchange_count":        v.get("exchange_count", 0),
+                "claim_count":           v.get("claim_count", 0),
+                "other_count":           v.get("other_count", 0),
+                "delivered_quantity":    del_qty,
+                "one_unit_price":        float(v.get("one_unit_price", 0) or 0),
+                "delivered_profit":      round(del_profit, 2),
+                "avg_profit_per_piece":  round(del_profit / del_qty, 2) if del_qty > 0 else None,
+                "net_profit":            round(float(v.get("net_profit", 0) or 0), 2),
+            })
+        return rows
+
+    ad_rows  = build_rows(ad_profit)
+    org_by_sku = {r["sku_id"]: r for r in build_rows(org_profit)}
+
+    # Organic comparison, attached per row so the UI can judge "did ads actually help".
+    for r in ad_rows:
+        o = org_by_sku.get(r["sku_id"])
+        r["organic_avg_profit_per_piece"] = o["avg_profit_per_piece"] if o else None
+        r["organic_delivered_count"]      = o["delivered_count"] if o else 0
+
+    ad_rows.sort(key=lambda r: r["net_profit"])
+
+    ads_qs = AdsCost.objects.filter(business=business)
+    if date_from:
+        ads_qs = ads_qs.filter(deduction_date__gte=date_from)
+    if date_to:
+        ads_qs = ads_qs.filter(deduction_date__lte=date_to)
+    # Meesho's export can store this as a positive spend or a negative deduction
+    # depending on the sheet — normalize to a positive "amount spent" figure.
+    total_ads_spend = abs(float(ads_qs.aggregate(t=Sum("total_ads_cost"))["t"] or 0))
+
+    total_ad_orders    = sum(r["order_count"]     for r in ad_rows)
+    total_ad_delivered = sum(r["delivered_count"] for r in ad_rows)
+    total_ad_net_profit = round(sum(r["net_profit"] for r in ad_rows), 2)
+    net_benefit = round(total_ad_net_profit - total_ads_spend, 2)
+    roi_pct = round((total_ad_net_profit / total_ads_spend) * 100, 1) if total_ads_spend > 0 else None
+
+    total_org_orders    = sum(v.get("order_count", 0) for v in org_profit.values())
+    total_org_delivered = sum(v.get("delivered_count", 0) for v in org_profit.values())
+
+    # ── Monthly trend: ad orders/profit vs ad spend, month over month ──────────
+    spend_by_month = {}
+    for row in ads_qs.values("deduction_date", "total_ads_cost"):
+        d = row["deduction_date"]
+        if not d:
+            continue
+        mk = d.strftime("%Y-%m")
+        spend_by_month[mk] = spend_by_month.get(mk, 0) + abs(float(row["total_ads_cost"] or 0))
+
+    months = sorted(set(ad_monthly.keys()) | set(org_monthly.keys()) | set(spend_by_month.keys()))
+    months = [m for m in months if m != "Unknown"]
+    monthly_trend = []
+    for m in months:
+        a = ad_monthly.get(m, {})
+        o = org_monthly.get(m, {})
+        spend = round(spend_by_month.get(m, 0), 2)
+        profit = round(float(a.get("net_profit", 0) or 0), 2)
+        monthly_trend.append({
+            "month":              m,
+            "ad_orders":          a.get("order_count", 0),
+            "ad_delivered":       a.get("delivered_count", 0),
+            "ad_profit":          profit,
+            "ads_spend":          spend,
+            "net_benefit":        round(profit - spend, 2),
+            "organic_orders":     o.get("order_count", 0),
+            "organic_delivered":  o.get("delivered_count", 0),
+            "organic_profit":     round(float(o.get("net_profit", 0) or 0), 2),
+        })
+
+    # ── Campaign spend breakdown (no SKU link in Meesho's export, cost only) ──
+    campaign_agg = (
+        ads_qs.values("campaign_id")
+        .annotate(total_cost=Sum("total_ads_cost"), entries=Count("id"))
+        .order_by("-total_cost")
+    )
+    campaigns = [{
+        "campaign_id": c["campaign_id"] or "—",
+        "total_cost":  round(abs(float(c["total_cost"] or 0)), 2),
+        "entries":     c["entries"],
+    } for c in campaign_agg][:25]
+
+    return Response({
+        "summary": {
+            "total_ad_orders":       total_ad_orders,
+            "total_ad_delivered":    total_ad_delivered,
+            "total_ad_return":       sum(r["return_count"]    for r in ad_rows),
+            "total_ad_rto":          sum(r["rto_count"]       for r in ad_rows),
+            "total_ad_claim":        sum(r["claim_count"]     for r in ad_rows),
+            "total_ad_net_profit":   total_ad_net_profit,
+            "total_ads_spend":       round(total_ads_spend, 2),
+            "net_benefit":           net_benefit,
+            "roi_pct":               roi_pct,
+            "sku_count":             len(ad_rows),
+            "ad_delivery_rate_pct":  round(total_ad_delivered / total_ad_orders * 100, 1) if total_ad_orders else None,
+            "organic_delivery_rate_pct": round(total_org_delivered / total_org_orders * 100, 1) if total_org_orders else None,
+            "total_organic_orders": total_org_orders,
+        },
+        "results": ad_rows,
+        "monthly_trend": monthly_trend,
+        "campaigns": campaigns,
     })
 
 
@@ -4479,6 +4728,121 @@ def inventory_create_sku(request, business_id):
     return Response({"sku_id": parent.item_id, "message": "Created"}, status=201)
 
 
+# ── Inventory Labels / Barcodes & Packed Stock ────────────────────────────────
+
+@api_view(["GET"])
+def inventory_labels_list(request, business_id):
+    """
+    Parent SKUs available for label/barcode printing. The barcode encodes the
+    SKU id itself (no separate code system) — this just lists SKUs plus their
+    current packed-stock count so the tab can show what's already labelled.
+    """
+    business = get_authorized_business(request, business_id)
+    search = request.GET.get("search", "").strip()
+    qs = ParentItemPrice.objects.filter(business=business)
+    if search:
+        qs = qs.filter(item_id__icontains=search)
+    parents = list(qs.values("id", "item_id").order_by("item_id"))
+    parent_ids = [p["id"] for p in parents]
+
+    packed_by_parent = dict(
+        PackedStockEvent.objects.filter(business=business, parent_sku_id__in=parent_ids)
+        .values("parent_sku_id").annotate(total=Sum("quantity"))
+        .values_list("parent_sku_id", "total")
+    )
+
+    results = [{
+        "sku_id":       p["item_id"],
+        "code":         p["item_id"],
+        "packed_stock": packed_by_parent.get(p["id"], 0) or 0,
+    } for p in parents]
+
+    return Response({"results": results, "total": len(results)})
+
+
+@api_view(["GET", "POST"])
+def packed_stock_list(request, business_id):
+    """
+    GET: current packed-stock total per parent SKU + recent scan/entry events.
+    POST: record one scan/entry event against a SKU's printed barcode —
+    {code, quantity, notes}. quantity may be negative to correct a mistake.
+    """
+    business = get_authorized_business(request, business_id)
+
+    if request.method == "GET":
+        totals = (
+            PackedStockEvent.objects.filter(business=business)
+            .values("parent_sku__item_id").annotate(total=Sum("quantity"))
+        )
+        events = list(
+            PackedStockEvent.objects.filter(business=business)
+            .select_related("parent_sku").order_by("-created_at")[:50]
+        )
+        return Response({
+            "totals": [
+                {"sku_id": t["parent_sku__item_id"], "packed_stock": t["total"]}
+                for t in totals if t["total"]
+            ],
+            "events": [{
+                "id":         e.id,
+                "sku_id":     e.parent_sku.item_id,
+                "quantity":   e.quantity,
+                "notes":      e.notes,
+                "created_at": e.created_at.isoformat(),
+            } for e in events],
+        })
+
+    data = request.data
+    code = (data.get("code") or "").strip()
+    if not code:
+        return Response({"error": "code is required"}, status=400)
+    try:
+        qty = int(data.get("quantity", 1))
+    except (TypeError, ValueError):
+        return Response({"error": "quantity must be an integer"}, status=400)
+    if qty == 0:
+        return Response({"error": "quantity cannot be zero"}, status=400)
+
+    parent = ParentItemPrice.objects.filter(business=business, item_id=code).first()
+    if not parent:
+        return Response({"error": f"No SKU found for code '{code}'"}, status=404)
+
+    event = PackedStockEvent.objects.create(
+        business=business, parent_sku=parent, quantity=qty,
+        code_scanned=code, notes=(data.get("notes") or "").strip(),
+    )
+    _log_inventory(
+        business, "PACKED_STOCK", event.id, "CREATE",
+        f"{'Packed' if qty > 0 else 'Removed'} {abs(qty)} units of {parent.item_id}",
+        parent_sku_id=parent.item_id, quantity_change=qty,
+    )
+    total = (
+        PackedStockEvent.objects.filter(business=business, parent_sku=parent)
+        .aggregate(t=Sum("quantity"))["t"] or 0
+    )
+    return Response({
+        "id": event.id, "sku_id": parent.item_id, "quantity": qty,
+        "packed_stock": total, "created_at": event.created_at.isoformat(),
+    }, status=201)
+
+
+@api_view(["DELETE"])
+def packed_stock_detail(request, business_id, event_id):
+    """Undo a scan/entry event (deletes it and reverses the running total)."""
+    business = get_authorized_business(request, business_id)
+    try:
+        event = PackedStockEvent.objects.get(pk=event_id, business=business)
+    except PackedStockEvent.DoesNotExist:
+        return Response({"error": "Not found"}, status=404)
+    sku_id = event.parent_sku.item_id
+    event.delete()
+    _log_inventory(
+        business, "PACKED_STOCK", event_id, "DELETE",
+        f"Removed packed-stock entry for {sku_id}", parent_sku_id=sku_id,
+    )
+    return Response(status=204)
+
+
 # ── Purchase item-level CRUD ──────────────────────────────────────────────────
 
 @api_view(["GET"])
@@ -5965,6 +6329,8 @@ def expenses_summary(request, business_id):
     """Combined expense totals (invoices + transport) for a period."""
     business = get_authorized_business(request, business_id)
     month = request.GET.get("month", "")
+    date_from = request.GET.get("date_from", "")
+    date_to   = request.GET.get("date_to", "")
     start, end = _month_range(month)
 
     inv_items = ExpenseInvoiceItem.objects.filter(business=business)
@@ -5972,6 +6338,12 @@ def expenses_summary(request, business_id):
     if start:
         inv_items = inv_items.filter(invoice__date__gte=start, invoice__date__lt=end)
         transport = transport.filter(date__gte=start, date__lt=end)
+    if date_from:
+        inv_items = inv_items.filter(invoice__date__gte=date_from)
+        transport = transport.filter(date__gte=date_from)
+    if date_to:
+        inv_items = inv_items.filter(invoice__date__lte=date_to)
+        transport = transport.filter(date__lte=date_to)
 
     packaging = Decimal("0")
     other = Decimal("0")

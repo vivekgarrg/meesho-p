@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { API, C, fmt } from "../../App";
+import { useDateFilter } from "../../contexts/DateFilterContext";
 import {
   Alert, Autocomplete, Box, Button, Chip, CircularProgress, Divider, Drawer,
   FormControlLabel, Switch, IconButton, InputAdornment, Paper, Stack,
@@ -322,11 +323,10 @@ function Kpi({ label, value, sub, icon, color }) {
 
 // ── Main ──
 export function PurchasesTab() {
+  const { range, label: periodLabel } = useDateFilter();
   const [bills, setBills] = useState([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
-  const [dateFrom, setDateFrom] = useState("");
-  const [dateTo, setDateTo] = useState("");
   const [sellerQ, setSellerQ] = useState("");
   const [drawer, setDrawer] = useState({ open: false, initial: null });
   const [expanded, setExpanded] = useState(new Set());
@@ -335,22 +335,22 @@ export function PurchasesTab() {
   const load = useCallback(async () => {
     setLoading(true);
     const params = new URLSearchParams({
-      ...(dateFrom && { date_from: dateFrom }),
-      ...(dateTo && { date_to: dateTo }),
+      ...(range.date_from && { date_from: range.date_from }),
+      ...(range.date_to && { date_to: range.date_to }),
       ...(sellerQ && { seller: sellerQ }),
     });
     try {
       const r = await fetch(`${API}/purchases/?${params}`);
       if (r.ok) { const d = await r.json(); setBills(d.results || []); setTotal(d.total || 0); }
     } finally { setLoading(false); }
-  }, [dateFrom, dateTo, sellerQ]);
+  }, [JSON.stringify(range), sellerQ]);
 
   useEffect(() => { load(); }, [load]);
 
   const sellers = useMemo(() => [...new Set(bills.map((b) => b.seller_name).filter(Boolean))].sort(), [bills]);
   const totalSpend = bills.reduce((s, b) => s + parseFloat(b.total_amount || 0), 0);
   const totalQty = bills.reduce((s, b) => s + b.items.filter((i) => !i.is_exchange).reduce((q, i) => q + Number(i.quantity), 0), 0);
-  const hasFilters = dateFrom || dateTo || sellerQ;
+  const hasFilters = !!sellerQ;
 
   const toggle = (id) => setExpanded((prev) => { const s = new Set(prev); s.has(id) ? s.delete(id) : s.add(id); return s; });
   const onSaved = () => load();
@@ -387,7 +387,7 @@ export function PurchasesTab() {
         <Kpi label="Total Spend" value={money(totalSpend).replace(/\.00$/, "")} sub={`${total} bill${total !== 1 ? "s" : ""}`} icon={<PaymentsIcon />} color={C.orange} />
         <Kpi label="Units Purchased" value={totalQty.toLocaleString("en-IN")} sub="excl. exchanges" icon={<InventoryIcon />} color={C.blue} />
         <Kpi label="Vendors" value={sellers.length} sub="unique sellers" icon={<StorefrontIcon />} color={C.green} />
-        <Kpi label="Bills" value={total} sub={hasFilters ? "filtered" : "all time"} icon={<ReceiptLongIcon />} color={C.amber} />
+        <Kpi label="Bills" value={total} sub={hasFilters ? `filtered · ${periodLabel}` : periodLabel} icon={<ReceiptLongIcon />} color={C.amber} />
       </Box>
 
       {/* Filter + list */}
@@ -396,9 +396,7 @@ export function PurchasesTab() {
           <TextField size="small" value={sellerQ} onChange={(e) => setSellerQ(e.target.value)} placeholder="Search seller…"
             InputProps={{ startAdornment: <InputAdornment position="start"><SearchIcon fontSize="small" sx={{ color: "text.secondary" }} /></InputAdornment> }}
             sx={{ flex: 1, minWidth: 200 }} />
-          <TextField size="small" type="date" value={dateFrom} label="From" onChange={(e) => setDateFrom(e.target.value)} InputLabelProps={{ shrink: true }} sx={{ width: 150 }} />
-          <TextField size="small" type="date" value={dateTo} label="To" onChange={(e) => setDateTo(e.target.value)} InputLabelProps={{ shrink: true }} sx={{ width: 150 }} />
-          {hasFilters && <Button size="small" onClick={() => { setDateFrom(""); setDateTo(""); setSellerQ(""); }} sx={{ textTransform: "none", color: C.red }}>Clear</Button>}
+          {hasFilters && <Button size="small" onClick={() => setSellerQ("")} sx={{ textTransform: "none", color: C.red }}>Clear</Button>}
           <IconButton size="small" onClick={load}><RefreshIcon fontSize="small" /></IconButton>
         </Stack>
 

@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { API, C, S, btn, Tag } from "../../App";
+import { useDateFilter } from "../../contexts/DateFilterContext";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import ExpandLessIcon from "@mui/icons-material/ExpandLess";
 import SearchIcon from "@mui/icons-material/Search";
@@ -24,13 +25,6 @@ const fmt2 = (n) =>
   n === null || n === undefined
     ? "—"
     : `₹${Number(n).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-
-function fmtMonth(m) {
-  if (!m) return "All time";
-  const [y, mo] = m.split("-");
-  return new Date(Number(y), Number(mo) - 1, 1)
-    .toLocaleString("en-IN", { month: "short", year: "numeric" });
-}
 
 function StatusBadge({ status }) {
   const m = STATUS_META[status] || STATUS_META.UNKNOWN;
@@ -111,9 +105,9 @@ function ExpandedRows({ rows }) {
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 export function PaymentsTab() {
-  const [months, setMonths] = useState([]);
+  const { range, label: periodLabel } = useDateFilter();
   // All filter+pagination in ONE object — changes are atomic, no stale page issues
-  const [query, setQuery] = useState({ month: null, status: "", search: "", page: 1 });
+  const [query, setQuery] = useState({ status: "", search: "", page: 1 });
 
   const [groups, setGroups] = useState([]);
   const [total, setTotal] = useState(0);
@@ -124,21 +118,10 @@ export function PaymentsTab() {
   // Abort controller ref — cancel in-flight requests when query changes
   const abortRef = useRef(null);
 
-  // Load available months once, then set the initial month
-  useEffect(() => {
-    fetch(`${API}/profit/available-months/`)
-      .then(r => r.json())
-      .then(ms => {
-        setMonths(ms || []);
-        // Set initial month atomically — no separate page reset needed
-        if (ms && ms.length > 0) {
-          setQuery(q => ({ ...q, month: ms[0], page: 1 }));
-        }
-      })
-      .catch(() => { });
-  }, []);
+  // Reset to page 1 whenever the global period filter changes
+  useEffect(() => { setQuery(q => ({ ...q, page: 1 })); }, [JSON.stringify(range)]); // eslint-disable-line
 
-  // Single effect — fires whenever query object changes (one render, one fetch)
+  // Single effect — fires whenever query object or the global period changes
   useEffect(() => {
     // Cancel previous in-flight request
     if (abortRef.current) abortRef.current.abort();
@@ -149,7 +132,8 @@ export function PaymentsTab() {
     setExpanded(new Set()); // collapse rows on filter change
 
     const p = new URLSearchParams({ page: query.page, page_size: PAGE_SIZE });
-    if (query.month) p.set("month", query.month);
+    if (range.date_from) p.set("date_from", range.date_from);
+    if (range.date_to) p.set("date_to", range.date_to);
     if (query.status) p.set("status", query.status);
     if (query.search) p.set("search", query.search)
 
@@ -173,10 +157,9 @@ export function PaymentsTab() {
       .finally(() => { if (!ctrl.signal.aborted) setLoading(false); });
 
     return () => ctrl.abort();
-  }, [query]);
+  }, [query, JSON.stringify(range)]); // eslint-disable-line
 
   // Helpers that reset page to 1 atomically when filter changes
-  const setMonth = (m) => setQuery(q => ({ ...q, month: m, page: 1 }));
   const setStatus = (s) => setQuery(q => ({ ...q, status: s, page: 1 }));
   const setSearch = (s) => setQuery(q => ({ ...q, search: s, page: 1 }));
   const setPage = (p) => setQuery(q => ({ ...q, page: p }));
@@ -199,25 +182,6 @@ export function PaymentsTab() {
         </p>
       </div>
 
-      {/* ── Month selector ── */}
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-        <button
-          onClick={() => setMonth(null)}
-          style={{ ...btn(query.month === null ? "primary" : "ghost", "sm"), borderRadius: 20, padding: "6px 14px", fontSize: 12 }}
-        >
-          All time
-        </button>
-        {months.map(m => (
-          <button
-            key={m}
-            onClick={() => setMonth(m)}
-            style={{ ...btn(query.month === m ? "primary" : "ghost", "sm"), borderRadius: 20, padding: "6px 14px", fontSize: 12 }}
-          >
-            {fmtMonth(m)}
-          </button>
-        ))}
-      </div>
-
       {/* ── KPI cards ── */}
       {kpi && (
         <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
@@ -225,7 +189,7 @@ export function PaymentsTab() {
             label="Total Orders"
             value={kpi.total_groups}
             color={C.blue}
-            sub={query.month ? fmtMonth(query.month) : "all time"}
+            sub={periodLabel}
           />
           <KpiCard
             label="Net Settlement"

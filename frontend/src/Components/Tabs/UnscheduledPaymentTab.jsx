@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { API, C, S, btn, Tag } from "../../App";
+import { useDateFilter } from "../../contexts/DateFilterContext";
 import SearchIcon from "@mui/icons-material/Search";
 import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import { CircularProgress } from "@mui/material";
@@ -15,12 +16,6 @@ const fmt2 = (n) =>
   n === null || n === undefined
     ? "—"
     : `₹${Number(n).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-
-function fmtMonth(m) {
-  if (!m) return "All time";
-  const [y, mo] = m.split("-");
-  return new Date(Number(y), Number(mo) - 1, 1).toLocaleString("en-IN", { month: "short", year: "numeric" });
-}
 
 function KpiCard({ label, value, isAmount, color, bg, sub }) {
   return (
@@ -117,18 +112,14 @@ function LowMarginProducts({ products, threshold }) {
 
 // ── Main ──
 export function UnscheduledPaymentTab() {
-  const [months, setMonths] = useState([]);
-  const [query, setQuery] = useState({ month: null, search: "", threshold: 50, page: 1 });
+  const { range, label: periodLabel } = useDateFilter();
+  const [query, setQuery] = useState({ search: "", threshold: 50, page: 1 });
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const abortRef = useRef(null);
 
-  useEffect(() => {
-    fetch(`${API}/profit/available-months/`)
-      .then((r) => r.json())
-      .then((ms) => setMonths(ms || []))
-      .catch(() => {});
-  }, []);
+  // Reset to page 1 whenever the global period filter changes
+  useEffect(() => { setQuery((q) => ({ ...q, page: 1 })); }, [JSON.stringify(range)]); // eslint-disable-line
 
   useEffect(() => {
     if (abortRef.current) abortRef.current.abort();
@@ -137,7 +128,8 @@ export function UnscheduledPaymentTab() {
     setLoading(true);
 
     const p = new URLSearchParams({ page: query.page, page_size: PAGE_SIZE, threshold: query.threshold });
-    if (query.month) p.set("month", query.month);
+    if (range.date_from) p.set("date_from", range.date_from);
+    if (range.date_to) p.set("date_to", range.date_to);
     if (query.search) p.set("search", query.search);
 
     fetch(`${API}/orders/unscheduled/?${p}`, { signal: ctrl.signal })
@@ -147,9 +139,8 @@ export function UnscheduledPaymentTab() {
       .finally(() => { if (!ctrl.signal.aborted) setLoading(false); });
 
     return () => ctrl.abort();
-  }, [query]);
+  }, [query, JSON.stringify(range)]); // eslint-disable-line
 
-  const setMonth = (m) => setQuery((q) => ({ ...q, month: m, page: 1 }));
   const setSearch = (s) => setQuery((q) => ({ ...q, search: s, page: 1 }));
   const setThreshold = (t) => setQuery((q) => ({ ...q, threshold: t, page: 1 }));
   const setPage = (p) => setQuery((q) => ({ ...q, page: p }));
@@ -170,20 +161,10 @@ export function UnscheduledPaymentTab() {
         </p>
       </div>
 
-      {/* Month pills */}
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-        <button onClick={() => setMonth(null)} style={{ ...btn(query.month === null ? "primary" : "ghost", "sm"), borderRadius: 20, padding: "6px 14px", fontSize: 12 }}>All time</button>
-        {months.map((m) => (
-          <button key={m} onClick={() => setMonth(m)} style={{ ...btn(query.month === m ? "primary" : "ghost", "sm"), borderRadius: 20, padding: "6px 14px", fontSize: 12 }}>
-            {fmtMonth(m)}
-          </button>
-        ))}
-      </div>
-
       {/* KPI cards */}
       {data && (
         <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-          <KpiCard label="Shipped / Awaiting Pay" value={data.total} color={C.blue} sub={query.month ? fmtMonth(query.month) : "all time"} />
+          <KpiCard label="Shipped / Awaiting Pay" value={data.total} color={C.blue} sub={periodLabel} />
           <KpiCard label="Expected Payout" value={data.total_expected} isAmount color={C.green} bg="#ECFDF5" sub="gross, before Meesho fees" />
           <KpiCard label="Low-Margin Products" value={data.low_product_count} color={C.red} bg="#FFF1F2" sub={`below ₹${threshold}/unit`} />
           <KpiCard label="At-Risk Margin" value={data.at_risk_margin} isAmount color={C.red} bg="#FFF1F2" sub="est. margin on flagged products" />

@@ -24,6 +24,7 @@ import { DataGrid } from "@mui/x-data-grid";
 import { BarChart } from "@mui/x-charts/BarChart";
 import { PieChart } from "@mui/x-charts/PieChart";
 import { API, fmt } from "../../App";
+import { useDateFilter } from "../../contexts/DateFilterContext";
 
 // ── utils ─────────────────────────────────────────────────────────────────────
 const fmtMonth = ym => new Date(...ym.split("-").map((v, i) => i === 1 ? v - 1 : +v), 1)
@@ -1262,28 +1263,16 @@ function MissingSkuPanel({ missingSkus, ordersCount, onResolved }) {
 
 // ── Main tab ──────────────────────────────────────────────────────────────────
 export function SKUAnalysisTab() {
+  const { range, label, months, mode: globalMode, selectedMonth: globalMonth } = useDateFilter();
   const [allData, setAllData] = useState([]);
   const [profitSummary, setProfitSummary] = useState(null);
   const [loading, setLoading] = useState(true);
   const [view, setView] = useState("all");
   const [selSKU, setSelSKU] = useState(null);
-  const [months, setMonths] = useState([]);
-  const [selMonth, setSelMonth] = useState(null);
-  const [range, setRange] = useState(null);
-  const [label, setLabel] = useState("All time");
   const [marginThreshold, setMarginThreshold] = useState(50);
   const [reloadTick, setReloadTick] = useState(0);
 
   useEffect(() => {
-    fetch(`${API}/profit/available-months/`).then(r => r.json()).then(ms => {
-      setMonths(ms);
-      if (ms.length > 0) { setSelMonth(ms[0]); setRange(toRange(ms[0])); setLabel(fmtMonth(ms[0])); }
-      else { setRange({}); setLabel("All time"); }
-    }).catch(() => { setRange({}); setLabel("All time"); });
-  }, []);
-
-  useEffect(() => {
-    if (range === null) return;
     const ctrl = new AbortController();
     setLoading(true); setProfitSummary(null); setAllData([]);
     const params = new URLSearchParams();
@@ -1324,11 +1313,6 @@ export function SKUAnalysisTab() {
 
   const viewData = view === "profit" ? profitRows : view === "loss" ? lossRows : view === "low-margin" ? lowMarginRows : allData;
   const chartData = [...allData].sort((a, b) => Math.abs(b.net_profit) - Math.abs(a.net_profit)).slice(0, 12);
-
-  const handleFilter = (month, r) => {
-    setSelMonth(month); setRange(r);
-    setLabel(month === null ? "All time" : month === "custom" ? `${r.date_from} → ${r.date_to}` : fmtMonth(month));
-  };
 
   const VIEWS = [
     { id: "all", label: "All SKUs", count: allData.length, activeBg: "#1E3A5F", activeText: "#fff", idleBg: "#EFF6FF", idleText: "#1E3A5F", idleBorder: "#BFDBFE" },
@@ -1378,9 +1362,6 @@ export function SKUAnalysisTab() {
           })}
         </Box>
       </Box>
-
-      {/* ── Filter ───────────────────────────────────────────────────────── */}
-      <MonthFilter months={months} selMonth={selMonth} onSelect={handleFilter} />
 
       {/* ── Missing SKUs panel ───────────────────────────────────────────── */}
       {!loading && (
@@ -1513,7 +1494,7 @@ export function SKUAnalysisTab() {
           sku={selSKU}
           months={months}
           initialRange={range}
-          initialMonth={selMonth}
+          initialMonth={globalMode === "month" ? globalMonth : null}
           onClose={() => setSelSKU(null)}
         />
       )}

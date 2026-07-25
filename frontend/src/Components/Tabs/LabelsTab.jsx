@@ -26,6 +26,7 @@ import KeyboardArrowUpIcon   from "@mui/icons-material/KeyboardArrowUp";
 import BlockIcon              from "@mui/icons-material/Block";
 import { C, API, fmt } from "../../App";
 import { PAGE_SIZE } from "../../lib/helper";
+import { useDateFilter } from "../../contexts/DateFilterContext";
 
 // ── localStorage helpers — persist parsed label results by date ───────────────
 const _LS_PREFIX = "labels_parse_";
@@ -598,14 +599,13 @@ function DuplicateBanner({ repData, repLoading }) {
 }
 
 // ── Orders by partner tab ─────────────────────────────────────────────────────
-function OrdersByPartnerTab({ availDates, activeRange, onRangeChange, onViewHistory }) {
+function OrdersByPartnerTab({ onViewHistory }) {
+  const { range: activeRange, label: periodLabel } = useDateFilter();
   const [orders,      setOrders]      = useState([]);
   const [loading,     setLoading]     = useState(false);
   const [filter,      setFilter]      = useState("all");   // "all" | "packed" | "unpacked"
   const [search,      setSearch]      = useState("");
   const [suggestions, setSuggestions] = useState([]);
-  const [dateMode,    setDateMode]    = useState("all");
-  const [selDate,     setSelDate]     = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -618,7 +618,7 @@ function OrdersByPartnerTab({ availDates, activeRange, onRangeChange, onViewHist
     } finally { setLoading(false); }
   }, [JSON.stringify(activeRange)]); // eslint-disable-line
 
-  useEffect(() => { if (activeRange !== null) load(); }, [load, activeRange]);
+  useEffect(() => { load(); }, [load]);
 
   const togglePacked = async (order_id, current) => {
     const res = await fetch(`${API}/labels/orders/${encodeURIComponent(order_id)}/pack/`, {
@@ -657,12 +657,6 @@ function OrdersByPartnerTab({ availDates, activeRange, onRangeChange, onViewHist
     } else { setSuggestions([]); }
   };
 
-  const applyDate = (mode, dateStr, range) => {
-    setDateMode(mode);
-    if (dateStr) setSelDate(dateStr);
-    onRangeChange(range);
-  };
-
   const packedCount   = orders.filter(o => o.is_packed).length;
   const unpackedCount = orders.length - packedCount;
   const allPacked     = orders.length > 0 && unpackedCount === 0;
@@ -683,49 +677,16 @@ function OrdersByPartnerTab({ availDates, activeRange, onRangeChange, onViewHist
   return (
     <Box sx={{ display: "flex", flexDirection: "column", gap: "16px" }}>
 
-      {/* Date filter */}
+      {/* Date filter — driven by the global period filter above the page */}
       <Paper elevation={1} sx={{ p: "12px 16px", borderRadius: 2, display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
-        <Typography sx={{ fontSize: 12, fontWeight: 700, color: C.gray500, textTransform: "uppercase", letterSpacing: "0.06em" }}>📅 Date</Typography>
-        <Chip
-          label="All Time"
-          size="small"
-          onClick={() => applyDate("all", "", {})}
-          color={dateMode === "all" ? "primary" : "default"}
-          variant={dateMode === "all" ? "filled" : "outlined"}
-          sx={{
-            fontSize: 12,
-            fontWeight: dateMode === "all" ? 700 : 500,
-            background: dateMode === "all" ? C.orangeLight : C.white,
-            color: dateMode === "all" ? C.orange : C.gray600,
-            borderColor: dateMode === "all" ? C.orange : C.gray300,
-            cursor: "pointer",
-          }}
-        />
-        {availDates.slice(0, 7).map(d => (
-          <Chip
-            key={d}
-            label={d}
-            size="small"
-            onClick={() => applyDate("single", d, { date_from: d, date_to: d })}
-            color={dateMode === "single" && selDate === d ? "primary" : "default"}
-            variant={dateMode === "single" && selDate === d ? "filled" : "outlined"}
-            sx={{
-              fontSize: 11,
-              fontWeight: dateMode === "single" && selDate === d ? 700 : 500,
-              background: dateMode === "single" && selDate === d ? C.orangeLight : C.white,
-              color: dateMode === "single" && selDate === d ? C.orange : C.gray600,
-              borderColor: dateMode === "single" && selDate === d ? C.orange : C.gray300,
-              cursor: "pointer",
-            }}
-          />
-        ))}
+        <Typography sx={{ fontSize: 12, fontWeight: 700, color: C.gray500, textTransform: "uppercase", letterSpacing: "0.06em" }}>📅 {periodLabel}</Typography>
         <Button
           size="small"
           variant="outlined"
           onClick={load}
           sx={{ minWidth: 0, px: "10px", py: "4px", color: C.gray500, borderColor: C.gray300, fontSize: 12, textTransform: "none" }}
         >
-          ⟳
+          ⟳ Refresh
         </Button>
       </Paper>
 
@@ -1214,12 +1175,7 @@ export function LabelsTab() {
   const [skuSearch,     setSkuSearch]     = useState("");
 
   // Date filter (shared between tabs)
-  const [availDates,  setAvailDates]  = useState([]);
-  const [dateMode,    setDateMode]    = useState("all");
-  const [selDate,     setSelDate]     = useState("");
-  const [customFrom,  setCustomFrom]  = useState("");
-  const [customTo,    setCustomTo]    = useState("");
-  const [activeRange, setActiveRange] = useState(null);
+  const { range: activeRange, label: periodLabel } = useDateFilter();
 
   // Repeat customers
   const [repData,    setRepData]    = useState(null);
@@ -1247,26 +1203,8 @@ export function LabelsTab() {
     }
   }, [batchDate]); // eslint-disable-line
 
-  // ── Init ──────────────────────────────────────────────────────────────────
-  useEffect(() => {
-    fetch(`${API}/labels/summary/`)
-      .then(r => r.json())
-      .then(d => {
-        const dates = d.available_dates || [];
-        setAvailDates(dates);
-        if (dates.length > 0) {
-          setSelDate(dates[0]); setDateMode("single");
-          setActiveRange({ date_from: dates[0], date_to: dates[0] });
-        } else {
-          setActiveRange({});
-        }
-      })
-      .catch(() => setActiveRange({}));
-  }, []);
-
   // ── Fetch repeat customers (address-based) ────────────────────────────────
   useEffect(() => {
-    if (activeRange === null) return;
     setRepLoading(true); setRepData(null);
     const params = new URLSearchParams();
     if (activeRange.date_from) params.set("date_from", activeRange.date_from);
@@ -1276,8 +1214,6 @@ export function LabelsTab() {
       .then(d => { setRepData(d); setRepLoading(false); })
       .catch(() => setRepLoading(false));
   }, [JSON.stringify(activeRange)]); // eslint-disable-line
-
-  const applyRange = (range) => { setActiveRange(range); };
 
   // ── Upload handlers ───────────────────────────────────────────────────────
   const handleFile = async (file) => {
@@ -1295,8 +1231,6 @@ export function LabelsTab() {
       } else {
         setUploadResult(data);
         saveParseResult(batchDate, file.name, data);
-        setAvailDates(prev => prev.includes(batchDate) ? prev : [batchDate, ...prev].sort().reverse());
-        setActiveRange(ar => ar ? { ...ar } : {});
         const ords = (data.page_details || []).filter(pd => pd.order_id)
           .map(pd => ({ order_id: pd.order_id, sku: pd.sku, qty: pd.qty || 1, is_packed: false }));
         setPackingOrders(ords);
@@ -1857,91 +1791,16 @@ export function LabelsTab() {
             )}
           </Paper>
 
-          {/* Date filter (for banner context) */}
+          {/* Date filter (for banner context) — driven by the global period filter above the page */}
           <Paper elevation={1} sx={{ p: "12px 16px", borderRadius: 2, display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
-            <Typography sx={{ fontSize: 12, fontWeight: 700, color: C.gray500, textTransform: "uppercase", letterSpacing: "0.06em" }}>📅 Date Filter</Typography>
-            <Chip
-              label="All Time"
-              size="small"
-              onClick={() => { setDateMode("all"); applyRange({}); }}
-              color={dateMode === "all" ? "primary" : "default"}
-              variant={dateMode === "all" ? "filled" : "outlined"}
-              sx={{
-                fontSize: 12,
-                fontWeight: dateMode === "all" ? 700 : 500,
-                background: dateMode === "all" ? C.orangeLight : C.white,
-                color: dateMode === "all" ? C.orange : C.gray600,
-                borderColor: dateMode === "all" ? C.orange : C.gray300,
-                cursor: "pointer",
-              }}
-            />
-            {availDates.slice(0, 7).map(d => (
-              <Chip
-                key={d}
-                label={d}
-                size="small"
-                onClick={() => { setSelDate(d); setDateMode("single"); applyRange({ date_from: d, date_to: d }); }}
-                color={dateMode === "single" && selDate === d ? "primary" : "default"}
-                variant={dateMode === "single" && selDate === d ? "filled" : "outlined"}
-                sx={{
-                  fontSize: 11,
-                  fontWeight: dateMode === "single" && selDate === d ? 700 : 500,
-                  background: dateMode === "single" && selDate === d ? C.orangeLight : C.white,
-                  color: dateMode === "single" && selDate === d ? C.orange : C.gray600,
-                  borderColor: dateMode === "single" && selDate === d ? C.orange : C.gray300,
-                  cursor: "pointer",
-                }}
-              />
-            ))}
-            <Box component="span" sx={{ color: C.gray300, fontSize: 18 }}>|</Box>
-            <Box sx={{ display: "flex", alignItems: "center", gap: "6px" }}>
-              <TextField
-                type="date"
-                size="small"
-                value={customFrom}
-                onChange={e => setCustomFrom(e.target.value)}
-                sx={{ width: 140, "& input": { fontSize: 12, py: "7px" } }}
-              />
-              <Typography sx={{ color: C.gray400, fontSize: 13 }}>→</Typography>
-              <TextField
-                type="date"
-                size="small"
-                value={customTo}
-                onChange={e => setCustomTo(e.target.value)}
-                sx={{ width: 140, "& input": { fontSize: 12, py: "7px" } }}
-              />
-              <Button
-                size="small"
-                disabled={!customFrom || !customTo}
-                onClick={() => { if (!customFrom || !customTo) return; setDateMode("custom"); applyRange({ date_from: customFrom, date_to: customTo }); }}
-                sx={{
-                  px: "14px",
-                  py: "6px",
-                  fontSize: 12,
-                  fontWeight: 600,
-                  textTransform: "none",
-                  background: dateMode === "custom" ? C.orange : C.gray100,
-                  color: dateMode === "custom" ? C.white : C.gray600,
-                  border: "none",
-                  "&:hover": { background: dateMode === "custom" ? C.orange : C.gray100 },
-                  "&.Mui-disabled": { opacity: 0.5 },
-                }}
-              >
-                Apply
-              </Button>
-            </Box>
+            <Typography sx={{ fontSize: 12, fontWeight: 700, color: C.gray500, textTransform: "uppercase", letterSpacing: "0.06em" }}>📅 {periodLabel}</Typography>
           </Paper>
         </Box>
       )}
 
       {/* ════════════════ TAB 2: ORDERS BY PARTNER ══════════════════════════ */}
       {subTab === "orders" && (
-        <OrdersByPartnerTab
-          availDates={availDates}
-          activeRange={activeRange}
-          onRangeChange={applyRange}
-          onViewHistory={setHistoryQuery}
-        />
+        <OrdersByPartnerTab onViewHistory={setHistoryQuery} />
       )}
     </Box>
   );

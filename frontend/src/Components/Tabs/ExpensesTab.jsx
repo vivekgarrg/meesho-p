@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { API, C, S, btn } from "../../App";
+import { useDateFilter } from "../../contexts/DateFilterContext";
 import {
   Dialog, DialogTitle, DialogContent, DialogActions, Button, TextField,
   IconButton, MenuItem, Table, TableHead, TableBody, TableRow, TableCell,
@@ -12,7 +13,6 @@ import ReceiptLongIcon from "@mui/icons-material/ReceiptLong";
 import LocalShippingIcon from "@mui/icons-material/LocalShipping";
 
 const todayStr = () => new Date().toISOString().slice(0, 10);
-const thisMonth = () => new Date().toISOString().slice(0, 7);
 
 const fmt2 = (n) =>
   n === null || n === undefined || n === ""
@@ -143,8 +143,7 @@ function InvoiceDialog({ open, initial, onClose, onSaved }) {
 
 // ── Main ──
 export function ExpensesTab() {
-  const [month, setMonth] = useState(thisMonth());
-  const [allTime, setAllTime] = useState(false);
+  const { range, label: periodLabel } = useDateFilter();
   const [invoices, setInvoices] = useState([]);
   const [invMeta, setInvMeta] = useState({ grand_total: "0", by_category: {} });
   const [transport, setTransport] = useState([]);
@@ -157,15 +156,21 @@ export function ExpensesTab() {
   const [tForm, setTForm] = useState({ date: todayStr(), amount: "", note: "" });
   const [tSaving, setTSaving] = useState(false);
 
-  const monthParam = allTime ? "" : `?month=${month}`;
+  const dateParam = (() => {
+    const p = new URLSearchParams();
+    if (range.date_from) p.set("date_from", range.date_from);
+    if (range.date_to) p.set("date_to", range.date_to);
+    const s = p.toString();
+    return s ? `?${s}` : "";
+  })();
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
       const [invR, trR, smR] = await Promise.all([
-        fetch(`${API}/expenses/invoices/${monthParam}`).then((r) => r.json()),
-        fetch(`${API}/expenses/transport/${monthParam}`).then((r) => r.json()),
-        fetch(`${API}/expenses/summary/${monthParam}`).then((r) => r.json()),
+        fetch(`${API}/expenses/invoices/${dateParam}`).then((r) => r.json()),
+        fetch(`${API}/expenses/transport/${dateParam}`).then((r) => r.json()),
+        fetch(`${API}/expenses/summary/${dateParam}`).then((r) => r.json()),
       ]);
       setInvoices(invR.results || []);
       setInvMeta({ grand_total: invR.grand_total || "0", by_category: invR.by_category || {} });
@@ -173,7 +178,7 @@ export function ExpensesTab() {
       setTransportTotal(trR.total_amount || "0");
       setSummary(smR);
     } finally { setLoading(false); }
-  }, [monthParam]);
+  }, [dateParam]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -214,9 +219,7 @@ export function ExpensesTab() {
           </p>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-          <button onClick={() => setAllTime(true)} style={{ ...btn(allTime ? "primary" : "ghost", "sm"), borderRadius: 20, padding: "6px 14px", fontSize: 12 }}>All time</button>
-          <button onClick={() => setAllTime(false)} style={{ ...btn(!allTime ? "primary" : "ghost", "sm"), borderRadius: 20, padding: "6px 14px", fontSize: 12 }}>Month</button>
-          <input type="month" value={month} disabled={allTime} onChange={(e) => setMonth(e.target.value)} style={{ ...S.inp, width: 150, opacity: allTime ? 0.5 : 1 }} />
+          <span style={{ fontSize: 12, color: C.gray400 }}>{periodLabel}</span>
           <button onClick={() => { setEditing(null); setDialogOpen(true); }} style={btn("primary", "md")}>+ New Invoice</button>
         </div>
       </div>
@@ -227,7 +230,7 @@ export function ExpensesTab() {
           <KpiCard label="Packaging Material" value={summary.packaging} color={C.blue} bg="#EFF6FF" />
           <KpiCard label="Other Expenses" value={summary.other} color="#D97706" bg="#FFFBEB" />
           <KpiCard label="Transportation" value={summary.transport} color="#7C3AED" bg="#F5F3FF" sub={`${transport.length} day(s)`} />
-          <KpiCard label="Grand Total" value={summary.grand_total} color={C.green} bg="#ECFDF5" sub={allTime ? "all time" : month} />
+          <KpiCard label="Grand Total" value={summary.grand_total} color={C.green} bg="#ECFDF5" sub={periodLabel} />
         </div>
       )}
 

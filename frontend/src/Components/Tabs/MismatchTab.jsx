@@ -7,7 +7,7 @@ import { DataGrid } from "@mui/x-data-grid";
 import SearchIcon from "@mui/icons-material/Search";
 import { API, C, fmt } from "../../App";
 import { PAGE_SIZE as pageSize } from "../../lib/helper";
-import { FilterBar, fmtMonth, monthToRange } from "../shared/FilterBar";
+import { useDateFilter } from "../../contexts/DateFilterContext";
 
 const PAGE_SIZE = pageSize;
 
@@ -120,39 +120,21 @@ const PAYMENT_COLS = [
 
 // ── Main component ────────────────────────────────────────────────────────────
 export function MismatchTab() {
-  const [months,      setMonths]      = useState([]);
-  const [mode,        setMode]        = useState("all");
-  const [selMonth,    setSelMonth]    = useState("");
-  const [custFrom,    setCustFrom]    = useState("");
-  const [custTo,      setCustTo]      = useState("");
-  const [activeRange, setActiveRange] = useState(null);
+  const { range: activeRange, label: filterLabel } = useDateFilter();
   const [view,        setView]        = useState("orders");  // "orders" | "payments"
   const [page,        setPage]        = useState(0);
   const [search,      setSearch]      = useState("");
   const [data,        setData]        = useState(null);
   const [loading,     setLoading]     = useState(true);
 
-  useEffect(() => {
-    fetch(`${API}/profit/available-months/`)
-      .then((r) => r.json())
-      .then((ms) => {
-        setMonths(ms);
-        const target = ms[0] || null;
-        if (target) { setMode("month"); setSelMonth(target); setActiveRange(monthToRange(target)); }
-        else         setActiveRange({});
-      })
-      .catch(() => setActiveRange({}));
-  }, []);
-
-  useEffect(() => { setPage(0); }, [activeRange, search, view]);
+  useEffect(() => { setPage(0); }, [JSON.stringify(activeRange), search, view]);
 
   const queryKey = useMemo(
-    () => activeRange === null ? null : JSON.stringify({ activeRange, page, search, view }),
+    () => JSON.stringify({ activeRange, page, search, view }),
     [activeRange, page, search, view],
   );
 
   useEffect(() => {
-    if (queryKey === null) return;
     setLoading(true);
     const params = { ...activeRange, page: page + 1, page_size: PAGE_SIZE, view };
     if (search) params.search = search;
@@ -161,10 +143,6 @@ export function MismatchTab() {
       .then((d) => { setData(d); setLoading(false); })
       .catch(() => setLoading(false));
   }, [queryKey]);
-
-  const filterLabel =
-    mode === "month"  ? fmtMonth(selMonth) :
-    mode === "custom" ? `${custFrom} → ${custTo}` : "All Time";
 
   return (
     <Box sx={{ display: "flex", flexDirection: "column", gap: 2.5 }}>
@@ -177,16 +155,6 @@ export function MismatchTab() {
           Identify gaps: orders with no payment record, and payments with no matching order.
         </Typography>
       </Box>
-
-      {/* Shared filter bar */}
-      <FilterBar
-        months={months}
-        mode={mode}        setMode={setMode}
-        selectedMonth={selMonth}  setSelectedMonth={setSelMonth}
-        customFrom={custFrom}     setCustomFrom={setCustFrom}
-        customTo={custTo}         setCustomTo={setCustTo}
-        onApply={(range) => setActiveRange(range)}
-      />
 
       {/* Summary cards */}
       {data && (

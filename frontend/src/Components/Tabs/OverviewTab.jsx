@@ -1,17 +1,12 @@
 import React, { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import CircularProgress from "@mui/material/CircularProgress";
-import MenuItem from "@mui/material/MenuItem";
-import Select from "@mui/material/Select";
-import TextField from "@mui/material/TextField";
 import Alert from "@mui/material/Alert";
-import Divider from "@mui/material/Divider";
-import Button from "@mui/material/Button";
-import Chip from "@mui/material/Chip";
 import { BarChart } from "@mui/x-charts/BarChart";
 import { LineChart } from "@mui/x-charts/LineChart";
 import { PieChart } from "@mui/x-charts/PieChart";
 import { API, C, CHART_COLORS, fmt } from "../../App";
+import { useDateFilter } from "../../contexts/DateFilterContext";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Design tokens
@@ -171,47 +166,6 @@ function OutcomeCard({ icon, label, count, rate, rateColor, netLabel, net, netCo
   );
 }
 
-/** Filter bar with month selector + custom date range */
-function FilterBar({ mode, setMode, selectedMonth, setSelectedMonth, months, customFrom, setCustomFrom, customTo, setCustomTo, onApply }) {
-  return (
-    <div style={{ ...T.card, padding: "12px 18px" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-        <span style={{ fontSize: 11, fontWeight: 700, color: C.gray400, letterSpacing: "0.07em", textTransform: "uppercase" }}>Period</span>
-        <Button size="small" variant={mode === "all" ? "contained" : "outlined"} disableElevation
-          onClick={() => { setMode("all"); onApply({}); }}
-          sx={{ borderRadius: 20, textTransform: "none", fontSize: 12, minWidth: 80 }}>
-          All Time
-        </Button>
-        <Select size="small" displayEmpty value={mode === "month" ? (selectedMonth || "") : ""}
-          onChange={e => { const m = e.target.value; if (!m) return; setMode("month"); setSelectedMonth(m); onApply(monthToRange(m)); }}
-          sx={{ minWidth: 160, fontSize: 12, borderRadius: 20, "& .MuiOutlinedInput-notchedOutline": { borderRadius: 20 } }}>
-          <MenuItem value=""><em>Select month…</em></MenuItem>
-          {months.map(m => <MenuItem key={m} value={m} sx={{ fontSize: 12 }}>{fmtMonth(m)}</MenuItem>)}
-        </Select>
-        {mode === "month" && selectedMonth && (
-          <Chip label={fmtMonth(selectedMonth)} color="primary" size="small" sx={{ borderRadius: 20 }} />
-        )}
-        <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
-        <span style={{ fontSize: 11, color: C.gray400 }}>Custom range:</span>
-        <TextField size="small" type="date" value={customFrom} onChange={e => setCustomFrom(e.target.value)}
-          sx={{ width: 148, "& input": { fontSize: 12 } }} />
-        <span style={{ fontSize: 11, color: C.gray400 }}>→</span>
-        <TextField size="small" type="date" value={customTo} onChange={e => setCustomTo(e.target.value)}
-          sx={{ width: 148, "& input": { fontSize: 12 } }} />
-        <Button size="small" variant={mode === "custom" ? "contained" : "outlined"} disableElevation
-          disabled={!customFrom || !customTo}
-          onClick={() => { if (customFrom && customTo) { setMode("custom"); onApply({ date_from: customFrom, date_to: customTo }); } }}
-          sx={{ borderRadius: 20, textTransform: "none", fontSize: 12 }}>
-          Apply
-        </Button>
-        {mode === "custom" && customFrom && (
-          <Chip label={`${customFrom} → ${customTo}`} color="primary" size="small"
-            onDelete={() => { setMode("all"); onApply({}); }} sx={{ borderRadius: 20 }} />
-        )}
-      </div>
-    </div>
-  );
-}
 
 /** Settlement by status compact table */
 function SettlementTable({ rows, total }) {
@@ -273,26 +227,12 @@ function DeductionRow({ label, value, pct, color }) {
 // ─────────────────────────────────────────────────────────────────────────────
 export function OverviewTab() {
   const navigate = useNavigate();
+  const { range: activeRange, label: filterLabel } = useDateFilter();
   const [profit, setProfit] = useState(null);
   const [dash, setDash] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [months, setMonths] = useState([]);
-  const [mode, setMode] = useState("all");
-  const [selectedMonth, setSelectedMonth] = useState("");
-  const [customFrom, setCustomFrom] = useState("");
-  const [customTo, setCustomTo] = useState("");
-  const [activeRange, setActiveRange] = useState(null);
 
   useEffect(() => {
-    fetch(`${API}/profit/available-months/`).then(r => r.json()).then(ms => {
-      setMonths(ms);
-      if (ms.length > 0) { setMode("month"); setSelectedMonth(ms[0]); setActiveRange(monthToRange(ms[0])); }
-      else setActiveRange({});
-    }).catch(() => setActiveRange({}));
-  }, []);
-
-  useEffect(() => {
-    if (activeRange === null) return;
     const ctrl = new AbortController();
     setLoading(true);
     const qs = Object.keys(activeRange).length ? `?${new URLSearchParams(activeRange)}` : "";
@@ -302,7 +242,7 @@ export function OverviewTab() {
     ]).then(([p, d]) => { setProfit(p); setDash(d); setLoading(false); })
       .catch(e => { if (e.name !== "AbortError") setLoading(false); });
     return () => ctrl.abort();
-  }, [JSON.stringify(activeRange ?? {})]); // eslint-disable-line
+  }, [JSON.stringify(activeRange)]); // eslint-disable-line
 
   // ── Derived values ────────────────────────────────────────────────────────
   const netProfit = Number(profit?.net_revenue ?? 0);
@@ -313,9 +253,6 @@ export function OverviewTab() {
   const netSettle = payment_stats?.total_settlement ?? 0;
   const totalSale = payment_stats?.total_sale ?? 0;
   const settleEff = totalSale > 0 ? ((netSettle / totalSale) * 100).toFixed(1) : "—";
-
-  const filterLabel = mode === "month" ? fmtMonth(selectedMonth)
-    : mode === "custom" ? `${customFrom} → ${customTo}` : "All Time";
 
 
   const returnSummary = profit?.order_summary?.return_summary;
@@ -437,13 +374,6 @@ export function OverviewTab() {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-
-      {/* ── 1. Filter bar ──────────────────────────────────────────────── */}
-      <FilterBar mode={mode} setMode={setMode} selectedMonth={selectedMonth}
-        setSelectedMonth={setSelectedMonth} months={months}
-        customFrom={customFrom} setCustomFrom={setCustomFrom}
-        customTo={customTo} setCustomTo={setCustomTo}
-        onApply={range => setActiveRange(range)} />
 
       {loading && (
         <div style={{ display: "flex", flexDirection: "column", alignItems: "center", padding: "80px 0", gap: 14 }}>
@@ -920,12 +850,8 @@ export function OverviewTab() {
         {/* ── 10. Unsettled quick link ─────────────────────────────────────── */}
         {unsettled && (
           <div
-            onClick={() => {
-              const params = new URLSearchParams();
-              if (activeRange?.date_from) params.set("date_from", activeRange.date_from);
-              if (activeRange?.date_to) params.set("date_to", activeRange.date_to);
-              navigate(`/unsettled?${params.toString()}`);
-            }}
+            // Unsettled tab reads the same global period filter, so no need to pass it via URL.
+            onClick={() => navigate("/unsettled")}
             style={{
               ...T.card, display: "flex", alignItems: "center", gap: 20, cursor: "pointer",
               background: "#FFF1F2", border: "1.5px solid #FECDD3", padding: "16px 22px",
