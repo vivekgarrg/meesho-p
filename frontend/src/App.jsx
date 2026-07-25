@@ -12,6 +12,7 @@ import { ExpensesTab } from "./Components/Tabs/ExpensesTab";
 import { PricingTab } from "./Components/Tabs/PricingTab";
 import { UploadTab } from "./Components/Tabs/UploadTab";
 import { SKUAnalysisTab } from "./Components/Tabs/SKUProfitTab";
+import { EstimatedProfitTab } from "./Components/Tabs/EstimatedProfitTab";
 import { LabelsTab } from "./Components/Tabs/LabelsTab";
 import { PurchasesTab } from "./Components/Tabs/PurchasesTab";
 import { InventoryTab } from "./Components/Tabs/InventoryTab";
@@ -390,6 +391,7 @@ const NAV_GROUPS = [
       { path: "/", label: "Overview", icon: "◈", end: true },
       { path: "/sku-analysis", label: "SKU Analysis", icon: "↗" },
       { path: "/ads-analysis", label: "Ads Analysis", icon: "◬" },
+      { path: "/estimated-profit", label: "Estimated Profit", icon: "🧮" },
     ],
   },
   {
@@ -730,6 +732,7 @@ function AppShell() {
             <Route path="/mismatch" element={<MismatchTab />} />
             <Route path="/sku-analysis" element={<SKUAnalysisTab />} />
             <Route path="/ads-analysis" element={<AdsAnalysisTab />} />
+            <Route path="/estimated-profit" element={<EstimatedProfitTab />} />
             <Route path="/pricing" element={<PricingTab />} />
             <Route path="/upload" element={<UploadTab />} />
             <Route path="/labels" element={<LabelsTab />} />

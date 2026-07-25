@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import Box from "@mui/material/Box";
@@ -46,14 +46,28 @@ function fmtDate(v) {
 }
 
 // ── DataGrid columns ──────────────────────────────────────────────────────────
-const COLUMNS = [
+// `dupeCounts` maps sub_order_no → how many rows on the current page share it,
+// so an order with more than one lifecycle row (e.g. SHIPPED then DELIVERED)
+// gets a visible "stage" badge instead of looking like a plain duplicate.
+function buildColumns(dupeCounts) {
+  return [
   {
-    field: "sub_order_no", headerName: "Order No", width: 158,
-    renderCell: ({ value }) => (
-      <Box sx={{ fontFamily: "monospace", fontSize: 11, fontWeight: 700, color: C.blue, bgcolor: C.blueLight, px: 1, py: 0.3, borderRadius: 1, border: "1px solid #BFDBFE" }}>
-        {value}
-      </Box>
-    ),
+    field: "sub_order_no", headerName: "Order No", width: 168,
+    renderCell: ({ value, row }) => {
+      const count = dupeCounts[value] || 1;
+      return (
+        <Box sx={{ display: "flex", alignItems: "center", gap: 0.5 }}>
+          <Box sx={{ fontFamily: "monospace", fontSize: 11, fontWeight: 700, color: C.blue, bgcolor: C.blueLight, px: 1, py: 0.3, borderRadius: 1, border: "1px solid #BFDBFE" }}>
+            {value}
+          </Box>
+          {count > 1 && (
+            <Tooltip title={`This order has ${count} lifecycle rows on this page (e.g. Shipped → Delivered) — not a duplicate, each row is a status the order passed through.`}>
+              <Chip label={`${count}×`} size="small" sx={{ height: 16, fontSize: 9, fontWeight: 800, bgcolor: C.amberLight, color: C.amber, border: `1px solid #FDE68A`, "& .MuiChip-label": { px: 0.6 } }} />
+            </Tooltip>
+          )}
+        </Box>
+      );
+    },
   },
   {
     field: "order_date", headerName: "Date", width: 90,
@@ -111,7 +125,8 @@ const COLUMNS = [
     field: "supplier_discounted_price", headerName: "Sell ₹", width: 88, type: "number",
     renderCell: ({ value }) => <Typography sx={{ fontFamily: "monospace", fontWeight: 700, fontSize: 13, color: C.gray800 }}>{value != null ? fmt(value) : "—"}</Typography>,
   },
-];
+  ];
+}
 
 // ── Main Tab ──────────────────────────────────────────────────────────────────
 export function OrdersTab() {
@@ -138,6 +153,17 @@ export function OrdersTab() {
   const [total, setTotal] = useState(0);
   const [analytics, setAnalytics] = useState(null);
   const [listLoading, setListLoading] = useState(true);
+
+  // How many lifecycle rows each sub_order_no has on the current page — an order
+  // that was uploaded once as SHIPPED and again later as DELIVERED shows up twice
+  // by design (see Order.update_or_create key in upload_orders_csv); this flags it
+  // clearly instead of it reading as an accidental duplicate.
+  const dupeCounts = useMemo(() => {
+    const counts = {};
+    for (const r of rows) counts[r.sub_order_no] = (counts[r.sub_order_no] || 0) + 1;
+    return counts;
+  }, [rows]);
+  const columns = useMemo(() => buildColumns(dupeCounts), [dupeCounts]);
 
   const resetPage = () => setPage(1);
 
@@ -445,8 +471,8 @@ export function OrdersTab() {
 
         <DataGrid
           rows={rows}
-          columns={COLUMNS}
-          getRowId={r => r.sub_order_no}
+          columns={columns}
+          getRowId={r => r.id ?? r.sub_order_no}
           rowCount={total}
           paginationMode="server"
           paginationModel={{ page: page - 1, pageSize: PAGE_SIZE }}

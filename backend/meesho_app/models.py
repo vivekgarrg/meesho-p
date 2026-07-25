@@ -734,3 +734,42 @@ class PackedStockEvent(models.Model):
     def __str__(self):
         sign = "+" if self.quantity >= 0 else ""
         return f"{self.parent_sku_id} {sign}{self.quantity} packed"
+
+
+class EstimatedProfitOrder(models.Model):
+    """
+    One row from an uploaded Meesho 'Order Summary' CSV (Estimated Profit tab).
+    Stores the raw order data only — cost/profit is always computed live against
+    current SKU pricing when read, the same way /profit/ works, so adding/fixing
+    a SKU's price retroactively updates every stored row that references it.
+
+    Re-uploading the same sheet updates rows in place instead of duplicating:
+    (business, sub_order_no, order_status) is the natural key — one row per
+    sub-order per lifecycle status (an order can appear once as e.g. "Delivered"
+    and, if it later changes, again as "Returned").
+    """
+    sub_order_no  = models.CharField(max_length=100, db_index=True)
+    order_status  = models.CharField(max_length=50)
+    catalog_id    = models.CharField(max_length=100, null=True, blank=True)
+    sku_id        = models.CharField(max_length=200, db_index=True)
+    quantity      = models.PositiveIntegerField(default=1)
+    price         = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    order_date    = models.DateField(null=True, blank=True)
+    payout_value  = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    payout_status = models.CharField(max_length=50, null=True, blank=True)
+    claim_status  = models.CharField(max_length=50, null=True, blank=True)
+
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+    updated_at  = models.DateTimeField(auto_now=True)
+
+    business = models.ForeignKey(
+        "accounts.Business", on_delete=models.PROTECT,
+    )
+
+    class Meta:
+        db_table = "estimated_profit_orders"
+        ordering = ["-order_date", "-uploaded_at"]
+        unique_together = [("business", "sub_order_no", "order_status")]
+
+    def __str__(self):
+        return f"{self.sub_order_no} ({self.order_status})"

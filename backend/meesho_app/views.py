@@ -17,7 +17,7 @@ from PIL import Image
 from .helpers.helper import status_wise_summary
 from .permissions import get_authorized_business
 
-from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, PurchaseBill, PurchaseItem, BlockedCustomer, InventoryAdjustment, ConsumableItem, ConsumablePurchase, ConsumableUsage, InventoryLog, MeeshoInventory, MeeshoPriceUpdate, ExpenseInvoice, ExpenseInvoiceItem, TransportCharge, PackedStockEvent
+from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, PurchaseBill, PurchaseItem, BlockedCustomer, InventoryAdjustment, ConsumableItem, ConsumablePurchase, ConsumableUsage, InventoryLog, MeeshoInventory, MeeshoPriceUpdate, ExpenseInvoice, ExpenseInvoiceItem, TransportCharge, PackedStockEvent, EstimatedProfitOrder
 from .serializers import (
     OrderPaymentSerializer, AdsCostSerializer,
     ReferralPaymentSerializer, CompensationRecoverySerializer,
@@ -1684,6 +1684,368 @@ def profit_summary(request, business_id):
         },
         "payout_breakdown": _build_payout_breakdown(qs),
     })
+
+
+# ── Estimated Profit from an uploaded Order Summary CSV ───────────────────────
+
+_ESTIMATED_PROFIT_EXCLUDED_STATUSES = {"in transit", "ready to ship"}
+_ESTIMATED_PROFIT_BUCKETS = ["delivered", "return", "rto", "exchange", "claim", "other"]
+_ESTIMATED_PROFIT_STATUS_LABELS = {
+    "delivered": "Delivered", "return": "Returned", "rto": "RTO",
+    "exchange": "Exchanged", "claim": "Claim", "other": "Other / Cancelled",
+}
+
+
+def _estimated_profit_pricing_lookup(business):
+    """
+    Build a get_price(sku_id, order_date) -> (item_price, packaging_cost, tax_percent)
+    closure using the same effective-date SKU/parent pricing as /profit/, so the
+    uploaded-CSV estimate uses identical unit economics to the Overview tab.
+    """
+    from collections import defaultdict
+
+    fp_all = list(FinalPrice.objects.filter(business=business).only(
+        "sku_id", "item_price", "packaging_cost", "tax_percent", "parent_id"))
+    item_price_map = {fp.sku_id: fp.item_price or Decimal("0") for fp in fp_all}
+    packaging_map  = {fp.sku_id: fp.packaging_cost or Decimal("0") for fp in fp_all}
+    tax_map        = {fp.sku_id: fp.tax_percent or 0 for fp in fp_all}
+    sku_parent_map = {fp.sku_id: fp.parent_id for fp in fp_all if fp.parent_id}
+    known_skus     = set(item_price_map.keys())
+
+    parent_qs = ParentItemPrice.objects.filter(business=business).only(
+        "id", "item_price", "tax_percent", "packaging_cost")
+    parent_item_price_map = {p.id: p.item_price or Decimal("0") for p in parent_qs}
+    parent_packaging_map  = {p.id: p.packaging_cost or Decimal("0") for p in parent_qs}
+    parent_tax_map        = {p.id: p.tax_percent or 0 for p in parent_qs}
+
+    hist = list(
+        ParentPriceHistory.objects.filter(business=business)
+        .values("parent_id", "effective_from", "packaging_cost", "item_price", "tax_percent")
+        .order_by("effective_from")
+    )
+    parent_histories = defaultdict(list)
+    for h in hist:
+        parent_histories[h["parent_id"]].append((
+            h["effective_from"], h["item_price"] or Decimal("0"),
+            h["packaging_cost"] or Decimal("0"), h["tax_percent"] or 0,
+        ))
+
+    def get_price(sku_id, order_date):
+        if order_date is not None and hasattr(order_date, "date"):
+            order_date = order_date.date()
+        pid = sku_parent_map.get(sku_id)
+        if pid:
+            applicable = [
+                (d, ip, pkg, tax) for d, ip, pkg, tax in parent_histories[pid]
+                if order_date and d <= order_date
+            ]
+            if applicable:
+                _, ip, pkg, tax = applicable[-1]
+                return ip, pkg, tax
+            return (
+                parent_item_price_map.get(pid, Decimal("0")),
+                parent_packaging_map.get(pid, Decimal("0")),
+                parent_tax_map.get(pid, 0),
+            )
+        return (
+            item_price_map.get(sku_id, Decimal("0")),
+            packaging_map.get(sku_id, Decimal("0")),
+            tax_map.get(sku_id, 0),
+        )
+
+    return get_price, known_skus
+
+
+def _to_num(v):
+    return round(float(v), 2) if isinstance(v, Decimal) else v
+
+
+def _compute_estimated_profit_summary(business, date_from=None, date_to=None):
+    """
+    Live aggregate over persisted EstimatedProfitOrder rows — cost/profit is
+    recomputed against *current* SKU pricing every call, so adding a missing
+    SKU's price (or correcting one) is reflected immediately without needing
+    to re-upload the sheet.
+
+    Cost formula (matches Overview / compute_order_net): Delivered and an
+    approved Claim both deduct item cost×qty + tax + packaging; Exchanged
+    deducts the same but with packaging doubled. Returned, RTO, and a rejected
+    (or otherwise non-approved) Claim deduct nothing — the payout stands as-is.
+
+    Those payout-only rows (Returned / RTO / non-approved Claim) only represent
+    a real loss when Meesho actually deducted money back — i.e. the settlement
+    is negative or zero. A positive settlement doesn't fit that pattern, so the
+    row is dropped from the estimate entirely, the same as an In Transit / Ready
+    To Ship row.
+    """
+    get_price, known_skus = _estimated_profit_pricing_lookup(business)
+
+    qs = EstimatedProfitOrder.objects.filter(business=business)
+    if date_from:
+        qs = qs.filter(order_date__gte=date_from)
+    if date_to:
+        qs = qs.filter(order_date__lte=date_to)
+
+    missing_price_skus_seen = []
+    missing_price_payout = Decimal("0")
+    missing_price_count = 0
+    total_order_value = Decimal("0")   # informational: Price × Qty, not used in P&L
+    non_loss_payout_excluded_count = 0
+    non_loss_payout_excluded_sum = Decimal("0")
+
+    bucket_totals = {
+        b: {"count": 0, "gross": Decimal("0"), "cost": Decimal("0"), "net": Decimal("0")}
+        for b in _ESTIMATED_PROFIT_BUCKETS
+    }
+    sku_agg = {}
+
+    def _bump_sku(sku_id, bucket, payout_value, final_cost, net, one_unit_price):
+        if sku_id not in sku_agg:
+            sku_agg[sku_id] = {
+                "sku_id": sku_id, "order_count": 0,
+                "delivered_count": 0, "return_count": 0, "rto_count": 0,
+                "exchange_count": 0, "claim_count": 0, "other_count": 0,
+                "gross_payout": Decimal("0"), "total_cost": Decimal("0"), "net_profit": Decimal("0"),
+                "one_unit_price": one_unit_price,
+            }
+        s = sku_agg[sku_id]
+        s["order_count"] += 1
+        s[f"{bucket}_count"] += 1
+        s["gross_payout"] += payout_value
+        s["total_cost"]  += final_cost
+        s["net_profit"]  += net
+
+    for row in qs.iterator():
+        sku_id = row.sku_id
+        order_status = (row.order_status or "").lower()
+        claim_status = (row.claim_status or "").strip()
+        claim_status_lower = claim_status.lower()
+        payout_value = row.payout_value or Decimal("0")
+        qty_d = Decimal(str(row.quantity or 0))
+
+        is_claim = bool(claim_status)
+        claim_approved = is_claim and claim_status_lower == "approved"
+
+        # Returned / RTO / a Claim that isn't explicitly "approved" (rejected, or
+        # any other non-blank claim status) all deduct nothing — payout stands
+        # as-is, and only counts when it's actually a loss (<= 0).
+        payout_only_bucket = None
+        if is_claim and not claim_approved:
+            payout_only_bucket = "claim"
+        elif not is_claim and order_status == "returned":
+            payout_only_bucket = "return"
+        elif not is_claim and order_status == "rto":
+            payout_only_bucket = "rto"
+
+        if payout_only_bucket:
+            if payout_value > 0:
+                non_loss_payout_excluded_count += 1
+                non_loss_payout_excluded_sum += payout_value
+                continue
+            final_cost = Decimal("0")
+            net = payout_value
+            total_order_value += (row.price or Decimal("0")) * qty_d
+            bt = bucket_totals[payout_only_bucket]
+            bt["count"] += 1
+            bt["gross"] += payout_value
+            bt["cost"]  += final_cost
+            bt["net"]   += net
+            _bump_sku(sku_id, payout_only_bucket, payout_value, final_cost, net, Decimal("0"))
+            continue
+
+        # Remaining rows deduct cost and need pricing: Delivered, Exchanged, an
+        # approved Claim.
+        if sku_id not in known_skus:
+            missing_price_skus_seen.append(sku_id)
+            missing_price_payout += payout_value
+            missing_price_count += 1
+            continue
+
+        item_price, packaging_cost, tax_pct = get_price(sku_id, row.order_date)
+        item_price = Decimal(str(item_price or 0))
+        packaging_cost = Decimal(str(packaging_cost or 0))
+        tax_pct = Decimal(str(tax_pct or 0))
+
+        purchase_cost = item_price * qty_d
+        tax_cost = (purchase_cost * tax_pct / Decimal("100")) * qty_d
+
+        if claim_approved:
+            bucket = "claim"
+            final_cost = purchase_cost + tax_cost + packaging_cost
+        elif order_status == "exchanged":
+            bucket = "exchange"
+            final_cost = purchase_cost + tax_cost + (packaging_cost * Decimal("2"))
+        elif order_status == "delivered":
+            bucket = "delivered"
+            final_cost = purchase_cost + tax_cost + packaging_cost
+        else:
+            bucket = "other"  # cancelled / anything else
+            final_cost = Decimal("0")
+
+        net = payout_value - final_cost
+        total_order_value += (row.price or Decimal("0")) * qty_d
+
+        bt = bucket_totals[bucket]
+        bt["count"] += 1
+        bt["gross"] += payout_value
+        bt["cost"]  += final_cost
+        bt["net"]   += net
+
+        _bump_sku(sku_id, bucket, payout_value, final_cost, net, item_price)
+
+    processed_count = sum(v["count"] for v in bucket_totals.values())
+    total_gross = sum(v["gross"] for v in bucket_totals.values())
+    total_cost  = sum(v["cost"]  for v in bucket_totals.values())
+    total_net   = sum(v["net"]   for v in bucket_totals.values())
+
+    sku_list = []
+    for s in sku_agg.values():
+        row_out = {k: _to_num(v) for k, v in s.items()}
+        row_out["avg_profit_per_order"] = round(row_out["net_profit"] / row_out["order_count"], 2)
+        sku_list.append(row_out)
+    # Sorted by profit, best performers first — losses sink to the bottom.
+    sku_list.sort(key=lambda r: r["net_profit"], reverse=True)
+
+    status_breakdown = [
+        {
+            "status": _ESTIMATED_PROFIT_STATUS_LABELS[b],
+            "bucket": b,
+            "count":  bucket_totals[b]["count"],
+            "gross":  _to_num(bucket_totals[b]["gross"]),
+            "cost":   _to_num(bucket_totals[b]["cost"]),
+            "net":    _to_num(bucket_totals[b]["net"]),
+        }
+        for b in _ESTIMATED_PROFIT_BUCKETS
+    ]
+
+    missing_price_sku_list = sorted(set(missing_price_skus_seen))
+
+    return {
+        "saved_order_count": qs.count(),
+        "processed_count":  processed_count,
+        "missing_price_count":      missing_price_count,
+        "missing_price_skus":       missing_price_sku_list,
+        "missing_price_payout_sum": _to_num(missing_price_payout),
+        "non_loss_payout_excluded_count": non_loss_payout_excluded_count,
+        "non_loss_payout_excluded_sum":   _to_num(non_loss_payout_excluded_sum),
+        "totals": {
+            "order_count":       processed_count,
+            "gross_payout":      _to_num(total_gross),
+            "total_cost":        _to_num(total_cost),
+            "net_profit":        _to_num(total_net),
+            "total_order_value": _to_num(total_order_value),
+        },
+        "status_breakdown": status_breakdown,
+        "sku_wise":         sku_list,
+        "top_profit_skus":  [r for r in sku_list[:10] if r["net_profit"] > 0],
+        "top_loss_skus":    [r for r in sku_list[::-1][:10] if r["net_profit"] < 0],
+    }
+
+
+@api_view(["GET"])
+def estimated_profit_summary(request, business_id):
+    """Current live estimate over every previously-uploaded Order Summary row for this business."""
+    business = get_authorized_business(request, business_id)
+    date_from = request.GET.get("date_from", "") or None
+    date_to = request.GET.get("date_to", "") or None
+    return Response(_compute_estimated_profit_summary(business, date_from, date_to))
+
+
+@api_view(["POST"])
+@parser_classes([MultiPartParser])
+def estimated_profit_upload(request, business_id):
+    """
+    Upload a Meesho 'Order Summary' CSV (Sub orderId, Catalog ID, Quantity, Price,
+    Order Date, Order Status, Payout Value, Payout Status, Claim Status, SKU ID).
+    Rows are saved to EstimatedProfitOrder, keyed by (business, sub_order_no,
+    order_status) — re-uploading the same sheet (or an updated export covering the
+    same orders) updates those rows in place instead of duplicating them. The
+    returned P&L is then computed live from every row saved so far — see
+    _compute_estimated_profit_summary for the cost formula (item + packaging on
+    Delivered/Claim, item + 2×packaging on Exchanged, no cost on Returned/RTO).
+
+    In Transit / Ready To Ship rows are excluded (payment not yet settled) and are
+    not saved. Delivered / Returned / RTO / Exchanged rows are included at face
+    value; Cancelled (and any other status) lands in the "Other" bucket. A
+    non-blank Claim Status overrides Order Status — claim-first.
+    """
+    business = get_authorized_business(request, business_id)
+    file = request.FILES.get("file")
+    if not file:
+        return Response({"error": "No file provided"}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        df = pd.read_csv(file, dtype=str)
+    except Exception as e:
+        return Response({"error": f"Unable to read CSV: {str(e)}"}, status=status.HTTP_400_BAD_REQUEST)
+
+    df.columns = [c.strip() for c in df.columns]
+    required_cols = {"Sub orderId", "Order Status", "Payout Value", "SKU ID", "Quantity", "Order Date"}
+    missing_cols = required_cols - set(df.columns)
+    if missing_cols:
+        return Response(
+            {"error": f"Missing required columns: {', '.join(sorted(missing_cols))}"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    excluded_count = 0
+    invalid_rows = 0
+    created = 0
+    updated = 0
+
+    with transaction.atomic():
+        for _, row in df.iterrows():
+            order_status_raw = safe_str(row.get("Order Status")) or ""
+            if order_status_raw.lower() in _ESTIMATED_PROFIT_EXCLUDED_STATUSES:
+                excluded_count += 1
+                continue
+
+            sub_order_no = safe_str(row.get("Sub orderId")) or ""
+            sku_id = safe_str(row.get("SKU ID")) or ""
+            try:
+                qty = int(float(row.get("Quantity")))
+            except (TypeError, ValueError):
+                qty = None
+            payout_value = safe_decimal(row.get("Payout Value"))
+
+            if not sub_order_no or not sku_id or sku_id.lower() == "null" or not qty or payout_value is None:
+                invalid_rows += 1
+                continue
+
+            try:
+                order_date = pd.to_datetime(row.get("Order Date")).date()
+            except Exception:
+                order_date = None
+
+            _, was_created = EstimatedProfitOrder.objects.update_or_create(
+                business=business,
+                sub_order_no=sub_order_no,
+                order_status=order_status_raw,
+                defaults={
+                    "catalog_id":    safe_str(row.get("Catalog ID")),
+                    "sku_id":        sku_id,
+                    "quantity":      qty,
+                    "price":         safe_decimal(row.get("Price")),
+                    "order_date":    order_date,
+                    "payout_value":  payout_value,
+                    "payout_status": safe_str(row.get("Payout Status")),
+                    "claim_status":  safe_str(row.get("Claim Status")) or "",
+                },
+            )
+            if was_created:
+                created += 1
+            else:
+                updated += 1
+
+    summary = _compute_estimated_profit_summary(business)
+    summary.update({
+        "total_rows":     len(df),
+        "excluded_count": excluded_count,
+        "invalid_rows":   invalid_rows,
+        "created":        created,
+        "updated":        updated,
+    })
+    return Response(summary)
 
 
 @api_view(["GET"])
