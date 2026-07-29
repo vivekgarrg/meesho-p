@@ -142,6 +142,15 @@ raw_csrf = os.environ.get("CSRF_TRUSTED_ORIGINS", "")
 if raw_csrf:
     CSRF_TRUSTED_ORIGINS = [u.strip() for u in raw_csrf.split(",") if u.strip()]
 
+# ── Reverse proxy (nginx / Cloudflare) ───────────────────────────────────────
+# When the app runs behind nginx (and optionally Cloudflare), the TLS is
+# terminated upstream and the request reaches Django over plain HTTP. nginx
+# forwards the original scheme in the X-Forwarded-Proto header, so trust it to
+# detect HTTPS correctly (fixes request.is_secure(), secure cookies, and
+# absolute URL building). Enable via TRUST_PROXY_SSL_HEADER=true in the env.
+if os.environ.get("TRUST_PROXY_SSL_HEADER", "false").lower() == "true":
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+
 REST_FRAMEWORK = {
     "DEFAULT_RENDERER_CLASSES": ["rest_framework.renderers.JSONRenderer"],
     "DEFAULT_AUTHENTICATION_CLASSES": [
