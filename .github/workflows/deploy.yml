@@ -26,3 +26,19 @@ jobs:
             set -e
             cd ~/meesho-p
             bash deploy/hostinger/update.sh
+
+      - name: Purge Cloudflare cache
+        env:
+          CF_ZONE: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          if [ -n "$CF_ZONE" ] && [ -n "$CF_TOKEN" ]; then
+            echo "Purging Cloudflare cache for zone $CF_ZONE"
+            curl -sS -X POST "https://api.cloudflare.com/client/v4/zones/$CF_ZONE/purge_cache" \
+              -H "Authorization: Bearer $CF_TOKEN" \
+              -H "Content-Type: application/json" \
+              --data '{"purge_everything":true}'
+          else
+            echo "Cloudflare secrets not set; skipping cache purge."
+          fi
+
