@@ -101,6 +101,9 @@ source .venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
 set -a; source "${APP_DIR}/deploy/hostinger/.env"; set +a
+# Enforce MySQL: abort if Django is connected to anything else (e.g. a stray
+# SQLite fallback). This guarantees the deployment only ever uses MySQL.
+python manage.py shell -c "from django.db import connection; v=connection.vendor; print('DB vendor:', v); assert v=='mysql', 'Refusing to continue: expected MySQL but got '+v"
 python manage.py migrate --noinput
 python manage.py collectstatic --noinput
 python manage.py load_initial_data || true
