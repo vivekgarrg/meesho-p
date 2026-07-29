@@ -1,0 +1,25 @@
+# systemd service for the Django (gunicorn) app.
+# Copy to: /etc/systemd/system/meesho.service
+# Then:  sudo systemctl daemon-reload && sudo systemctl enable --now meesho
+#
+# Adjust User, paths, and the EnvironmentFile location if you clone elsewhere.
+
+[Unit]
+Description=Meesho Profit Django app (gunicorn)
+After=network.target
+
+[Service]
+User=deploy
+Group=www-data
+WorkingDirectory=/home/deploy/meesho-p/backend
+EnvironmentFile=/home/deploy/meesho-p/deploy/hostinger/.env
+ExecStart=/home/deploy/meesho-p/backend/.venv/bin/gunicorn \
+    meesho_project.wsgi:application \
+    --bind 127.0.0.1:8000 \
+    --workers 3 \
+    --timeout 120
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

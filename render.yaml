@@ -12,10 +12,6 @@ services:
       cd backend && python manage.py collectstatic --noinput
     startCommand: |
       cd backend && python manage.py migrate && python manage.py load_initial_data && python manage.py create_seed_users && gunicorn meesho_project.wsgi:application --bind 0.0.0.0:$PORT
-    disk:
-      name: sqlite-data
-      mountPath: /var/data
-      sizeGB: 1
     envVars:
       - key: PYTHON_VERSION
         value: "3.12.6"
@@ -23,14 +19,22 @@ services:
         sync: false
       - key: DJANGO_DEBUG
         value: "false"
+      # Custom domain + Render's own subdomain (keep the onrender.com host so
+      # the app still answers on it while DNS propagates).
       - key: DJANGO_ALLOWED_HOSTS
-        value: "*"
+        value: "rudam.in,www.rudam.in,meesho-p.onrender.com"
+      - key: CSRF_TRUSTED_ORIGINS
+        value: "https://rudam.in,https://www.rudam.in"
+      # Frontend is served same-origin, so CORS can be locked down.
       - key: CORS_ALLOW_ALL
-        value: "true"
+        value: "false"
+      - key: CORS_ALLOWED_ORIGINS
+        value: "https://rudam.in,https://www.rudam.in"
       - key: DJANGO_SECRET_KEY
         generateValue: true
-      - key: DB_ENGINE
-        value: "sqlite"
-      # SQLite lives on the persistent disk so data survives deploys/restarts.
-      - key: SQLITE_PATH
-        value: "/var/data/db.sqlite3"
+      # ── Database: external MySQL for persistent, consistent data ──
+      # Set this in the Render dashboard (Environment tab). Format:
+      #   mysql://USER:PASSWORD@HOST:PORT/DBNAME
+      # settings.py uses DATABASE_URL first, so DB_ENGINE/DB_* are ignored.
+      - key: DATABASE_URL
+        sync: false
