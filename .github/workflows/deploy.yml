@@ -25,6 +25,7 @@ jobs:
           script: |
             set -e
             cd ~/meesho-p
+            git pull --ff-only origin main
             bash deploy/hostinger/update.sh
 
       - name: Purge Cloudflare cache
