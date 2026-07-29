@@ -56,6 +56,15 @@ export const removeMember = (businessId, membershipId) =>
     method: "DELETE",
   });
 
+// ── Sidebar tab visibility (global) ─────────────────────────────────────────
+export const getNavVisibility = () => request("/api/auth/nav-visibility/");
+
+export const updateNavVisibility = (visiblePaths) =>
+  request("/api/auth/nav-visibility/", {
+    method: "PUT",
+    body: JSON.stringify({ visible_paths: visiblePaths }),
+  });
+
 // ── Users ─────────────────────────────────────────────────────────────────
 export const listUsers = () => request("/api/auth/users/");
 
@@ -67,3 +76,10 @@ export const updateUser = (id, payload) =>
 
 export const deleteUser = (id) =>
   request(`/api/auth/users/${id}/`, { method: "DELETE" });
+
+// Replace the full set of businesses a business user can manage.
+export const updateUserBusinesses = (id, businessIds) =>
+  request(`/api/auth/users/${id}/businesses/`, {
+    method: "PUT",
+    body: JSON.stringify({ business_ids: businessIds }),
+  });

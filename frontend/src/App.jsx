@@ -305,7 +305,7 @@ export function SKUTable({ data, mode, onRowClick }) {
 }
 
 // ── Navigation config ─────────────────────────────────────────────────────────
-const NAV_GROUPS = [
+export const NAV_GROUPS = [
   {
     label: "Analytics",
     color: "#A78BFA",
@@ -411,10 +411,27 @@ const SIDEBAR_BG = "#13111C";
 const SIDEBAR_BG2 = "#0E0C18";
 const DIVIDER = "rgba(255,255,255,0.07)";
 
+// Paths that must never be hidden by the visibility config, so a super-admin
+// can always reach the Admin Panel to change the sidebar settings back.
+export const ALWAYS_VISIBLE_PATHS = ["/admin"];
+
 function Sidebar({ collapsed, setCollapsed }) {
   const [btnHovered, setBtnHovered] = useState(false);
-  const { isSuperAdmin } = useAuth();
-  const navGroups = NAV_GROUPS.filter((g) => !g.adminOnly || isSuperAdmin);
+  const { isSuperAdmin, navVisibility } = useAuth();
+
+  // The visibility filter applies to everyone (including super-admins), but only
+  // once an admin has actually configured a list. Until then, show every tab.
+  const isConfigured = !!navVisibility?.configured;
+  const visibleSet = new Set(navVisibility?.visiblePaths || []);
+  const isPathVisible = (path) =>
+    !isConfigured ||
+    visibleSet.has(path) ||
+    (isSuperAdmin && ALWAYS_VISIBLE_PATHS.includes(path));
+
+  const navGroups = NAV_GROUPS
+    .filter((g) => !g.adminOnly || isSuperAdmin)
+    .map((g) => ({ ...g, items: g.items.filter((item) => isPathVisible(item.path)) }))
+    .filter((g) => g.items.length > 0);
   const W = collapsed ? 60 : 232;
 
   return (

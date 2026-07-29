@@ -39,6 +39,35 @@ class Business(models.Model):
         return self.name
 
 
+class NavVisibilitySetting(models.Model):
+    """Global sidebar tab visibility, applied to every user in every business.
+
+    Single-row (singleton) config managed by super admins. `visible_paths` is the
+    list of nav item paths that should appear in the sidebar. An empty list is
+    treated as "not configured yet" → all tabs are shown (safe default).
+    """
+
+    visible_paths = models.JSONField(default=list, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey(
+        User, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="nav_visibility_updates",
+    )
+
+    class Meta:
+        db_table = "nav_visibility_setting"
+
+    @classmethod
+    def get_solo(cls):
+        obj = cls.objects.first()
+        if obj is None:
+            obj = cls.objects.create(visible_paths=[])
+        return obj
+
+    def __str__(self):
+        return f"NavVisibility({len(self.visible_paths)} tabs)"
+
+
 class Membership(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="memberships")
     business = models.ForeignKey(Business, on_delete=models.CASCADE, related_name="memberships")

@@ -20,13 +20,24 @@ class AdminUserSerializer(serializers.ModelSerializer):
 
     password = serializers.CharField(write_only=True, required=False, allow_blank=False, min_length=4)
     business_ids = serializers.SerializerMethodField(read_only=True)
+    businesses = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = User
-        fields = ["id", "username", "email", "first_name", "last_name", "role", "password", "business_ids"]
+        fields = [
+            "id", "username", "email", "first_name", "last_name", "role", "password",
+            "business_ids", "businesses", "is_active", "date_joined", "last_login",
+        ]
+        read_only_fields = ["date_joined", "last_login"]
 
     def get_business_ids(self, obj):
         return list(obj.memberships.values_list("business_id", flat=True))
+
+    def get_businesses(self, obj):
+        return [
+            {"id": m.business_id, "name": m.business.name, "joined_at": m.created_at}
+            for m in obj.memberships.select_related("business").all()
+        ]
 
     def validate_role(self, value):
         if value not in (User.ROLE_SUPER_ADMIN, User.ROLE_BUSINESS_USER):

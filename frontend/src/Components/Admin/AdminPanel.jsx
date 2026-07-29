@@ -1,11 +1,162 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { C, S, btn, SectionHeader, Tag } from "../../App";
+import { C, S, btn, SectionHeader, Tag, NAV_GROUPS, ALWAYS_VISIBLE_PATHS } from "../../App";
 import { useAuth } from "../../contexts/AuthContext";
 import {
   listBusinesses, createBusiness, updateBusiness,
   listMembers, addMember, removeMember,
-  listUsers, createUser, updateUser, deleteUser,
+  listUsers, createUser, updateUser, deleteUser, updateUserBusinesses,
 } from "../../lib/adminApi";
+
+// Format an ISO timestamp as a readable local date/time (or a dash when absent).
+function fmtDateTime(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleString("en-IN", {
+    day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit",
+  });
+}
+
+// Small labelled read-only attribute tile used in the user detail panel.
+function AttrTile({ label, children }) {
+  return (
+    <div style={{ background: C.white, border: `1px solid ${C.border}`, borderRadius: 8, padding: "8px 12px" }}>
+      <div style={{ fontSize: 10, fontWeight: 700, color: C.gray400, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 3 }}>{label}</div>
+      <div style={{ fontSize: 13, color: C.gray800, fontWeight: 600 }}>{children}</div>
+    </div>
+  );
+}
+
+// ── Expanded per-user details + management panel ────────────────────────────
+function UserDetailPanel({ user, businesses, onSaved, notify }) {
+  const isAdmin = user.role === "super_admin";
+  const [profile, setProfile] = useState({
+    email: user.email || "", first_name: user.first_name || "", last_name: user.last_name || "",
+  });
+  const [bizSel, setBizSel] = useState(new Set(user.business_ids || []));
+  const [savingProfile, setSavingProfile] = useState(false);
+  const [savingBiz, setSavingBiz] = useState(false);
+
+  useEffect(() => {
+    setProfile({ email: user.email || "", first_name: user.first_name || "", last_name: user.last_name || "" });
+    setBizSel(new Set(user.business_ids || []));
+  }, [user]);
+
+  const toggleBiz = (id) => setBizSel((prev) => {
+    const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n;
+  });
+
+  const profileDirty =
+    profile.email !== (user.email || "") ||
+    profile.first_name !== (user.first_name || "") ||
+    profile.last_name !== (user.last_name || "");
+
+  const bizDirty = (() => {
+    const cur = new Set(user.business_ids || []);
+    if (cur.size !== bizSel.size) return true;
+    for (const id of bizSel) if (!cur.has(id)) return true;
+    return false;
+  })();
+
+  const saveProfile = async () => {
+    setSavingProfile(true);
+    try {
+      await updateUser(user.id, profile);
+      notify({ notice: "Profile updated." });
+      onSaved();
+    } catch (e) { notify({ error: e.message }); }
+    finally { setSavingProfile(false); }
+  };
+
+  const saveBiz = async () => {
+    setSavingBiz(true);
+    try {
+      await updateUserBusinesses(user.id, [...bizSel]);
+      notify({ notice: "Businesses updated." });
+      onSaved();
+    } catch (e) { notify({ error: e.message }); }
+    finally { setSavingBiz(false); }
+  };
+
+  const fld = { ...S.inp, fontSize: 13 };
+
+  return (
+    <div style={{ background: C.gray50, border: `1px solid ${C.border}`, borderRadius: 10, padding: 16, margin: "4px 0 8px" }}>
+      {/* Attribute tiles */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10, marginBottom: 16 }}>
+        <AttrTile label="User ID">#{user.id}</AttrTile>
+        <AttrTile label="Role"><Tag variant={isAdmin ? "orange" : "blue"}>{user.role}</Tag></AttrTile>
+        <AttrTile label="Status"><Tag variant={user.is_active !== false ? "green" : "red"}>{user.is_active !== false ? "Active" : "Suspended"}</Tag></AttrTile>
+        <AttrTile label="Joined">{fmtDateTime(user.date_joined)}</AttrTile>
+        <AttrTile label="Last sign-in">{user.last_login ? fmtDateTime(user.last_login) : "Never"}</AttrTile>
+        <AttrTile label="Businesses">{isAdmin ? "All (admin)" : (user.business_ids || []).length}</AttrTile>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+        {/* Editable profile */}
+        <div style={{ background: C.white, border: `1px solid ${C.border}`, borderRadius: 8, padding: 14 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+            <span style={{ fontSize: 12, fontWeight: 800, color: C.gray700, textTransform: "uppercase", letterSpacing: "0.05em" }}>Profile</span>
+            <button onClick={saveProfile} disabled={!profileDirty || savingProfile}
+              style={{ ...btn("primary", "sm"), opacity: profileDirty ? 1 : 0.45 }}>
+              {savingProfile ? "Saving…" : "Save profile"}
+            </button>
+          </div>
+          <label style={{ ...S.label, fontSize: 10 }}>Email</label>
+          <input style={{ ...fld, marginBottom: 8 }} type="email" placeholder="email@example.com"
+            value={profile.email} onChange={(e) => setProfile((p) => ({ ...p, email: e.target.value }))} />
+          <div style={{ display: "flex", gap: 8 }}>
+            <div style={{ flex: 1 }}>
+              <label style={{ ...S.label, fontSize: 10 }}>First name</label>
+              <input style={fld} value={profile.first_name} onChange={(e) => setProfile((p) => ({ ...p, first_name: e.target.value }))} />
+            </div>
+            <div style={{ flex: 1 }}>
+              <label style={{ ...S.label, fontSize: 10 }}>Last name</label>
+              <input style={fld} value={profile.last_name} onChange={(e) => setProfile((p) => ({ ...p, last_name: e.target.value }))} />
+            </div>
+          </div>
+        </div>
+
+        {/* Businesses management */}
+        <div style={{ background: C.white, border: `1px solid ${C.border}`, borderRadius: 8, padding: 14 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+            <span style={{ fontSize: 12, fontWeight: 800, color: C.gray700, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+              Businesses {!isAdmin && bizSel.size > 0 && <span style={{ color: C.blue }}>· {bizSel.size}</span>}
+            </span>
+            {!isAdmin && (
+              <button onClick={saveBiz} disabled={!bizDirty || savingBiz}
+                style={{ ...btn("secondary", "sm"), opacity: bizDirty ? 1 : 0.45 }}>
+                {savingBiz ? "Saving…" : "Save businesses"}
+              </button>
+            )}
+          </div>
+          {isAdmin ? (
+            <p style={{ fontSize: 12, color: C.gray500 }}>Super admins can access <strong>every business</strong> — no assignment needed.</p>
+          ) : businesses.length === 0 ? (
+            <p style={{ fontSize: 12, color: C.gray400 }}>No businesses exist yet.</p>
+          ) : (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, maxHeight: 150, overflowY: "auto" }}>
+              {businesses.map((b) => {
+                const on = bizSel.has(b.id);
+                return (
+                  <label key={b.id} style={{
+                    display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer",
+                    fontSize: 12, fontWeight: 600, padding: "4px 10px", borderRadius: 16,
+                    border: `1px solid ${on ? C.blue : C.gray200}`,
+                    background: on ? C.blueLight : C.white, color: on ? C.blue : C.gray600,
+                  }}>
+                    <input type="checkbox" checked={on} onChange={() => toggleBiz(b.id)} />
+                    {b.name}
+                  </label>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function Banner({ error, notice }) {
   if (!error && !notice) return null;
@@ -200,7 +351,17 @@ function BusinessesSection({ users, onChanged, notify }) {
 function UsersSection({ businesses, onChanged, notify, currentUserId }) {
   const [users, setUsers] = useState([]);
   const [form, setForm] = useState({ username: "", password: "", role: "business_user" });
+  const [assignBiz, setAssignBiz] = useState(new Set()); // business ids to grant on create
   const [busy, setBusy] = useState(false);
+  const [expandedId, setExpandedId] = useState(null); // user row expanded into detail panel
+
+  const toggleAssignBiz = (id) => {
+    setAssignBiz((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  };
 
   const bizName = useMemo(() => {
     const map = {};
@@ -220,8 +381,14 @@ function UsersSection({ businesses, onChanged, notify, currentUserId }) {
     if (!form.username.trim() || !form.password) return;
     setBusy(true);
     try {
-      await createUser({ username: form.username.trim(), password: form.password, role: form.role });
+      const payload = { username: form.username.trim(), password: form.password, role: form.role };
+      // Business assignment only applies to business users (admins see all).
+      if (form.role === "business_user" && assignBiz.size) {
+        payload.business_ids = [...assignBiz];
+      }
+      await createUser(payload);
       setForm({ username: "", password: "", role: "business_user" });
+      setAssignBiz(new Set());
       notify({ notice: "User created." });
       await load();
       onChanged();
@@ -259,20 +426,65 @@ function UsersSection({ businesses, onChanged, notify, currentUserId }) {
     } catch (e) { notify({ error: e.message }); }
   };
 
+  const handleToggleActive = async (u) => {
+    const suspend = u.is_active !== false;
+    const verb = suspend ? "Suspend" : "Reactivate";
+    if (suspend && !window.confirm(
+      `Suspend ${u.username}? They will be signed out immediately and cannot log in until reactivated.`
+    )) return;
+    try {
+      await updateUser(u.id, { is_active: !suspend });
+      notify({ notice: `${u.username} ${suspend ? "suspended" : "reactivated"}.` });
+      await load();
+      onChanged();
+    } catch (e) { notify({ error: e.message }); }
+  };
+
   return (
     <div style={S.card}>
       <SectionHeader title="Users" count={users.length} />
-      <form onSubmit={handleCreate} style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
-        <input style={{ ...S.inp, flex: "1 1 160px" }} placeholder="Username"
-          value={form.username} onChange={(e) => setForm((f) => ({ ...f, username: e.target.value }))} />
-        <input style={{ ...S.inp, flex: "1 1 160px" }} type="password" placeholder="Password"
-          value={form.password} onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))} />
-        <select style={{ ...S.inp, flex: "0 0 160px" }} value={form.role}
-          onChange={(e) => setForm((f) => ({ ...f, role: e.target.value }))}>
-          <option value="business_user">Business user</option>
-          <option value="super_admin">Super admin</option>
-        </select>
-        <button type="submit" disabled={busy} style={btn("primary", "md")}>+ Create user</button>
+      <form onSubmit={handleCreate} style={{ marginBottom: 16 }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <input style={{ ...S.inp, flex: "1 1 160px" }} placeholder="Username"
+            value={form.username} onChange={(e) => setForm((f) => ({ ...f, username: e.target.value }))} />
+          <input style={{ ...S.inp, flex: "1 1 160px" }} type="password" placeholder="Password"
+            value={form.password} onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))} />
+          <select style={{ ...S.inp, flex: "0 0 160px" }} value={form.role}
+            onChange={(e) => setForm((f) => ({ ...f, role: e.target.value }))}>
+            <option value="business_user">Business user</option>
+            <option value="super_admin">Super admin</option>
+          </select>
+          <button type="submit" disabled={busy} style={btn("primary", "md")}>+ Create user</button>
+        </div>
+
+        {/* Assign businesses at creation (business users only — admins see all). */}
+        {form.role === "business_user" && (
+          <div style={{ marginTop: 10, border: `1px solid ${C.border}`, borderRadius: 10, padding: "10px 12px", background: C.gray50 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: C.gray600, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 8 }}>
+              Assign businesses to manage {assignBiz.size > 0 && <span style={{ color: C.blue }}>· {assignBiz.size} selected</span>}
+            </div>
+            {businesses.length === 0 ? (
+              <span style={{ fontSize: 12, color: C.gray400 }}>No businesses yet — create one first, or assign later.</span>
+            ) : (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                {businesses.map((b) => {
+                  const on = assignBiz.has(b.id);
+                  return (
+                    <label key={b.id} style={{
+                      display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer",
+                      fontSize: 12, fontWeight: 600, padding: "4px 10px", borderRadius: 16,
+                      border: `1px solid ${on ? C.blue : C.gray200}`,
+                      background: on ? C.blueLight : C.white, color: on ? C.blue : C.gray600,
+                    }}>
+                      <input type="checkbox" checked={on} onChange={() => toggleAssignBiz(b.id)} />
+                      {b.name}
+                    </label>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
       </form>
       <div style={{ overflowX: "auto" }}>
         <table style={{ width: "100%", borderCollapse: "collapse" }}>
@@ -280,18 +492,28 @@ function UsersSection({ businesses, onChanged, notify, currentUserId }) {
             <tr>
               <th style={S.th}>Username</th>
               <th style={S.th}>Role</th>
+              <th style={S.th}>Status</th>
               <th style={S.th}>Businesses</th>
               <th style={{ ...S.th, textAlign: "right" }}>Actions</th>
             </tr>
           </thead>
           <tbody>
-            {users.map((u) => (
-              <tr key={u.id}>
+            {users.map((u) => {
+              const active = u.is_active !== false;
+              const isSelf = u.id === currentUserId;
+              const expanded = expandedId === u.id;
+              return (
+              <React.Fragment key={u.id}>
+              <tr style={{ opacity: active ? 1 : 0.6, background: expanded ? C.orangeLight : undefined }}>
                 <td style={S.td}>
+                  <button onClick={() => setExpandedId(expanded ? null : u.id)}
+                    style={{ background: "none", border: "none", cursor: "pointer", color: C.gray400, fontSize: 11, marginRight: 6, padding: 0 }}
+                    title={expanded ? "Collapse" : "Show details"}>{expanded ? "▼" : "▶"}</button>
                   <strong>{u.username}</strong>
-                  {u.id === currentUserId && <span style={{ marginLeft: 6, fontSize: 10, color: C.gray400 }}>(you)</span>}
+                  {isSelf && <span style={{ marginLeft: 6, fontSize: 10, color: C.gray400 }}>(you)</span>}
                 </td>
                 <td style={S.td}><Tag variant={u.role === "super_admin" ? "orange" : "blue"}>{u.role}</Tag></td>
+                <td style={S.td}><Tag variant={active ? "green" : "red"}>{active ? "Active" : "Suspended"}</Tag></td>
                 <td style={S.td}>
                   {u.role === "super_admin"
                     ? <span style={{ fontSize: 12, color: C.gray400 }}>all</span>
@@ -300,17 +522,171 @@ function UsersSection({ businesses, onChanged, notify, currentUserId }) {
                       : <span style={{ fontSize: 12, color: C.gray400 }}>—</span>}
                 </td>
                 <td style={{ ...S.td, textAlign: "right", whiteSpace: "nowrap" }}>
+                  <button onClick={() => setExpandedId(expanded ? null : u.id)}
+                    style={{ ...btn(expanded ? "secondary" : "ghost", "sm"), marginRight: 6 }}>
+                    {expanded ? "Close" : "Manage"}
+                  </button>
                   <button onClick={() => handleResetPassword(u)} style={{ ...btn("ghost", "sm"), marginRight: 6 }}>Reset PW</button>
                   <button onClick={() => handleToggleRole(u)} style={{ ...btn("ghost", "sm"), marginRight: 6 }}>
                     {u.role === "super_admin" ? "Make user" : "Make admin"}
                   </button>
-                  <button onClick={() => handleDelete(u)} disabled={u.id === currentUserId}
-                    style={{ ...btn("danger", "sm"), opacity: u.id === currentUserId ? 0.4 : 1 }}>Delete</button>
+                  <button onClick={() => handleToggleActive(u)} disabled={isSelf}
+                    style={{ ...btn(active ? "ghost" : "success", "sm"), marginRight: 6, opacity: isSelf ? 0.4 : 1 }}
+                    title={isSelf ? "You cannot suspend your own account" : undefined}>
+                    {active ? "Suspend" : "Activate"}
+                  </button>
+                  <button onClick={() => handleDelete(u)} disabled={isSelf}
+                    style={{ ...btn("danger", "sm"), opacity: isSelf ? 0.4 : 1 }}>Delete</button>
                 </td>
               </tr>
-            ))}
+              {expanded && (
+                <tr>
+                  <td colSpan={5} style={{ padding: "0 8px", background: C.white }}>
+                    <UserDetailPanel user={u} businesses={businesses}
+                      notify={notify}
+                      onSaved={async () => { await load(); onChanged(); }} />
+                  </td>
+                </tr>
+              )}
+              </React.Fragment>
+              );
+            })}
           </tbody>
         </table>
+      </div>
+    </div>
+  );
+}
+
+// ── Sidebar tab visibility section ──────────────────────────────────────────
+function SidebarTabsSection({ notify }) {
+  const { navVisibility, updateNavVisibility, refreshNavVisibility } = useAuth();
+
+  // Flat list of every togglable nav item (skip the always-visible ones — they
+  // render as locked rows and are always included in what we save).
+  const allPaths = useMemo(
+    () => NAV_GROUPS.flatMap((g) => g.items).map((i) => i.path),
+    []
+  );
+  const lockedPaths = useMemo(
+    () => allPaths.filter((p) => ALWAYS_VISIBLE_PATHS.includes(p)),
+    [allPaths]
+  );
+
+  // Build the initial selection: when a config exists use it, otherwise start
+  // with everything checked (that mirrors the "all tabs visible" default).
+  const buildInitial = useCallback(() => {
+    if (navVisibility?.configured) return new Set(navVisibility.visiblePaths || []);
+    return new Set(allPaths);
+  }, [navVisibility, allPaths]);
+
+  const [selected, setSelected] = useState(buildInitial);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => { setSelected(buildInitial()); }, [buildInitial]);
+
+  const isLocked = (path) => ALWAYS_VISIBLE_PATHS.includes(path);
+  const isChecked = (path) => isLocked(path) || selected.has(path);
+
+  const toggle = (path) => {
+    if (isLocked(path)) return;
+    setSelected((prev) => {
+      const next = new Set(prev);
+      next.has(path) ? next.delete(path) : next.add(path);
+      return next;
+    });
+  };
+
+  const selectAll = () => setSelected(new Set(allPaths));
+  const clearAll = () => setSelected(new Set(lockedPaths));
+
+  const save = async () => {
+    // Always persist the locked paths so admins keep access to this screen.
+    const paths = [...new Set([...selected, ...lockedPaths])];
+    setBusy(true);
+    try {
+      await updateNavVisibility(paths);
+      notify({ notice: "Sidebar tabs updated — this applies to all users." });
+    } catch (e) {
+      notify({ error: e.message });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const resetToAll = async () => {
+    if (!window.confirm("Show every tab to all users again?")) return;
+    setBusy(true);
+    try {
+      await updateNavVisibility([]); // empty = not configured = show everything
+      await refreshNavVisibility();
+      notify({ notice: "Reset — all tabs are now visible to everyone." });
+    } catch (e) {
+      notify({ error: e.message });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const selectedCount = [...new Set([...selected, ...lockedPaths])].length;
+
+  return (
+    <div style={S.card}>
+      <SectionHeader
+        title="Sidebar Tabs"
+        count={`${selectedCount}/${allPaths.length}`}
+        actions={
+          <>
+            <button onClick={selectAll} style={{ ...btn("ghost", "sm"), marginRight: 6 }}>Select all</button>
+            <button onClick={clearAll} style={{ ...btn("ghost", "sm"), marginRight: 6 }}>Clear</button>
+            <button onClick={save} disabled={busy} style={btn("primary", "sm")}>{busy ? "Saving…" : "Save changes"}</button>
+          </>
+        }
+      />
+      <p style={{ fontSize: 12, color: C.gray500, marginBottom: 4 }}>
+        Choose which tabs appear in the left sidebar. Your selection is applied to
+        <strong> every user</strong> across the whole app.
+      </p>
+      <p style={{ fontSize: 12, color: C.gray400, marginBottom: 16 }}>
+        {navVisibility?.configured
+          ? "A custom set is active. "
+          : "No custom set yet — all tabs are currently visible. "}
+        <button onClick={resetToAll} disabled={busy}
+          style={{ ...btn("ghost", "sm"), padding: "3px 10px" }}>Reset (show all)</button>
+      </p>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))", gap: 16 }}>
+        {NAV_GROUPS.map((group) => (
+          <div key={group.label} style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: "12px 14px" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+              <span style={{ width: 8, height: 8, borderRadius: "50%", background: group.color, display: "inline-block" }} />
+              <span style={{ fontSize: 11, fontWeight: 800, color: C.gray600, letterSpacing: "0.08em", textTransform: "uppercase" }}>
+                {group.label}
+              </span>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {group.items.map((item) => {
+                const locked = isLocked(item.path);
+                return (
+                  <label key={item.path}
+                    style={{
+                      display: "flex", alignItems: "center", gap: 9,
+                      fontSize: 13, color: locked ? C.gray400 : C.gray700,
+                      cursor: locked ? "not-allowed" : "pointer",
+                      padding: "4px 6px", borderRadius: 7,
+                    }}
+                    title={locked ? "Always visible to super-admins" : undefined}>
+                    <input type="checkbox" checked={isChecked(item.path)} disabled={locked}
+                      onChange={() => toggle(item.path)} />
+                    <span style={{ fontSize: 14, width: 18, textAlign: "center" }}>{item.icon}</span>
+                    <span style={{ flex: 1 }}>{item.label}</span>
+                    {locked && <span style={{ fontSize: 10, color: C.gray400 }}>🔒</span>}
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -365,15 +741,20 @@ export default function AdminPanel() {
         <div style={{ display: "flex", gap: 8, marginLeft: 12 }}>
           <TabBtn id="businesses" label="Businesses & Members" />
           <TabBtn id="users" label="Users" />
+          <TabBtn id="sidebar" label="Sidebar Tabs" />
         </div>
       </div>
 
       <Banner error={msg.error} notice={msg.notice} />
 
-      {tab === "businesses" ? (
+      {tab === "businesses" && (
         <BusinessesSection users={users} onChanged={refreshShared} notify={notify} />
-      ) : (
+      )}
+      {tab === "users" && (
         <UsersSection businesses={businesses} onChanged={refreshShared} notify={notify} currentUserId={user?.id} />
+      )}
+      {tab === "sidebar" && (
+        <SidebarTabsSection notify={notify} />
       )}
     </div>
   );

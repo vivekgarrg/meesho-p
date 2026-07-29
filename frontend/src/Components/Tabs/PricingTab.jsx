@@ -672,6 +672,101 @@ function UnlinkedSkuTray({ unlinked, dragging, setDragging }) {
   );
 }
 
+// ── create a NEW parent group FROM an existing child SKU ──────────────────────
+// Opens as a focused modal. Parent name defaults to the SKU id, pricing is
+// pre-filled from the SKU's own price when it has one. On save the backend
+// creates the parent and links this SKU to it in one atomic step.
+function CreateParentFromSkuModal({ sku, onSaved, onCancel }) {
+  const [form, setForm] = useState({
+    parent_id: sku.sku_id,
+    item_price: sku.item_price != null && sku.item_price !== "" ? String(sku.item_price) : "",
+    tax_percent: "0",
+    packaging_cost: "0",
+  });
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState(null);
+  const preview = calcFinal(form.item_price, form.tax_percent, form.packaging_cost);
+
+  const set = (key, v) => setForm(f => ({ ...f, [key]: v }));
+
+  const save = async () => {
+    if (!form.parent_id.trim()) return setErr("Parent name is required.");
+    if (!form.item_price || parseFloat(form.item_price) <= 0) return setErr("Item price is required.");
+    setSaving(true); setErr(null);
+    try {
+      const res = await fetch(`${API}/parent-from-sku/`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sku_id: sku.sku_id,
+          parent_id: form.parent_id.trim(),
+          item_price: form.item_price,
+          tax_percent: form.tax_percent,
+          packaging_cost: form.packaging_cost,
+          final_price: preview.toFixed(2),
+        }),
+      });
+      if (res.ok) { onSaved(form.parent_id.trim()); return; }
+      const e = await res.json().catch(() => ({}));
+      setErr(e.error || Object.values(e).flat().join(" ") || "Could not create parent.");
+    } catch {
+      setErr("Network error.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div onClick={onCancel} style={{
+      position: "fixed", inset: 0, background: "rgba(15,12,24,0.45)", zIndex: 1000,
+      display: "flex", alignItems: "center", justifyContent: "center", padding: 20,
+    }}>
+      <div onClick={e => e.stopPropagation()} style={{
+        background: C.white, borderRadius: 14, width: "min(560px, 100%)",
+        boxShadow: "0 20px 60px rgba(0,0,0,0.3)", overflow: "hidden",
+        border: `1px solid ${C.border}`,
+      }}>
+        {/* Header */}
+        <div style={{ padding: "16px 20px", background: C.greenLight, borderBottom: `1px solid ${C.greenBorder}` }}>
+          <p style={{ fontSize: 15, fontWeight: 800, color: C.gray900 }}>➕ New Parent from SKU</p>
+          <p style={{ fontSize: 12, color: C.gray600, marginTop: 2 }}>
+            Promote <span style={{ fontFamily: "monospace", fontWeight: 700, color: C.green }}>{sku.sku_id}</span> into a new parent group — it'll be linked automatically.
+          </p>
+        </div>
+
+        {/* Body */}
+        <div style={{ padding: "18px 20px" }}>
+          <div style={{ marginBottom: 12 }}>
+            <label style={S.label}>Parent Group Name *</label>
+            <input value={form.parent_id} onChange={e => set("parent_id", e.target.value)}
+              placeholder="e.g. copper_bottle" style={S.inp} />
+            <p style={{ fontSize: 11, color: C.gray400, marginTop: 4 }}>Defaults to the SKU id — rename it to group more SKUs under this parent.</p>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+            {[["Item Price (₹) *", "item_price"], ["Tax %", "tax_percent"], ["Packaging (₹)", "packaging_cost"]].map(([label, key]) => (
+              <div key={key}>
+                <label style={{ ...S.label, fontSize: 10 }}>{label}</label>
+                <input type="number" step="0.01" value={form[key]} onChange={e => set(key, e.target.value)} style={{ ...S.inp, fontSize: 12 }} />
+              </div>
+            ))}
+          </div>
+          {err && <p style={{ color: C.red, fontSize: 12, marginTop: 10 }}>{err}</p>}
+        </div>
+
+        {/* Footer */}
+        <div style={{ padding: "14px 20px", borderTop: `1px solid ${C.gray100}`, display: "flex", alignItems: "center", justifyContent: "space-between", background: C.gray50 }}>
+          <span style={{ fontSize: 13, color: C.gray500 }}>
+            Final price: <strong style={{ fontFamily: "monospace", color: C.green, fontSize: 16 }}>{fmt(preview)}</strong>
+          </span>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={onCancel} style={btn("ghost", "md")}>Cancel</button>
+            <button onClick={save} disabled={saving} style={btn("success", "md")}>{saving ? "Creating…" : "Create & Link"}</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── main tab ──────────────────────────────────────────────────────────────────
 export function PricingTab() {
   const [parents, setParents] = useState([]);
@@ -688,6 +783,7 @@ export function PricingTab() {
   const [linkQuery, setLinkQuery] = useState("");
   const [selectedUnlinked, setSelectedUnlinked] = useState(new Set());
   const [bulkLinking, setBulkLinking] = useState(false);
+  const [newParentFor, setNewParentFor] = useState(null); // unlinked-SKU object → open "new parent from SKU" modal
   const [uploading, setUploading] = useState(false);
   const fileRef = useRef(null);
 
@@ -947,80 +1043,106 @@ export function PricingTab() {
       <div style={{ display: "grid", gridTemplateColumns: "minmax(300px, 360px) minmax(0, 1fr)", gap: 14 }}>
 
         <div style={{ ...S.card, padding: 14, position: "sticky", top: 8, height: "fit-content" }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-            <h3 style={{ fontSize: 14, fontWeight: 800, color: C.gray800 }}>Link Studio</h3>
-            <span style={{ fontSize: 11, color: C.gray500 }}>{selectedCount} selected</span>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
+            <h3 style={{ fontSize: 14, fontWeight: 800, color: C.gray800 }}>🔗 Link Center</h3>
+            <span style={{ background: C.redLight, color: C.red, border: `1px solid ${C.redBorder}`, padding: "2px 9px", borderRadius: 20, fontSize: 11, fontWeight: 700 }}>
+              {unlinked.length} unlinked
+            </span>
           </div>
+          <p style={{ fontSize: 11, color: C.gray400, marginBottom: 12 }}>
+            Pick a target parent, then one-click link — or make any SKU its own new parent.
+          </p>
 
-          <label style={S.label}>Target Parent Group</label>
-          <select value={linkParentId} onChange={e => setLinkParentId(e.target.value)} style={{ ...S.inp, marginBottom: 10 }}>
-            <option value="">Select parent...</option>
+          {/* Step 1 — choose target parent */}
+          <label style={S.label}>① Target Parent Group</label>
+          <select value={linkParentId} onChange={e => setLinkParentId(e.target.value)}
+            style={{ ...S.inp, marginBottom: 6, borderColor: linkParentId ? C.blue : C.gray200 }}>
+            <option value="">Select a parent to link into…</option>
             {parents.map(p => (
               <option key={p.item_id} value={p.item_id}>{p.item_id} ({(p.sku_ids || []).length})</option>
             ))}
           </select>
+          {!linkParentId && (
+            <p style={{ fontSize: 10, color: C.amber, marginBottom: 10 }}>Choose a parent to enable one-click linking below.</p>
+          )}
 
-          <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
-            <input
-              value={linkQuery}
-              onChange={e => setLinkQuery(e.target.value)}
-              placeholder="Find unlinked SKU"
-              style={{ ...S.inp, fontSize: 12 }}
-            />
-          </div>
+          {/* Step 2 — find + bulk act */}
+          <label style={{ ...S.label, marginTop: 4 }}>② Find & Link</label>
+          <input
+            value={linkQuery}
+            onChange={e => setLinkQuery(e.target.value)}
+            placeholder="Filter unlinked SKUs…"
+            style={{ ...S.inp, fontSize: 12, marginBottom: 8 }}
+          />
 
-          <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
-            <button onClick={selectVisibleUnlinked} style={btn("ghost", "sm")}>Select Visible</button>
-            <button onClick={clearSelectedUnlinked} style={btn("ghost", "sm")}>Clear</button>
+          <div style={{ display: "flex", gap: 6, marginBottom: 8, flexWrap: "wrap" }}>
+            <button onClick={selectVisibleUnlinked} style={btn("ghost", "sm")}>Select visible</button>
+            {selectedCount > 0 && <button onClick={clearSelectedUnlinked} style={btn("ghost", "sm")}>Clear ({selectedCount})</button>}
           </div>
 
           <button
             onClick={bulkLinkSelected}
             disabled={!linkParentId || selectedCount === 0 || bulkLinking}
-            style={{ ...btn("primary", "md"), width: "100%", marginBottom: 10 }}
+            style={{ ...btn("primary", "md"), width: "100%", marginBottom: 12,
+              opacity: (!linkParentId || selectedCount === 0) ? 0.5 : 1 }}
           >
-            {bulkLinking ? "Linking..." : `Link ${selectedCount} SKU${selectedCount !== 1 ? "s" : ""}`}
+            {bulkLinking ? "Linking…" : `Link ${selectedCount} selected → ${linkParentId || "parent"}`}
           </button>
 
-          <div style={{ border: `1px solid ${C.gray100}`, borderRadius: 10, padding: 8, maxHeight: 260, overflowY: "auto" }}>
+          {/* Unlinked SKU rows with inline quick actions */}
+          <div style={{ border: `1px solid ${C.gray100}`, borderRadius: 10, overflow: "hidden", maxHeight: 420, overflowY: "auto" }}>
             {quickUnlinked.length === 0 ? (
-              <div style={{ fontSize: 12, color: C.gray400, padding: 6 }}>No unlinked SKUs.</div>
-            ) : (
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                {quickUnlinked.slice(0, 180).map(s => {
-                  const selected = selectedUnlinked.has(s.sku_id);
-                  return (
-                    <button
-                      key={s.sku_id}
-                      onClick={() => toggleUnlinked(s.sku_id)}
-                      draggable
-                      onDragStart={e => {
-                        e.dataTransfer.setData("text/plain", s.sku_id);
-                        setDragging(s.sku_id);
-                      }}
-                      onDragEnd={() => setDragging(null)}
-                      style={{
-                        border: `1px solid ${selected ? C.blue : C.gray200}`,
-                        background: selected ? C.blueLight : C.white,
-                        color: selected ? C.blue : C.gray700,
-                        borderRadius: 16,
-                        fontFamily: "monospace",
-                        fontSize: 11,
-                        fontWeight: 600,
-                        padding: "4px 8px",
-                        cursor: "pointer",
-                      }}
-                    >
-                      {s.sku_id}
-                    </button>
-                  );
-                })}
+              <div style={{ fontSize: 12, color: C.gray400, padding: 14, textAlign: "center" }}>
+                {unlinked.length === 0 ? "🎉 Every SKU is linked." : "No SKUs match your filter."}
               </div>
+            ) : (
+              quickUnlinked.slice(0, 200).map((s, i) => {
+                const selected = selectedUnlinked.has(s.sku_id);
+                return (
+                  <div
+                    key={s.sku_id}
+                    draggable
+                    onDragStart={e => { e.dataTransfer.setData("text/plain", s.sku_id); setDragging(s.sku_id); }}
+                    onDragEnd={() => setDragging(null)}
+                    style={{
+                      display: "flex", alignItems: "center", gap: 8, padding: "7px 9px",
+                      background: selected ? C.blueLight : i % 2 ? C.gray50 : C.white,
+                      borderBottom: `1px solid ${C.gray100}`, cursor: "grab",
+                    }}
+                    title={`Drag onto a parent card to link · ${s.order_count || 0} order(s)`}
+                  >
+                    <input type="checkbox" checked={selected} onChange={() => toggleUnlinked(s.sku_id)} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontFamily: "monospace", fontSize: 12, fontWeight: 700, color: s.has_price ? C.orange : C.green, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                        {s.sku_id}
+                      </div>
+                      <div style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 1 }}>
+                        {s.has_price
+                          ? <span style={{ fontSize: 10, fontFamily: "monospace", color: C.gray400 }}>{fmt(s.final_price)}</span>
+                          : <span style={{ fontSize: 8, fontWeight: 800, color: C.white, background: C.green, padding: "1px 5px", borderRadius: 10 }}>NEW</span>}
+                        {s.order_count > 0 && <span style={{ fontSize: 10, color: C.gray400 }}>📦 {s.order_count}</span>}
+                      </div>
+                    </div>
+                    {/* Quick actions */}
+                    <button
+                      onClick={() => linkParentId && linkSku(s.sku_id, linkParentId)}
+                      disabled={!linkParentId}
+                      title={linkParentId ? `Link to ${linkParentId}` : "Select a target parent first"}
+                      style={{ ...btn("secondary", "sm"), padding: "3px 8px", fontSize: 11, opacity: linkParentId ? 1 : 0.4 }}
+                    >🔗</button>
+                    <button
+                      onClick={() => setNewParentFor(s)}
+                      title="Create a new parent from this SKU"
+                      style={{ ...btn("success", "sm"), padding: "3px 8px", fontSize: 11 }}
+                    >+ Parent</button>
+                  </div>
+                );
+              })
             )}
           </div>
 
           <div style={{ marginTop: 8, fontSize: 11, color: C.gray400 }}>
-            Tip: click chips to multi-select, or drag a chip and drop on any parent card.
+            Tip: 🔗 links to the target parent · <strong>+ Parent</strong> promotes a SKU into its own group · drag a row onto any card to link.
           </div>
         </div>
 
@@ -1052,6 +1174,18 @@ export function PricingTab() {
           )}
         </div>
       </div>
+
+      {newParentFor && (
+        <CreateParentFromSkuModal
+          sku={newParentFor}
+          onCancel={() => setNewParentFor(null)}
+          onSaved={(parentId) => {
+            setNewParentFor(null);
+            notify("ok", `Parent "${parentId}" created from ${newParentFor.sku_id}.`);
+            refresh();
+          }}
+        />
+      )}
     </div>
   );
 }

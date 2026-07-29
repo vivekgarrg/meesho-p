@@ -2854,6 +2854,62 @@ def link_sku_to_parent(request, business_id):
     }, status=status.HTTP_200_OK)
 
 
+@api_view(["POST"])
+def create_parent_from_sku(request, business_id):
+    """Create a brand-new parent group *from* an existing child/unlinked SKU and
+    link that SKU to it in one atomic step.
+
+    The new parent inherits its pricing from the SKU's existing FinalPrice row
+    (if any) unless overridden in the request body. Used by the "New parent from
+    this SKU" action in the pricing UI.
+
+    Body: {"sku_id": "...", "parent_id": "..." (optional, defaults to sku_id),
+           "item_price", "tax_percent", "packaging_cost", "final_price" (all optional)}
+    """
+    business = get_authorized_business(request, business_id)
+    sku_id = (request.data.get("sku_id") or "").strip()
+    parent_id = (request.data.get("parent_id") or sku_id).strip()
+
+    if not sku_id:
+        return Response({"error": "sku_id is required."}, status=status.HTTP_400_BAD_REQUEST)
+    if not parent_id:
+        return Response({"error": "parent_id is required."}, status=status.HTTP_400_BAD_REQUEST)
+    if ParentItemPrice.objects.filter(business=business, item_id=parent_id).exists():
+        return Response(
+            {"error": f"A parent named '{parent_id}' already exists."},
+            status=status.HTTP_409_CONFLICT,
+        )
+
+    existing = FinalPrice.objects.filter(business=business, sku_id=sku_id).first()
+
+    def pick(key, default):
+        v = request.data.get(key)
+        return v if v not in (None, "") else default
+
+    item_price = pick("item_price", existing.item_price if existing else 0)
+    tax_percent = pick("tax_percent", (existing.tax_percent if existing else 0) or 0)
+    packaging_cost = pick("packaging_cost", (existing.packaging_cost if existing else 0) or 0)
+    final_price = pick("final_price", None)
+    if final_price in (None, ""):
+        ip = Decimal(str(item_price or 0))
+        tax = Decimal(str(tax_percent or 0)) / 100
+        pkg = Decimal(str(packaging_cost or 0))
+        final_price = str((ip + ip * tax + pkg).quantize(Decimal("0.01")))
+
+    with transaction.atomic():
+        parent = ParentItemPrice.objects.create(
+            business=business,
+            item_id=parent_id,
+            item_price=item_price or 0,
+            tax_percent=tax_percent or 0,
+            packaging_cost=packaging_cost or 0,
+            final_price=final_price,
+        )
+        _bulk_link_skus_to_parent(business=business, parent=parent, sku_ids=[sku_id])
+
+    return Response(ParentItemPriceSerializer(parent).data, status=status.HTTP_201_CREATED)
+
+
 def _normalize_sku_ids(raw_sku_ids):
     seen = set()
     out = []

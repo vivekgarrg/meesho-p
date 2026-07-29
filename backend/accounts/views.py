@@ -3,7 +3,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_simplejwt.views import TokenObtainPairView
 
-from .models import Business, Membership, User
+from .models import MAX_BUSINESSES_PER_USER, Business, Membership, NavVisibilitySetting, User
 from .permissions import IsSuperAdmin
 from .serializers import (
     AdminUserSerializer,
@@ -40,6 +40,48 @@ def change_password(request):
     return Response({"detail": "Password updated successfully."})
 
 
+@api_view(["GET", "PUT"])
+@permission_classes([IsAuthenticated])
+def nav_visibility(request):
+    """Global sidebar tab visibility.
+
+    GET  (any authenticated user): returns the configured visible paths so the
+         sidebar can filter itself. `configured` is False when no admin has set
+         a list yet, in which case the frontend shows every tab.
+    PUT  (super admin only): replace the visible-paths list.
+    """
+    setting = NavVisibilitySetting.get_solo()
+
+    if request.method == "GET":
+        return Response({
+            "visible_paths": setting.visible_paths or [],
+            "configured": bool(setting.visible_paths),
+        })
+
+    if not request.user.is_super_admin:
+        return Response(
+            {"error": "Only a super admin can change sidebar visibility."}, status=403
+        )
+
+    paths = request.data.get("visible_paths", [])
+    if not isinstance(paths, list) or not all(isinstance(p, str) for p in paths):
+        return Response({"error": "visible_paths must be a list of strings."}, status=400)
+
+    # De-dupe while preserving order.
+    seen = set()
+    clean = []
+    for p in paths:
+        p = p.strip()
+        if p and p not in seen:
+            seen.add(p)
+            clean.append(p)
+
+    setting.visible_paths = clean
+    setting.updated_by = request.user
+    setting.save()
+    return Response({"visible_paths": setting.visible_paths, "configured": bool(setting.visible_paths)})
+
+
 @api_view(["GET", "POST"])
 @permission_classes([IsSuperAdmin])
 def user_list(request):
@@ -53,6 +95,17 @@ def user_list(request):
     if User.objects.filter(username=serializer.validated_data["username"]).exists():
         return Response({"username": "A user with that username already exists."}, status=400)
     user = serializer.save()
+
+    # Optional: assign the new user to businesses in the same step. Super admins
+    # implicitly see every business, so assignment only applies to business users.
+    business_ids = request.data.get("business_ids") or []
+    if user.role == User.ROLE_BUSINESS_USER and business_ids:
+        if len(business_ids) > MAX_BUSINESSES_PER_USER:
+            business_ids = business_ids[:MAX_BUSINESSES_PER_USER]
+        valid = Business.objects.filter(pk__in=business_ids)
+        for biz in valid:
+            Membership.objects.get_or_create(user=user, business=biz)
+
     return Response(AdminUserSerializer(user).data, status=201)
 
 
@@ -80,8 +133,63 @@ def user_detail(request, user_id):
         and User.objects.filter(role=User.ROLE_SUPER_ADMIN).count() <= 1
     ):
         return Response({"role": "Cannot demote the only super admin."}, status=400)
+
+    # Guard: suspending a user (is_active → False) revokes all access — block the
+    # cases that would lock everyone out.
+    new_is_active = serializer.validated_data.get("is_active", target.is_active)
+    if target.is_active and not new_is_active:
+        if target.pk == request.user.pk:
+            return Response({"is_active": "You cannot suspend your own account."}, status=400)
+        if (
+            target.role == User.ROLE_SUPER_ADMIN
+            and User.objects.filter(role=User.ROLE_SUPER_ADMIN, is_active=True).count() <= 1
+        ):
+            return Response({"is_active": "Cannot suspend the only active super admin."}, status=400)
+
     user = serializer.save()
     return Response(AdminUserSerializer(user).data)
+
+
+@api_view(["PUT"])
+@permission_classes([IsSuperAdmin])
+def user_businesses(request, user_id):
+    """Super-admin: replace the full set of businesses a business user can manage.
+
+    Body: {"business_ids": [1, 2, ...]}. Adds any new memberships and removes the
+    ones no longer listed, so the frontend can present a checklist and just save.
+    """
+    target = User.objects.filter(pk=user_id).first()
+    if target is None:
+        return Response({"error": "User not found."}, status=404)
+    if target.role == User.ROLE_SUPER_ADMIN:
+        return Response(
+            {"error": "Super admins already have access to every business."}, status=400
+        )
+
+    raw = request.data.get("business_ids", [])
+    if not isinstance(raw, list):
+        return Response({"error": "business_ids must be a list."}, status=400)
+    try:
+        requested = {int(i) for i in raw}
+    except (TypeError, ValueError):
+        return Response({"error": "business_ids must be integers."}, status=400)
+
+    if len(requested) > MAX_BUSINESSES_PER_USER:
+        return Response(
+            {"business_ids": f"A business user can belong to at most {MAX_BUSINESSES_PER_USER} businesses."},
+            status=400,
+        )
+
+    valid = set(Business.objects.filter(pk__in=requested).values_list("id", flat=True))
+    current = set(Membership.objects.filter(user=target).values_list("business_id", flat=True))
+
+    for bid in valid - current:
+        Membership.objects.get_or_create(user=target, business_id=bid)
+    to_remove = current - valid
+    if to_remove:
+        Membership.objects.filter(user=target, business_id__in=to_remove).delete()
+
+    return Response(AdminUserSerializer(target).data)
 
 
 @api_view(["GET", "POST"])

@@ -8,7 +8,10 @@ urlpatterns = [
     path("token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
     path("me/", views.me, name="me"),
     path("change-password/", views.change_password, name="change_password"),
+    # Global sidebar tab visibility (read: any user, write: super admin)
+    path("nav-visibility/", views.nav_visibility, name="nav_visibility"),
     # Super-admin user management
     path("users/", views.user_list, name="user_list"),
     path("users/<int:user_id>/", views.user_detail, name="user_detail"),
+    path("users/<int:user_id>/businesses/", views.user_businesses, name="user_businesses"),
 ]
