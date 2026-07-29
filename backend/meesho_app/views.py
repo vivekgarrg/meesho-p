@@ -6723,3 +6723,95 @@ def expenses_summary(request, business_id):
         "transport": str(transport_total),
         "grand_total": str(grand),
     })
+
+
+@api_view(["GET"])
+def tax_check(request, business_id):
+    """Compare the tax % set on each SKU (FinalPrice.tax_percent) against the
+    GST % Meesho actually reports on that SKU's payments
+    (OrderPayment.product_gst_percent), and flag mismatches.
+
+    Query params: status = mismatch|match|no_data|unset|all (default all),
+    search (sku / parent).
+    """
+    from collections import defaultdict, Counter
+    business = get_authorized_business(request, business_id)
+    status_filter = request.GET.get("status", "all")
+    search = request.GET.get("search", "").strip().lower()
+
+    # Meesho GST per SKU (bucketed to whole-percent) from payment rows.
+    gst_counts = defaultdict(Counter)
+    for sku, gst in (
+        OrderPayment.objects
+        .filter(business=business)
+        .exclude(product_gst_percent__isnull=True)
+        .exclude(supplier_sku__isnull=True).exclude(supplier_sku="")
+        .values_list("supplier_sku", "product_gst_percent")
+        .iterator()
+    ):
+        gst_counts[sku][int(round(float(gst)))] += 1
+
+    results = []
+    counts = {"priced": 0, "matched": 0, "mismatched": 0, "no_data": 0, "unset": 0}
+
+    for fp in FinalPrice.objects.filter(business=business).select_related("parent"):
+        counts["priced"] += 1
+        set_tax = fp.tax_percent
+        counter = gst_counts.get(fp.sku_id)
+        parent = fp.parent.item_id if fp.parent_id else None
+
+        if not counter:
+            row_status = "no_data"
+            meesho = None
+            values = []
+            order_count = 0
+        else:
+            meesho = counter.most_common(1)[0][0]
+            values = sorted(counter.keys())
+            order_count = sum(counter.values())
+            if set_tax is None:
+                row_status = "unset"
+            elif int(set_tax) == meesho:
+                row_status = "match"
+            else:
+                row_status = "mismatch"
+
+        counts_key = {"no_data": "no_data", "match": "matched", "mismatch": "mismatched", "unset": "unset"}[row_status]
+        counts[counts_key] += 1
+
+        row = {
+            "sku_id": fp.sku_id,
+            "parent": parent,
+            "set_tax": set_tax,
+            "meesho_gst": meesho,
+            "meesho_values": values,
+            "multiple_meesho": len(values) > 1,
+            "diff": (int(set_tax) - meesho) if (set_tax is not None and meesho is not None) else None,
+            "order_count": order_count,
+            "status": row_status,
+        }
+        if status_filter != "all" and row_status != status_filter:
+            continue
+        if search and search not in fp.sku_id.lower() and not (parent and search in parent.lower()):
+            continue
+        results.append(row)
+
+    # SKUs Meesho charges GST on but that have no FinalPrice row (unpriced).
+    priced_skus = set(FinalPrice.objects.filter(business=business).values_list("sku_id", flat=True))
+    unpriced_with_orders = sum(1 for s in gst_counts if s not in priced_skus)
+
+    # Mismatches first, biggest |diff| first.
+    order_rank = {"mismatch": 0, "unset": 1, "no_data": 2, "match": 3}
+    results.sort(key=lambda r: (order_rank.get(r["status"], 9), -(abs(r["diff"]) if r["diff"] is not None else 0)))
+
+    return Response({
+        "kpi": {
+            "priced_skus": counts["priced"],
+            "matched": counts["matched"],
+            "mismatched": counts["mismatched"],
+            "no_meesho_data": counts["no_data"],
+            "unset": counts["unset"],
+            "unpriced_with_orders": unpriced_with_orders,
+        },
+        "results": results,
+    })

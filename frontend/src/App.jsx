@@ -10,6 +10,7 @@ import { PaymentsTab } from "./Components/Tabs/PaymentsTab";
 import { UnscheduledPaymentTab } from "./Components/Tabs/UnscheduledPaymentTab";
 import { ExpensesTab } from "./Components/Tabs/ExpensesTab";
 import { PricingTab } from "./Components/Tabs/PricingTab";
+import { TaxCheckTab } from "./Components/Tabs/TaxCheckTab";
 import { UploadTab } from "./Components/Tabs/UploadTab";
 import { SKUAnalysisTab } from "./Components/Tabs/SKUProfitTab";
 import { EstimatedProfitTab } from "./Components/Tabs/EstimatedProfitTab";
@@ -411,6 +412,7 @@ const NAV_GROUPS = [
     color: "#60A5FA",
     items: [
       { path: "/pricing", label: "SKU Pricing", icon: "⊞" },
+      { path: "/tax-check", label: "Tax Check", icon: "%" },
       { path: "/inventory", label: "Inventory", icon: "⊕" },
       { path: "/inventory-labels", label: "Labels & Barcodes", icon: "▥" },
       { path: "/meesho-inventory", label: "Meesho Stock", icon: "⊞" },
@@ -734,6 +736,7 @@ function AppShell() {
             <Route path="/ads-analysis" element={<AdsAnalysisTab />} />
             <Route path="/estimated-profit" element={<EstimatedProfitTab />} />
             <Route path="/pricing" element={<PricingTab />} />
+            <Route path="/tax-check" element={<TaxCheckTab />} />
             <Route path="/upload" element={<UploadTab />} />
             <Route path="/labels" element={<LabelsTab />} />
             <Route path="/purchases" element={<PurchasesTab />} />

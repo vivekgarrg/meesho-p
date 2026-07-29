@@ -30,6 +30,7 @@ urlpatterns = [
     path("final-prices/", views.final_price_list, name="final_price_list"),
     path("final-prices/upload/", views.upload_final_price, name="upload_final_price"),
     path("final-prices/download/", views.download_final_price, name="download_final_price"),
+    path("tax-check/", views.tax_check, name="tax_check"),
     path("pricing/download/", views.download_pricing_workbook, name="download_pricing_workbook"),
     path("pricing/upload/", views.upload_pricing_workbook, name="upload_pricing_workbook"),
     path("final-prices/<str:sku_id>/", views.final_price_detail, name="final_price_detail"),
