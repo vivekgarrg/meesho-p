@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# One-command production update. Run as the `deploy` user ON the VPS:
+#   bash deploy/hostinger/update.sh
+# Also used by the GitHub Actions auto-deploy workflow.
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$REPO_ROOT"
+
+echo "==> Pulling latest code"
+git pull --ff-only origin main
+
+echo "==> Building frontend"
+npm ci --prefix frontend
+npm run build --prefix frontend
+mkdir -p backend/templates
+cp backend/frontend_build/index.html backend/templates/index.html
+
+echo "==> Python deps + migrate + collectstatic"
+cd backend
+python3 -m venv .venv || true
+# shellcheck disable=SC1091
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+set -a
+# shellcheck disable=SC1091
+source "$REPO_ROOT/deploy/hostinger/.env"
+set +a
+python manage.py migrate --noinput
+python manage.py collectstatic --noinput
+# Seed commands are idempotent: they no-op once the DB has data.
+python manage.py load_initial_data || true
+python manage.py create_seed_users || true
+
+echo "==> Ensuring static files are readable by nginx"
+chmod o+x "$HOME" 2>/dev/null || true
+chmod -R o+rX "$REPO_ROOT/backend/staticfiles" 2>/dev/null || true
+
+echo "==> Restarting gunicorn service"
+sudo systemctl restart meesho
+
+echo "==> Done. $(sudo systemctl is-active meesho)"
