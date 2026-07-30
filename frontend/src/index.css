@@ -1,9 +1,62 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=DM+Mono:wght@400;500&display=swap');
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-body { background: #f5f6fa; color: #1a1d23; -webkit-font-smoothing: antialiased; }
+
+html {
+  /* Stop iOS inflating text in landscape, which silently breaks every
+     carefully-sized layout. */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  background: #f5f6fa;
+  color: #1a1d23;
+  -webkit-font-smoothing: antialiased;
+  /* The shell manages its own scroll containers, so nothing should ever scroll
+     the page sideways. Without this one too-wide child turns the whole app into
+     a horizontally-draggable mess on a phone. */
+  overflow-x: hidden;
+  max-width: 100vw;
+}
+
 button { font-family: inherit; transition: all 0.15s; }
-button:hover { filter: brightness(0.93); }
+
+/* Only dim on hover where hovering exists. On a touchscreen :hover sticks after
+   a tap, leaving buttons looking permanently pressed. */
+@media (hover: hover) and (pointer: fine) {
+  button:hover { filter: brightness(0.93); }
+}
+
 input, select { font-family: inherit; }
+
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: #f0f1f5; }
 ::-webkit-scrollbar-thumb { background: #d0d3de; border-radius: 3px; }
+
+@media (max-width: 767px) {
+  /* iOS Safari zooms the whole page when you focus an input whose font-size is
+     under 16px — which is most inputs here. `!important` is deliberate: these
+     sizes are set inline, and inline styles otherwise beat CSS. */
+  input, select, textarea {
+    font-size: 16px !important;
+  }
+
+  /* Long SKUs, product names and tracking URLs must wrap rather than force a
+     card wider than the screen. */
+  body { overflow-wrap: anywhere; }
+
+  /* Wide tables keep their natural width and scroll inside their wrapper
+     instead of being squeezed into an unreadable column. */
+  table { width: auto !important; min-width: 100%; }
+
+  /* Comfortable touch targets, without affecting layout width. */
+  button { min-height: 34px; }
+}
+
+/* A horizontally scrollable region with iOS momentum — used to wrap wide
+   tables so the page itself never scrolls sideways. */
+.scroll-x {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  max-width: 100%;
+}

@@ -9,7 +9,39 @@
 // cycle: this file imports nothing from App or the components, so it always
 // initializes first.
 
+import { useState, useEffect } from "react";
+
 export { API_BASE as API } from "./lib/apiBase";
+
+// ── Responsive breakpoints ────────────────────────────────────────────────────
+// Almost all styling in this app is inline, and inline styles can't be
+// overridden by a CSS media query — so responsive layout has to be decided in
+// JS. These hooks are the single source of truth for "are we on a small
+// screen", used by the shell and by any tab that needs to restructure rather
+// than merely reflow.
+export const BP = { mobile: 768, tablet: 1024 };
+
+function useMediaQuery(query) {
+  const [matches, setMatches] = useState(
+    () => typeof window !== "undefined" && window.matchMedia(query).matches
+  );
+
+  useEffect(() => {
+    const mql = window.matchMedia(query);
+    const onChange = (e) => setMatches(e.matches);
+    setMatches(mql.matches);   // re-sync in case it changed before this ran
+    mql.addEventListener("change", onChange);
+    return () => mql.removeEventListener("change", onChange);
+  }, [query]);
+
+  return matches;
+}
+
+/** True on phones and small tablets in portrait — the layout-changing breakpoint. */
+export const useIsMobile = () => useMediaQuery(`(max-width: ${BP.mobile - 1}px)`);
+
+/** True on narrow desktop / tablet landscape, where the sidebar still fits but space is tight. */
+export const useIsTablet = () => useMediaQuery(`(max-width: ${BP.tablet - 1}px)`);
 
 // ── Formatters ─────────────────────────────────────────────────────────────────
 export const fmt = (n) =>

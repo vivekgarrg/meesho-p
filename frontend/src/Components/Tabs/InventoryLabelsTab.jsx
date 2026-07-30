@@ -174,7 +174,7 @@ function PrintLabelsSection({ rows }) {
         </ToggleButtonGroup>
       </Stack>
 
-      <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+      <Stack useFlexGap direction="row" spacing={1} alignItems="center" sx={{ flexWrap: "wrap" }}>
         <Button size="small" onClick={selectAllVisible} sx={{ textTransform: "none" }}>Select all visible</Button>
         <Button size="small" onClick={clearSelection} sx={{ textTransform: "none" }} disabled={selectedCount === 0}>Clear</Button>
         <Typography variant="caption" color="text.secondary" sx={{ flex: 1 }}>

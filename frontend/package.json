@@ -14,6 +14,8 @@
     "@mui/material": "^9.1.0",
     "@mui/x-charts": "^9.4.0",
     "@mui/x-data-grid": "^9.4.0",
+    "@zxing/browser": "^0.1.5",
+    "@zxing/library": "^0.21.3",
     "jsbarcode": "^3.12.3",
     "react": "^18.2.0",
     "react-datepicker": "^9.1.0",

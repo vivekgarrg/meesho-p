@@ -180,7 +180,8 @@ export function AdsAnalysisTab() {
           </Paper>
 
           {/* KPI row */}
-          <Stack direction="row" spacing={1.5} flexWrap="wrap">
+
+          <Stack useFlexGap direction="row" spacing={1.5} sx={{ flexWrap: "wrap" }}>
             <KpiCard label="Ad Orders" value={(s.total_ad_orders || 0).toLocaleString()} color={C.blue} />
             <KpiCard label="Ad Delivery Rate" value={s.ad_delivery_rate_pct != null ? `${s.ad_delivery_rate_pct}%` : "—"}
               sub={s.organic_delivery_rate_pct != null ? `organic: ${s.organic_delivery_rate_pct}%` : ""}
@@ -249,7 +250,7 @@ export function AdsAnalysisTab() {
           )}
 
           {/* SKU table */}
-          <Stack direction="row" justifyContent="space-between" alignItems="center" flexWrap="wrap" gap={1}>
+          <Stack direction="row" justifyContent="space-between" alignItems="center" gap={1} sx={{ flexWrap: "wrap" }}>
             <Typography variant="subtitle2" fontWeight={700}>
               Per-SKU Ad Performance — {results.length} of {s.sku_count || 0} SKUs
             </Typography>
@@ -292,7 +293,7 @@ export function AdsAnalysisTab() {
                         {r.parent_sku && <Typography sx={{ fontSize: 11, color: "#94A3B8", mt: 0.3 }}>↳ {r.parent_sku}</Typography>}
                       </TableCell>
                       <TableCell sx={{ textAlign: "right" }}>
-                        <Stack direction="row" spacing={0.5} flexWrap="wrap" justifyContent="flex-end" useFlexGap>
+                        <Stack direction="row" spacing={0.5} justifyContent="flex-end" useFlexGap sx={{ flexWrap: "wrap" }}>
                           <OrderBadge icon="📦" count={r.order_count} color={C.blue} bg={C.blueLight} border="#BFDBFE" />
                           <OrderBadge icon="✅" count={r.delivered_count} color={C.green} bg={C.greenLight} border={C.greenBorder} />
                           <OrderBadge icon="↩" count={r.return_count} color={C.red} bg={C.redLight} border={C.redBorder} />

@@ -8,7 +8,7 @@ import { Routes, Route, NavLink, useLocation, Navigate, useNavigate } from "reac
 // them at module scope (e.g. TaxCheckTab's STATUS_META). Importing ./shared
 // first guarantees it initializes before any tab module evaluates, avoiding a
 // "Cannot access 'C' before initialization" (TDZ) crash in the production build.
-import { API, fmt, C, CHART_COLORS, STATUS_COLORS, S } from "./shared";
+import { API, fmt, C, CHART_COLORS, STATUS_COLORS, S, useIsMobile } from "./shared";
 
 // ── Tab components ─────────────────────────────────────────────────────────────
 import { OverviewTab } from "./Components/Tabs/OverviewTab";
@@ -33,6 +33,7 @@ import { ProductPhotosTab } from "./Components/Tabs/ProductPhotosTab";
 import { MismatchTab } from "./Components/Tabs/MismatchTab";
 import { MeeshoInventoryTab } from "./Components/Tabs/MeeshoInventoryTab";
 import { MeeshoPricingTab } from "./Components/Tabs/MeeshoPricingTab";
+import { ReturnScanTab } from "./Components/Tabs/ReturnScanTab";
 import { SKU_PAGE_SIZE as skuPageSize } from "./lib/helper";
 import TableData from "./Components/Table/TableData";
 import LoginPage from "./Components/Login/LoginPage";
@@ -47,7 +48,7 @@ import { useAuth } from "./contexts/AuthContext";
 
 // Re-export the shared tokens (imported at the top of this file) so existing
 // `import { C, fmt, ... } from "../App"` statements across the app keep working.
-export { API, fmt, C, CHART_COLORS, STATUS_COLORS, S } from "./shared";
+export { API, fmt, C, CHART_COLORS, STATUS_COLORS, S, useIsMobile, useIsTablet, BP } from "./shared";
 
 export function btn(variant = "primary", size = "md") {
   const sizes = {
@@ -326,6 +327,7 @@ export const NAV_GROUPS = [
       { path: "/unsettled", label: "Unsettled", icon: "⚡" },
       { path: "/mismatch", label: "Pay Mismatch", icon: "⊝" },
       { path: "/labels", label: "Labels", icon: "⊟" },
+      { path: "/returns", label: "Returns & Claims", icon: "⟲" },
     ],
   },
   {
@@ -365,16 +367,18 @@ export const NAV_GROUPS = [
 const ALL_NAV = NAV_GROUPS.flatMap(g => g.items);
 
 // ── Sidebar nav item ──────────────────────────────────────────────────────────
-function NavItem({ item, collapsed }) {
+function NavItem({ item, collapsed, onNavigate, touch }) {
   const [hovered, setHovered] = useState(false);
   return (
     <NavLink
       to={item.path} end={item.end}
       title={collapsed ? item.label : undefined}
+      onClick={onNavigate}
       onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)}
       style={({ isActive }) => ({
         display: "flex", alignItems: "center", gap: 11, textDecoration: "none",
-        padding: collapsed ? "10px 0" : "8px 12px",
+        // Roomier rows on touch, where a 30px target is a miss risk.
+        padding: collapsed ? "10px 0" : touch ? "12px 14px" : "8px 12px",
         justifyContent: collapsed ? "center" : "flex-start",
         margin: "1px 8px", borderRadius: 10,
         transition: "background 0.12s, color 0.12s",
@@ -398,7 +402,7 @@ function NavItem({ item, collapsed }) {
         fontFamily: "system-ui, sans-serif",
       }}>{item.icon}</span>
       {!collapsed && (
-        <span style={{ fontSize: 13, fontWeight: 500, whiteSpace: "nowrap", letterSpacing: "0.005em" }}>
+        <span style={{ fontSize: touch ? 14 : 13, fontWeight: 500, whiteSpace: "nowrap", letterSpacing: "0.005em" }}>
           {item.label}
         </span>
       )}
@@ -415,7 +419,7 @@ const DIVIDER = "rgba(255,255,255,0.07)";
 // can always reach the Admin Panel to change the sidebar settings back.
 export const ALWAYS_VISIBLE_PATHS = ["/admin"];
 
-function Sidebar({ collapsed, setCollapsed }) {
+function Sidebar({ collapsed, setCollapsed, isMobile, mobileOpen, closeMobile }) {
   const [btnHovered, setBtnHovered] = useState(false);
   const { isSuperAdmin, navVisibility } = useAuth();
 
@@ -432,23 +436,42 @@ function Sidebar({ collapsed, setCollapsed }) {
     .filter((g) => !g.adminOnly || isSuperAdmin)
     .map((g) => ({ ...g, items: g.items.filter((item) => isPathVisible(item.path)) }))
     .filter((g) => g.items.length > 0);
-  const W = collapsed ? 60 : 232;
+  // On mobile the sidebar is never collapsed-to-icons — it's an off-canvas
+  // drawer that slides over the content, because a 232px rail on a 390px screen
+  // leaves nothing usable behind it.
+  const onMobile = isMobile;
+  const iconsOnly = !onMobile && collapsed;
+  const W = onMobile ? 268 : collapsed ? 60 : 232;
+
+  const shellStyle = onMobile
+    ? {
+        width: W, minWidth: W,
+        position: "fixed", top: 0, bottom: 0, left: 0,
+        transform: mobileOpen ? "translateX(0)" : "translateX(-100%)",
+        transition: "transform 0.24s cubic-bezier(.4,0,.2,1)",
+        boxShadow: mobileOpen ? "4px 0 28px rgba(0,0,0,0.4)" : "none",
+        zIndex: 1200,
+      }
+    : {
+        width: W, minWidth: W, height: "100vh", position: "sticky", top: 0,
+        transition: "width 0.22s cubic-bezier(.4,0,.2,1), min-width 0.22s cubic-bezier(.4,0,.2,1)",
+        zIndex: 100,
+      };
 
   return (
     <div style={{
-      width: W, minWidth: W, height: "100vh", position: "sticky", top: 0,
       background: `linear-gradient(180deg, ${SIDEBAR_BG} 0%, ${SIDEBAR_BG2} 100%)`,
       display: "flex", flexDirection: "column",
-      transition: "width 0.22s cubic-bezier(.4,0,.2,1), min-width 0.22s cubic-bezier(.4,0,.2,1)",
-      overflow: "hidden", zIndex: 100, flexShrink: 0,
+      overflow: "hidden", flexShrink: 0,
       borderRight: `1px solid ${DIVIDER}`,
+      ...shellStyle,
     }}>
 
       {/* Brand */}
       <div style={{
         height: 64, display: "flex", alignItems: "center", flexShrink: 0,
-        padding: collapsed ? "0" : "0 18px",
-        justifyContent: collapsed ? "center" : "flex-start", gap: 12,
+        padding: iconsOnly ? "0" : "0 18px",
+        justifyContent: iconsOnly ? "center" : "flex-start", gap: 12,
         borderBottom: `1px solid ${DIVIDER}`,
       }}>
         {/* Logo mark — "R" monogram */}
@@ -461,7 +484,7 @@ function Sidebar({ collapsed, setCollapsed }) {
           boxShadow: "0 4px 12px rgba(124,58,237,0.4)",
           letterSpacing: "-0.02em",
         }}>R</div>
-        {!collapsed && (
+        {!iconsOnly && (
           <div style={{ overflow: "hidden", minWidth: 0 }}>
             <div style={{ fontSize: 14, fontWeight: 800, color: "#F8F8FF", letterSpacing: "-0.02em", whiteSpace: "nowrap" }}>
               Rudam
@@ -476,8 +499,8 @@ function Sidebar({ collapsed, setCollapsed }) {
       {/* Nav */}
       <div style={{ flex: 1, overflowY: "auto", padding: "16px 0 8px", scrollbarWidth: "none" }}>
         {navGroups.map((group, gi) => (
-          <div key={group.label} style={{ marginBottom: collapsed ? 4 : 8 }}>
-            {collapsed ? (
+          <div key={group.label} style={{ marginBottom: iconsOnly ? 4 : 8 }}>
+            {iconsOnly ? (
               <div style={{ height: 1, background: DIVIDER, margin: gi === 0 ? "0 10px 8px" : "8px 10px" }} />
             ) : (
               <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "2px 18px 5px" }}>
@@ -487,27 +510,41 @@ function Sidebar({ collapsed, setCollapsed }) {
                 </span>
               </div>
             )}
-            {group.items.map(item => <NavItem key={item.path} item={item} collapsed={collapsed} />)}
+            {group.items.map(item => (
+              <NavItem
+                key={item.path}
+                item={item}
+                collapsed={iconsOnly}
+                // Tapping a link on mobile should navigate *and* get the drawer
+                // out of the way, which is what every drawer nav does.
+                onNavigate={onMobile ? closeMobile : undefined}
+                touch={onMobile}
+              />
+            ))}
           </div>
         ))}
       </div>
 
-      {/* Collapse toggle */}
+      {/* Collapse toggle (desktop) / close drawer (mobile) */}
       <div style={{ borderTop: `1px solid ${DIVIDER}`, padding: "10px 8px" }}>
         <button
-          onClick={() => setCollapsed(c => !c)}
+          onClick={() => (onMobile ? closeMobile() : setCollapsed(c => !c))}
           onMouseEnter={() => setBtnHovered(true)} onMouseLeave={() => setBtnHovered(false)}
           style={{
-            display: "flex", alignItems: "center", justifyContent: collapsed ? "center" : "space-between",
-            padding: collapsed ? "8px 0" : "8px 12px", width: "100%",
+            display: "flex", alignItems: "center", justifyContent: iconsOnly ? "center" : "space-between",
+            padding: iconsOnly ? "8px 0" : "8px 12px", width: "100%",
             background: btnHovered ? "rgba(255,255,255,0.06)" : "transparent",
             border: "none", borderRadius: 10, cursor: "pointer", fontFamily: "inherit",
             color: btnHovered ? "rgba(255,255,255,0.65)" : "rgba(255,255,255,0.3)",
             transition: "background 0.15s, color 0.15s",
           }}
         >
-          {!collapsed && <span style={{ fontSize: 11, fontWeight: 600, letterSpacing: "0.04em" }}>Collapse</span>}
-          <span style={{ fontSize: 13 }}>{collapsed ? "›" : "‹"}</span>
+          {!iconsOnly && (
+            <span style={{ fontSize: 11, fontWeight: 600, letterSpacing: "0.04em" }}>
+              {onMobile ? "Close menu" : "Collapse"}
+            </span>
+          )}
+          <span style={{ fontSize: 13 }}>{onMobile ? "✕" : iconsOnly ? "›" : "‹"}</span>
         </button>
       </div>
     </div>
@@ -515,7 +552,7 @@ function Sidebar({ collapsed, setCollapsed }) {
 }
 
 // ── User menu (top-right) ─────────────────────────────────────────────────────
-function UserMenu({ onChangePassword }) {
+function UserMenu({ onChangePassword, compact }) {
   const navigate = useNavigate();
   const { user, logout } = useAuth();
   const [open, setOpen] = useState(false);
@@ -549,13 +586,19 @@ function UserMenu({ onChangePassword }) {
           display: "flex", alignItems: "center", justifyContent: "center",
           fontSize: 13, fontWeight: 800, color: "#fff",
         }}>{initial}</div>
-        <div style={{ textAlign: "left", lineHeight: 1.2 }}>
-          <div style={{ fontSize: 12, fontWeight: 700, color: C.gray800 }}>{user?.username}</div>
-          <div style={{ fontSize: 10, color: C.gray400 }}>
-            {user?.role === "super_admin" ? "Super Admin" : "Business User"}
-          </div>
-        </div>
-        <span style={{ fontSize: 10, color: C.gray400 }}>▾</span>
+        {/* On mobile only the avatar shows — the name/role block is what pushed
+            this row off the right edge of the screen. */}
+        {!compact && (
+          <>
+            <div style={{ textAlign: "left", lineHeight: 1.2 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: C.gray800 }}>{user?.username}</div>
+              <div style={{ fontSize: 10, color: C.gray400 }}>
+                {user?.role === "super_admin" ? "Super Admin" : "Business User"}
+              </div>
+            </div>
+            <span style={{ fontSize: 10, color: C.gray400 }}>▾</span>
+          </>
+        )}
       </button>
 
       {open && (
@@ -595,7 +638,7 @@ function UserMenu({ onChangePassword }) {
 }
 
 // ── Top bar ───────────────────────────────────────────────────────────────────
-function TopBar() {
+function TopBar({ isMobile, onOpenMenu }) {
   const loc = useLocation();
   const [showChangePassword, setShowChangePassword] = useState(false);
   const current = ALL_NAV.find(item =>
@@ -608,25 +651,47 @@ function TopBar() {
   return (
     <div style={{
       background: C.white, borderBottom: `1px solid ${C.border}`,
-      padding: "0 28px", height: 56, flexShrink: 0,
+      padding: isMobile ? "0 12px" : "0 28px", height: 56, flexShrink: 0,
       display: "flex", alignItems: "center", justifyContent: "space-between",
-      boxShadow: "0 1px 0 rgba(0,0,0,0.06)",
+      gap: 8, boxShadow: "0 1px 0 rgba(0,0,0,0.06)",
     }}>
-      {/* Left section — business selector + breadcrumb */}
-      <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+      {/* Left section — hamburger (mobile) + business selector + breadcrumb */}
+      <div style={{ display: "flex", alignItems: "center", gap: isMobile ? 8 : 16, minWidth: 0 }}>
+        {isMobile && (
+          <button
+            onClick={onOpenMenu}
+            aria-label="Open menu"
+            style={{
+              display: "flex", flexDirection: "column", justifyContent: "center", gap: 4,
+              width: 38, height: 38, flexShrink: 0, padding: 9,
+              background: C.gray100, border: `1px solid ${C.border}`,
+              borderRadius: 10, cursor: "pointer",
+            }}
+          >
+            {[0, 1, 2].map(i => (
+              <span key={i} style={{ display: "block", height: 2, borderRadius: 2, background: C.gray700 }} />
+            ))}
+          </button>
+        )}
         <BusinessSwitcher />
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <span style={{ fontSize: 12, color: C.gray300 }}>/</span>
-          <span style={{ fontSize: 14, fontWeight: 700, color: C.gray800 }}>
-            {current?.label ?? "Dashboard"}
-          </span>
-        </div>
+        {/* The breadcrumb duplicates the page's own <h1> — drop it on mobile
+            where the row has no room to spare. */}
+        {!isMobile && (
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <span style={{ fontSize: 12, color: C.gray300 }}>/</span>
+            <span style={{ fontSize: 14, fontWeight: 700, color: C.gray800 }}>
+              {current?.label ?? "Dashboard"}
+            </span>
+          </div>
+        )}
       </div>
 
       {/* Right section */}
-      <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
-        <span style={{ fontSize: 12, color: C.gray400, fontWeight: 500 }}>{dateStr}</span>
-        <UserMenu onChangePassword={() => setShowChangePassword(true)} />
+      <div style={{ display: "flex", alignItems: "center", gap: 16, flexShrink: 0 }}>
+        {!isMobile && (
+          <span style={{ fontSize: 12, color: C.gray400, fontWeight: 500 }}>{dateStr}</span>
+        )}
+        <UserMenu onChangePassword={() => setShowChangePassword(true)} compact={isMobile} />
       </div>
 
       {showChangePassword && <ChangePasswordModal onClose={() => setShowChangePassword(false)} />}
@@ -637,24 +702,61 @@ function TopBar() {
 // ── Authenticated app shell ───────────────────────────────────────────────────
 function AppShell() {
   const { activeBusinessId } = useBusiness();
+  const isMobile = useIsMobile();
+  const loc = useLocation();
   const [collapsed, setCollapsed] = useState(() =>
     localStorage.getItem("sidebar_collapsed") === "true"
   );
+  const [drawerOpen, setDrawerOpen] = useState(false);
+
   useEffect(() => {
     localStorage.setItem("sidebar_collapsed", String(collapsed));
   }, [collapsed]);
 
+  // Close the drawer on navigation, and whenever the viewport grows back to
+  // desktop — otherwise a stale open drawer overlays the restored sidebar.
+  useEffect(() => { setDrawerOpen(false); }, [loc.pathname]);
+  useEffect(() => { if (!isMobile) setDrawerOpen(false); }, [isMobile]);
+
+  // Don't let the page behind the drawer scroll under your finger.
+  useEffect(() => {
+    if (!drawerOpen) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => { document.body.style.overflow = prev; };
+  }, [drawerOpen]);
+
   return (
     <div style={{
-      display: "flex", height: "100vh",
+      display: "flex",
+      // 100dvh tracks the shrinking/growing mobile browser chrome; 100vh alone
+      // leaves the bottom of the app hidden under Safari's toolbar.
+      height: "100dvh", minHeight: "100vh",
       background: C.bg, color: C.gray800,
       fontFamily: "'Inter', 'Segoe UI', system-ui, sans-serif",
       overflow: "hidden",
     }}>
-      <Sidebar collapsed={collapsed} setCollapsed={setCollapsed} />
+      <Sidebar
+        collapsed={collapsed}
+        setCollapsed={setCollapsed}
+        isMobile={isMobile}
+        mobileOpen={drawerOpen}
+        closeMobile={() => setDrawerOpen(false)}
+      />
+
+      {/* Backdrop — tap anywhere to dismiss the drawer */}
+      {isMobile && drawerOpen && (
+        <div
+          onClick={() => setDrawerOpen(false)}
+          style={{
+            position: "fixed", inset: 0, zIndex: 1100,
+            background: "rgba(0,0,0,0.5)",
+          }}
+        />
+      )}
 
       <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
-        <TopBar />
+        <TopBar isMobile={isMobile} onOpenMenu={() => setDrawerOpen(true)} />
         {/* Global period filter — stays mounted across route changes and
             business switches so it's never remounted, only its context value
             changes. Every tab reads the active range from useDateFilter(). */}
@@ -662,7 +764,11 @@ function AppShell() {
         {/* key by active business so switching businesses remounts the routed
             view, forcing every tab (dashboard included) to refetch fresh data
             against the newly-set business-scoped API base. */}
-        <div key={activeBusinessId ?? "none"} style={{ flex: 1, overflowY: "auto", padding: "28px 32px" }}>
+        <div key={activeBusinessId ?? "none"} style={{
+          flex: 1, overflowY: "auto", overflowX: "hidden",
+          padding: isMobile ? "16px 12px 40px" : "28px 32px",
+          WebkitOverflowScrolling: "touch",
+        }}>
           <Routes>
             <Route path="/" element={<OverviewTab />} />
             <Route path="/orders" element={<OrdersTab />} />
@@ -677,6 +783,7 @@ function AppShell() {
             <Route path="/tax-check" element={<TaxCheckTab />} />
             <Route path="/upload" element={<UploadTab />} />
             <Route path="/labels" element={<LabelsTab />} />
+            <Route path="/returns" element={<ReturnScanTab />} />
             <Route path="/purchases" element={<PurchasesTab />} />
             <Route path="/expenses" element={<ExpensesTab />} />
             <Route path="/inventory" element={<InventoryTab />} />

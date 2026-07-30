@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { API, btn, C, S, fmt } from "../../App";
+import { API, btn, C, S, fmt, useIsMobile } from "../../App";
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 const calcFinal = (ip, tax, pkg) => {
@@ -769,6 +769,7 @@ function CreateParentFromSkuModal({ sku, onSaved, onCancel }) {
 
 // ── main tab ──────────────────────────────────────────────────────────────────
 export function PricingTab() {
+  const isMobile = useIsMobile();
   const [parents, setParents] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
@@ -1040,9 +1041,20 @@ export function PricingTab() {
 
       {showAdd && <AddParentForm notify={notify} onSaved={() => { setShowAdd(false); load(); }} onCancel={() => setShowAdd(false)} />}
 
-      <div style={{ display: "grid", gridTemplateColumns: "minmax(300px, 360px) minmax(0, 1fr)", gap: 14 }}>
+      <div style={{
+        display: "grid",
+        // A 300px-minimum column beside a 1fr sibling cannot fit a 390px
+        // screen, so the Link Center stacks above the list on mobile.
+        gridTemplateColumns: isMobile ? "minmax(0, 1fr)" : "minmax(300px, 360px) minmax(0, 1fr)",
+        gap: 14,
+      }}>
 
-        <div style={{ ...S.card, padding: 14, position: "sticky", top: 8, height: "fit-content" }}>
+        <div style={{
+          ...S.card, padding: 14, height: "fit-content", minWidth: 0,
+          // Sticky is only useful next to a long scrolling list; stacked on
+          // mobile it would pin the panel over the content below it.
+          ...(isMobile ? {} : { position: "sticky", top: 8 }),
+        }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
             <h3 style={{ fontSize: 14, fontWeight: 800, color: C.gray800 }}>🔗 Link Center</h3>
             <span style={{ background: C.redLight, color: C.red, border: `1px solid ${C.redBorder}`, padding: "2px 9px", borderRadius: 20, fontSize: 11, fontWeight: 700 }}>

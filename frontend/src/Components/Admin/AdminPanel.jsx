@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { C, S, btn, SectionHeader, Tag, NAV_GROUPS, ALWAYS_VISIBLE_PATHS } from "../../App";
+import { C, S, btn, SectionHeader, Tag, NAV_GROUPS, ALWAYS_VISIBLE_PATHS, useIsMobile } from "../../App";
 import { useAuth } from "../../contexts/AuthContext";
 import {
   listBusinesses, createBusiness, updateBusiness,
@@ -29,6 +29,7 @@ function AttrTile({ label, children }) {
 
 // ── Expanded per-user details + management panel ────────────────────────────
 function UserDetailPanel({ user, businesses, onSaved, notify }) {
+  const isMobile = useIsMobile();
   const isAdmin = user.role === "super_admin";
   const [profile, setProfile] = useState({
     email: user.email || "", first_name: user.first_name || "", last_name: user.last_name || "",
@@ -92,7 +93,7 @@ function UserDetailPanel({ user, businesses, onSaved, notify }) {
         <AttrTile label="Businesses">{isAdmin ? "All (admin)" : (user.business_ids || []).length}</AttrTile>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+      <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: 16 }}>
         {/* Editable profile */}
         <div style={{ background: C.white, border: `1px solid ${C.border}`, borderRadius: 8, padding: 14 }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
@@ -175,6 +176,7 @@ function Banner({ error, notice }) {
 
 // ── Businesses section ────────────────────────────────────────────────────
 function BusinessesSection({ users, onChanged, notify }) {
+  const isMobile = useIsMobile();
   const [businesses, setBusinesses] = useState([]);
   const [newName, setNewName] = useState("");
   const [selected, setSelected] = useState(null);
@@ -260,8 +262,15 @@ function BusinessesSection({ users, onChanged, notify }) {
   const assignable = users.filter((u) => !memberUserIds.has(u.id));
 
   return (
-    <div style={{ display: "grid", gridTemplateColumns: selected ? "1fr 1fr" : "1fr", gap: 20 }}>
-      <div style={S.card}>
+    <div style={{
+      display: "grid",
+      gridTemplateColumns: isMobile ? "1fr" : selected ? "1fr 1fr" : "1fr",
+      gap: 20,
+    }}>
+      {/* minWidth: 0 — without it a grid item sizes to its content's
+          min-content width, so the table inside widens the whole page
+          instead of scrolling within its own wrapper. */}
+      <div style={{ ...S.card, minWidth: 0 }}>
         <SectionHeader title="Businesses" count={businesses.length} />
         <form onSubmit={handleCreate} style={{ display: "flex", gap: 8, marginBottom: 14 }}>
           <input style={{ ...S.inp, flex: 1 }} placeholder="New business name"

@@ -64,7 +64,7 @@ function KPICard({ label, value, sub, color, icon, accent, style }) {
     <div style={{
       ...T.card,
       borderTop: `3px solid ${accent || color || C.blue}`,
-      flex: "1 1 180px",
+      flex: "1 1 180px", minWidth: 0,
       position: "relative",
       overflow: "hidden",
       ...style,
@@ -138,7 +138,7 @@ function FormulaStep({ sign, label, value, color, note, bold, divider }) {
 function OutcomeCard({ icon, label, count, rate, rateColor, netLabel, net, netColor, subStats }) {
   return (
     <div style={{
-      ...T.card, flex: "1 1 180px", padding: "16px 18px",
+      ...T.card, flex: "1 1 180px", minWidth: 0, padding: "16px 18px",
       borderLeft: `4px solid ${rateColor}`
     }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
@@ -479,7 +479,7 @@ export function OverviewTab() {
         <div style={{ display: "flex", gap: 18, flexWrap: "wrap" }}>
 
           {/* Profit formula */}
-          <SectionCard title="Profit Formula" style={{ flex: "1 1 340px" }}>
+          <SectionCard title="Profit Formula" style={{ flex: "1 1 340px", minWidth: 0 }}>
             <p style={{ fontSize: 11, color: C.gray400, marginBottom: 14, lineHeight: 1.7 }}>
               Commission / TCS / TDS / Shipping are already deducted by Meesho inside the settlement — not subtracted again here.
             </p>
@@ -528,7 +528,7 @@ export function OverviewTab() {
           </SectionCard>
 
           {/* P&L columns */}
-          <div style={{ flex: "1 1 380px", display: "flex", flexDirection: "column", gap: 14 }}>
+          <div style={{ flex: "1 1 380px", minWidth: 0, display: "flex", flexDirection: "column", gap: 14 }}>
 
             {/* Order P&L Breakdown */}
             <SectionCard title="Order P&L Breakdown">
@@ -633,7 +633,7 @@ export function OverviewTab() {
               <div style={{ display: "flex", gap: 0, flexWrap: "wrap" }}>
 
                 {/* ── Left: deduction rows ─────────────────────────────── */}
-                <div style={{ flex: "1 1 340px", padding: "16px 22px" }}>
+                <div style={{ flex: "1 1 340px", minWidth: 0, padding: "16px 22px" }}>
                   {deductItems.map(({ icon, label, desc, value, pct, accent, bg, border, bold }) => {
                     const v = Number(value || 0);
                     const barW = grossRev > 0 && v !== 0 ? Math.min(Math.abs(v) / Math.abs(grossRev) * 100, 100) : 0;
@@ -770,7 +770,7 @@ export function OverviewTab() {
         <div style={{ display: "flex", gap: 18, flexWrap: "wrap" }}>
 
           {/* Order outcome rates */}
-          <SectionCard title="Order Outcome Rates" style={{ flex: "1 1 260px" }}>
+          <SectionCard title="Order Outcome Rates" style={{ flex: "1 1 260px", minWidth: 0 }}>
             <RateBar label="✅ Delivery Rate" pct={delRate} count={nDel} color={C.green} />
             <RateBar label="↩ Pure Return Rate" pct={retRate} count={nRet} color={C.red} />
             <RateBar label="🔄 Pure RTO Rate" pct={rtoRate} count={nRTO} color={C.amber} />
@@ -782,7 +782,7 @@ export function OverviewTab() {
           </SectionCard>
 
           {/* Operations KPIs */}
-          <SectionCard title="Operations" style={{ flex: "1 1 340px" }}>
+          <SectionCard title="Operations" style={{ flex: "1 1 340px", minWidth: 0 }}>
             <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
               {[
                 { label: "Orders Settled", value: (profit.order_count ?? 0).toLocaleString(), sub: `${profit.orders_with_price ?? 0} with price`, accent: C.blue },
@@ -792,7 +792,7 @@ export function OverviewTab() {
                 { label: "Ad Campaigns", value: (profit.ads_campaigns ?? 0).toLocaleString(), sub: `${profit.adjustment_count ?? 0} adj. rows`, accent: C.orange },
                 { label: "Referral Count", value: (profit.referral_count ?? 0).toLocaleString(), sub: fmt(profit.total_referral_income ?? 0), accent: C.green },
               ].map(({ label, value, sub, accent }) => (
-                <div key={label} style={{ flex: "1 1 130px", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 10, padding: "12px 14px", borderLeft: `3px solid ${accent}` }}>
+                <div key={label} style={{ flex: "1 1 130px", minWidth: 0, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 10, padding: "12px 14px", borderLeft: `3px solid ${accent}` }}>
                   <p style={{ fontSize: 10, fontWeight: 700, color: C.gray400, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6 }}>{label}</p>
                   <p style={{ fontSize: 18, fontWeight: 800, fontFamily: "monospace", color: accent }}>{value}</p>
                   {sub && <p style={{ fontSize: 11, color: C.gray400, marginTop: 3 }}>{sub}</p>}
@@ -819,7 +819,7 @@ export function OverviewTab() {
             </SectionCard>
 
             {/* Payment deduction breakdown */}
-            <SectionCard title="Payment Deductions Breakdown" style={{ flex: "1 1 300px" }}>
+            <SectionCard title="Payment Deductions Breakdown" style={{ flex: "1 1 300px", minWidth: 0 }}>
               <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                 {[
                   { label: "Total Sale Amount", value: payment_stats?.total_sale, color: C.green },
@@ -828,7 +828,7 @@ export function OverviewTab() {
                   { label: "TCS Deducted", value: payment_stats?.total_tcs, color: C.gray500 },
                   { label: "TDS Deducted", value: payment_stats?.total_tds, color: C.gray500 },
                 ].map(({ label, value, color }) => (
-                  <div key={label} style={{ flex: "1 1 140px", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 10, padding: "12px 14px" }}>
+                  <div key={label} style={{ flex: "1 1 140px", minWidth: 0, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 10, padding: "12px 14px" }}>
                     <p style={{ fontSize: 11, color: C.gray400, marginBottom: 5 }}>{label}</p>
                     <p style={{ fontSize: 16, fontWeight: 700, fontFamily: "monospace", color }}>{fmt(value)}</p>
                   </div>
@@ -879,7 +879,7 @@ export function OverviewTab() {
             </SectionCard>
           )}
           {timelineData.length > 0 && (
-            <SectionCard title="Daily Settlement Activity" style={{ flex: "1 1 320px" }}>
+            <SectionCard title="Daily Settlement Activity" style={{ flex: "1 1 320px", minWidth: 0 }}>
               <p style={{ fontSize: 11, color: C.gray400, marginBottom: 10 }}>
                 Settlements per day vs orders placed. Gap = pending settlement.
               </p>
@@ -897,14 +897,14 @@ export function OverviewTab() {
         {/* ── 12. Orders + Payments by status bar charts ──────────────────── */}
         {dash && order_stats?.by_status?.length > 0 && (
           <div style={{ display: "flex", gap: 18, flexWrap: "wrap" }}>
-            <SectionCard title="Orders by Lifecycle Status" style={{ flex: "1 1 300px" }}>
+            <SectionCard title="Orders by Lifecycle Status" style={{ flex: "1 1 300px", minWidth: 0 }}>
               <BarChart dataset={order_stats.by_status}
                 xAxis={[{ scaleType: "band", dataKey: "reason_for_credit_entry", tickLabelStyle: { fontSize: 10 } }]}
                 series={[{ dataKey: "count", label: "Orders", color: C.blue }]}
                 height={200} borderRadius={6} margin={{ left: 48, bottom: 48, right: 8, top: 8 }}
                 slotProps={{ legend: { hidden: true } }} />
             </SectionCard>
-            <SectionCard title="Payments by Settlement Status" style={{ flex: "1 1 300px" }}>
+            <SectionCard title="Payments by Settlement Status" style={{ flex: "1 1 300px", minWidth: 0 }}>
               <BarChart dataset={payment_stats.by_status}
                 xAxis={[{ scaleType: "band", dataKey: "live_order_status" }]}
                 series={[{ dataKey: "count", label: "Payments", color: C.blue }]}

@@ -8,7 +8,7 @@ from rest_framework import status
 from rest_framework.decorators import api_view, parser_classes
 from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 import requests as http_requests
 import base64
 import io
@@ -17,7 +17,7 @@ from PIL import Image
 from .helpers.helper import status_wise_summary
 from .permissions import get_authorized_business
 
-from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, PurchaseBill, PurchaseItem, BlockedCustomer, InventoryAdjustment, ConsumableItem, ConsumablePurchase, ConsumableUsage, InventoryLog, MeeshoInventory, MeeshoPriceUpdate, ExpenseInvoice, ExpenseInvoiceItem, TransportCharge, PackedStockEvent, EstimatedProfitOrder
+from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, PurchaseBill, PurchaseItem, BlockedCustomer, InventoryAdjustment, ConsumableItem, ConsumablePurchase, ConsumableUsage, InventoryLog, MeeshoInventory, MeeshoPriceUpdate, ExpenseInvoice, ExpenseInvoiceItem, TransportCharge, PackedStockEvent, EstimatedProfitOrder, ReturnDelivery
 from .serializers import (
     OrderPaymentSerializer, AdsCostSerializer,
     ReferralPaymentSerializer, CompensationRecoverySerializer,
@@ -26,6 +26,7 @@ from .serializers import (
     ParentPriceHistorySerializer,
     OrderSerializer,
     LabelOrderSerializer,
+    ReturnDeliverySerializer,
 )
 
 
@@ -6871,3 +6872,545 @@ def tax_check(request, business_id):
         },
         "results": results,
     })
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Return deliveries — returns physically received back, and their 7-day claims
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Header names in the Meesho "Returns → Completed/Delivered" CSV → model fields.
+_RETURN_COL_MAP = {
+    "product name":           "product_name",
+    "sku":                    "sku",
+    "variation":              "variation",
+    "meesho pid":             "meesho_pid",
+    "category":               "category",
+    "qty":                    "qty",
+    "order number":           "order_no",
+    "suborder number":        "suborder_no",
+    "sub order number":       "suborder_no",
+    "dispatch date":          "dispatch_date",
+    "return created date":    "return_created_date",
+    "type of return":         "type_of_return",
+    "sub type":               "sub_type",
+    "delivered date":         "delivered_date",
+    "courier partner":        "courier_partner",
+    "awb number":             "awb_number",
+    "tracking link":          "tracking_link",
+    "proof of delivery":      "proof_of_delivery",
+    "return price type":      "return_price_type",
+    "return reason":          "return_reason",
+    "detailed return reason": "detailed_return_reason",
+    "otp verified at":        "otp_verified_at",
+}
+
+# Cells Meesho writes to mean "nothing here".
+_RETURN_BLANK_VALUES = {"", "nan", "none", "null", "na", "n/a", "-", "--"}
+
+# Claim fields a client may write, and the statuses that mean the claim has
+# already been dealt with (so no countdown applies any more).
+_CLAIM_WRITABLE = {"claim_status", "claim_amount", "claim_reference", "claim_notes", "verify_result"}
+_CLAIM_DECIDED  = (
+    ReturnDelivery.CLAIM_RAISED,
+    ReturnDelivery.CLAIM_APPROVED,
+    ReturnDelivery.CLAIM_REJECTED,
+)
+
+# A scanned code shorter than this is too ambiguous to fuzzy-match — a stray
+# keystroke shouldn't pull back ten unrelated returns.
+_MIN_PARTIAL_SCAN_LEN = 6
+
+
+def _return_text(val, blank_as_empty=True):
+    """Sheet cell → clean string. Meesho's literal 'NA' placeholders become ''."""
+    s = safe_str(val) or ""
+    if blank_as_empty and s.strip().lower() in _RETURN_BLANK_VALUES:
+        return ""
+    return s.strip()
+
+
+def _find_return_header_row(lines):
+    """
+    The export starts with 6 lines of supplier metadata before the real header,
+    and Meesho has moved that block around before — so locate the header by its
+    content instead of hardcoding a skiprows count.
+    """
+    for idx, line in enumerate(lines[:60]):
+        low = line.lower()
+        if "suborder number" in low and "delivered date" in low:
+            return idx
+    return None
+
+
+def _read_return_sheet(file):
+    """Parse the uploaded returns export into a DataFrame with mapped columns."""
+    name = (file.name or "").lower()
+
+    if name.endswith((".xlsx", ".xls")):
+        file.seek(0)
+        raw = pd.read_excel(file, header=None, dtype=str)
+        header_idx = None
+        for idx, row in raw.iterrows():
+            joined = " ".join(str(c).lower() for c in row.tolist() if c is not None)
+            if "suborder number" in joined and "delivered date" in joined:
+                header_idx = idx
+                break
+        if header_idx is None:
+            raise ValueError("Could not find the header row (expected 'Suborder Number' and 'Delivered Date').")
+        df = raw.iloc[header_idx + 1:].copy()
+        df.columns = [str(c) for c in raw.iloc[header_idx].tolist()]
+    else:
+        blob = file.read()
+        text = None
+        for encoding in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
+            try:
+                text = blob.decode(encoding)
+                break
+            except UnicodeDecodeError:
+                continue
+        if text is None:
+            text = blob.decode("utf-8", errors="replace")
+
+        lines = text.splitlines()
+        header_idx = _find_return_header_row(lines)
+        if header_idx is None:
+            raise ValueError("Could not find the header row (expected 'Suborder Number' and 'Delivered Date').")
+        df = pd.read_csv(io.StringIO("\n".join(lines[header_idx:])), dtype=str)
+
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    df.rename(columns=_RETURN_COL_MAP, inplace=True)
+    return df
+
+
+@api_view(["POST"])
+@parser_classes([MultiPartParser])
+def return_deliveries_upload(request, business_id):
+    """
+    Upload the Meesho "Returns → Completed/Delivered" export (CSV or Excel).
+
+    Keyed on (suborder_no, awb_number), so re-uploading an overlapping export
+    updates rows in place. Claim fields are deliberately left out of the update
+    payload — an upload can never overwrite claim work already recorded.
+    """
+    business = get_authorized_business(request, business_id)
+    file = request.FILES.get("file")
+    if not file:
+        return Response({"error": "No file provided."}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        df = _read_return_sheet(file)
+    except Exception as exc:
+        return Response({"error": f"Could not read file: {exc}"}, status=status.HTTP_400_BAD_REQUEST)
+
+    if "suborder_no" not in df.columns:
+        return Response(
+            {"error": "Missing required column: Suborder Number"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    created = updated = skipped = 0
+    no_delivered_date = 0
+    seen_keys = set()
+
+    with transaction.atomic():
+        for _, row in df.iterrows():
+            suborder = _return_text(row.get("suborder_no"))
+            if not suborder:
+                skipped += 1
+                continue
+
+            awb = _return_text(row.get("awb_number"))
+            key = (suborder, awb)
+            if key in seen_keys:
+                # Same return listed twice inside one file — keep the first.
+                skipped += 1
+                continue
+            seen_keys.add(key)
+
+            delivered = safe_date(row.get("delivered_date"))
+            if delivered is None:
+                no_delivered_date += 1
+
+            qty = safe_int(row.get("qty"))
+
+            defaults = {
+                "order_no":               _return_text(row.get("order_no")),
+                "product_name":           _return_text(row.get("product_name")),
+                "sku":                    _return_text(row.get("sku")),
+                "variation":              _return_text(row.get("variation")),
+                "meesho_pid":             _return_text(row.get("meesho_pid")),
+                "category":               _return_text(row.get("category")),
+                "qty":                    1 if qty is None else max(0, qty),
+                "dispatch_date":          safe_date(row.get("dispatch_date")),
+                "return_created_date":    safe_date(row.get("return_created_date")),
+                "delivered_date":         delivered,
+                "type_of_return":         _return_text(row.get("type_of_return")),
+                "sub_type":               _return_text(row.get("sub_type")),
+                "courier_partner":        _return_text(row.get("courier_partner")),
+                "tracking_link":          _return_text(row.get("tracking_link")),
+                "proof_of_delivery":      _return_text(row.get("proof_of_delivery")),
+                "return_price_type":      _return_text(row.get("return_price_type")),
+                "return_reason":          _return_text(row.get("return_reason")),
+                "detailed_return_reason": _return_text(row.get("detailed_return_reason")),
+                "otp_verified_at":        safe_datetime(row.get("otp_verified_at")),
+            }
+
+            _, was_created = ReturnDelivery.objects.update_or_create(
+                business=business, suborder_no=suborder, awb_number=awb,
+                defaults=defaults,
+            )
+            if was_created:
+                created += 1
+            else:
+                updated += 1
+
+    return Response(
+        {
+            "success": True,
+            "created": created,
+            "updated": updated,
+            "skipped": skipped,
+            "without_delivered_date": no_delivered_date,
+        },
+        status=status.HTTP_201_CREATED,
+    )
+
+
+def _return_claim_stats(business):
+    """
+    Claim workload for the whole business — deliberately never narrowed by the
+    period filter, so a claim about to expire can't hide behind the selected
+    month. Counted in the database (not in Python) so it stays cheap as the
+    returns table grows.
+    """
+    base   = ReturnDelivery.objects.filter(business=business)
+    today  = timezone.localdate()
+    window = ReturnDelivery.CLAIM_WINDOW_DAYS
+    warn   = ReturnDelivery.WARN_FROM_DAY
+
+    by_status = {
+        row["claim_status"]: row["n"]
+        for row in base.values("claim_status").annotate(n=Count("id"))
+    }
+
+    # Day-of-window boundaries, as delivered_date ranges:
+    #   deadline today          → delivered exactly `window` days ago
+    #   1–2 days left (day 5–6) → delivered between `window` and `warn` days ago
+    #   window closed           → delivered more than `window` days ago
+    last_day_on   = today - timedelta(days=window)
+    warn_start_on = today - timedelta(days=window - 1)   # day 6 → 1 day left
+    warn_end_on   = today - timedelta(days=warn)         # day 5 → 2 days left
+
+    def _count(statuses, **date_filters):
+        return base.filter(claim_status__in=statuses, **date_filters).count()
+
+    required = (ReturnDelivery.CLAIM_REQUIRED,)
+    open_all = ReturnDelivery.OPEN_CLAIM_STATUSES
+
+    stats = {
+        "total":          base.count(),
+        "unreviewed":     by_status.get(ReturnDelivery.CLAIM_UNREVIEWED, 0),
+        "claim_required": by_status.get(ReturnDelivery.CLAIM_REQUIRED, 0),
+        "not_required":   by_status.get(ReturnDelivery.CLAIM_NOT_REQUIRED, 0),
+        "claim_raised":   sum(by_status.get(s, 0) for s in _CLAIM_DECIDED),
+
+        # Flagged as needing a claim, still not raised:
+        "expiring": _count(required,
+                           delivered_date__gte=warn_start_on,
+                           delivered_date__lte=warn_end_on),
+        "last_day": _count(required, delivered_date=last_day_on),
+        "expired":  _count(required, delivered_date__lt=last_day_on),
+
+        # Never reviewed and already at day 5 or beyond — nobody has even
+        # decided whether these need a claim.
+        "unreviewed_expiring": _count(
+            (ReturnDelivery.CLAIM_UNREVIEWED,), delivered_date__lte=warn_end_on
+        ),
+        "open_total": base.filter(claim_status__in=open_all).count(),
+    }
+
+    # Everything that needs someone to act today.
+    stats["needs_attention"] = stats["expiring"] + stats["last_day"]
+    return stats
+
+
+def _order_context(business, suborder_no):
+    """
+    What we know about this sub-order from the rest of the app, so the person
+    at the scanning desk can cross-check the parcel in their hands: what was
+    shipped (label) and what Meesho settled / already paid as a claim.
+    """
+    context = {"label": None, "payments": None}
+
+    label = LabelOrder.objects.filter(business=business, order_id=suborder_no).first()
+    if label:
+        context["label"] = {
+            "sku": label.sku,
+            "qty": label.qty,
+            "size": label.size,
+            "color": label.color,
+            "courier_name": label.courier_name,
+            "awb_number": label.awb_number,
+            "customer_name": label.customer_name,
+            "customer_city": label.customer_city,
+            "customer_state": label.customer_state,
+            "customer_pincode": label.customer_pincode,
+            "order_date": label.order_date,
+        }
+
+    rows = list(
+        OrderPayment.objects.filter(business=business, sub_order_no=suborder_no)
+        .order_by("payment_date", "live_order_status")
+    )
+    if rows:
+        context["payments"] = {
+            "row_count": len(rows),
+            "statuses": [r.live_order_status for r in rows if r.live_order_status],
+            "supplier_sku": next((r.supplier_sku for r in rows if r.supplier_sku), None),
+            "quantity": next((r.quantity for r in rows if r.quantity), None),
+            "listing_price": next(
+                (float(r.listing_price_incl_taxes) for r in rows if r.listing_price_incl_taxes is not None), None
+            ),
+            "net_settlement": round(sum(float(r.final_settlement_amount or 0) for r in rows), 2),
+            "claims_paid": round(sum(float(r.claims or 0) for r in rows), 2),
+            "return_shipping_charge": round(sum(float(r.return_shipping_charge or 0) for r in rows), 2),
+            "last_payment_date": max((r.payment_date for r in rows if r.payment_date), default=None),
+        }
+
+    return context
+
+
+@api_view(["GET"])
+def return_deliveries_list(request, business_id):
+    """
+    Paginated list of received returns.
+
+    Query params:
+      q            — matches suborder / order no / AWB / SKU / product name
+      date_from / date_to  — on delivered_date
+      claim_status — one of the CLAIM_* values, or "open" for anything still owed
+      urgency      — "attention" (expiring or last day), "expired", "unreviewed"
+      type         — "customer" | "rto"
+      page, page_size
+    """
+    business = get_authorized_business(request, business_id)
+
+    qs = ReturnDelivery.objects.filter(business=business)
+
+    date_from = request.GET.get("date_from", "").strip()
+    date_to   = request.GET.get("date_to", "").strip()
+    if date_from:
+        qs = qs.filter(delivered_date__gte=date_from)
+    if date_to:
+        qs = qs.filter(delivered_date__lte=date_to)
+
+    search = request.GET.get("q", "").strip()
+    if search:
+        qs = qs.filter(
+            DQ(suborder_no__icontains=search) |
+            DQ(order_no__icontains=search) |
+            DQ(awb_number__icontains=search) |
+            DQ(sku__icontains=search) |
+            DQ(product_name__icontains=search)
+        )
+
+    claim_status = request.GET.get("claim_status", "").strip().upper()
+    if claim_status == "OPEN":
+        qs = qs.filter(claim_status__in=ReturnDelivery.OPEN_CLAIM_STATUSES)
+    elif claim_status:
+        qs = qs.filter(claim_status=claim_status)
+
+    return_type = request.GET.get("type", "").strip().lower()
+    if return_type == "customer":
+        qs = qs.filter(type_of_return__icontains="customer")
+    elif return_type == "rto":
+        qs = qs.filter(type_of_return__icontains="rto")
+
+    # Urgency depends on today's date vs delivered_date, so translate it into a
+    # delivered_date range rather than filtering in Python over the whole table.
+    urgency = request.GET.get("urgency", "").strip().lower()
+    today  = timezone.localdate()
+    window = ReturnDelivery.CLAIM_WINDOW_DAYS
+    warn   = ReturnDelivery.WARN_FROM_DAY
+    if urgency == "attention":
+        # Day WARN_FROM_DAY..window of the claim window, claim still owed.
+        qs = qs.filter(
+            claim_status__in=ReturnDelivery.OPEN_CLAIM_STATUSES,
+            delivered_date__gte=today - timedelta(days=window),
+            delivered_date__lte=today - timedelta(days=warn),
+        )
+    elif urgency == "expired":
+        qs = qs.filter(
+            claim_status__in=ReturnDelivery.OPEN_CLAIM_STATUSES,
+            delivered_date__lt=today - timedelta(days=window),
+        )
+    elif urgency == "unreviewed":
+        qs = qs.filter(claim_status=ReturnDelivery.CLAIM_UNREVIEWED)
+
+    total = qs.count()
+
+    try:
+        page = max(1, int(request.GET.get("page", 1)))
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        page_size = min(200, max(1, int(request.GET.get("page_size", 50))))
+    except (TypeError, ValueError):
+        page_size = 50
+
+    start = (page - 1) * page_size
+    rows  = qs[start:start + page_size]
+
+    return Response({
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "results": ReturnDeliverySerializer(rows, many=True).data,
+        "stats": _return_claim_stats(business),
+        "claim_window_days": window,
+    })
+
+
+@api_view(["GET"])
+def return_delivery_lookup(request, business_id):
+    """
+    Barcode-scanner endpoint: resolve a scanned AWB / sub-order / order number
+    to the return(s) it belongs to, with cross-check context for each.
+
+    A scanned *order* number can cover several sub-orders, so this always
+    returns a list and lets the UI pick when there's more than one.
+    """
+    business = get_authorized_business(request, business_id)
+
+    raw = request.GET.get("q", "")
+    # Scanners often append whitespace/newlines, and some encode the AWB with
+    # surrounding junk characters — keep it to what a code can actually contain.
+    code = raw.strip().strip("\r\n\t ").strip('"').strip("'")
+    if not code:
+        return Response({"error": "Nothing scanned."}, status=status.HTTP_400_BAD_REQUEST)
+
+    base = ReturnDelivery.objects.filter(business=business)
+
+    # Most specific match first, so a code that is both an AWB and a
+    # sub-order prefix resolves to the AWB.
+    matched_by = None
+    rows = list(base.filter(awb_number__iexact=code))
+    if rows:
+        matched_by = "awb"
+    if not rows:
+        rows = list(base.filter(suborder_no__iexact=code))
+        if rows:
+            matched_by = "suborder"
+    if not rows:
+        rows = list(base.filter(order_no__iexact=code))
+        if rows:
+            matched_by = "order"
+    if not rows and len(code) >= _MIN_PARTIAL_SCAN_LEN:
+        # Fall back to a contains search — handles scanners that prepend a
+        # carrier prefix, and lets a partially-read code still resolve.
+        rows = list(
+            base.filter(
+                DQ(awb_number__icontains=code) |
+                DQ(suborder_no__icontains=code) |
+                DQ(order_no__icontains=code)
+            )[:10]
+        )
+        if rows:
+            matched_by = "partial"
+
+    if not rows:
+        return Response({
+            "found": False,
+            "scanned": code,
+            "message": "No received return matches this code. Upload the latest "
+                       "returns export, or check that the parcel has been marked "
+                       "delivered on Meesho.",
+        }, status=status.HTTP_404_NOT_FOUND)
+
+    matches = []
+    for row in rows:
+        data = ReturnDeliverySerializer(row).data
+        data["order_context"] = _order_context(business, row.suborder_no)
+        matches.append(data)
+
+    return Response({
+        "found": True,
+        "scanned": code,
+        "matched_by": matched_by,
+        "match_count": len(matches),
+        "matches": matches,
+    })
+
+
+@api_view(["GET", "PATCH"])
+def return_delivery_detail(request, business_id, pk):
+    """Read one return, or record claim / verification progress against it."""
+    business = get_authorized_business(request, business_id)
+
+    try:
+        row = ReturnDelivery.objects.get(pk=pk, business=business)
+    except ReturnDelivery.DoesNotExist:
+        return Response({"error": "Return not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == "PATCH":
+        payload = request.data if isinstance(request.data, dict) else {}
+        unknown = set(payload) - _CLAIM_WRITABLE
+        if unknown:
+            return Response(
+                {"error": f"Not editable: {', '.join(sorted(unknown))}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        now = timezone.now()
+
+        if "claim_status" in payload:
+            new_status = str(payload["claim_status"] or "").strip().upper()
+            valid = {c[0] for c in ReturnDelivery.CLAIM_STATUS_CHOICES}
+            if new_status not in valid:
+                return Response(
+                    {"error": f"Invalid claim_status. Expected one of: {', '.join(sorted(valid))}"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            row.claim_status = new_status
+
+            # Stamp when the claim was flagged, and when it was actually raised.
+            if new_status == ReturnDelivery.CLAIM_REQUIRED and not row.claim_marked_at:
+                row.claim_marked_at = now
+            if new_status in _CLAIM_DECIDED:
+                if not row.claim_marked_at:
+                    row.claim_marked_at = now
+                if not row.claim_raised_at:
+                    row.claim_raised_at = now
+            else:
+                # Reopened / reset — the claim is owed again, so drop the
+                # raised stamp or the countdown would stay hidden.
+                row.claim_raised_at = None
+            if new_status == ReturnDelivery.CLAIM_UNREVIEWED:
+                row.claim_marked_at = None
+
+        if "claim_amount" in payload:
+            raw_amount = payload["claim_amount"]
+            row.claim_amount = None if raw_amount in (None, "") else safe_decimal(raw_amount)
+
+        if "claim_reference" in payload:
+            row.claim_reference = (str(payload["claim_reference"] or "")).strip()[:150]
+
+        if "claim_notes" in payload:
+            row.claim_notes = str(payload["claim_notes"] or "").strip()
+
+        if "verify_result" in payload:
+            verify = str(payload["verify_result"] or "").strip().upper()
+            valid_verify = {c[0] for c in ReturnDelivery.VERIFY_CHOICES}
+            if verify and verify not in valid_verify:
+                return Response(
+                    {"error": f"Invalid verify_result. Expected one of: {', '.join(sorted(valid_verify))}"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            row.verify_result = verify
+            row.verified_at = now if verify else None
+
+        row.save()
+
+    data = ReturnDeliverySerializer(row).data
+    data["order_context"] = _order_context(business, row.suborder_no)
+    return Response(data)

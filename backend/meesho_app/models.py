@@ -1,4 +1,7 @@
+from datetime import timedelta
+
 from django.db import models
+from django.utils import timezone
 
 class ParentItemPrice(models.Model):
     # item_id is unique per business (not globally) so the same parent id can
@@ -773,3 +776,161 @@ class EstimatedProfitOrder(models.Model):
 
     def __str__(self):
         return f"{self.sub_order_no} ({self.order_status})"
+
+
+class ReturnDelivery(models.Model):
+    """
+    One returned parcel that has physically come back to us, parsed from the
+    Meesho supplier-panel "Returns → Completed/Delivered" CSV export.
+
+    This is the only Meesho report that carries `delivered_date` — the day the
+    return was handed back to the seller. That date starts the 7-day window in
+    which a claim can be raised, so it drives the countdown and the warnings.
+
+    Natural key is (business, suborder_no, awb_number): a return leg is
+    identified by the AWB it travelled back on, so re-uploading an overlapping
+    2-week export updates existing rows instead of duplicating them, while a
+    genuine second return of the same sub-order (a different AWB) still lands
+    as its own row. Claim fields are never written by the importer, so an
+    upload can't wipe claim work already recorded against a row.
+    """
+
+    # Meesho allows a claim to be raised within this many days of the return
+    # being delivered back to the seller.
+    CLAIM_WINDOW_DAYS = 7
+    # Day of the window from which the UI starts warning that the claim is
+    # still not raised (i.e. 2 days left of 7).
+    WARN_FROM_DAY = 5
+
+    CLAIM_UNREVIEWED   = "UNREVIEWED"
+    CLAIM_NOT_REQUIRED = "NOT_REQUIRED"
+    CLAIM_REQUIRED     = "REQUIRED"
+    CLAIM_RAISED       = "RAISED"
+    CLAIM_APPROVED     = "APPROVED"
+    CLAIM_REJECTED     = "REJECTED"
+
+    CLAIM_STATUS_CHOICES = [
+        (CLAIM_UNREVIEWED,   "Not reviewed yet"),
+        (CLAIM_NOT_REQUIRED, "No claim needed"),
+        (CLAIM_REQUIRED,     "Claim required"),
+        (CLAIM_RAISED,       "Claim raised"),
+        (CLAIM_APPROVED,     "Claim approved"),
+        (CLAIM_REJECTED,     "Claim rejected"),
+    ]
+
+    # Statuses where a claim is still owed — these are the ones the countdown
+    # and the expiry warnings apply to.
+    OPEN_CLAIM_STATUSES = (CLAIM_UNREVIEWED, CLAIM_REQUIRED)
+
+    VERIFY_MATCH    = "MATCH"
+    VERIFY_MISMATCH = "MISMATCH"
+    VERIFY_CHOICES  = [
+        (VERIFY_MATCH,    "Correct product received"),
+        (VERIFY_MISMATCH, "Wrong product received"),
+    ]
+
+    # ── Identity (what you scan) ──────────────────────────────────────────
+    suborder_no = models.CharField(max_length=100, db_index=True)
+    order_no    = models.CharField(max_length=100, blank=True, db_index=True)
+    awb_number  = models.CharField(max_length=100, blank=True, db_index=True)
+
+    # ── Product ───────────────────────────────────────────────────────────
+    product_name = models.TextField(blank=True)
+    sku          = models.CharField(max_length=300, blank=True, db_index=True)
+    variation    = models.CharField(max_length=255, blank=True)
+    meesho_pid   = models.CharField(max_length=100, blank=True)
+    category     = models.CharField(max_length=200, blank=True)
+    qty          = models.PositiveIntegerField(default=1)
+
+    # ── The return journey ────────────────────────────────────────────────
+    dispatch_date          = models.DateField(null=True, blank=True)
+    return_created_date    = models.DateField(null=True, blank=True)
+    delivered_date         = models.DateField(null=True, blank=True, db_index=True)
+    type_of_return         = models.CharField(max_length=60, blank=True)   # "Customer Return" | "Courier Return (RTO)"
+    sub_type               = models.CharField(max_length=60, blank=True)   # FIRST_RET | forward_RTO | EXCHANGE_RTO
+    courier_partner        = models.CharField(max_length=100, blank=True)
+    tracking_link          = models.TextField(blank=True)
+    proof_of_delivery      = models.TextField(blank=True)
+    return_price_type      = models.CharField(max_length=100, blank=True)
+    return_reason          = models.TextField(blank=True)
+    detailed_return_reason = models.TextField(blank=True)
+    otp_verified_at        = models.DateTimeField(null=True, blank=True)
+
+    # ── Claim tracking (entered in the app, never from the sheet) ──────────
+    claim_status    = models.CharField(max_length=20, choices=CLAIM_STATUS_CHOICES,
+                                       default=CLAIM_UNREVIEWED, db_index=True)
+    claim_marked_at = models.DateTimeField(null=True, blank=True,
+                                           help_text="When the claim was flagged as required")
+    claim_raised_at = models.DateTimeField(null=True, blank=True,
+                                           help_text="When the claim was actually raised on Meesho")
+    claim_amount    = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    claim_reference = models.CharField(max_length=150, blank=True,
+                                       help_text="Meesho ticket / claim reference id")
+    claim_notes     = models.TextField(blank=True)
+
+    # ── Physical check at the scanning desk ───────────────────────────────
+    verify_result = models.CharField(max_length=20, choices=VERIFY_CHOICES, blank=True)
+    verified_at   = models.DateTimeField(null=True, blank=True)
+
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+    updated_at  = models.DateTimeField(auto_now=True)
+
+    business = models.ForeignKey(
+        "accounts.Business", on_delete=models.PROTECT,
+    )
+
+    class Meta:
+        db_table = "return_deliveries"
+        ordering = ["-delivered_date", "-return_created_date", "-uploaded_at"]
+        unique_together = [("business", "suborder_no", "awb_number")]
+        indexes = [
+            models.Index(fields=["business", "claim_status"]),
+            models.Index(fields=["business", "delivered_date"]),
+        ]
+
+    def __str__(self):
+        return f"{self.suborder_no} | {self.sku} | returned {self.delivered_date}"
+
+    # ── Claim window ──────────────────────────────────────────────────────
+    @property
+    def claim_deadline(self):
+        """Last date a claim can be raised — delivered_date + 7 days."""
+        if not self.delivered_date:
+            return None
+        return self.delivered_date + timedelta(days=self.CLAIM_WINDOW_DAYS)
+
+    def days_left(self, today=None):
+        """Days remaining to raise a claim. 0 = today is the last day, <0 = missed."""
+        deadline = self.claim_deadline
+        if deadline is None:
+            return None
+        return (deadline - (today or timezone.localdate())).days
+
+    def day_of_window(self, today=None):
+        """How many days into the 7-day window we are (0 = delivered today)."""
+        if not self.delivered_date:
+            return None
+        return ((today or timezone.localdate()) - self.delivered_date).days
+
+    def claim_urgency(self, today=None):
+        """
+        How pressing this row's claim is:
+          none     — nothing owed (already raised / decided / marked not needed)
+          unknown  — no delivered date on the sheet, so no window to track
+          ok       — 3+ days of the window still left
+          warning  — day 5 or 6 of 7: only 1–2 days left, claim still not raised
+          last_day — the deadline is today
+          expired  — the window closed without a claim
+        """
+        if self.claim_status not in self.OPEN_CLAIM_STATUSES:
+            return "none"
+        left = self.days_left(today)
+        if left is None:
+            return "unknown"
+        if left < 0:
+            return "expired"
+        if left == 0:
+            return "last_day"
+        if left <= self.CLAIM_WINDOW_DAYS - self.WARN_FROM_DAY:
+            return "warning"
+        return "ok"

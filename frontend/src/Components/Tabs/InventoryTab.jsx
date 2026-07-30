@@ -580,7 +580,7 @@ function OverviewSection() {
   return (
     <Stack spacing={3}>
       {/* KPI Row */}
-      <Stack direction={{ xs: "column", sm: "row" }} spacing={2} flexWrap="wrap">
+      <Stack useFlexGap direction={{ xs: "column", sm: "row" }} spacing={2} sx={{ flexWrap: "wrap" }}>
         <KpiCard label="Total SKUs" value={total_skus || 0} icon={<InventoryIcon />} color={C.orange} />
         <KpiCard label="Total Stock" value={`${total_stock || 0} units`} icon={<LocalShippingIcon />} color={C.blue} />
         <KpiCard label="Stock Value" value={fmt(total_value)} icon={<CheckCircleOutlinedIcon />} color={C.green} />
@@ -715,7 +715,7 @@ function StockSection() {
   return (
     <Stack spacing={2}>
       <Stack direction={{ xs: "column", sm: "row" }} spacing={2} alignItems={{ sm: "center" }} justifyContent="space-between">
-        <Stack direction="row" spacing={1} flexWrap="wrap">
+        <Stack useFlexGap direction="row" spacing={1} sx={{ flexWrap: "wrap" }}>
           {[["all", "All"], ["instock", "In Stock"], ["low", "Low Stock"], ["out", "Out of Stock"]].map(([key, label]) => (
             <Button key={key} size="small" onClick={() => setFilter(key)} sx={tabSx(filter === key)}>
               {label} <Box component="span" sx={{ ml: 0.5, fontSize: 11, opacity: 0.8 }}>({counts[key]})</Box>
@@ -927,8 +927,8 @@ function ConsumablesSection() {
 
   return (
     <Stack spacing={2}>
-      <Stack direction="row" justifyContent="space-between" alignItems="center" flexWrap="wrap" gap={1}>
-        <Stack direction="row" spacing={1} flexWrap="wrap">
+      <Stack direction="row" justifyContent="space-between" alignItems="center" gap={1} sx={{ flexWrap: "wrap" }}>
+        <Stack useFlexGap direction="row" spacing={1} sx={{ flexWrap: "wrap" }}>
           <Button size="small" onClick={() => setCatFilter("ALL")}
             sx={{ textTransform: "none", fontWeight: 600, bgcolor: catFilter === "ALL" ? C.orange : "transparent", color: catFilter === "ALL" ? "#fff" : "text.secondary", borderRadius: 2 }}>
             All
@@ -1035,7 +1035,7 @@ function HistorySection() {
   return (
     <Stack spacing={2}>
       {/* Filters */}
-      <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} flexWrap="wrap">
+      <Stack useFlexGap direction={{ xs: "column", sm: "row" }} spacing={1.5} sx={{ flexWrap: "wrap" }}>
         <TextField label="Parent SKU" size="small" value={filters.parent_sku}
           onChange={e => setFilter("parent_sku", e.target.value)} sx={{ minWidth: 160 }} />
         <FormControl size="small" sx={{ minWidth: 160 }}>

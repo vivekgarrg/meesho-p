@@ -53,3 +53,6 @@ backend/uploads/
 # Build artifacts (regenerated on deploy)
 backend/staticfiles/
 backend/frontend_build/
+
+# Local dev HTTPS certs (self-signed, for phone camera testing)
+.certs/

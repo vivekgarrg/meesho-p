@@ -145,8 +145,9 @@ export function FilterBar({
         />
       )}
 
-      {/* Divider */}
-      <Box sx={{ width: 1, height: 28, bgcolor: "divider" }} />
+      {/* Divider — "1px", not MUI's `width: 1`, which means 100% and rendered
+          as a full-width grey bar whenever this row wrapped. */}
+      <Box sx={{ width: "1px", height: 28, bgcolor: "divider", flexShrink: 0 }} />
 
       {/* Custom range */}
       <Typography variant="caption" sx={{ fontWeight: 600, color: "text.secondary" }}>

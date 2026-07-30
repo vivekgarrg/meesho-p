@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, ParentItemPrice, ParentPriceHistory, Order, LabelOrder
+from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, ParentItemPrice, ParentPriceHistory, Order, LabelOrder, ReturnDelivery
 
 
 class OrderPaymentSerializer(serializers.ModelSerializer):
@@ -77,3 +77,30 @@ class LabelOrderSerializer(serializers.ModelSerializer):
         model = LabelOrder
         fields = "__all__"
         read_only_fields = ["business"]
+
+
+class ReturnDeliverySerializer(serializers.ModelSerializer):
+    """
+    Adds the derived claim-window fields the UI counts down on. They are
+    computed per request (never stored) so the countdown is always relative
+    to today rather than to whenever the row was last saved.
+    """
+    claim_deadline = serializers.DateField(read_only=True)
+    days_left      = serializers.SerializerMethodField()
+    day_of_window  = serializers.SerializerMethodField()
+    claim_urgency  = serializers.SerializerMethodField()
+    claim_window_days = serializers.IntegerField(source="CLAIM_WINDOW_DAYS", read_only=True)
+
+    class Meta:
+        model = ReturnDelivery
+        fields = "__all__"
+        read_only_fields = ["business", "uploaded_at", "updated_at"]
+
+    def get_days_left(self, obj):
+        return obj.days_left()
+
+    def get_day_of_window(self, obj):
+        return obj.day_of_window()
+
+    def get_claim_urgency(self, obj):
+        return obj.claim_urgency()

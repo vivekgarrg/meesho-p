@@ -392,7 +392,7 @@ export function PurchasesTab() {
 
       {/* Filter + list */}
       <Paper variant="outlined" sx={{ borderRadius: 3, borderColor: "#E2E8F0", overflow: "hidden" }}>
-        <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} alignItems={{ sm: "center" }} sx={{ p: 2, borderBottom: "1px solid #F1F5F9", flexWrap: "wrap" }}>
+        <Stack useFlexGap direction={{ xs: "column", sm: "row" }} spacing={1.5} alignItems={{ sm: "center" }} sx={{ p: 2, borderBottom: "1px solid #F1F5F9", flexWrap: "wrap" }}>
           <TextField size="small" value={sellerQ} onChange={(e) => setSellerQ(e.target.value)} placeholder="Search seller…"
             InputProps={{ startAdornment: <InputAdornment position="start"><SearchIcon fontSize="small" sx={{ color: "text.secondary" }} /></InputAdornment> }}
             sx={{ flex: 1, minWidth: 200 }} />
