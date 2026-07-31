@@ -34,6 +34,7 @@ import { MismatchTab } from "./Components/Tabs/MismatchTab";
 import { MeeshoInventoryTab } from "./Components/Tabs/MeeshoInventoryTab";
 import { MeeshoPricingTab } from "./Components/Tabs/MeeshoPricingTab";
 import { ReturnScanTab } from "./Components/Tabs/ReturnScanTab";
+import { GstTab } from "./Components/Tabs/GstTab";
 import { SKU_PAGE_SIZE as skuPageSize } from "./lib/helper";
 import TableData from "./Components/Table/TableData";
 import LoginPage from "./Components/Login/LoginPage";
@@ -336,6 +337,7 @@ export const NAV_GROUPS = [
     items: [
       { path: "/pricing", label: "SKU Pricing", icon: "⊞" },
       { path: "/tax-check", label: "Tax Check", icon: "%" },
+      { path: "/gst", label: "GST", icon: "₹" },
       { path: "/inventory", label: "Inventory", icon: "⊕" },
       { path: "/inventory-labels", label: "Labels & Barcodes", icon: "▥" },
       { path: "/meesho-inventory", label: "Meesho Stock", icon: "⊞" },
@@ -781,6 +783,7 @@ function AppShell() {
             <Route path="/estimated-profit" element={<EstimatedProfitTab />} />
             <Route path="/pricing" element={<PricingTab />} />
             <Route path="/tax-check" element={<TaxCheckTab />} />
+            <Route path="/gst" element={<GstTab />} />
             <Route path="/upload" element={<UploadTab />} />
             <Route path="/labels" element={<LabelsTab />} />
             <Route path="/returns" element={<ReturnScanTab />} />

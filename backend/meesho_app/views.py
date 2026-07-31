@@ -17,7 +17,7 @@ from PIL import Image
 from .helpers.helper import status_wise_summary
 from .permissions import get_authorized_business
 
-from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, PurchaseBill, PurchaseItem, BlockedCustomer, InventoryAdjustment, ConsumableItem, ConsumablePurchase, ConsumableUsage, InventoryLog, MeeshoInventory, MeeshoPriceUpdate, ExpenseInvoice, ExpenseInvoiceItem, TransportCharge, PackedStockEvent, EstimatedProfitOrder, ReturnDelivery
+from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, PurchaseBill, PurchaseItem, BlockedCustomer, InventoryAdjustment, ConsumableItem, ConsumablePurchase, ConsumableUsage, InventoryLog, MeeshoInventory, MeeshoPriceUpdate, ExpenseInvoice, ExpenseInvoiceItem, TransportCharge, PackedStockEvent, EstimatedProfitOrder, ReturnDelivery, GstTransaction, GstInvoiceDetail
 from .serializers import (
     OrderPaymentSerializer, AdsCostSerializer,
     ReferralPaymentSerializer, CompensationRecoverySerializer,
@@ -7414,3 +7414,909 @@ def return_delivery_detail(request, business_id, pk):
     data = ReturnDeliverySerializer(row).data
     data["order_context"] = _order_context(business, row.suborder_no)
     return Response(data)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Expense sheet — export to Excel and import back
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Sheet 1 is one row per invoice *line item*, with the invoice's own fields
+# repeated on each of its rows — that's the shape people actually want to read
+# and edit in Excel. Rows are tied back to existing records by the ID column.
+_EXPENSE_HEADERS = [
+    "Invoice ID", "Date", "Invoice No", "Vendor", "Title",
+    "Item Description", "Category", "Quantity", "Unit Rate", "Amount", "Notes",
+]
+_TRANSPORT_HEADERS = ["Charge ID", "Date", "Amount", "Note"]
+
+# Header text → the key used internally, so a re-import tolerates case and
+# spacing differences after a trip through Excel.
+_EXPENSE_COL_MAP = {
+    "invoice id": "invoice_id",
+    "date": "date",
+    "invoice no": "invoice_no",
+    "invoice number": "invoice_no",
+    "vendor": "vendor",
+    "title": "title",
+    "item description": "description",
+    "description": "description",
+    "category": "category",
+    "quantity": "quantity",
+    "qty": "quantity",
+    "unit rate": "unit_rate",
+    "rate": "unit_rate",
+    "amount": "amount",          # computed on import, never trusted from the sheet
+    "notes": "notes",
+}
+_TRANSPORT_COL_MAP = {
+    "charge id": "charge_id",
+    "id": "charge_id",
+    "date": "date",
+    "amount": "amount",
+    "note": "note",
+    "notes": "note",
+}
+
+_VALID_EXPENSE_CATEGORIES = {c[0] for c in ExpenseInvoiceItem.CATEGORY_CHOICES}
+
+
+def _expense_category(raw):
+    """Accept either the stored key ("packaging") or the display label."""
+    v = (safe_str(raw) or "").strip().lower()
+    if v in _VALID_EXPENSE_CATEGORIES:
+        return v
+    for key, label in ExpenseInvoiceItem.CATEGORY_CHOICES:
+        if v == label.lower():
+            return key
+    if "packag" in v:
+        return "packaging"
+    return "other" if v else "packaging"
+
+
+@api_view(["GET"])
+def expenses_export(request, business_id):
+    """
+    Download every expense invoice (with line items) and transport charge as a
+    two-sheet Excel workbook. The same file can be edited and fed back to
+    /expenses/import/ — the ID columns are what make that round-trip update
+    existing rows instead of duplicating them.
+
+    Honours the same date filters as the list endpoints so you can export just
+    one period.
+    """
+    from io import BytesIO
+    from django.http import HttpResponse
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.utils import get_column_letter
+
+    business = get_authorized_business(request, business_id)
+
+    inv_qs = ExpenseInvoice.objects.filter(business=business).prefetch_related("items")
+    tc_qs  = TransportCharge.objects.filter(business=business)
+
+    month = request.GET.get("month", "")
+    start, end = _month_range(month)
+    if start:
+        inv_qs = inv_qs.filter(date__gte=start, date__lt=end)
+        tc_qs  = tc_qs.filter(date__gte=start, date__lt=end)
+    if request.GET.get("date_from"):
+        inv_qs = inv_qs.filter(date__gte=request.GET["date_from"])
+        tc_qs  = tc_qs.filter(date__gte=request.GET["date_from"])
+    if request.GET.get("date_to"):
+        inv_qs = inv_qs.filter(date__lte=request.GET["date_to"])
+        tc_qs  = tc_qs.filter(date__lte=request.GET["date_to"])
+
+    head_font = Font(bold=True, size=10, color="FFFFFF")
+    head_fill = PatternFill("solid", fgColor="6D28D9")
+    money_fmt = "#,##0.00"
+
+    wb = openpyxl.Workbook()
+
+    # ── Sheet 1: expenses ────────────────────────────────────────────────────
+    ws = wb.active
+    ws.title = "Expenses"
+    ws.append(_EXPENSE_HEADERS)
+    for col, _ in enumerate(_EXPENSE_HEADERS, start=1):
+        c = ws.cell(row=1, column=col)
+        c.font, c.fill = head_font, head_fill
+        c.alignment = Alignment(horizontal="center", vertical="center")
+
+    rows = 0
+    for inv in inv_qs.order_by("-date", "-created_at"):
+        items = list(inv.items.all())
+        if not items:
+            # Keep empty invoices in the sheet so they survive a round-trip.
+            items = [None]
+        for it in items:
+            qty  = (it.quantity if it else None) or Decimal("0")
+            rate = (it.unit_rate if it else None) or Decimal("0")
+            ws.append([
+                inv.id,
+                inv.date,
+                inv.invoice_no or "",
+                inv.vendor or "",
+                inv.title or "",
+                (it.description if it else ""),
+                (it.get_category_display() if it else ""),
+                float(qty),
+                float(rate),
+                float((qty * rate).quantize(Decimal("0.01"))),
+                inv.notes or "",
+            ])
+            rows += 1
+
+    for r in range(2, ws.max_row + 1):
+        ws.cell(row=r, column=2).number_format = "yyyy-mm-dd"
+        for col in (8, 9, 10):
+            ws.cell(row=r, column=col).number_format = money_fmt
+
+    # ── Sheet 2: transport charges ───────────────────────────────────────────
+    ws2 = wb.create_sheet("Transport")
+    ws2.append(_TRANSPORT_HEADERS)
+    for col, _ in enumerate(_TRANSPORT_HEADERS, start=1):
+        c = ws2.cell(row=1, column=col)
+        c.font, c.fill = head_font, head_fill
+        c.alignment = Alignment(horizontal="center", vertical="center")
+
+    tc_rows = 0
+    for tc in tc_qs.order_by("-date", "-created_at"):
+        ws2.append([tc.id, tc.date, float(tc.amount or 0), tc.note or ""])
+        tc_rows += 1
+    for r in range(2, ws2.max_row + 1):
+        ws2.cell(row=r, column=2).number_format = "yyyy-mm-dd"
+        ws2.cell(row=r, column=3).number_format = money_fmt
+
+    # ── Sheet 3: how the round-trip works ────────────────────────────────────
+    ws3 = wb.create_sheet("How to use")
+    for line in [
+        ["Editing and re-importing this workbook"],
+        [""],
+        ["1. Edit any cell except the ID and Amount columns."],
+        ["2. Amount is recalculated on import as Quantity x Unit Rate — editing it has no effect."],
+        ["3. Leave 'Invoice ID' as-is to update that invoice. Clear it (or add a new row"],
+        ["   without one) to create a new invoice."],
+        ["4. Line items belonging to one invoice are the rows that share its Invoice ID."],
+        ["   For a brand new invoice spanning several item rows, leave Invoice ID blank on"],
+        ["   all of them and give them the same Date + Invoice No + Vendor so they group."],
+        ["5. Deleting a line-item row removes that line from its invoice on import."],
+        ["6. Deleting a whole invoice's rows does NOT delete the invoice — remove it in the app."],
+        ["7. Category accepts 'Packaging Material' or 'Other Expense'."],
+        ["8. The Transport sheet works the same way, keyed on 'Charge ID'."],
+    ]:
+        ws3.append(line)
+    ws3.column_dimensions["A"].width = 90
+    ws3.cell(row=1, column=1).font = Font(bold=True, size=12)
+
+    # Readable column widths.
+    for sheet, headers in ((ws, _EXPENSE_HEADERS), (ws2, _TRANSPORT_HEADERS)):
+        for idx, name in enumerate(headers, start=1):
+            longest = len(name)
+            for r in range(2, min(sheet.max_row, 400) + 1):
+                v = sheet.cell(row=r, column=idx).value
+                longest = max(longest, len(str(v)) if v is not None else 0)
+            sheet.column_dimensions[get_column_letter(idx)].width = min(max(longest + 2, 10), 46)
+        sheet.freeze_panes = "A2"
+
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    label = (month or "all").replace("/", "-")
+    filename = f"expenses_{business.name.replace(' ', '_')}_{label}.xlsx"
+    resp = HttpResponse(
+        buf.getvalue(),
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    resp["Content-Disposition"] = f'attachment; filename="{filename}"'
+    resp["X-Expense-Rows"] = str(rows)
+    resp["X-Transport-Rows"] = str(tc_rows)
+    return resp
+
+
+def _read_expense_sheet(file, sheet_name, col_map):
+    """Read one sheet into a list of dicts keyed by our internal names."""
+    file.seek(0)
+    try:
+        df = pd.read_excel(file, sheet_name=sheet_name, dtype=object)
+    except ValueError:
+        return None   # sheet absent — caller decides whether that's fatal
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    df.rename(columns=col_map, inplace=True)
+    return df
+
+
+@api_view(["POST"])
+@parser_classes([MultiPartParser])
+def expenses_import(request, business_id):
+    """
+    Import the expense workbook produced by /expenses/export/.
+
+    Rows carrying an ID update that record; rows without one create a new
+    record. Nothing is ever deleted at the invoice/charge level — removing a
+    row from the sheet only drops that *line item* from its invoice. That
+    asymmetry is deliberate: an accidental deletion in Excel shouldn't wipe
+    expense history.
+    """
+    business = get_authorized_business(request, business_id)
+    file = request.FILES.get("file")
+    if not file:
+        return Response({"error": "No file provided."}, status=status.HTTP_400_BAD_REQUEST)
+
+    name = (file.name or "").lower()
+    if not name.endswith((".xlsx", ".xls")):
+        return Response(
+            {"error": "Please upload the .xlsx workbook produced by Export."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        exp_df = _read_expense_sheet(file, "Expenses", _EXPENSE_COL_MAP)
+        tc_df  = _read_expense_sheet(file, "Transport", _TRANSPORT_COL_MAP)
+    except Exception as exc:
+        return Response({"error": f"Could not read the workbook: {exc}"},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    if exp_df is None and tc_df is None:
+        return Response(
+            {"error": "Workbook has neither an 'Expenses' nor a 'Transport' sheet."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    result = {
+        "invoices_created": 0, "invoices_updated": 0, "items_written": 0,
+        "transport_created": 0, "transport_updated": 0,
+        "skipped_rows": 0, "warnings": [],
+    }
+
+    def _add_warning(msg):
+        if msg not in result["warnings"] and len(result["warnings"]) < 12:
+            result["warnings"].append(msg)
+
+    with transaction.atomic():
+        # ── Expenses ─────────────────────────────────────────────────────────
+        if exp_df is not None and "date" in exp_df.columns:
+            # Group rows into invoices: by existing id when present, otherwise
+            # by the natural key so several new item rows form one invoice.
+            groups = {}
+            order = []
+            for _, row in exp_df.iterrows():
+                inv_id = safe_int(row.get("invoice_id"))
+                date   = safe_date(row.get("date"))
+                desc   = (safe_str(row.get("description")) or "").strip()
+
+                if date is None and inv_id is None:
+                    if desc:
+                        result["skipped_rows"] += 1
+                        _add_warning("Skipped row(s) with no date.")
+                    continue
+
+                key = ("id", inv_id) if inv_id is not None else (
+                    "new",
+                    str(date),
+                    (safe_str(row.get("invoice_no")) or "").strip().lower(),
+                    (safe_str(row.get("vendor")) or "").strip().lower(),
+                    (safe_str(row.get("title")) or "").strip().lower(),
+                )
+                if key not in groups:
+                    groups[key] = {"header": row, "items": []}
+                    order.append(key)
+                if desc:
+                    groups[key]["items"].append(row)
+
+            for key in order:
+                grp    = groups[key]
+                header = grp["header"]
+                date   = safe_date(header.get("date"))
+
+                fields = {
+                    "invoice_no": (safe_str(header.get("invoice_no")) or "")[:100],
+                    "vendor":     (safe_str(header.get("vendor")) or "")[:255],
+                    "title":      (safe_str(header.get("title")) or "")[:255],
+                    "notes":      safe_str(header.get("notes")) or "",
+                }
+
+                if key[0] == "id":
+                    inv = ExpenseInvoice.objects.filter(pk=key[1], business=business).first()
+                    if inv is None:
+                        # An id from a different business (or a deleted row) must
+                        # not silently reach across the tenant boundary.
+                        _add_warning(
+                            f"Invoice ID {key[1]} does not belong to this business — "
+                            f"imported as a new invoice instead."
+                        )
+                        inv = None
+                    if inv is not None:
+                        if date is not None:
+                            inv.date = date
+                        for f, v in fields.items():
+                            setattr(inv, f, v)
+                        inv.save()
+                        result["invoices_updated"] += 1
+                    else:
+                        if date is None:
+                            result["skipped_rows"] += 1
+                            continue
+                        inv = ExpenseInvoice.objects.create(business=business, date=date, **fields)
+                        result["invoices_created"] += 1
+                else:
+                    if date is None:
+                        result["skipped_rows"] += 1
+                        continue
+                    inv = ExpenseInvoice.objects.create(business=business, date=date, **fields)
+                    result["invoices_created"] += 1
+
+                # The sheet is the source of truth for this invoice's lines.
+                inv.items.all().delete()
+                for it in grp["items"]:
+                    qty  = safe_decimal(it.get("quantity"))
+                    rate = safe_decimal(it.get("unit_rate"))
+                    ExpenseInvoiceItem.objects.create(
+                        business=business,
+                        invoice=inv,
+                        description=(safe_str(it.get("description")) or "")[:500],
+                        category=_expense_category(it.get("category")),
+                        quantity=qty if qty is not None else Decimal("0"),
+                        unit_rate=rate if rate is not None else Decimal("0"),
+                    )
+                    result["items_written"] += 1
+        elif exp_df is not None:
+            _add_warning("'Expenses' sheet has no Date column — it was ignored.")
+
+        # ── Transport charges ────────────────────────────────────────────────
+        if tc_df is not None and "date" in tc_df.columns:
+            for _, row in tc_df.iterrows():
+                date   = safe_date(row.get("date"))
+                amount = safe_decimal(row.get("amount"))
+                if date is None or amount is None:
+                    if date is not None or amount is not None:
+                        result["skipped_rows"] += 1
+                        _add_warning("Skipped transport row(s) missing a date or amount.")
+                    continue
+                note = (safe_str(row.get("note")) or "")[:255]
+                cid  = safe_int(row.get("charge_id"))
+
+                tc = TransportCharge.objects.filter(pk=cid, business=business).first() if cid else None
+                if tc:
+                    tc.date, tc.amount, tc.note = date, amount, note
+                    tc.save()
+                    result["transport_updated"] += 1
+                else:
+                    if cid:
+                        _add_warning(
+                            f"Charge ID {cid} does not belong to this business — "
+                            f"imported as a new charge instead."
+                        )
+                    TransportCharge.objects.create(
+                        business=business, date=date, amount=amount, note=note
+                    )
+                    result["transport_created"] += 1
+        elif tc_df is not None:
+            _add_warning("'Transport' sheet has no Date column — it was ignored.")
+
+    result["success"] = True
+    return Response(result, status=status.HTTP_200_OK)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# GST — monthly liability from Meesho's TCS exports, plus rate-mismatch checks
+# ══════════════════════════════════════════════════════════════════════════════
+
+# The first two digits of a GSTIN are the state code. Only needed to decide
+# whether a line is intra-state (CGST+SGST) or inter-state (IGST), which is the
+# split GSTR-3B asks for.
+_GST_STATE_CODES = {
+    "01": "JAMMU AND KASHMIR", "02": "HIMACHAL PRADESH", "03": "PUNJAB",
+    "04": "CHANDIGARH", "05": "UTTARAKHAND", "06": "HARYANA", "07": "DELHI",
+    "08": "RAJASTHAN", "09": "UTTAR PRADESH", "10": "BIHAR", "11": "SIKKIM",
+    "12": "ARUNACHAL PRADESH", "13": "NAGALAND", "14": "MANIPUR", "15": "MIZORAM",
+    "16": "TRIPURA", "17": "MEGHALAYA", "18": "ASSAM", "19": "WEST BENGAL",
+    "20": "JHARKHAND", "21": "ODISHA", "22": "CHATTISGARH", "23": "MADHYA PRADESH",
+    "24": "GUJARAT", "26": "DADRA AND NAGAR HAVELI AND DAMAN AND DIU",
+    "27": "MAHARASHTRA", "29": "KARNATAKA", "30": "GOA", "31": "LAKSHADWEEP",
+    "32": "KERALA", "33": "TAMIL NADU", "34": "PUDUCHERRY", "35": "ANDAMAN AND NICOBAR ISLANDS",
+    "36": "TELANGANA", "37": "ANDHRA PRADESH", "38": "LADAKH",
+}
+
+# Columns of the TCS sales / sales-return exports → model fields.
+_GST_TCS_COL_MAP = {
+    "sub_order_num": "sub_order_num", "suborder_num": "sub_order_num",
+    "order_date": "order_date",
+    "manifest_date": "manifest_date",
+    "cancel_return_date": "cancel_return_date",
+    "hsn_code": "hsn_code", "hsn": "hsn_code",
+    "quantity": "quantity",
+    "gst_rate": "gst_rate",
+    "total_taxable_sale_value": "total_taxable_sale_value",
+    "tax_amount": "tax_amount",
+    "total_invoice_value": "total_invoice_value",
+    "taxable_shipping": "taxable_shipping",
+    "end_customer_state_new": "end_customer_state", "end_customer_state": "end_customer_state",
+    "gstin": "supplier_gstin",
+    "eco_tcs_gstin": "eco_tcs_gstin",
+    "supplier_id": "supplier_id",
+    "sup_name": "sup_name",
+    "financial_year": "financial_year",
+    "month_number": "month_number",
+}
+
+_GST_INVOICE_COL_MAP = {
+    "type": "doc_type",
+    "order date": "order_date",
+    "suborder no.": "suborder_no", "suborder no": "suborder_no",
+    "sub order no.": "suborder_no", "sub_order_no": "suborder_no",
+    "product description": "product_description",
+    "hsn": "hsn",
+    "invoice no.": "invoice_no", "invoice no": "invoice_no",
+}
+
+_GST_MONTH_NAMES = ["", "January", "February", "March", "April", "May", "June",
+                    "July", "August", "September", "October", "November", "December"]
+
+
+def _gst_read_any_sheet(file, col_map):
+    """
+    Read the first sheet of the workbook and map its headers.
+
+    The TCS exports name their sheet after the supplier id ("3564327"), so the
+    sheet name can't be hardcoded — always take the first one.
+    """
+    file.seek(0)
+    df = pd.read_excel(file, sheet_name=0, dtype=object)
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    df.rename(columns=col_map, inplace=True)
+    return df
+
+
+def _gst_detect_kind(df):
+    """
+    Work out which of the three exports this is from its columns, so the user
+    doesn't have to pick the file type (and can't pick it wrongly).
+    """
+    cols = set(df.columns)
+    if {"doc_type", "invoice_no", "suborder_no"} & cols and "total_taxable_sale_value" not in cols:
+        return "INVOICE_DETAILS"
+    if "total_taxable_sale_value" in cols:
+        # The return export is the one carrying a cancellation date.
+        return "RETURN" if "cancel_return_date" in cols else "SALE"
+    return None
+
+
+@api_view(["POST"])
+@parser_classes([MultiPartParser])
+def gst_upload(request, business_id):
+    """
+    Upload any of Meesho's three GST exports — tcs_sales, tcs_sales_return, or
+    Tax invoice details. The file type is detected from its columns.
+
+    An upload **replaces** every stored row for the periods present in the file
+    rather than merging. That matches how tax filing works: if Meesho reissues a
+    corrected export for a month, you want the corrected set, not the union of
+    old and new rows.
+    """
+    business = get_authorized_business(request, business_id)
+    file = request.FILES.get("file")
+    if not file:
+        return Response({"error": "No file provided."}, status=status.HTTP_400_BAD_REQUEST)
+    if not (file.name or "").lower().endswith((".xlsx", ".xls", ".csv")):
+        return Response({"error": "Upload the .xlsx file exactly as downloaded from Meesho."},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        if (file.name or "").lower().endswith(".csv"):
+            file.seek(0)
+            df = pd.read_csv(file, dtype=object)
+            df.columns = [str(c).strip().lower() for c in df.columns]
+            df.rename(columns={**_GST_TCS_COL_MAP, **_GST_INVOICE_COL_MAP}, inplace=True)
+        else:
+            df = _gst_read_any_sheet(file, {**_GST_TCS_COL_MAP, **_GST_INVOICE_COL_MAP})
+    except Exception as exc:
+        return Response({"error": f"Could not read the file: {exc}"},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    kind = _gst_detect_kind(df)
+    if kind is None:
+        return Response(
+            {"error": "Unrecognised file. Expected one of Meesho's tcs_sales, "
+                      "tcs_sales_return or Tax invoice details exports."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # ── Tax invoice details ──────────────────────────────────────────────────
+    if kind == "INVOICE_DETAILS":
+        rows, periods, skipped = [], set(), 0
+        for _, r in df.iterrows():
+            suborder = (safe_str(r.get("suborder_no")) or "").strip()
+            invoice  = (safe_str(r.get("invoice_no")) or "").strip()
+            when     = safe_datetime(r.get("order_date"))
+            if not suborder or not invoice or when is None:
+                skipped += 1
+                continue
+            periods.add((when.year, when.month))
+            rows.append(GstInvoiceDetail(
+                business=business,
+                doc_type=(safe_str(r.get("doc_type")) or "").strip()[:30],
+                order_date=when,
+                suborder_no=suborder[:100],
+                product_description=safe_str(r.get("product_description")) or "",
+                hsn=(safe_str(r.get("hsn")) or "").strip()[:20],
+                invoice_no=invoice[:100],
+                period_year=when.year,
+                period_month=when.month,
+            ))
+
+        with transaction.atomic():
+            removed = 0
+            for (y, m) in periods:
+                removed += GstInvoiceDetail.objects.filter(
+                    business=business, period_year=y, period_month=m
+                ).delete()[0]
+            GstInvoiceDetail.objects.bulk_create(rows, batch_size=1000)
+
+        return Response({
+            "success": True, "file_type": "Tax invoice details",
+            "rows_imported": len(rows), "rows_replaced": removed, "skipped": skipped,
+            "periods": sorted(f"{y}-{m:02d}" for y, m in periods),
+        }, status=status.HTTP_201_CREATED)
+
+    # ── TCS sales / sales returns ────────────────────────────────────────────
+    rows, periods, skipped = [], set(), 0
+    for _, r in df.iterrows():
+        suborder = (safe_str(r.get("sub_order_num")) or "").strip()
+        fy = safe_int(r.get("financial_year"))
+        mn = safe_int(r.get("month_number"))
+        if not suborder or fy is None or mn is None:
+            skipped += 1
+            continue
+        periods.add((fy, mn))
+        rows.append(GstTransaction(
+            business=business,
+            kind=kind,
+            financial_year=fy,
+            month_number=mn,
+            sub_order_num=suborder[:100],
+            order_date=safe_date(r.get("order_date")),
+            manifest_date=safe_date(r.get("manifest_date")),
+            cancel_return_date=safe_date(r.get("cancel_return_date")),
+            hsn_code=(safe_str(r.get("hsn_code")) or "").strip()[:20],
+            quantity=safe_int(r.get("quantity")) or 0,
+            gst_rate=safe_decimal(r.get("gst_rate")) or Decimal("0"),
+            total_taxable_sale_value=safe_decimal(r.get("total_taxable_sale_value")) or Decimal("0"),
+            tax_amount=safe_decimal(r.get("tax_amount")) or Decimal("0"),
+            total_invoice_value=safe_decimal(r.get("total_invoice_value")) or Decimal("0"),
+            taxable_shipping=safe_decimal(r.get("taxable_shipping")) or Decimal("0"),
+            end_customer_state=(safe_str(r.get("end_customer_state")) or "").strip()[:100],
+            supplier_gstin=(safe_str(r.get("supplier_gstin")) or "").strip()[:20],
+            eco_tcs_gstin=(safe_str(r.get("eco_tcs_gstin")) or "").strip()[:20],
+            supplier_id=(safe_str(r.get("supplier_id")) or "").strip()[:50],
+            sup_name=(safe_str(r.get("sup_name")) or "").strip()[:255],
+        ))
+
+    with transaction.atomic():
+        removed = 0
+        for (fy, mn) in periods:
+            removed += GstTransaction.objects.filter(
+                business=business, kind=kind, financial_year=fy, month_number=mn
+            ).delete()[0]
+        GstTransaction.objects.bulk_create(rows, batch_size=1000)
+
+    return Response({
+        "success": True,
+        "file_type": "TCS sales" if kind == "SALE" else "TCS sales returns",
+        "rows_imported": len(rows), "rows_replaced": removed, "skipped": skipped,
+        "periods": sorted(f"FY{fy} M{mn:02d}" for fy, mn in periods),
+    }, status=status.HTTP_201_CREATED)
+
+
+def _gst_period_filter(request, qs):
+    """Narrow a GstTransaction queryset to the requested filing period."""
+    fy = request.GET.get("financial_year") or request.GET.get("fy")
+    mn = request.GET.get("month_number") or request.GET.get("month")
+    if fy:
+        qs = qs.filter(financial_year=safe_int(fy))
+    if mn:
+        qs = qs.filter(month_number=safe_int(mn))
+    return qs
+
+
+def _d(v):
+    return Decimal(str(v or 0))
+
+
+@api_view(["GET"])
+def gst_periods(request, business_id):
+    """Which filing periods have data, so the tab can offer a month picker."""
+    business = get_authorized_business(request, business_id)
+    rows = (GstTransaction.objects.filter(business=business)
+            .values("financial_year", "month_number", "kind")
+            .annotate(n=Count("id")))
+    periods = {}
+    for r in rows:
+        key = (r["financial_year"], r["month_number"])
+        p = periods.setdefault(key, {
+            "financial_year": r["financial_year"],
+            "month_number": r["month_number"],
+            "label": f"{_GST_MONTH_NAMES[r['month_number']] if 1 <= r['month_number'] <= 12 else r['month_number']} {r['financial_year']}",
+            "sale_lines": 0, "return_lines": 0,
+        })
+        p["sale_lines" if r["kind"] == GstTransaction.KIND_SALE else "return_lines"] = r["n"]
+    out = sorted(periods.values(), key=lambda p: (-p["financial_year"], -p["month_number"]))
+    return Response({"periods": out})
+
+
+@api_view(["GET"])
+def gst_summary(request, business_id):
+    """
+    The GST position for a filing period: output tax on sales, less returns,
+    broken down by rate and by place of supply.
+
+    `tcs_rate` (default 0.5%) only drives the informational TCS-credit line —
+    Meesho's export does not state the TCS it collected, so that figure is an
+    estimate, never a filed number.
+    """
+    business = get_authorized_business(request, business_id)
+    qs = _gst_period_filter(request, GstTransaction.objects.filter(business=business))
+
+    tcs_rate = safe_decimal(request.GET.get("tcs_rate")) 
+    if tcs_rate is None:
+        tcs_rate = Decimal("0.5")
+
+    supplier_state = ""
+    first = qs.exclude(supplier_gstin="").values_list("supplier_gstin", flat=True).first()
+    if first:
+        supplier_state = _GST_STATE_CODES.get(str(first)[:2], "")
+
+    totals = {
+        "SALE":   {"lines": 0, "qty": 0, "taxable": Decimal("0"), "tax": Decimal("0"), "invoice": Decimal("0"), "shipping": Decimal("0")},
+        "RETURN": {"lines": 0, "qty": 0, "taxable": Decimal("0"), "tax": Decimal("0"), "invoice": Decimal("0"), "shipping": Decimal("0")},
+    }
+    by_rate  = {}
+    by_hsn   = {}
+    by_state = {}
+    intra = {"taxable": Decimal("0"), "tax": Decimal("0")}
+    inter = {"taxable": Decimal("0"), "tax": Decimal("0")}
+    recompute_mismatch = []
+
+    for t in qs.iterator():
+        bucket = totals[t.kind]
+        bucket["lines"] += 1
+        bucket["qty"] += t.quantity or 0
+        bucket["taxable"]  += _d(t.total_taxable_sale_value)
+        bucket["tax"]      += _d(t.tax_amount)
+        bucket["invoice"]  += _d(t.total_invoice_value)
+        bucket["shipping"] += _d(t.taxable_shipping)
+
+        sign = Decimal("-1") if t.kind == GstTransaction.KIND_RETURN else Decimal("1")
+        s_taxable = _d(t.total_taxable_sale_value) * sign
+        s_tax     = _d(t.tax_amount) * sign
+
+        rate_key = str(_d(t.gst_rate).quantize(Decimal("0.01")))
+        r = by_rate.setdefault(rate_key, {
+            "gst_rate": float(_d(t.gst_rate)), "lines": 0,
+            "sale_taxable": Decimal("0"), "sale_tax": Decimal("0"),
+            "return_taxable": Decimal("0"), "return_tax": Decimal("0"),
+        })
+        r["lines"] += 1
+        if t.kind == GstTransaction.KIND_SALE:
+            r["sale_taxable"] += _d(t.total_taxable_sale_value)
+            r["sale_tax"]     += _d(t.tax_amount)
+        else:
+            r["return_taxable"] += _d(t.total_taxable_sale_value)
+            r["return_tax"]     += _d(t.tax_amount)
+
+        h = by_hsn.setdefault(t.hsn_code or "—", {
+            "hsn": t.hsn_code or "—", "lines": 0, "qty": 0,
+            "net_taxable": Decimal("0"), "net_tax": Decimal("0"), "rates": set(),
+        })
+        h["lines"] += 1
+        h["qty"] += (t.quantity or 0) * (1 if t.kind == GstTransaction.KIND_SALE else -1)
+        h["net_taxable"] += s_taxable
+        h["net_tax"]     += s_tax
+        h["rates"].add(float(_d(t.gst_rate)))
+
+        st = by_state.setdefault(t.end_customer_state or "—", {
+            "state": t.end_customer_state or "—", "lines": 0,
+            "net_taxable": Decimal("0"), "net_tax": Decimal("0"),
+        })
+        st["lines"] += 1
+        st["net_taxable"] += s_taxable
+        st["net_tax"]     += s_tax
+
+        target = intra if (supplier_state and (t.end_customer_state or "").upper() == supplier_state) else inter
+        target["taxable"] += s_taxable
+        target["tax"]     += s_tax
+
+        # Sanity check on the file itself: taxable x rate should equal the tax.
+        expected = (_d(t.total_taxable_sale_value) * _d(t.gst_rate) / Decimal("100"))
+        if abs(expected - _d(t.tax_amount)) > Decimal("0.05"):
+            if len(recompute_mismatch) < 50:
+                recompute_mismatch.append({
+                    "sub_order_num": t.sub_order_num,
+                    "kind": t.kind,
+                    "gst_rate": float(_d(t.gst_rate)),
+                    "taxable": float(_d(t.total_taxable_sale_value)),
+                    "tax_in_file": float(_d(t.tax_amount)),
+                    "tax_recomputed": float(expected.quantize(Decimal("0.01"))),
+                    "difference": float((expected - _d(t.tax_amount)).quantize(Decimal("0.01"))),
+                })
+
+    q2 = Decimal("0.01")
+    net_taxable = totals["SALE"]["taxable"] - totals["RETURN"]["taxable"]
+    net_tax     = totals["SALE"]["tax"]     - totals["RETURN"]["tax"]
+    tcs_credit  = (net_taxable * tcs_rate / Decimal("100")).quantize(q2)
+
+    def money(d):
+        return str(Decimal(d).quantize(q2))
+
+    rate_rows = []
+    for key in sorted(by_rate, key=lambda k: float(k)):
+        r = by_rate[key]
+        nt  = r["sale_taxable"] - r["return_taxable"]
+        ntx = r["sale_tax"] - r["return_tax"]
+        rate_rows.append({
+            "gst_rate": r["gst_rate"], "lines": r["lines"],
+            "sale_taxable": money(r["sale_taxable"]), "sale_tax": money(r["sale_tax"]),
+            "return_taxable": money(r["return_taxable"]), "return_tax": money(r["return_tax"]),
+            "net_taxable": money(nt), "net_tax": money(ntx),
+        })
+
+    hsn_rows = sorted(
+        [{"hsn": h["hsn"], "lines": h["lines"], "qty": h["qty"],
+          "net_taxable": money(h["net_taxable"]), "net_tax": money(h["net_tax"]),
+          "rates": sorted(h["rates"])} for h in by_hsn.values()],
+        key=lambda x: -Decimal(x["net_taxable"]),
+    )
+    state_rows = sorted(
+        [{"state": s["state"], "lines": s["lines"],
+          "net_taxable": money(s["net_taxable"]), "net_tax": money(s["net_tax"])}
+         for s in by_state.values()],
+        key=lambda x: -Decimal(x["net_taxable"]),
+    )
+
+    return Response({
+        "supplier_state": supplier_state,
+        "sales":   {**{k: (money(v) if isinstance(v, Decimal) else v) for k, v in totals["SALE"].items()}},
+        "returns": {**{k: (money(v) if isinstance(v, Decimal) else v) for k, v in totals["RETURN"].items()}},
+        "net": {
+            "taxable": money(net_taxable),
+            "tax": money(net_tax),
+            "gst_payable": money(net_tax),
+        },
+        "place_of_supply": {
+            "intra_state": {"taxable": money(intra["taxable"]), "tax": money(intra["tax"]),
+                            "cgst": money(intra["tax"] / 2), "sgst": money(intra["tax"] / 2)},
+            "inter_state": {"taxable": money(inter["taxable"]), "igst": money(inter["tax"])},
+        },
+        "tcs": {
+            "rate": float(tcs_rate),
+            "estimated_credit": money(tcs_credit),
+            "note": "Estimated: Meesho's export does not state the TCS it collected. "
+                    "Confirm against your GSTR-2X / cash ledger before offsetting.",
+        },
+        "by_rate": rate_rows,
+        "by_hsn": hsn_rows,
+        "by_state": state_rows,
+        "file_arithmetic_issues": recompute_mismatch,
+    })
+
+
+@api_view(["GET"])
+def gst_mismatches(request, business_id):
+    """
+    Where the GST Meesho filed disagrees with what this catalogue expects.
+
+    Two independent checks:
+
+    1. **Rate vs your SKU pricing** — the rate on the filed line against the
+       `tax_percent` configured for that SKU, with the resulting tax
+       difference. Requires the SKU, which comes from the payment sheet via the
+       sub-order, so lines whose sub-order isn't in Order Payments can't be
+       checked.
+    2. **One HSN, several rates** — the same HSN code filed at more than one
+       rate in the period. An HSN has a single statutory rate, so this is a
+       filing inconsistency worth explaining before it is queried.
+    """
+    business = get_authorized_business(request, business_id)
+    qs = _gst_period_filter(request, GstTransaction.objects.filter(business=business))
+
+    # sub-order → SKU, from the payment sheet.
+    sku_of = {}
+    for so, sku in (OrderPayment.objects
+                    .filter(business=business)
+                    .exclude(supplier_sku__isnull=True).exclude(supplier_sku="")
+                    .values_list("sub_order_no", "supplier_sku").iterator()):
+        sku_of.setdefault(so, sku)
+
+    # SKU → the rate configured in pricing.
+    configured = {
+        sku: rate for sku, rate in FinalPrice.objects.filter(business=business)
+        .exclude(tax_percent__isnull=True).values_list("sku_id", "tax_percent")
+    }
+
+    groups = {}
+    unmatched_suborder = 0
+    unpriced_sku = 0
+    checked = 0
+    hsn_rates = {}
+
+    for t in qs.iterator():
+        hsn_rates.setdefault(t.hsn_code or "—", {})
+        bucket = hsn_rates[t.hsn_code or "—"].setdefault(float(_d(t.gst_rate)), {
+            "lines": 0, "net_taxable": Decimal("0"),
+        })
+        bucket["lines"] += 1
+        bucket["net_taxable"] += _d(t.total_taxable_sale_value) * (
+            Decimal("-1") if t.kind == GstTransaction.KIND_RETURN else Decimal("1")
+        )
+
+        sku = sku_of.get(t.sub_order_num)
+        if not sku:
+            unmatched_suborder += 1
+            continue
+        if sku not in configured:
+            unpriced_sku += 1
+            continue
+        checked += 1
+
+        filed = _d(t.gst_rate)
+        mine  = _d(configured[sku])
+        if abs(filed - mine) <= Decimal("0.001"):
+            continue
+
+        key = (sku, str(filed), str(mine))
+        g = groups.setdefault(key, {
+            "sku": sku, "hsn": t.hsn_code, "filed_rate": float(filed), "configured_rate": float(mine),
+            "lines": 0, "net_taxable": Decimal("0"), "tax_filed": Decimal("0"),
+            "sub_orders": [],
+        })
+        sign = Decimal("-1") if t.kind == GstTransaction.KIND_RETURN else Decimal("1")
+        g["lines"] += 1
+        g["net_taxable"] += _d(t.total_taxable_sale_value) * sign
+        g["tax_filed"]   += _d(t.tax_amount) * sign
+        if len(g["sub_orders"]) < 5:
+            g["sub_orders"].append(t.sub_order_num)
+
+    q2 = Decimal("0.01")
+    rate_rows = []
+    total_diff = Decimal("0")
+    for g in groups.values():
+        at_configured = (g["net_taxable"] * Decimal(str(g["configured_rate"])) / Decimal("100"))
+        diff = at_configured - g["tax_filed"]
+        total_diff += diff
+        rate_rows.append({
+            "sku": g["sku"], "hsn": g["hsn"],
+            "filed_rate": g["filed_rate"], "configured_rate": g["configured_rate"],
+            "lines": g["lines"],
+            "net_taxable": str(g["net_taxable"].quantize(q2)),
+            "tax_filed": str(g["tax_filed"].quantize(q2)),
+            "tax_at_configured_rate": str(at_configured.quantize(q2)),
+            "difference": str(diff.quantize(q2)),
+            "direction": "overcharged" if diff < 0 else "undercharged",
+            "sample_sub_orders": g["sub_orders"],
+        })
+    rate_rows.sort(key=lambda r: -abs(Decimal(r["difference"])))
+
+    hsn_rows = []
+    for hsn, rates in hsn_rates.items():
+        if len(rates) < 2:
+            continue
+        hsn_rows.append({
+            "hsn": hsn,
+            "rates": [
+                {"gst_rate": r, "lines": v["lines"], "net_taxable": str(v["net_taxable"].quantize(q2))}
+                for r, v in sorted(rates.items())
+            ],
+            "total_lines": sum(v["lines"] for v in rates.values()),
+        })
+    hsn_rows.sort(key=lambda h: -h["total_lines"])
+
+    return Response({
+        "rate_mismatches": rate_rows,
+        "rate_mismatch_total_difference": str(total_diff.quantize(q2)),
+        "hsn_rate_conflicts": hsn_rows,
+        "coverage": {
+            "lines_checked": checked,
+            "lines_without_matching_sub_order": unmatched_suborder,
+            "lines_on_unpriced_skus": unpriced_sku,
+        },
+    })

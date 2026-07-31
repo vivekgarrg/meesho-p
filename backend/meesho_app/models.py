@@ -56,7 +56,7 @@ class OrderPayment(models.Model):
     Maps to 'Order Payments' sheet.
     One logical order can have multiple rows (main delivery row + blank-status
     affiliate-fee / claim-adjustment rows).
-    Composite unique key: (sub_order_no, payment_date, live_order_status).
+    Composite unique key: (business, sub_order_no, payment_date, live_order_status).
     """
 
     # Order Related Details
@@ -125,7 +125,7 @@ class OrderPayment(models.Model):
     class Meta:
         db_table = "order_payments"
         ordering = ["-order_date"]
-        unique_together = [("sub_order_no", "payment_date", "live_order_status")]
+        unique_together = [("business", "sub_order_no", "payment_date", "live_order_status")]
 
     def __str__(self):
         return self.sub_order_no
@@ -154,7 +154,7 @@ class AdsCost(models.Model):
         ordering = ["-deduction_date"]
         constraints = [
             models.UniqueConstraint(
-                fields=["deduction_duration", "deduction_date", "campaign_id"],
+                fields=["business", "deduction_duration", "deduction_date", "campaign_id"],
                 name="unique_ads_cost_entry",
             )
         ]
@@ -282,7 +282,7 @@ class Order(models.Model):
     class Meta:
         db_table = "orders"
         ordering = ["-order_date"]
-        unique_together = [("sub_order_no", "reason_for_credit_entry", "order_date")]
+        unique_together = [("business", "sub_order_no", "reason_for_credit_entry", "order_date")]
 
     def __str__(self):
         return self.sub_order_no
@@ -308,7 +308,9 @@ class BlockedCustomer(models.Model):
 
     class Meta:
         db_table = "blocked_customers"
-        unique_together = [("customer_name", "customer_pincode")]
+        # Per business: the same shopper can legitimately be blocked by one
+        # business and not another.
+        unique_together = [("business", "customer_name", "customer_pincode")]
         ordering = ["-blocked_at"]
 
     def __str__(self):
@@ -583,7 +585,9 @@ class MeeshoInventory(models.Model):
         ("ALL",          "All"),
     ]
 
-    serial_no          = models.PositiveIntegerField(unique=True, help_text="Row identifier from the Meesho sheet")
+    # Not globally unique: Meesho numbers every export from 1, so each business
+    # has its own SERIAL NO 1..N. Uniqueness is per business (see Meta).
+    serial_no          = models.PositiveIntegerField(db_index=True, help_text="Row identifier from the Meesho sheet")
     catalog_name       = models.CharField(max_length=500)
     catalog_id         = models.BigIntegerField(db_index=True)
     product_name       = models.TextField()
@@ -605,6 +609,7 @@ class MeeshoInventory(models.Model):
     class Meta:
         db_table = "meesho_inventory"
         ordering = ["serial_no"]
+        unique_together = [("business", "serial_no")]
         indexes = [
             models.Index(fields=["catalog_id"]),
             models.Index(fields=["product_id"]),
@@ -934,3 +939,117 @@ class ReturnDelivery(models.Model):
         if left <= self.CLAIM_WINDOW_DAYS - self.WARN_FROM_DAY:
             return "warning"
         return "ok"
+
+
+class GstTransaction(models.Model):
+    """
+    One line from Meesho's TCS sales / sales-return export — the data a GST
+    return is actually filed from.
+
+    Sales and returns share this table (see `kind`) because GST for a period is
+    output tax on sales *net of* returns, and every downstream figure needs both
+    together.
+
+    Note the grain: one sub-order can have several lines. Meesho appends
+    negative-value adjustment lines (quantity 0) for post-sale price
+    corrections, so lines must be summed rather than deduped by sub-order.
+    """
+
+    KIND_SALE   = "SALE"
+    KIND_RETURN = "RETURN"
+    KIND_CHOICES = [(KIND_SALE, "Sale"), (KIND_RETURN, "Sale return / cancellation")]
+
+    kind = models.CharField(max_length=10, choices=KIND_CHOICES, db_index=True)
+
+    # Period this line is filed in — taken from the sheet, not derived, so it
+    # matches whatever Meesho reported it under.
+    financial_year = models.IntegerField(db_index=True)
+    month_number   = models.IntegerField(db_index=True)
+
+    sub_order_num = models.CharField(max_length=100, db_index=True)
+    order_date    = models.DateField(null=True, blank=True)
+    manifest_date = models.DateField(null=True, blank=True)
+    # Returns only: when the cancellation/return happened.
+    cancel_return_date = models.DateField(null=True, blank=True)
+
+    hsn_code = models.CharField(max_length=20, blank=True, db_index=True)
+    quantity = models.IntegerField(default=0)
+    gst_rate = models.DecimalField(max_digits=6, decimal_places=2, default=0)
+
+    total_taxable_sale_value = models.DecimalField(max_digits=14, decimal_places=4, default=0)
+    tax_amount               = models.DecimalField(max_digits=14, decimal_places=4, default=0)
+    total_invoice_value      = models.DecimalField(max_digits=14, decimal_places=4, default=0)
+    taxable_shipping         = models.DecimalField(max_digits=14, decimal_places=4, default=0)
+
+    end_customer_state = models.CharField(max_length=100, blank=True, db_index=True)
+    supplier_gstin     = models.CharField(max_length=20, blank=True)
+    eco_tcs_gstin      = models.CharField(max_length=20, blank=True, help_text="Meesho's GSTIN as the e-commerce operator")
+    supplier_id        = models.CharField(max_length=50, blank=True)
+    sup_name           = models.CharField(max_length=255, blank=True)
+
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+
+    business = models.ForeignKey(
+        "accounts.Business", on_delete=models.PROTECT,
+    )
+
+    class Meta:
+        db_table = "gst_transactions"
+        ordering = ["-financial_year", "-month_number", "sub_order_num"]
+        indexes = [
+            models.Index(fields=["business", "financial_year", "month_number", "kind"]),
+            models.Index(fields=["business", "gst_rate"]),
+        ]
+
+    def __str__(self):
+        return f"{self.kind} {self.sub_order_num} @{self.gst_rate}%"
+
+    @property
+    def signed_taxable(self):
+        """Returns reduce the period's taxable value, so they carry a negative sign."""
+        v = self.total_taxable_sale_value or 0
+        return -v if self.kind == self.KIND_RETURN else v
+
+    @property
+    def signed_tax(self):
+        v = self.tax_amount or 0
+        return -v if self.kind == self.KIND_RETURN else v
+
+
+class GstInvoiceDetail(models.Model):
+    """
+    One row of Meesho's "Tax invoice details" export: the invoice/credit-note
+    number issued for a sub-order, with its HSN and product description.
+
+    Kept separate from GstTransaction because the grain differs — a sub-order
+    can have both an INVOICE and a later CREDIT NOTE, each with its own
+    document number. Used to put an invoice number and product name against
+    the tax lines, and to cross-check the HSN actually invoiced.
+    """
+    doc_type      = models.CharField(max_length=30, db_index=True,
+                                     help_text="INVOICE / CREDIT NOTE / CREDIT_DISCOUNT / …")
+    order_date    = models.DateTimeField(null=True, blank=True)
+    suborder_no   = models.CharField(max_length=100, db_index=True)
+    product_description = models.TextField(blank=True)
+    hsn           = models.CharField(max_length=20, blank=True, db_index=True)
+    invoice_no    = models.CharField(max_length=100, db_index=True)
+
+    # Derived from order_date so an upload can replace exactly one period.
+    period_year  = models.IntegerField(db_index=True)
+    period_month = models.IntegerField(db_index=True)
+
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+
+    business = models.ForeignKey(
+        "accounts.Business", on_delete=models.PROTECT,
+    )
+
+    class Meta:
+        db_table = "gst_invoice_details"
+        ordering = ["-order_date"]
+        # (sub-order, document no) is unique in Meesho's export — a sub-order
+        # may appear twice, but never twice under the same document.
+        unique_together = [("business", "suborder_no", "invoice_no")]
+
+    def __str__(self):
+        return f"{self.doc_type} {self.invoice_no} ({self.suborder_no})"

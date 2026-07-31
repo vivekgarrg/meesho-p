@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { API, C, S, btn } from "../../App";
 import { useDateFilter } from "../../contexts/DateFilterContext";
 import {
@@ -11,6 +11,8 @@ import DeleteIcon from "@mui/icons-material/Delete";
 import EditIcon from "@mui/icons-material/Edit";
 import ReceiptLongIcon from "@mui/icons-material/ReceiptLong";
 import LocalShippingIcon from "@mui/icons-material/LocalShipping";
+import DownloadIcon from "@mui/icons-material/Download";
+import UploadFileIcon from "@mui/icons-material/UploadFile";
 
 const todayStr = () => new Date().toISOString().slice(0, 10);
 
@@ -156,6 +158,11 @@ export function ExpensesTab() {
   const [tForm, setTForm] = useState({ date: todayStr(), amount: "", note: "" });
   const [tSaving, setTSaving] = useState(false);
 
+  const [exporting, setExporting] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [sheetMsg, setSheetMsg] = useState(null);
+  const fileRef = useRef(null);
+
   const dateParam = (() => {
     const p = new URLSearchParams();
     if (range.date_from) p.set("date_from", range.date_from);
@@ -181,6 +188,71 @@ export function ExpensesTab() {
   }, [dateParam]);
 
   useEffect(() => { load(); }, [load]);
+
+  // Fetched as a blob rather than navigating to the URL: auth is a JWT held in
+  // JS, and a plain link navigation wouldn't carry the Authorization header.
+  const handleExport = async () => {
+    setExporting(true);
+    setSheetMsg(null);
+    try {
+      const res = await fetch(`${API}/expenses/export/${dateParam}`);
+      if (!res.ok) {
+        setSheetMsg({ type: "error", text: "Could not export the expense sheet." });
+        return;
+      }
+      const blob = await res.blob();
+      const cd = res.headers.get("Content-Disposition") || "";
+      const named = /filename="?([^"]+)"?/.exec(cd);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = named ? named[1] : "expenses.xlsx";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      const n = res.headers.get("X-Expense-Rows");
+      const t = res.headers.get("X-Transport-Rows");
+      setSheetMsg({
+        type: "success",
+        text: `Exported ${n ?? "?"} expense line(s) and ${t ?? "?"} transport charge(s) for ${periodLabel}.`,
+      });
+    } catch {
+      setSheetMsg({ type: "error", text: "Could not export the expense sheet." });
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const handleImport = async (file) => {
+    if (!file) return;
+    setImporting(true);
+    setSheetMsg(null);
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      const res = await fetch(`${API}/expenses/import/`, { method: "POST", body: form });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        setSheetMsg({ type: "error", text: data.error || "Import failed." });
+        return;
+      }
+      const bits = [
+        `${data.invoices_created} invoice(s) added`,
+        `${data.invoices_updated} updated`,
+        `${data.items_written} line item(s) written`,
+        `${data.transport_created} transport charge(s) added`,
+        `${data.transport_updated} updated`,
+      ];
+      if (data.skipped_rows) bits.push(`${data.skipped_rows} row(s) skipped`);
+      setSheetMsg({ type: "success", text: `Imported — ${bits.join(", ")}.`, warnings: data.warnings });
+      load();
+    } catch {
+      setSheetMsg({ type: "error", text: "Network error during import." });
+    } finally {
+      setImporting(false);
+    }
+  };
 
   const deleteInvoice = async (id) => {
     if (!window.confirm("Delete this invoice?")) return;
@@ -220,9 +292,55 @@ export function ExpensesTab() {
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
           <span style={{ fontSize: 12, color: C.gray400 }}>{periodLabel}</span>
+          <Tooltip title="Download the current period as an Excel sheet you can edit and re-import">
+            <span>
+              <button onClick={handleExport} disabled={exporting} style={{ ...btn("ghostOrange", "md"), opacity: exporting ? 0.6 : 1 }}>
+                {exporting
+                  ? <CircularProgress size={13} style={{ color: C.orange }} />
+                  : <DownloadIcon style={{ fontSize: 16, verticalAlign: "-3px" }} />}
+                &nbsp;Export sheet
+              </button>
+            </span>
+          </Tooltip>
+          <Tooltip title="Upload an edited export — rows keep their IDs, so they update instead of duplicating">
+            <span>
+              <button onClick={() => fileRef.current?.click()} disabled={importing} style={{ ...btn("ghost", "md"), opacity: importing ? 0.6 : 1 }}>
+                {importing
+                  ? <CircularProgress size={13} style={{ color: C.gray600 }} />
+                  : <UploadFileIcon style={{ fontSize: 16, verticalAlign: "-3px" }} />}
+                &nbsp;Import sheet
+              </button>
+            </span>
+          </Tooltip>
+          <input
+            ref={fileRef} type="file" accept=".xlsx,.xls" style={{ display: "none" }}
+            onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; handleImport(f); }}
+          />
           <button onClick={() => { setEditing(null); setDialogOpen(true); }} style={btn("primary", "md")}>+ New Invoice</button>
         </div>
       </div>
+
+      {/* Export / import result */}
+      {sheetMsg && (
+        <div style={{
+          padding: "12px 18px", borderRadius: 10, fontSize: 13, fontWeight: 500,
+          background: sheetMsg.type === "success" ? "#ECFDF5" : "#FFF1F2",
+          color:      sheetMsg.type === "success" ? C.green : C.red,
+          border: `1px solid ${sheetMsg.type === "success" ? "#A7F3D0" : "#FECDD3"}`,
+          display: "flex", alignItems: "flex-start", gap: 8,
+        }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            {sheetMsg.text}
+            {!!sheetMsg.warnings?.length && (
+              <ul style={{ margin: "6px 0 0 18px", fontWeight: 400 }}>
+                {sheetMsg.warnings.map((w, i) => <li key={i}>{w}</li>)}
+              </ul>
+            )}
+          </div>
+          <button onClick={() => setSheetMsg(null)}
+            style={{ background: "none", border: "none", cursor: "pointer", color: "inherit", fontSize: 16, lineHeight: 1 }}>×</button>
+        </div>
+      )}
 
       {/* Summary cards */}
       {summary && (

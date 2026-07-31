@@ -77,6 +77,8 @@ urlpatterns = [
     path("expenses/transport/",             views.transport_charges_list, name="transport_charges_list"),
     path("expenses/transport/<int:charge_id>/", views.transport_charge_detail, name="transport_charge_detail"),
     path("expenses/summary/",               views.expenses_summary,       name="expenses_summary"),
+    path("expenses/export/",                views.expenses_export,        name="expenses_export"),
+    path("expenses/import/",                views.expenses_import,        name="expenses_import"),
     # Product Photography AI
     path("product-photos/generate/", views.generate_product_images, name="generate_product_images"),
     # Meesho Inventory
@@ -91,6 +93,11 @@ urlpatterns = [
     path("returns/upload/",             views.return_deliveries_upload, name="return_deliveries_upload"),
     path("returns/lookup/",             views.return_delivery_lookup,   name="return_delivery_lookup"),
     path("returns/<int:pk>/",           views.return_delivery_detail,   name="return_delivery_detail"),
+    # GST — monthly liability from Meesho TCS exports
+    path("gst/upload/",      views.gst_upload,      name="gst_upload"),
+    path("gst/periods/",     views.gst_periods,     name="gst_periods"),
+    path("gst/summary/",     views.gst_summary,     name="gst_summary"),
+    path("gst/mismatches/",  views.gst_mismatches,  name="gst_mismatches"),
     # Label packing
     path("labels/orders/<str:order_id>/pack/", views.label_order_pack, name="label_order_pack"),
     path("labels/bulk-pack/",       views.label_bulk_pack,     name="label_bulk_pack"),
