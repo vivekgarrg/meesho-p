@@ -16,6 +16,7 @@ import concurrent.futures
 from PIL import Image
 from .helpers.helper import status_wise_summary
 from .permissions import get_authorized_business
+from .helpers.label_pdf import extract_all_pages
 
 from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, PurchaseBill, PurchaseItem, BlockedCustomer, InventoryAdjustment, ConsumableItem, ConsumablePurchase, ConsumableUsage, InventoryLog, MeeshoInventory, MeeshoPriceUpdate, ExpenseInvoice, ExpenseInvoiceItem, TransportCharge, PackedStockEvent, EstimatedProfitOrder, ReturnDelivery, GstTransaction, GstInvoiceDetail
 from .serializers import (
@@ -480,7 +481,10 @@ def compute_order_net(payment_rows, sku_final_price, sku_packaging_price, quanti
 
     purchase_cost  = Decimal(str(sku_item_price or 0)) * qty   # item_cost × qty
     packaging_cost = Decimal(str(sku_packaging_price or 0))    # fixed per order, not × qty
-    tax_cost       = ( purchase_cost * Decimal(str(sku_tax_percent or 0)) / Decimal("100")) * qty
+    # Tax applies to the purchase value, which already includes × qty — so the
+    # rate must NOT be multiplied by qty a second time. (It used to be, which
+    # squared the quantity and overstated cost on every multi-unit order.)
+    tax_cost       = purchase_cost * Decimal(str(sku_tax_percent or 0)) / Decimal("100")
 
     c = _classify_rows(payment_rows)
 
@@ -1868,7 +1872,9 @@ def _compute_estimated_profit_summary(business, date_from=None, date_to=None):
         tax_pct = Decimal(str(tax_pct or 0))
 
         purchase_cost = item_price * qty_d
-        tax_cost = (purchase_cost * tax_pct / Decimal("100")) * qty_d
+        # purchase_cost already carries × qty, so the rate must not be
+        # multiplied by qty again — same fix as compute_order_net().
+        tax_cost = purchase_cost * tax_pct / Decimal("100")
 
         if claim_approved:
             bucket = "claim"
@@ -3897,82 +3903,74 @@ def upload_labels_pdf(request, business_id):
     db_rows        = []   # parsed dicts ready for LabelOrder.update_or_create
     total_pages    = 0
 
+    extract_meta = {}
     try:
-        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-            total_pages = len(pdf.pages)
+        # Page extraction (pdfminer layout + table detection) is the expensive
+        # part of an upload and is independent per page, so it runs across a
+        # process pool for larger batches. Field parsing below is unchanged and
+        # still runs here, serially — there is only one parser either way.
+        extracted, extract_meta = extract_all_pages(pdf_bytes)
+        total_pages = extract_meta["total_pages"]
 
-            for page_num, page in enumerate(pdf.pages, 1):
-                pl_heights.append(page.height)
+        for page_num, pg in enumerate(extracted, 1):
+            pl_heights.append(pg["height"])
+            crop_y_list.append(pg["crop_y"])
 
-                # ── Locate TAX INVOICE separator ─────────────────────────────
-                words  = page.extract_words()
-                crop_y = page.height * 0.54
-                for wi in range(len(words) - 1):
-                    if (words[wi]["text"].upper() == "TAX"
-                            and words[wi + 1]["text"].upper() == "INVOICE"):
-                        crop_y = max(0.0, words[wi]["top"] - 6)
-                        break
-                crop_y_list.append(crop_y)
+            tables    = pg["tables"]
+            full_text = pg["full_text"]
 
-                # ── Extract text and tables ───────────────────────────────────
-                # IMPORTANT: call extract_tables() and extract_text() on the
-                # original page BEFORE any crop() calls — pdfplumber's internal
-                # PDF object cache can be disrupted by crop() in some versions.
-                tables    = page.extract_tables() or []
-                full_text = page.extract_text() or ""
+            # Derive label-only text by splitting at "TAX INVOICE"
+            tax_pos    = full_text.upper().find("TAX INVOICE")
+            label_text = full_text[:tax_pos].strip() if tax_pos > 0 else full_text
 
-                # Derive label-only text by splitting at "TAX INVOICE"
-                tax_pos    = full_text.upper().find("TAX INVOICE")
-                label_text = full_text[:tax_pos].strip() if tax_pos > 0 else full_text
+            # ── Parse all fields via helper ───────────────────────────────
+            parsed = _parse_label_page(label_text, full_text, tables)
 
-                # ── Parse all fields via helper ───────────────────────────────
-                parsed = _parse_label_page(label_text, full_text, tables)
+            # ── Accumulate SKU analytics ──────────────────────────────────
+            sku, qty = parsed["sku"], parsed["qty"]
+            if sku:
+                if sku not in sku_data:
+                    sku_data[sku] = {"count": 0, "total_qty": 0, "max_qty": 0, "high_qty_orders": 0}
+                sku_data[sku]["count"]    += 1
+                sku_data[sku]["total_qty"] += qty
+                sku_data[sku]["max_qty"]   = max(sku_data[sku]["max_qty"], qty)
+                if qty > 1:
+                    sku_data[sku]["high_qty_orders"] += 1
 
-                # ── Accumulate SKU analytics ──────────────────────────────────
-                sku, qty = parsed["sku"], parsed["qty"]
-                if sku:
-                    if sku not in sku_data:
-                        sku_data[sku] = {"count": 0, "total_qty": 0, "max_qty": 0, "high_qty_orders": 0}
-                    sku_data[sku]["count"]    += 1
-                    sku_data[sku]["total_qty"] += qty
-                    sku_data[sku]["max_qty"]   = max(sku_data[sku]["max_qty"], qty)
-                    if qty > 1:
-                        sku_data[sku]["high_qty_orders"] += 1
+            page_details.append({
+                "page":             page_num,
+                "sku":              sku,
+                "qty":              qty,
+                "courier":          parsed["courier_name"],
+                "awb":              parsed["awb_number"],
+                "order_id":         parsed["order_id"],
+                "customer_name":    parsed["customer_name"],
+                "customer_pincode": parsed["customer_pincode"],
+                "customer_address": parsed["customer_address"],
+                "customer_city":    parsed["customer_city"],
+                "customer_state":   parsed["customer_state"],
+            })
 
-                page_details.append({
-                    "page":             page_num,
-                    "sku":              sku,
-                    "qty":              qty,
-                    "courier":          parsed["courier_name"],
-                    "awb":              parsed["awb_number"],
-                    "order_id":         parsed["order_id"],
-                    "customer_name":    parsed["customer_name"],
-                    "customer_pincode": parsed["customer_pincode"],
-                    "customer_address": parsed["customer_address"],
-                    "customer_city":    parsed["customer_city"],
-                    "customer_state":   parsed["customer_state"],
+            # ── Queue DB row (only if we have an order_id) ────────────────
+            if parsed["order_id"]:
+                db_rows.append({
+                    "order_id":        parsed["order_id"],
+                    "customer_name":   parsed["customer_name"],
+                    "customer_address":parsed["customer_address"],
+                    "customer_city":   parsed["customer_city"],
+                    "customer_state":  parsed["customer_state"],
+                    "customer_pincode":parsed["customer_pincode"],
+                    "courier_name":    parsed["courier_name"],
+                    "awb_number":      parsed["awb_number"],
+                    "payment_type":    parsed["payment_type"],
+                    "pickup_date":     parsed["pickup_date"],
+                    "sku":             parsed["sku"],
+                    "size":            parsed["size"],
+                    "qty":             parsed["qty"],
+                    "color":           parsed["color"],
+                    "order_date":      parsed["order_date"],
+                    "uploaded_date":   today,
                 })
-
-                # ── Queue DB row (only if we have an order_id) ────────────────
-                if parsed["order_id"]:
-                    db_rows.append({
-                        "order_id":        parsed["order_id"],
-                        "customer_name":   parsed["customer_name"],
-                        "customer_address":parsed["customer_address"],
-                        "customer_city":   parsed["customer_city"],
-                        "customer_state":  parsed["customer_state"],
-                        "customer_pincode":parsed["customer_pincode"],
-                        "courier_name":    parsed["courier_name"],
-                        "awb_number":      parsed["awb_number"],
-                        "payment_type":    parsed["payment_type"],
-                        "pickup_date":     parsed["pickup_date"],
-                        "sku":             parsed["sku"],
-                        "size":            parsed["size"],
-                        "qty":             parsed["qty"],
-                        "color":           parsed["color"],
-                        "order_date":      parsed["order_date"],
-                        "uploaded_date":   today,
-                    })
 
     except Exception as exc:
         return Response({"error": f"Could not parse PDF: {exc}"},
@@ -3984,26 +3982,53 @@ def upload_labels_pdf(request, business_id):
     # but uploaded_date stays untouched — so orders remain on their original
     # day and don't "move" when the same order appears in a later batch.
     #
-    # Note: create_defaults (Django 5.0+) is not available; we use
-    # get_or_create + filter().update() which achieves the same semantics
-    # on Django 4.2.
+    # Written in bulk: one SELECT for what already exists, then one bulk_create
+    # and one bulk_update. The previous row-at-a-time get_or_create + update did
+    # two queries per label, which dominated the non-parsing time of a large
+    # batch. Semantics are unchanged.
     saved = updated = 0
-    with transaction.atomic():
+    if db_rows:
+        # Last occurrence wins if the same order appears twice in one PDF —
+        # matching the old loop, where the later row's update ran last.
+        by_id = {}
         for row in db_rows:
-            oid         = row.pop("order_id")
-            upload_date = row.pop("uploaded_date")  # only used on first INSERT
+            by_id[row["order_id"]] = row
 
-            _, created = LabelOrder.objects.get_or_create(
-                order_id=oid,
-                business=business,
-                defaults={"uploaded_date": upload_date, **row},
+        with transaction.atomic():
+            existing_ids = set(
+                LabelOrder.objects
+                .filter(business=business, order_id__in=list(by_id.keys()))
+                .values_list("order_id", flat=True)
             )
-            if created:
-                saved += 1
-            else:
-                # Refresh all data fields — but leave uploaded_date alone
-                LabelOrder.objects.filter(order_id=oid, business=business).update(**row)
-                updated += 1
+
+            to_create, to_update = [], []
+            for oid, row in by_id.items():
+                data = {k: v for k, v in row.items() if k not in ("order_id", "uploaded_date")}
+                if oid in existing_ids:
+                    # uploaded_date deliberately absent: an order keeps the day
+                    # it first arrived and must not move to a later batch.
+                    to_update.append(LabelOrder(order_id=oid, business=business, **data))
+                else:
+                    to_create.append(LabelOrder(
+                        order_id=oid, business=business,
+                        uploaded_date=row["uploaded_date"], **data,
+                    ))
+
+            if to_create:
+                LabelOrder.objects.bulk_create(to_create, batch_size=500)
+                saved = len(to_create)
+            if to_update:
+                LabelOrder.objects.bulk_update(
+                    to_update,
+                    [
+                        "customer_name", "customer_address", "customer_city",
+                        "customer_state", "customer_pincode", "courier_name",
+                        "awb_number", "payment_type", "pickup_date",
+                        "sku", "size", "qty", "color", "order_date",
+                    ],
+                    batch_size=500,
+                )
+                updated = len(to_update)
 
     # ── Resolve parent NAME (ParentItemPrice.item_id) for each child SKU ─────────
     # Use the human parent name (not the surrogate parent_id) so the upload
@@ -4277,6 +4302,8 @@ def label_orders_list(request, business_id):
     date_to     = request.GET.get("date_to", "")
     courier     = request.GET.get("courier", "")
     pay_type    = request.GET.get("payment_type", "")
+    search      = request.GET.get("q", "").strip()
+    sort        = (request.GET.get("sort") or "").strip()
 
     qs = LabelOrder.objects.filter(business=business)
 
@@ -4292,6 +4319,36 @@ def label_orders_list(request, business_id):
         qs = qs.filter(courier_name__iexact=courier)
     if pay_type:
         qs = qs.filter(payment_type__iexact=pay_type)
+    if search:
+        qs = qs.filter(
+            DQ(sku__icontains=search) |
+            DQ(order_id__icontains=search) |
+            DQ(awb_number__icontains=search) |
+            DQ(customer_name__icontains=search) |
+            DQ(customer_city__icontains=search) |
+            DQ(customer_pincode__icontains=search)
+        )
+
+    # Explicit sort, so the table's column headers can drive ordering. Unknown
+    # keys fall through to the model's own default (uploaded_date, courier).
+    _SORTS = {
+        "sku":      ("sku", "order_id"),
+        "-sku":     ("-sku", "order_id"),
+        "courier":  ("courier_name", "sku"),
+        "-courier": ("-courier_name", "sku"),
+        "qty":      ("qty", "sku"),
+        "-qty":     ("-qty", "sku"),
+        "date":     ("uploaded_date", "courier_name"),
+        "-date":    ("-uploaded_date", "courier_name"),
+        "name":     ("customer_name", "order_id"),
+        "-name":    ("-customer_name", "order_id"),
+        "city":     ("customer_city", "customer_name"),
+        "-city":    ("-customer_city", "customer_name"),
+        "order":    ("order_id",),
+        "-order":   ("-order_id",),
+    }
+    if sort in _SORTS:
+        qs = qs.order_by(*_SORTS[sort])
 
     total = qs.count()
     start = (page - 1) * page_size
@@ -4484,15 +4541,20 @@ def label_customer_history(request, business_id):
     business = get_authorized_business(request, business_id)
     name    = request.GET.get("name", "").strip()
     pincode = request.GET.get("pincode", "").strip()
+    address = request.GET.get("address", "").strip()
 
-    if not name and not pincode:
-        return Response({"error": "Provide at least name or pincode."}, status=400)
+    if not name and not pincode and not address:
+        return Response({"error": "Provide at least name, pincode or address."}, status=400)
 
     qs = LabelOrder.objects.filter(business=business)
     if name:
         qs = qs.filter(customer_name__iexact=name)
     if pincode:
         qs = qs.filter(customer_pincode=pincode)
+    # Address narrows a same-name match down to one household. Optional and
+    # additive, so existing name/pincode-only callers behave exactly as before.
+    if address:
+        qs = qs.filter(customer_address=address)
 
     label_list = list(qs.order_by("-uploaded_date").values())
     if not label_list:
@@ -8318,5 +8380,263 @@ def gst_mismatches(request, business_id):
             "lines_checked": checked,
             "lines_without_matching_sub_order": unmatched_suborder,
             "lines_on_unpriced_skus": unpriced_sku,
+        },
+    })
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Label customers — identity is name + the whole address, not the pincode alone
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _norm_customer_text(v):
+    """Collapse whitespace and case so 'A  B' and 'a b' group together."""
+    return " ".join((v or "").split()).strip().lower()
+
+
+def _customer_key(row):
+    """
+    Group key for one physical customer.
+
+    The older duplicate report keyed on (pincode, city, state), which lumped
+    together every unrelated household in a pincode. Identity here is the
+    person's name *plus* the full street address, so a genuine repeat buyer is
+    distinguished from a neighbour.
+    """
+    return (
+        _norm_customer_text(row.get("customer_name")),
+        _norm_customer_text(row.get("customer_address")),
+        _norm_customer_text(row.get("customer_city")),
+        _norm_customer_text(row.get("customer_state")),
+        (row.get("customer_pincode") or "").strip(),
+    )
+
+
+# Statuses grouped the way the rest of the app reads them.
+_CUST_RETURN_STATUSES    = {"RETURN", "RETURNED"}
+_CUST_RTO_STATUSES       = {"RTO", "RTO_COMPLETE", "RTO_LOCKED", "RTO_OFD"}
+_CUST_DELIVERED_STATUSES = {"DELIVERED", "DOOR_STEP_EXCHANGED"}
+
+
+def _customer_status_maps(business, order_ids):
+    """sub_order_no → (status, settlement, payment_date, qty) from the payment sheet."""
+    out = {}
+    if not order_ids:
+        return out
+    for p in (OrderPayment.objects
+              .filter(business=business, sub_order_no__in=order_ids)
+              .values("sub_order_no", "live_order_status", "final_settlement_amount",
+                      "payment_date", "quantity")
+              .iterator()):
+        cur = out.setdefault(p["sub_order_no"], {
+            "statuses": set(), "settlement": Decimal("0"),
+            "payment_date": None, "quantity": None,
+        })
+        if p["live_order_status"]:
+            cur["statuses"].add(p["live_order_status"].upper())
+        cur["settlement"] += Decimal(str(p["final_settlement_amount"] or 0))
+        if p["payment_date"] and (cur["payment_date"] is None or p["payment_date"] > cur["payment_date"]):
+            cur["payment_date"] = p["payment_date"]
+        if cur["quantity"] is None and p["quantity"]:
+            cur["quantity"] = p["quantity"]
+    return out
+
+
+def _classify_customer_status(statuses):
+    """One headline status per order, using the same precedence as the P&L."""
+    if statuses & _CUST_RETURN_STATUSES:
+        return "RETURN"
+    if statuses & _CUST_RTO_STATUSES:
+        return "RTO"
+    if statuses & _CUST_DELIVERED_STATUSES:
+        return "DELIVERED"
+    for s in statuses:
+        if "CANCEL" in s:
+            return "CANCELLED"
+    if statuses:
+        return sorted(statuses)[0]
+    return "PENDING"
+
+
+@api_view(["GET"])
+def label_customers(request, business_id):
+    """
+    Every customer seen in shipping labels, keyed on name + full address, with
+    their complete ordering record.
+
+    Query params:
+      date_from / date_to — restrict which customers appear (by label upload
+                            date); their history is always all-time, so a
+                            repeat buyer's full record is visible
+      q                   — search name / address / city / pincode / SKU
+      min_orders          — only customers with at least this many orders (default 1)
+      sort                — orders | qty | returns | return_rate | last | name
+      page / page_size
+    """
+    business = get_authorized_business(request, business_id)
+
+    date_from = request.GET.get("date_from", "").strip()
+    date_to   = request.GET.get("date_to", "").strip()
+    search    = _norm_customer_text(request.GET.get("q", ""))
+    sort      = (request.GET.get("sort") or "orders").strip().lower()
+    try:
+        min_orders = max(1, int(request.GET.get("min_orders", 1)))
+    except (TypeError, ValueError):
+        min_orders = 1
+    try:
+        page = max(1, int(request.GET.get("page", 1)))
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        page_size = min(200, max(1, int(request.GET.get("page_size", 40))))
+    except (TypeError, ValueError):
+        page_size = 40
+
+    _FIELDS = ("order_id", "customer_name", "customer_address", "customer_city",
+               "customer_state", "customer_pincode", "sku", "size", "qty",
+               "courier_name", "awb_number", "payment_type", "order_date",
+               "uploaded_date")
+
+    all_rows = list(LabelOrder.objects.filter(business=business).values(*_FIELDS))
+
+    # Which customers fall inside the requested window — their history stays
+    # all-time so you can see everything they've ever ordered.
+    in_window = set()
+    if date_from or date_to:
+        for r in all_rows:
+            d = r["uploaded_date"]
+            if date_from and (not d or str(d) < date_from):
+                continue
+            if date_to and (not d or str(d) > date_to):
+                continue
+            in_window.add(_customer_key(r))
+    else:
+        in_window = None   # no window filter
+
+    groups = {}
+    for r in all_rows:
+        key = _customer_key(r)
+        if in_window is not None and key not in in_window:
+            continue
+        groups.setdefault(key, []).append(r)
+
+    if not groups:
+        return Response({"total": 0, "page": page, "page_size": page_size, "results": [],
+                         "totals": {"customers": 0, "orders": 0, "repeat_customers": 0}})
+
+    status_map = _customer_status_maps(
+        business, [r["order_id"] for rows in groups.values() for r in rows]
+    )
+    blocked_set = set(
+        BlockedCustomer.objects.filter(business=business, is_active=True)
+        .values_list("customer_name", "customer_pincode")
+    )
+
+    # SKU → parent name, so the customer view speaks the same language as the
+    # labels table.
+    all_skus = {r["sku"] for rows in groups.values() for r in rows if r["sku"]}
+    sku_to_parent = dict(
+        FinalPrice.objects.filter(business=business, sku_id__in=all_skus)
+        .select_related("parent").values_list("sku_id", "parent__item_id")
+    ) if all_skus else {}
+
+    customers = []
+    for key, rows in groups.items():
+        rows.sort(key=lambda r: (str(r["uploaded_date"] or ""), r["order_id"]), reverse=True)
+        newest = rows[0]
+
+        counts = {"DELIVERED": 0, "RETURN": 0, "RTO": 0, "CANCELLED": 0, "PENDING": 0, "OTHER": 0}
+        total_qty = 0
+        settlement = Decimal("0")
+        orders = []
+        for r in rows:
+            info = status_map.get(r["order_id"], {})
+            st = _classify_customer_status(info.get("statuses") or set())
+            counts[st if st in counts else "OTHER"] += 1
+            qty = r["qty"] or info.get("quantity") or 1
+            total_qty += qty
+            settlement += Decimal(str(info.get("settlement") or 0))
+            orders.append({
+                "order_id":     r["order_id"],
+                "sku":          r["sku"],
+                "parent_sku":   sku_to_parent.get(r["sku"]) or None,
+                "size":         r["size"],
+                "qty":          qty,
+                "status":       st,
+                "courier_name": r["courier_name"],
+                "awb_number":   r["awb_number"],
+                "payment_type": r["payment_type"],
+                "order_date":   str(r["order_date"]) if r["order_date"] else None,
+                "label_date":   str(r["uploaded_date"]) if r["uploaded_date"] else None,
+                "payment_date": str(info["payment_date"]) if info.get("payment_date") else None,
+                "settlement":   str(Decimal(str(info.get("settlement") or 0)).quantize(Decimal("0.01"))),
+            })
+
+        n = len(rows)
+        if n < min_orders:
+            continue
+
+        bad = counts["RETURN"] + counts["RTO"]
+        settled = counts["DELIVERED"] + bad
+        customers.append({
+            "customer_name":    newest["customer_name"],
+            "customer_address": newest["customer_address"],
+            "customer_city":    newest["customer_city"],
+            "customer_state":   newest["customer_state"],
+            "customer_pincode": newest["customer_pincode"],
+            "order_count":      n,
+            "total_qty":        total_qty,
+            "delivered":        counts["DELIVERED"],
+            "returned":         counts["RETURN"],
+            "rto":              counts["RTO"],
+            "cancelled":        counts["CANCELLED"],
+            "pending":          counts["PENDING"],
+            # Share of *concluded* orders that came back — pending ones would
+            # otherwise flatter the rate.
+            "return_rate":      round(bad / settled, 4) if settled else 0.0,
+            "net_settlement":   str(settlement.quantize(Decimal("0.01"))),
+            "first_ordered":    str(min(r["uploaded_date"] for r in rows if r["uploaded_date"])) if any(r["uploaded_date"] for r in rows) else None,
+            "last_ordered":     str(max(r["uploaded_date"] for r in rows if r["uploaded_date"])) if any(r["uploaded_date"] for r in rows) else None,
+            "distinct_skus":    sorted({r["sku"] for r in rows if r["sku"]}),
+            "is_blocked":       (newest["customer_name"], newest["customer_pincode"]) in blocked_set,
+            "orders":           orders,
+        })
+
+    if search:
+        def hit(c):
+            hay = " ".join([
+                _norm_customer_text(c["customer_name"]),
+                _norm_customer_text(c["customer_address"]),
+                _norm_customer_text(c["customer_city"]),
+                _norm_customer_text(c["customer_state"]),
+                (c["customer_pincode"] or "").lower(),
+                " ".join(s.lower() for s in c["distinct_skus"]),
+            ])
+            return search in hay
+        customers = [c for c in customers if hit(c)]
+
+    sorters = {
+        "orders":      lambda c: (-c["order_count"], c["customer_name"] or ""),
+        "qty":         lambda c: (-c["total_qty"], c["customer_name"] or ""),
+        "returns":     lambda c: (-(c["returned"] + c["rto"]), -c["order_count"]),
+        "return_rate": lambda c: (-c["return_rate"], -c["order_count"]),
+        "last":        lambda c: (c["last_ordered"] or "", ),
+        "name":        lambda c: (_norm_customer_text(c["customer_name"]), ),
+    }
+    key_fn = sorters.get(sort, sorters["orders"])
+    customers.sort(key=key_fn, reverse=(sort == "last"))
+
+    total = len(customers)
+    start = (page - 1) * page_size
+    return Response({
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "sort": sort,
+        "results": customers[start:start + page_size],
+        "totals": {
+            "customers": total,
+            "orders": sum(c["order_count"] for c in customers),
+            "repeat_customers": sum(1 for c in customers if c["order_count"] > 1),
+            "blocked": sum(1 for c in customers if c["is_blocked"]),
         },
     })

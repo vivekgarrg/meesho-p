@@ -44,6 +44,7 @@ urlpatterns = [
     path("labels/summary/",          views.label_couriers_summary,    name="label_couriers_summary"),
     path("labels/duplicates/",       views.label_duplicate_customers, name="label_duplicate_customers"),
     path("labels/customer-history/", views.label_customer_history,    name="label_customer_history"),
+    path("labels/customers/",        views.label_customers,           name="label_customers"),
     # Fraud & Blocked Customers
     path("fraud-customers/",                  views.fraud_customers,          name="fraud_customers"),
     path("blocked-customers/",                views.blocked_customers_list,   name="blocked_customers_list"),

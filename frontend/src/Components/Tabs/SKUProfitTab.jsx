@@ -454,9 +454,14 @@ function SKUDetailModal({ sku, months, initialRange, initialMonth, onClose }) {
   const nOther = Number(d.other_count || 0);
   const nTotal = Number(d.order_count || 0) || (nDel + nRet + nRTO + nExchange + nClaim + nOther);
   const delQty = Number(d.delivered_quantity || 0);
-  const delCost = Number(d.delivered_purchase_cost || 0);
+  // Cost shown must be the ALL-IN cost the backend actually deducted
+  // (item + packaging + GST). Using the raw item cost understated both this
+  // column and the gross by exactly the packaging + GST.
+  const delItemCost = Number(d.delivered_purchase_cost || 0);              // item × qty, ex-tax, ex-packaging
+  const delCost = Number(d.delivered_final_purchase_cost ?? delItemCost);  // item + packaging + GST
   const delNet = Number(d.delivered_profit || 0);
-  const delGross = delNet + delCost;
+  // Prefer the settlement the backend summed; fall back to profit + cost.
+  const delGross = Number(d.delivered_total_settlement ?? (delNet + delCost));
   const retNet = Number(d.return_loss || 0);
   const rtoNet = Number(d.rto_loss || 0);
   const exchNet = Number(d.exchange_loss || 0); // fix: was exchange_net (always 0)
@@ -502,7 +507,7 @@ function SKUDetailModal({ sku, months, initialRange, initialMonth, onClose }) {
   }));
 
   const settlementRows = [
-    { ...STATUS.delivered, count: nDel, qty: delQty, gross: delGross, cost: delCost > 0 ? -delCost : null, net: delNet, note: `${delQty} units`, show: nDel > 0, netColor: "#059669" },
+    { ...STATUS.delivered, count: nDel, qty: delQty, gross: delGross, cost: delCost > 0 ? -delCost : null, net: delNet, note: `${delQty} units · cost incl. pkg + GST`, show: nDel > 0, netColor: "#059669" },
     { ...STATUS.return, count: nRet, qty: null, gross: null, cost: null, net: retNet, note: "pkg already deducted", show: nRet > 0, netColor: retNet >= 0 ? "#64748B" : "#DC2626" },
     { ...STATUS.rto, count: nRTO, qty: null, gross: null, cost: null, net: rtoNet, note: "pkg already deducted", show: nRTO > 0, netColor: rtoNet >= 0 ? "#64748B" : "#D97706" },
     { ...STATUS.exchange, count: nExchange, qty: null, gross: null, cost: null, net: exchNet, note: "2×pkg deducted", show: nExchange > 0, netColor: exchNet >= 0 ? "#64748B" : "#2563EB" },
@@ -1289,7 +1294,9 @@ export function SKUAnalysisTab() {
             const skuRaw = raw[key];
             const delPft = Number(skuRaw.delivered_profit || 0);
             const delQty = Number(skuRaw.delivered_quantity || 0);
-            const delCost = Number(skuRaw.delivered_purchase_cost || 0);
+            // Same reasoning as the detail view: settlement = profit + the
+            // all-in cost that was deducted, not just the raw item cost.
+            const delCost = Number(skuRaw.delivered_final_purchase_cost ?? skuRaw.delivered_purchase_cost ?? 0);
             const avg_profit_per_piece = delQty > 0 ? delPft / delQty : null;
             const avg_settlement_per_piece = delQty > 0 ? (delPft + delCost) / delQty : null;
             return {
