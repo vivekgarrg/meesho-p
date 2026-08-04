@@ -136,30 +136,64 @@ function FormulaStep({ sign, label, value, color, note, bold, divider }) {
 
 /** Status outcome card — shows count + net for one order type */
 function OutcomeCard({ icon, label, count, rate, rateColor, netLabel, net, netColor, subStats }) {
+  // Layout note: this used to be a single flex row with the status name on the
+  // left and the net profit on the right. Once the cards narrowed, neither side
+  // could shrink and they overlapped — "DELIVERED" ran straight into the amount.
+  // Now the two labels share a header row of their own and the two figures sit
+  // on the row beneath, so they can never collide at any card width.
   return (
     <div style={{
-      ...T.card, flex: "1 1 180px", minWidth: 0, padding: "16px 18px",
-      borderLeft: `4px solid ${rateColor}`
+      ...T.card, flex: "1 1 210px", minWidth: 0, padding: "14px 16px",
+      borderLeft: `4px solid ${rateColor}`,
     }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
-        <div>
-          <p style={{ fontSize: 11, fontWeight: 700, color: C.gray400, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>
-            {icon} {label}
-          </p>
-          <p style={{ fontSize: 26, fontWeight: 800, fontFamily: "monospace", color: rateColor, lineHeight: 1 }}>
-            {count.toLocaleString()}
-          </p>
-          <p style={{ fontSize: 11, color: C.gray400, marginTop: 3 }}>orders · {rate}%</p>
-        </div>
-        <div style={{ textAlign: "right" }}>
-          <p style={{ fontSize: 10, color: C.gray400, marginBottom: 2 }}>{netLabel}</p>
-          <p style={{ fontSize: 16, fontWeight: 800, fontFamily: "monospace", color: netColor }}>{fmt(net)}</p>
-        </div>
+      {/* Row 1 — the two captions */}
+      <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 6 }}>
+        <p style={{
+          fontSize: 11, fontWeight: 700, color: C.gray400, textTransform: "uppercase",
+          letterSpacing: "0.06em", minWidth: 0, overflow: "hidden",
+          textOverflow: "ellipsis", whiteSpace: "nowrap",
+        }}>
+          {icon} {label}
+        </p>
+        <p style={{
+          fontSize: 10, color: C.gray400, marginLeft: "auto",
+          whiteSpace: "nowrap", flexShrink: 0,
+        }}>
+          {netLabel}
+        </p>
       </div>
+
+      {/* Row 2 — the two figures */}
+      <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 8 }}>
+        <p style={{
+          fontSize: 24, fontWeight: 800, fontFamily: "monospace", color: rateColor,
+          lineHeight: 1.05, minWidth: 0,
+        }}>
+          {Number(count || 0).toLocaleString()}
+        </p>
+        <p style={{
+          fontSize: 15, fontWeight: 800, fontFamily: "monospace", color: netColor,
+          marginLeft: "auto", whiteSpace: "nowrap", flexShrink: 0, lineHeight: 1.05,
+        }}>
+          {fmt(net)}
+        </p>
+      </div>
+
+      <p style={{ fontSize: 11, color: C.gray400, marginBottom: 8, whiteSpace: "nowrap" }}>
+        orders · {rate}%
+      </p>
+
       {subStats && subStats.map(({ label: sl, value: sv, color: sc }) => (
-        <div key={sl} style={{ display: "flex", justifyContent: "space-between", padding: "3px 0", borderTop: "1px solid #F8FAFC" }}>
-          <span style={{ fontSize: 11, color: C.gray400 }}>{sl}</span>
-          <span style={{ fontSize: 11, fontFamily: "monospace", fontWeight: 600, color: sc || C.gray600 }}>{sv}</span>
+        <div key={sl} style={{
+          display: "flex", justifyContent: "space-between", alignItems: "baseline",
+          gap: 8, padding: "3px 0", borderTop: "1px solid #F8FAFC",
+        }}>
+          <span style={{ fontSize: 11, color: C.gray400, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {sl}
+          </span>
+          <span style={{ fontSize: 11, fontFamily: "monospace", fontWeight: 600, color: sc || C.gray600, whiteSpace: "nowrap", flexShrink: 0 }}>
+            {sv}
+          </span>
         </div>
       ))}
     </div>
@@ -452,14 +486,18 @@ export function OverviewTab() {
 
         <div style={{ display: "flex", gap: 18, flexWrap: "wrap" }}>
           {
-            Object.keys(orders_summary_cards_data)?.map(key => {
+            // `Object.keys(undefined)` throws — the optional chain after the call
+            // guarded the wrong thing, so a profit response without
+            // order_summary took the whole page down.
+            Object.keys(orders_summary_cards_data || {}).map(key => {
               const title = key.split("_")[0].toLocaleUpperCase();
-              const data = orders_summary_cards_data[key];
+              const data = orders_summary_cards_data?.[key] || {};
               const color = data.net_profit_loss > 0 ? C.green : C.red
               const row = settlementRows.find(obj => obj.label.toLowerCase() === title.toLocaleLowerCase())
               const cardColor = row?.netColor;
               return (
                 <OutcomeCard
+                  key={key}
                   icon={row?.icon} label={title} count={data.order_count} rate={row?.rate} rateColor={cardColor}
                   netLabel="Net Profit" net={Number(data.net_profit_loss || 0)} netColor={color}
                   subStats={[
@@ -501,6 +539,19 @@ export function OverviewTab() {
             <FormulaStep sign="±" label="Compensation / Recovery" value={profit.total_compensation_recovery}
               color={Number(profit.total_compensation_recovery) >= 0 ? C.blue : C.red} />
             <FormulaStep sign="+" label="Referral Income" value={profit.total_referral_income} color={C.green} />
+            {/* Transportation is a business-level overhead. Shown whenever there
+                are charges, so the figure is never invisible: deducted when the
+                business has the switch on, listed for information when it doesn't. */}
+            {Number(profit.total_transport_charges || 0) !== 0 && (
+              profit.transport_charges_deducted ? (
+                <FormulaStep sign="−" label="Transportation Charges" value={profit.total_transport_charges}
+                  color={C.orange} note="daily transport recorded under Expenses" />
+              ) : (
+                <FormulaStep sign="·" label="Transportation Charges (not deducted)"
+                  value={profit.total_transport_charges} color={C.gray400}
+                  note="turn on 'Deduct transportation charges' in Business Profile to subtract this" />
+              )
+            )}
             <FormulaStep sign="=" label="NET P&L (Final)" value={netProfit}
               color={pos ? C.green : C.red} bold divider />
 

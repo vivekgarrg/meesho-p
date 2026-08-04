@@ -68,6 +68,35 @@ class NavVisibilitySetting(models.Model):
         return f"NavVisibility({len(self.visible_paths)} tabs)"
 
 
+class UserAccess(models.Model):
+    """
+    Per-user override of which areas of the app that person can reach.
+
+    One row per user, created on demand. An empty `visible_paths` means "no
+    override" — the user falls back to their business's rule, and then to the
+    global default. That distinction matters: an empty list has to mean
+    "unset" rather than "nothing visible", otherwise creating the row would
+    lock the user out of everything by accident.
+
+    Kept out of the User model so the auth table stays about authentication.
+    """
+
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="access")
+    visible_paths = models.JSONField(default=list, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey(
+        User, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="user_access_updates",
+    )
+
+    class Meta:
+        db_table = "user_access"
+        verbose_name_plural = "user access"
+
+    def __str__(self):
+        return f"Access for {self.user.username} ({len(self.visible_paths)} areas)"
+
+
 class Membership(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="memberships")
     business = models.ForeignKey(Business, on_delete=models.CASCADE, related_name="memberships")
@@ -87,3 +116,64 @@ class Membership(models.Model):
 
     def __str__(self):
         return f"{self.user.username} @ {self.business.name}"
+
+
+class BusinessProfile(models.Model):
+    """
+    Everything about a business beyond its name and membership list: statutory
+    identifiers, contact and address details, and the business-level switches
+    that change how its numbers are calculated.
+
+    Kept in its own table rather than piled onto Business so the identity of a
+    business (name, active flag, who created it) stays separate from its
+    editable profile and preferences. One row per business, created on demand.
+    """
+
+    business = models.OneToOneField(
+        Business, on_delete=models.CASCADE, related_name="profile",
+    )
+
+    # ── Identity ──────────────────────────────────────────────────────────
+    legal_name   = models.CharField(max_length=255, blank=True,
+                                    help_text="Registered name, if it differs from the display name")
+    gstin        = models.CharField(max_length=20, blank=True)
+    pan          = models.CharField(max_length=20, blank=True)
+    supplier_id  = models.CharField(max_length=50, blank=True,
+                                    help_text="Meesho supplier id for this business")
+
+    # ── Contact ───────────────────────────────────────────────────────────
+    contact_person = models.CharField(max_length=255, blank=True)
+    phone          = models.CharField(max_length=30, blank=True)
+    email          = models.EmailField(blank=True)
+
+    # ── Address ───────────────────────────────────────────────────────────
+    address_line1 = models.CharField(max_length=255, blank=True)
+    address_line2 = models.CharField(max_length=255, blank=True)
+    city          = models.CharField(max_length=100, blank=True)
+    state         = models.CharField(max_length=100, blank=True)
+    pincode       = models.CharField(max_length=10, blank=True)
+
+    # ── Calculation preferences ───────────────────────────────────────────
+    # When on, the period's transportation charges are subtracted from profit.
+    # Off by default so switching this on is an explicit, visible decision
+    # rather than something that silently changes existing numbers.
+    deduct_transport_charges = models.BooleanField(
+        default=False,
+        help_text="Subtract daily transportation charges from profit for this business",
+    )
+
+    # ── Access ────────────────────────────────────────────────────────────
+    # Which areas of the app this business shows. Empty = no override, so the
+    # global default applies (see UserAccess for why empty can't mean "none").
+    # A user's own override, if they have one, wins over this.
+    visible_paths = models.JSONField(default=list, blank=True)
+
+    notes      = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "business_profiles"
+
+    def __str__(self):
+        return f"Profile for {self.business.name}"

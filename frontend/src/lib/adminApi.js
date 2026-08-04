@@ -56,13 +56,23 @@ export const removeMember = (businessId, membershipId) =>
     method: "DELETE",
   });
 
-// ── Sidebar tab visibility (global) ─────────────────────────────────────────
-export const getNavVisibility = () => request("/api/auth/nav-visibility/");
+// ── Access control ──────────────────────────────────────────────────────────
+// Resolved for the signed-in user (optionally within one business).
+export const getNavVisibility = (businessId) =>
+  request(`/api/auth/nav-visibility/${businessId ? `?business=${businessId}` : ""}`);
 
-export const updateNavVisibility = (visiblePaths) =>
-  request("/api/auth/nav-visibility/", {
+// Every rule at every scope, plus the catalog of areas — for the admin screen.
+export const getNavAccess = () => request("/api/auth/nav-access/");
+
+/**
+ * Write one rule. `scope` is "global" | "business" | "user"; `targetId` is the
+ * business or user id (omit for global). An empty `visiblePaths` clears the rule,
+ * so that scope falls back to the next level up.
+ */
+export const saveNavAccess = ({ scope, targetId, visiblePaths }) =>
+  request("/api/auth/nav-access/", {
     method: "PUT",
-    body: JSON.stringify({ visible_paths: visiblePaths }),
+    body: JSON.stringify({ scope, target_id: targetId, visible_paths: visiblePaths }),
   });
 
 // ── Users ─────────────────────────────────────────────────────────────────

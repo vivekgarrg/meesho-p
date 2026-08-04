@@ -1,10 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { C, S, btn, SectionHeader, Tag, NAV_GROUPS, ALWAYS_VISIBLE_PATHS, useIsMobile } from "../../App";
+import { C, S, btn, SectionHeader, Tag, useIsMobile } from "../../App";
+import { NAV_GROUPS, ALWAYS_VISIBLE_PATHS } from "../../navConfig";
 import { useAuth } from "../../contexts/AuthContext";
+import { useAccess } from "../../contexts/AccessContext";
 import {
   listBusinesses, createBusiness, updateBusiness,
   listMembers, addMember, removeMember,
   listUsers, createUser, updateUser, deleteUser, updateUserBusinesses,
+  getNavAccess, saveNavAccess,
 } from "../../lib/adminApi";
 
 // Format an ISO timestamp as a readable local date/time (or a dash when absent).
@@ -567,55 +570,139 @@ function UsersSection({ businesses, onChanged, notify, currentUserId }) {
   );
 }
 
-// ── Sidebar tab visibility section ──────────────────────────────────────────
-function SidebarTabsSection({ notify }) {
-  const { navVisibility, updateNavVisibility, refreshNavVisibility } = useAuth();
+// ── Access control section ──────────────────────────────────────────────────
+// Three scopes, most specific wins: a user's own rule beats their business's
+// rule, which beats the global default. "No rule" is not the same as "no
+// areas" — an empty selection clears the rule and falls back to the next level.
 
-  // Flat list of every togglable nav item (skip the always-visible ones — they
-  // render as locked rows and are always included in what we save).
-  const allPaths = useMemo(
-    () => NAV_GROUPS.flatMap((g) => g.items).map((i) => i.path),
-    []
+const SCOPES = [
+  { id: "global",   label: "Everyone",   hint: "The default for every user in every business." },
+  { id: "business", label: "Businesses", hint: "Applies to everyone working in that business." },
+  { id: "user",     label: "Users",      hint: "Applies to one person, wherever they log in." },
+];
+
+const ALL_NAV_PATHS = NAV_GROUPS.flatMap((g) => g.items).map((i) => i.path);
+
+// Common starting points, so restricting someone to one job is a single click.
+const PRESETS = [
+  { label: "Everything", paths: () => ALL_NAV_PATHS },
+  { label: "Labels only", paths: () => ["/labels"] },
+  { label: "Labels + packing", paths: () => ["/labels", "/inventory-labels"] },
+  { label: "Analytics only", paths: () => ["/", "/sku-analysis", "/ads-analysis", "/estimated-profit"] },
+  { label: "Uploads only", paths: () => ["/upload"] },
+];
+
+/** A row in the Businesses / Users picker. */
+function TargetRow({ label, sub, configured, count, active, onClick }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        display: "flex", alignItems: "center", gap: 10, width: "100%", textAlign: "left",
+        padding: "9px 11px", borderRadius: 9, cursor: "pointer", minWidth: 0,
+        border: `1px solid ${active ? C.orange : C.border}`,
+        background: active ? C.orangeLight : C.white,
+        fontFamily: "inherit", marginBottom: 6,
+      }}
+    >
+      <span style={{ flex: 1, minWidth: 0 }}>
+        <span style={{
+          display: "block", fontSize: 13, fontWeight: 700,
+          color: active ? C.orange : C.gray800,
+          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+        }}>
+          {label}
+        </span>
+        {sub && (
+          <span style={{
+            display: "block", fontSize: 11, color: C.gray400, marginTop: 1,
+            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+          }}>
+            {sub}
+          </span>
+        )}
+      </span>
+      {configured
+        ? <Tag color="orange">{count} areas</Tag>
+        : <span style={{ fontSize: 10, color: C.gray400, fontWeight: 700, flexShrink: 0 }}>INHERITS</span>}
+    </button>
   );
-  const lockedPaths = useMemo(
-    () => allPaths.filter((p) => ALWAYS_VISIBLE_PATHS.includes(p)),
-    [allPaths]
-  );
+}
 
-  // Build the initial selection: when a config exists use it, otherwise start
-  // with everything checked (that mirrors the "all tabs visible" default).
-  const buildInitial = useCallback(() => {
-    if (navVisibility?.configured) return new Set(navVisibility.visiblePaths || []);
-    return new Set(allPaths);
-  }, [navVisibility, allPaths]);
+function AccessSection({ notify }) {
+  const isMobile = useIsMobile();
+  const { refreshAccess } = useAccess();
 
-  const [selected, setSelected] = useState(buildInitial);
+  const [data, setData] = useState(null);
+  const [scope, setScope] = useState("global");
+  const [targetId, setTargetId] = useState(null);
+  const [selected, setSelected] = useState(() => new Set());
+  const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [query, setQuery] = useState("");
 
-  useEffect(() => { setSelected(buildInitial()); }, [buildInitial]);
+  const load = useCallback(async () => {
+    try {
+      setData(await getNavAccess());
+    } catch (e) {
+      notify({ error: e.message });
+    }
+  }, [notify]);
+
+  useEffect(() => { load(); }, [load]);
+
+  // The rule currently being edited, whatever the scope.
+  const currentRule = useMemo(() => {
+    if (!data) return null;
+    if (scope === "global") return data.global;
+    const list = scope === "business" ? data.businesses : data.users;
+    return list.find((t) => t.id === targetId) || null;
+  }, [data, scope, targetId]);
+
+  // Reset the checkboxes whenever the target changes. An unconfigured target
+  // starts with everything checked, mirroring what that target sees today.
+  useEffect(() => {
+    if (!currentRule) { setSelected(new Set()); setDirty(false); return; }
+    setSelected(new Set(
+      currentRule.configured ? currentRule.visible_paths : ALL_NAV_PATHS
+    ));
+    setDirty(false);
+  }, [currentRule]);
 
   const isLocked = (path) => ALWAYS_VISIBLE_PATHS.includes(path);
-  const isChecked = (path) => isLocked(path) || selected.has(path);
 
   const toggle = (path) => {
-    if (isLocked(path)) return;
     setSelected((prev) => {
       const next = new Set(prev);
       next.has(path) ? next.delete(path) : next.add(path);
       return next;
     });
+    setDirty(true);
   };
 
-  const selectAll = () => setSelected(new Set(allPaths));
-  const clearAll = () => setSelected(new Set(lockedPaths));
+  const apply = (paths) => { setSelected(new Set(paths)); setDirty(true); };
 
-  const save = async () => {
-    // Always persist the locked paths so admins keep access to this screen.
-    const paths = [...new Set([...selected, ...lockedPaths])];
+  const toggleGroup = (group) => {
+    const paths = group.items.map((i) => i.path);
+    const allOn = paths.every((p) => selected.has(p));
+    setSelected((prev) => {
+      const next = new Set(prev);
+      paths.forEach((p) => (allOn ? next.delete(p) : next.add(p)));
+      return next;
+    });
+    setDirty(true);
+  };
+
+  const save = async (paths) => {
     setBusy(true);
     try {
-      await updateNavVisibility(paths);
-      notify({ notice: "Sidebar tabs updated — this applies to all users." });
+      await saveNavAccess({ scope, targetId, visiblePaths: paths });
+      await load();
+      // The rule may apply to whoever is signed in — re-resolve so the sidebar
+      // reflects the change immediately instead of after a reload.
+      await refreshAccess();
+      setDirty(false);
+      notify({ notice: paths.length ? "Access updated." : "Rule cleared — this scope now inherits." });
     } catch (e) {
       notify({ error: e.message });
     } finally {
@@ -623,79 +710,276 @@ function SidebarTabsSection({ notify }) {
     }
   };
 
-  const resetToAll = async () => {
-    if (!window.confirm("Show every tab to all users again?")) return;
-    setBusy(true);
-    try {
-      await updateNavVisibility([]); // empty = not configured = show everything
-      await refreshNavVisibility();
-      notify({ notice: "Reset — all tabs are now visible to everyone." });
-    } catch (e) {
-      notify({ error: e.message });
-    } finally {
-      setBusy(false);
-    }
-  };
+  const targetLabel =
+    scope === "global" ? "Everyone"
+      : currentRule ? (currentRule.name || currentRule.username)
+        : null;
 
-  const selectedCount = [...new Set([...selected, ...lockedPaths])].length;
+  const needsTarget = scope !== "global" && !currentRule;
+  const targetIsSuperAdmin = scope === "user" && currentRule?.role === "super_admin";
+
+  const targets = useMemo(() => {
+    if (!data) return [];
+    const q = query.trim().toLowerCase();
+    const list = scope === "business" ? data.businesses : data.users;
+    if (!q) return list;
+    return list.filter((t) => (t.name || t.username || "").toLowerCase().includes(q));
+  }, [data, scope, query]);
+
+  if (!data) {
+    return <div style={{ ...S.card, fontSize: 13, color: C.gray500 }}>Loading access rules…</div>;
+  }
+
+  const restrictedBusinesses = data.businesses.filter((b) => b.configured).length;
+  const restrictedUsers = data.users.filter((u) => u.configured).length;
 
   return (
-    <div style={S.card}>
-      <SectionHeader
-        title="Sidebar Tabs"
-        count={`${selectedCount}/${allPaths.length}`}
-        actions={
-          <>
-            <button onClick={selectAll} style={{ ...btn("ghost", "sm"), marginRight: 6 }}>Select all</button>
-            <button onClick={clearAll} style={{ ...btn("ghost", "sm"), marginRight: 6 }}>Clear</button>
-            <button onClick={save} disabled={busy} style={btn("primary", "sm")}>{busy ? "Saving…" : "Save changes"}</button>
-          </>
-        }
-      />
-      <p style={{ fontSize: 12, color: C.gray500, marginBottom: 4 }}>
-        Choose which tabs appear in the left sidebar. Your selection is applied to
-        <strong> every user</strong> across the whole app.
-      </p>
-      <p style={{ fontSize: 12, color: C.gray400, marginBottom: 16 }}>
-        {navVisibility?.configured
-          ? "A custom set is active. "
-          : "No custom set yet — all tabs are currently visible. "}
-        <button onClick={resetToAll} disabled={busy}
-          style={{ ...btn("ghost", "sm"), padding: "3px 10px" }}>Reset (show all)</button>
-      </p>
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))", gap: 16 }}>
-        {NAV_GROUPS.map((group) => (
-          <div key={group.label} style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: "12px 14px" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
-              <span style={{ width: 8, height: 8, borderRadius: "50%", background: group.color, display: "inline-block" }} />
-              <span style={{ fontSize: 11, fontWeight: 800, color: C.gray600, letterSpacing: "0.08em", textTransform: "uppercase" }}>
-                {group.label}
-              </span>
+      {/* Scope picker + what's configured right now */}
+      <div style={S.card}>
+        <SectionHeader
+          title="Access Control"
+          count={data.global.configured ? "custom default" : "open by default"}
+        />
+        <p style={{ fontSize: 12, color: C.gray500, marginBottom: 14, lineHeight: 1.6 }}>
+          Choose which areas of the app each business and each user can reach.
+          The most specific rule wins: <strong>a user's own rule</strong> beats
+          <strong> their business's rule</strong>, which beats
+          <strong> the default for everyone</strong>. Hidden areas are blocked on the
+          server too, not just removed from the sidebar.
+        </p>
+
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {SCOPES.map((sc) => {
+            const active = scope === sc.id;
+            const badge =
+              sc.id === "business" ? restrictedBusinesses
+                : sc.id === "user" ? restrictedUsers
+                  : null;
+            return (
+              <button
+                key={sc.id}
+                onClick={() => { setScope(sc.id); setTargetId(null); setQuery(""); }}
+                title={sc.hint}
+                style={{
+                  ...btn(active ? "primary" : "ghost", "md"),
+                  display: "flex", alignItems: "center", gap: 7,
+                }}
+              >
+                {sc.label}
+                {badge ? (
+                  <span style={{
+                    fontSize: 10, fontWeight: 800, padding: "1px 6px", borderRadius: 99,
+                    background: active ? "rgba(255,255,255,0.25)" : C.orangeLight,
+                    color: active ? "#fff" : C.orange,
+                  }}>
+                    {badge} restricted
+                  </span>
+                ) : null}
+              </button>
+            );
+          })}
+        </div>
+        <p style={{ fontSize: 11.5, color: C.gray400, marginTop: 10 }}>
+          {SCOPES.find((sc) => sc.id === scope)?.hint}
+        </p>
+      </div>
+
+      <div style={{
+        display: "grid",
+        gridTemplateColumns: isMobile || scope === "global" ? "1fr" : "minmax(0, 280px) minmax(0, 1fr)",
+        gap: 14, alignItems: "start",
+      }}>
+        {/* Target picker */}
+        {scope !== "global" && (
+          <div style={{ ...S.card, minWidth: 0 }}>
+            <div style={{ fontSize: 11, fontWeight: 800, color: C.gray600, letterSpacing: "0.07em", textTransform: "uppercase", marginBottom: 10 }}>
+              {scope === "business" ? "Select a business" : "Select a user"}
             </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-              {group.items.map((item) => {
-                const locked = isLocked(item.path);
-                return (
-                  <label key={item.path}
-                    style={{
-                      display: "flex", alignItems: "center", gap: 9,
-                      fontSize: 13, color: locked ? C.gray400 : C.gray700,
-                      cursor: locked ? "not-allowed" : "pointer",
-                      padding: "4px 6px", borderRadius: 7,
-                    }}
-                    title={locked ? "Always visible to super-admins" : undefined}>
-                    <input type="checkbox" checked={isChecked(item.path)} disabled={locked}
-                      onChange={() => toggle(item.path)} />
-                    <span style={{ fontSize: 14, width: 18, textAlign: "center" }}>{item.icon}</span>
-                    <span style={{ flex: 1 }}>{item.label}</span>
-                    {locked && <span style={{ fontSize: 10, color: C.gray400 }}>🔒</span>}
-                  </label>
-                );
-              })}
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder={scope === "business" ? "Search businesses…" : "Search users…"}
+              style={{ ...S.inp, marginBottom: 10, fontSize: 12 }}
+            />
+            <div style={{ maxHeight: 420, overflowY: "auto", margin: "0 -2px", padding: "0 2px" }}>
+              {targets.length === 0 && (
+                <p style={{ fontSize: 12, color: C.gray400 }}>Nothing matches that search.</p>
+              )}
+              {targets.map((t) => (
+                <TargetRow
+                  key={t.id}
+                  label={t.name || t.username}
+                  sub={
+                    scope === "user"
+                      ? [
+                          t.role === "super_admin" ? "Super admin · not restricted" : null,
+                          (t.businesses || []).length
+                            ? (t.businesses || []).map((b) => b.name).join(", ")
+                            : "No business assigned",
+                        ].filter(Boolean).join(" · ")
+                      : null
+                  }
+                  configured={t.configured}
+                  count={(t.visible_paths || []).length}
+                  active={t.id === targetId}
+                  onClick={() => setTargetId(t.id)}
+                />
+              ))}
             </div>
           </div>
-        ))}
+        )}
+
+        {/* Area matrix */}
+        <div style={{ ...S.card, minWidth: 0 }}>
+          {targetIsSuperAdmin ? (
+            <div style={{ padding: "26px 4px", textAlign: "center" }}>
+              <div style={{ fontSize: 26, marginBottom: 8 }}>🛡️</div>
+              <p style={{ fontSize: 14, fontWeight: 700, color: C.gray800, marginBottom: 6 }}>
+                {targetLabel} is a super admin
+              </p>
+              <p style={{ fontSize: 12.5, color: C.gray500, lineHeight: 1.6, maxWidth: 380, margin: "0 auto" }}>
+                Super admins are never restricted — they manage these rules, so limiting
+                one could lock them out of the screen needed to undo it. To restrict this
+                person, change their role to Business User under <strong>Users</strong> first.
+              </p>
+            </div>
+          ) : needsTarget ? (
+            <div style={{ padding: "26px 4px", textAlign: "center" }}>
+              <div style={{ fontSize: 26, marginBottom: 8 }}>{scope === "business" ? "🏢" : "👤"}</div>
+              <p style={{ fontSize: 13, color: C.gray500 }}>
+                Pick {scope === "business" ? "a business" : "a user"} to set what they can see.
+              </p>
+            </div>
+          ) : (
+            <>
+              <SectionHeader
+                title={`Areas for ${targetLabel}`}
+                count={`${selected.size}/${ALL_NAV_PATHS.length}`}
+                actions={
+                  <button
+                    onClick={() => save([...selected])}
+                    disabled={busy || !dirty}
+                    style={btn(dirty ? "primary" : "ghost", "sm")}
+                  >
+                    {busy ? "Saving…" : dirty ? "Save changes" : "Saved"}
+                  </button>
+                }
+              />
+
+              {/* Where this target's access comes from right now */}
+              <div style={{
+                display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap",
+                padding: "8px 11px", borderRadius: 9, marginBottom: 12,
+                background: currentRule?.configured ? C.orangeLight : C.gray50,
+                border: `1px solid ${currentRule?.configured ? C.orangeBorder : C.border}`,
+              }}>
+                <span style={{ fontSize: 12, color: C.gray700, fontWeight: 600 }}>
+                  {currentRule?.configured
+                    ? `Custom rule active — ${(currentRule.visible_paths || []).length} area(s).`
+                    : scope === "global"
+                      ? "No default set — everyone sees every area."
+                      : scope === "business"
+                        ? "No rule — this business follows the default for everyone."
+                        : "No rule — this user follows their business, then the default."}
+                </span>
+                {currentRule?.configured && (
+                  <button
+                    onClick={() => {
+                      if (!window.confirm(
+                        scope === "global"
+                          ? "Clear the default so everyone sees every area again?"
+                          : `Clear this rule? ${targetLabel} will fall back to the next level.`
+                      )) return;
+                      save([]);
+                    }}
+                    disabled={busy}
+                    style={{ ...btn("ghost", "sm"), padding: "3px 10px" }}
+                  >
+                    Clear rule
+                  </button>
+                )}
+              </div>
+
+              {/* Presets */}
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 }}>
+                <span style={{ fontSize: 11, fontWeight: 700, color: C.gray400, alignSelf: "center", marginRight: 2 }}>
+                  QUICK SET
+                </span>
+                {PRESETS.map((preset) => (
+                  <button key={preset.label} onClick={() => apply(preset.paths())}
+                    style={{ ...btn("ghost", "sm"), padding: "3px 10px" }}>
+                    {preset.label}
+                  </button>
+                ))}
+                <button onClick={() => apply([])} style={{ ...btn("ghost", "sm"), padding: "3px 10px" }}>
+                  Clear all
+                </button>
+              </div>
+
+              <div style={{
+                display: "grid",
+                gridTemplateColumns: isMobile ? "1fr" : "repeat(auto-fit, minmax(220px, 1fr))",
+                gap: 12,
+              }}>
+                {NAV_GROUPS.map((group) => {
+                  const paths = group.items.map((i) => i.path);
+                  const onCount = paths.filter((p) => selected.has(p)).length;
+                  return (
+                    <div key={group.label} style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: "11px 13px", minWidth: 0 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 9 }}>
+                        <span style={{ width: 8, height: 8, borderRadius: "50%", background: group.color, flexShrink: 0 }} />
+                        <span style={{ fontSize: 11, fontWeight: 800, color: C.gray600, letterSpacing: "0.07em", textTransform: "uppercase", flex: 1, minWidth: 0 }}>
+                          {group.label}
+                        </span>
+                        <button
+                          onClick={() => toggleGroup(group)}
+                          style={{ background: "none", border: "none", cursor: "pointer", fontSize: 10, fontWeight: 800, color: C.gray400, fontFamily: "inherit", padding: 0 }}
+                        >
+                          {onCount === paths.length ? "NONE" : "ALL"}
+                        </button>
+                      </div>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                        {group.items.map((item) => {
+                          const locked = isLocked(item.path);
+                          return (
+                            <label
+                              key={item.path}
+                              title={locked ? "Only super admins can reach this, and they are never restricted" : undefined}
+                              style={{
+                                display: "flex", alignItems: "center", gap: 9, minWidth: 0,
+                                fontSize: 13, color: C.gray700, cursor: "pointer",
+                                padding: "3px 5px", borderRadius: 7,
+                              }}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={selected.has(item.path)}
+                                onChange={() => toggle(item.path)}
+                              />
+                              <span style={{ fontSize: 14, width: 18, textAlign: "center", flexShrink: 0 }}>{item.icon}</span>
+                              <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                {item.label}
+                              </span>
+                              {locked && <span style={{ fontSize: 10, color: C.gray400, flexShrink: 0 }}>🔒</span>}
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <p style={{ fontSize: 11.5, color: C.gray400, marginTop: 14, lineHeight: 1.6 }}>
+                Unchecking everything and saving clears the rule rather than hiding
+                everything — use it to hand access back to the level above.
+                Rules apply to business users; super admins are never restricted.
+              </p>
+            </>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -750,7 +1034,7 @@ export default function AdminPanel() {
         <div style={{ display: "flex", gap: 8, marginLeft: 12 }}>
           <TabBtn id="businesses" label="Businesses & Members" />
           <TabBtn id="users" label="Users" />
-          <TabBtn id="sidebar" label="Sidebar Tabs" />
+          <TabBtn id="access" label="Access Control" />
         </div>
       </div>
 
@@ -762,8 +1046,8 @@ export default function AdminPanel() {
       {tab === "users" && (
         <UsersSection businesses={businesses} onChanged={refreshShared} notify={notify} currentUserId={user?.id} />
       )}
-      {tab === "sidebar" && (
-        <SidebarTabsSection notify={notify} />
+      {tab === "access" && (
+        <AccessSection notify={notify} />
       )}
     </div>
   );

@@ -34,6 +34,7 @@ import { MismatchTab } from "./Components/Tabs/MismatchTab";
 import { MeeshoInventoryTab } from "./Components/Tabs/MeeshoInventoryTab";
 import { MeeshoPricingTab } from "./Components/Tabs/MeeshoPricingTab";
 import { ReturnScanTab } from "./Components/Tabs/ReturnScanTab";
+import { OrderScanTab } from "./Components/Tabs/OrderScanTab";
 import { GstTab } from "./Components/Tabs/GstTab";
 import { SKU_PAGE_SIZE as skuPageSize } from "./lib/helper";
 import TableData from "./Components/Table/TableData";
@@ -45,6 +46,9 @@ import { DateFilterProvider } from "./contexts/DateFilterContext";
 import { GlobalDateFilterBar } from "./Components/shared/GlobalDateFilterBar";
 import ChangePasswordModal from "./Components/ChangePasswordModal";
 import AdminPanel from "./Components/Admin/AdminPanel";
+import ErrorBoundary from "./Components/shared/ErrorBoundary";
+import { NAV_GROUPS, ALL_NAV } from "./navConfig";
+import { useAccess } from "./contexts/AccessContext";
 import { useAuth } from "./contexts/AuthContext";
 
 // Re-export the shared tokens (imported at the top of this file) so existing
@@ -307,66 +311,11 @@ export function SKUTable({ data, mode, onRowClick }) {
 }
 
 // ── Navigation config ─────────────────────────────────────────────────────────
-export const NAV_GROUPS = [
-  {
-    label: "Analytics",
-    color: "#A78BFA",
-    items: [
-      { path: "/", label: "Overview", icon: "◈", end: true },
-      { path: "/sku-analysis", label: "SKU Analysis", icon: "↗" },
-      { path: "/ads-analysis", label: "Ads Analysis", icon: "◬" },
-      { path: "/estimated-profit", label: "Estimated Profit", icon: "🧮" },
-    ],
-  },
-  {
-    label: "Operations",
-    color: "#34D399",
-    items: [
-      { path: "/orders", label: "Orders", icon: "⊡" },
-      { path: "/payments", label: "Payments", icon: "◎" },
-      { path: "/unscheduled", label: "Unscheduled Pay", icon: "◷" },
-      { path: "/unsettled", label: "Unsettled", icon: "⚡" },
-      { path: "/mismatch", label: "Pay Mismatch", icon: "⊝" },
-      { path: "/labels", label: "Labels", icon: "⊟" },
-      { path: "/returns", label: "Returns & Claims", icon: "⟲" },
-    ],
-  },
-  {
-    label: "Catalog",
-    color: "#60A5FA",
-    items: [
-      { path: "/pricing", label: "SKU Pricing", icon: "⊞" },
-      { path: "/tax-check", label: "Tax Check", icon: "%" },
-      { path: "/gst", label: "GST", icon: "₹" },
-      { path: "/inventory", label: "Inventory", icon: "⊕" },
-      { path: "/inventory-labels", label: "Labels & Barcodes", icon: "▥" },
-      { path: "/meesho-inventory", label: "Meesho Stock", icon: "⊞" },
-      { path: "/meesho-pricing", label: "Price Update", icon: "₹" },
-      { path: "/purchases", label: "Purchases", icon: "⊗" },
-      { path: "/expenses", label: "Expenses", icon: "⊜" },
-    ],
-  },
-  {
-    label: "Tools",
-    color: "#FBBF24",
-    items: [
-      { path: "/upload", label: "Upload Data", icon: "⇧" },
-      { path: "/product-photos", label: "AI Photos", icon: "✦" },
-      { path: "/fraud", label: "Fraud Watch", icon: "⊘" },
-      { path: "/business-profile", label: "Business Profile", icon: "⌂" },
-    ],
-  },
-  {
-    label: "Administration",
-    color: "#F472B6",
-    adminOnly: true,
-    items: [
-      { path: "/admin", label: "Admin Panel", icon: "⚙", adminOnly: true },
-    ],
-  },
-];
+// Defined in navConfig.js (contexts need it too, and importing App from a
+// context would be a cycle). Re-exported here for existing importers.
+export { NAV_GROUPS, ALWAYS_VISIBLE_PATHS } from "./navConfig";
 
-const ALL_NAV = NAV_GROUPS.flatMap(g => g.items);
+// (NAV_GROUPS / ALL_NAV / ALWAYS_VISIBLE_PATHS all come from navConfig.)
 
 // ── Sidebar nav item ──────────────────────────────────────────────────────────
 function NavItem({ item, collapsed, onNavigate, touch }) {
@@ -417,22 +366,12 @@ const SIDEBAR_BG = "#13111C";
 const SIDEBAR_BG2 = "#0E0C18";
 const DIVIDER = "rgba(255,255,255,0.07)";
 
-// Paths that must never be hidden by the visibility config, so a super-admin
-// can always reach the Admin Panel to change the sidebar settings back.
-export const ALWAYS_VISIBLE_PATHS = ["/admin"];
-
 function Sidebar({ collapsed, setCollapsed, isMobile, mobileOpen, closeMobile }) {
   const [btnHovered, setBtnHovered] = useState(false);
-  const { isSuperAdmin, navVisibility } = useAuth();
-
-  // The visibility filter applies to everyone (including super-admins), but only
-  // once an admin has actually configured a list. Until then, show every tab.
-  const isConfigured = !!navVisibility?.configured;
-  const visibleSet = new Set(navVisibility?.visiblePaths || []);
-  const isPathVisible = (path) =>
-    !isConfigured ||
-    visibleSet.has(path) ||
-    (isSuperAdmin && ALWAYS_VISIBLE_PATHS.includes(path));
+  const { isSuperAdmin } = useAuth();
+  // Resolved server-side: this user's own rule, else their business's, else the
+  // global default, else everything.
+  const { isPathVisible } = useAccess();
 
   const navGroups = NAV_GROUPS
     .filter((g) => !g.adminOnly || isSuperAdmin)
@@ -771,9 +710,12 @@ function AppShell() {
           padding: isMobile ? "16px 12px 40px" : "28px 32px",
           WebkitOverflowScrolling: "touch",
         }}>
+          <ErrorBoundary resetKey={loc.pathname} label={loc.pathname}>
+          <RouteGuard>
           <Routes>
             <Route path="/" element={<OverviewTab />} />
             <Route path="/orders" element={<OrdersTab />} />
+            <Route path="/order-scan" element={<OrderScanTab />} />
             <Route path="/unsettled" element={<UnsettledOrdersTab />} />
             <Route path="/payments" element={<PaymentsTab />} />
             <Route path="/unscheduled" element={<UnscheduledPaymentTab />} />
@@ -799,10 +741,53 @@ function AppShell() {
             <Route path="/admin" element={<AdminPanel />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
+          </RouteGuard>
+          </ErrorBoundary>
         </div>
       </div>
     </div>
   );
+}
+
+// ── Route guard ───────────────────────────────────────────────────────────────
+/**
+ * Keeps the URL bar honest: hiding a sidebar link doesn't stop someone typing
+ * the path, so a restricted area redirects to the first area they can reach.
+ * The server enforces the same rules on the API, so this is about not showing a
+ * broken page rather than about secrecy.
+ */
+function RouteGuard({ children }) {
+  const loc = useLocation();
+  const { loading, isPathVisible, landingPath, hasAnyAccess } = useAccess();
+
+  // Don't decide anything until the rules are known, otherwise a page refresh
+  // would briefly render a tab the user isn't allowed to see.
+  if (loading) return <LoadingScreen />;
+
+  if (!hasAnyAccess) {
+    return (
+      <div style={{ ...S.card, maxWidth: 520, margin: "40px auto", textAlign: "center" }}>
+        <div style={{ fontSize: 32, marginBottom: 10 }}>🔒</div>
+        <h2 style={{ fontSize: 16, fontWeight: 800, color: C.gray800, marginBottom: 8 }}>
+          No areas enabled
+        </h2>
+        <p style={{ fontSize: 13, color: C.gray500, lineHeight: 1.6 }}>
+          Your account doesn't have access to any part of the app yet.
+          Ask an administrator to enable the areas you need.
+        </p>
+      </div>
+    );
+  }
+
+  const match = ALL_NAV.find(item =>
+    item.end ? loc.pathname === item.path : loc.pathname.startsWith(item.path)
+  );
+  // An unknown path falls through to the existing catch-all route.
+  if (match && !isPathVisible(match.path) && landingPath) {
+    return <Navigate to={landingPath} replace />;
+  }
+
+  return children;
 }
 
 function LoadingScreen() {
@@ -833,8 +818,10 @@ export default function App() {
   }
 
   return (
-    <DateFilterProvider>
-      <AppShell />
-    </DateFilterProvider>
+    <ErrorBoundary label="app-shell">
+      <DateFilterProvider>
+        <AppShell />
+      </DateFilterProvider>
+    </ErrorBoundary>
   );
 }

@@ -3,6 +3,16 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_simplejwt.views import TokenObtainPairView
 
+from . import nav
+from .access import (
+    business_rule,
+    global_rule,
+    resolve_visible_paths,
+    set_business_rule,
+    set_global_rule,
+    set_user_rule,
+    user_rule,
+)
 from .models import MAX_BUSINESSES_PER_USER, Business, Membership, NavVisibilitySetting, User
 from .permissions import IsSuperAdmin
 from .serializers import (
@@ -40,22 +50,53 @@ def change_password(request):
     return Response({"detail": "Password updated successfully."})
 
 
+def _validate_paths(raw):
+    """(clean_list, error_response) — one shared validator for every scope."""
+    if not isinstance(raw, list) or not all(isinstance(p, str) for p in raw):
+        return None, Response({"error": "visible_paths must be a list of strings."}, status=400)
+    bad = nav.unknown_paths(raw)
+    if bad:
+        return None, Response(
+            {"error": f"Unknown nav path(s): {', '.join(bad)}"}, status=400
+        )
+    return nav.clean_paths(raw), None
+
+
 @api_view(["GET", "PUT"])
 @permission_classes([IsAuthenticated])
 def nav_visibility(request):
-    """Global sidebar tab visibility.
-
-    GET  (any authenticated user): returns the configured visible paths so the
-         sidebar can filter itself. `configured` is False when no admin has set
-         a list yet, in which case the frontend shows every tab.
-    PUT  (super admin only): replace the visible-paths list.
     """
-    setting = NavVisibilitySetting.get_solo()
+    What the signed-in user is allowed to see.
 
+    GET  (any authenticated user): the *resolved* set of areas — their own rule,
+         else their business's, else the global default. Pass ?business=<id> so
+         the answer reflects the business they're currently looking at, since a
+         user can belong to several with different rules. `configured` is False
+         when nothing restricts them, in which case the frontend shows every tab.
+    PUT  (super admin only): replace the global default. Per-business and
+         per-user rules live on /nav-access/.
+    """
     if request.method == "GET":
+        business = None
+        raw_id = request.query_params.get("business")
+        if raw_id:
+            try:
+                business = Business.objects.filter(pk=int(raw_id), is_active=True).first()
+            except (TypeError, ValueError):
+                business = None
+            # Only honour a business the caller actually belongs to, so the
+            # business id in the query string can't be used to probe other
+            # tenants' configuration.
+            if business and not request.user.is_super_admin:
+                if not Membership.objects.filter(user=request.user, business=business).exists():
+                    business = None
+
+        paths, source = resolve_visible_paths(request.user, business)
         return Response({
-            "visible_paths": setting.visible_paths or [],
-            "configured": bool(setting.visible_paths),
+            "visible_paths": paths if paths is not None else [],
+            "configured": paths is not None,
+            "source": source,
+            "business": business.id if business else None,
         })
 
     if not request.user.is_super_admin:
@@ -63,23 +104,98 @@ def nav_visibility(request):
             {"error": "Only a super admin can change sidebar visibility."}, status=403
         )
 
-    paths = request.data.get("visible_paths", [])
-    if not isinstance(paths, list) or not all(isinstance(p, str) for p in paths):
-        return Response({"error": "visible_paths must be a list of strings."}, status=400)
+    clean, error = _validate_paths(request.data.get("visible_paths", []))
+    if error:
+        return error
 
-    # De-dupe while preserving order.
-    seen = set()
-    clean = []
-    for p in paths:
-        p = p.strip()
-        if p and p not in seen:
-            seen.add(p)
-            clean.append(p)
+    set_global_rule(clean, updated_by=request.user)
+    return Response({"visible_paths": clean, "configured": bool(clean)})
 
-    setting.visible_paths = clean
-    setting.updated_by = request.user
-    setting.save()
-    return Response({"visible_paths": setting.visible_paths, "configured": bool(setting.visible_paths)})
+
+@api_view(["GET", "PUT"])
+@permission_classes([IsSuperAdmin])
+def nav_access(request):
+    """
+    Access rules for every scope, for the Admin Panel.
+
+    GET  returns the catalog of areas plus the current rule for the global
+         default, every business and every user, so the screen can show at a
+         glance who is restricted and to what.
+    PUT  writes one rule: {"scope": "global"|"business"|"user",
+                           "target_id": <id, omit for global>,
+                           "visible_paths": [...]}
+         An empty list clears the rule (falls back to the next level up).
+    """
+    if request.method == "GET":
+        businesses = Business.objects.filter(is_active=True).select_related("profile").order_by("name")
+        users = User.objects.all().select_related("access").prefetch_related(
+            "memberships__business"
+        ).order_by("username")
+
+        g = global_rule()
+        return Response({
+            "nav_items": nav.NAV_CATALOG,
+            "always_visible": nav.ALWAYS_VISIBLE_PATHS,
+            "global": {"visible_paths": g, "configured": bool(g)},
+            "businesses": [
+                {
+                    "id": b.id,
+                    "name": b.name,
+                    "visible_paths": business_rule(b),
+                    "configured": bool(business_rule(b)),
+                }
+                for b in businesses
+            ],
+            "users": [
+                {
+                    "id": u.id,
+                    "username": u.username,
+                    "role": u.role,
+                    "visible_paths": user_rule(u),
+                    "configured": bool(user_rule(u)),
+                    "businesses": [
+                        {"id": m.business_id, "name": m.business.name}
+                        for m in u.memberships.all()
+                    ],
+                }
+                for u in users
+            ],
+        })
+
+    scope = (request.data.get("scope") or "").strip()
+    clean, error = _validate_paths(request.data.get("visible_paths", []))
+    if error:
+        return error
+
+    if scope == "global":
+        set_global_rule(clean, updated_by=request.user)
+        return Response({"scope": scope, "visible_paths": clean, "configured": bool(clean)})
+
+    target_id = request.data.get("target_id")
+    if not target_id:
+        return Response({"error": "target_id is required for this scope."}, status=400)
+
+    if scope == "business":
+        business = Business.objects.filter(pk=target_id).first()
+        if not business:
+            return Response({"error": "Business not found."}, status=404)
+        set_business_rule(business, clean, updated_by=request.user)
+        return Response({
+            "scope": scope, "target_id": business.id,
+            "visible_paths": clean, "configured": bool(clean),
+        })
+
+    if scope == "user":
+        target = User.objects.filter(pk=target_id).first()
+        if not target:
+            return Response({"error": "User not found."}, status=404)
+        set_user_rule(target, clean, updated_by=request.user)
+        return Response({
+            "scope": scope, "target_id": target.id,
+            "visible_paths": clean, "configured": bool(clean),
+        })
+
+    return Response({"error": 'scope must be one of "global", "business", "user".'}, status=400)
 
 
 @api_view(["GET", "POST"])

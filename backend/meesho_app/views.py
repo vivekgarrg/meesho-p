@@ -18,7 +18,7 @@ from .helpers.helper import status_wise_summary
 from .permissions import get_authorized_business
 from .helpers.label_pdf import extract_all_pages
 
-from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, PurchaseBill, PurchaseItem, BlockedCustomer, InventoryAdjustment, ConsumableItem, ConsumablePurchase, ConsumableUsage, InventoryLog, MeeshoInventory, MeeshoPriceUpdate, ExpenseInvoice, ExpenseInvoiceItem, TransportCharge, PackedStockEvent, EstimatedProfitOrder, ReturnDelivery, GstTransaction, GstInvoiceDetail
+from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, PurchaseBill, PurchaseItem, BlockedCustomer, InventoryAdjustment, ConsumableItem, ConsumablePurchase, ConsumableUsage, InventoryLog, MeeshoInventory, MeeshoPriceUpdate, ExpenseInvoice, ExpenseInvoiceItem, TransportCharge, PackedStockEvent, EstimatedProfitOrder, ReturnDelivery, GstTransaction, GstInvoiceDetail, ScannedOrder
 from .serializers import (
     OrderPaymentSerializer, AdsCostSerializer,
     ReferralPaymentSerializer, CompensationRecoverySerializer,
@@ -28,6 +28,7 @@ from .serializers import (
     OrderSerializer,
     LabelOrderSerializer,
     ReturnDeliverySerializer,
+    ScannedOrderSerializer,
 )
 
 
@@ -778,7 +779,7 @@ def unscheduled_payments(request, business_id):
 
     # SKU -> per-unit landed cost (final_price already bakes in item price,
     # tax and packaging; fall back to item_price when final_price is unset).
-    cost_by_sku = {}
+    cost_by_sku = _SkuMap()
     for fp in FinalPrice.objects.filter(business=business).only("sku_id", "final_price", "item_price"):
         cost_by_sku[fp.sku_id] = fp.final_price if fp.final_price is not None else fp.item_price
 
@@ -1399,11 +1400,14 @@ def profit_summary(request, business_id):
 
     # Load pricing once (include item_price + tax_percent for tax cost calculation)
     _fp_all        = list(FinalPrice.objects.filter(business=business).only("sku_id", "final_price", "packaging_cost", "parent_id", "item_price", "tax_percent"))
-    price_map      = {fp.sku_id: fp.final_price    or Decimal("0") for fp in _fp_all}
-    packaging_map  = {fp.sku_id: fp.packaging_cost or Decimal("0") for fp in _fp_all}
-    item_price_map = {fp.sku_id: fp.item_price     or Decimal("0") for fp in _fp_all}
-    tax_map        = {fp.sku_id: fp.tax_percent    or 0            for fp in _fp_all}
-    sku_parent_map = {fp.sku_id: fp.parent_id for fp in _fp_all if fp.parent_id}
+    price_map      = _SkuMap((fp.sku_id, fp.final_price    or Decimal("0")) for fp in _fp_all)
+    packaging_map  = _SkuMap((fp.sku_id, fp.packaging_cost or Decimal("0")) for fp in _fp_all)
+    item_price_map = _SkuMap((fp.sku_id, fp.item_price     or Decimal("0")) for fp in _fp_all)
+    tax_map        = _SkuMap((fp.sku_id, fp.tax_percent    or 0)            for fp in _fp_all)
+    sku_parent_map = _SkuMap((fp.sku_id, fp.parent_id) for fp in _fp_all if fp.parent_id)
+    # Any casing of a SKU -> the spelling stored in pricing, so orders that spell
+    # the same SKU differently accumulate into one row instead of two.
+    canonical_sku  = _SkuMap((fp.sku_id, fp.sku_id) for fp in _fp_all)
     
     # Key parent maps by the parent's surrogate id, matching FinalPrice.parent_id
     # and ParentPriceHistory.parent_id (both now store the integer id).
@@ -1432,24 +1436,44 @@ def profit_summary(request, business_id):
         ))
 
     def get_eff_price(sku_id, order_date):
-        """Return (final_price, packaging_cost, item_price, tax_percent) effective on order_date."""
-        if order_date:
-            if hasattr(order_date, "date"):
-                order_date = order_date.date()
-            pid = sku_parent_map.get(sku_id)
-            if pid:
-                applicable = [(d, fp, pkg, ip, tax) for d, fp, pkg, ip, tax in _parent_histories[pid] if d <= order_date]
+        """
+        (final_price, packaging_cost, item_price, tax_percent) for a SKU.
+
+        Priority is the parent's price, then the SKU's own — in that order and
+        regardless of whether an order date is known. Previously the parent was
+        only consulted when an order_date was present, so any order without one
+        silently fell back to SKU pricing even when a parent existed.
+
+        A parent counts as "priced" only if it actually carries an item price;
+        an empty parent record falls through to the SKU so a missing parent
+        price can't zero out a cost.
+        """
+        pid = sku_parent_map.get(sku_id)
+
+        if pid:
+            # Dated parent price history wins when we know when the order was placed.
+            if order_date:
+                od = order_date.date() if hasattr(order_date, "date") else order_date
+                applicable = [
+                    (d, fp, pkg, ip, tax)
+                    for d, fp, pkg, ip, tax in _parent_histories[pid] if d <= od
+                ]
                 if applicable:
                     _, fp, pkg, ip, tax = applicable[-1]
-                    return fp, pkg, ip, tax
-                else: 
-                    return (
+                    if ip:
+                        return fp, pkg, ip, tax
+
+            # Otherwise the parent's current price.
+            p_item = parent_item_price_map.get(pid, Decimal("0"))
+            if p_item:
+                return (
                     parent_price_map.get(pid,      Decimal("0")),
                     parent_packaging_map.get(pid,  Decimal("0")),
-                    parent_item_price_map.get(pid, Decimal("0")),
+                    p_item,
                     parent_tax_map.get(pid, 0),
-                    )
-                    
+                )
+
+        # No parent, or the parent has no price of its own — use the SKU.
         return (
             price_map.get(sku_id,      Decimal("0")),
             packaging_map.get(sku_id,  Decimal("0")),
@@ -1495,7 +1519,7 @@ def profit_summary(request, business_id):
 
         eff_price, eff_pkg, eff_item_price, eff_tax_pct = get_eff_price(sku, primary.order_date)
         result = compute_order_net(payments, eff_price, eff_pkg, qty, unique_statuses,eff_item_price, eff_tax_pct, )
-        accumulate_sku_profit(sku, order_wise_profit, result, price_map, packaging_map, unique_statuses)
+        accumulate_sku_profit(canonical_sku.get(sku, sku), order_wise_profit, result, price_map, packaging_map, unique_statuses)
         orders_with_price += 1
 
 
@@ -1607,7 +1631,26 @@ def profit_summary(request, business_id):
     total_return_shipping    = agg["total_return_shipping"]    or Decimal("0")
     total_shipping_cost      = total_forward_shipping + total_return_shipping
 
-    net_revenue = revenue - total_purchase_cost + ads + comp_recovery
+    # ── Transportation charges ────────────────────────────────────────────────
+    # A business-level overhead: it can't be attributed to an individual order,
+    # so it is applied to the final bottom line rather than to Order Net P&L
+    # (which the per-SKU figures reconcile against). Deducted only when this
+    # business has the switch on in its profile; the total is always reported so
+    # the figure stays visible either way.
+    transport_qs = TransportCharge.objects.filter(business=business)
+    if date_from:
+        transport_qs = transport_qs.filter(date__gte=date_from)
+    if date_to:
+        transport_qs = transport_qs.filter(date__lte=date_to)
+    transport_total = transport_qs.aggregate(t=Sum("amount"))["t"] or Decimal("0")
+
+    profile = getattr(business, "profile", None)
+    deduct_transport = bool(profile and profile.deduct_transport_charges)
+    transport_deducted = transport_total if deduct_transport else Decimal("0")
+
+    # Order-level result: settlement less item cost. `ads` is already negative.
+    net_profit_loss = revenue - total_purchase_cost
+    net_revenue = revenue - total_purchase_cost + ads + comp_recovery - transport_deducted
 
     # Ensure sum(sku.net_profit) == revenue - total_purchase_cost by absorbing the gap
     # (settlement from missing-SKU orders) into a synthetic __unattributed__ bucket.
@@ -1640,7 +1683,9 @@ def profit_summary(request, business_id):
         "total_packaging_cost":   round(total_packaging_cost, 2),
         "total_packaging_cost_for_returns": round(total_packaging_cost_for_return, 2),
         "total_tax_cost":         round(total_tax_cost, 2),
-        "net_profit_loss": round(float(revenue - total_purchase_cost), 2),
+        "total_transport_charges":   round(transport_total, 2),
+        "transport_charges_deducted": deduct_transport,
+        "net_profit_loss": round(float(net_profit_loss), 2),
         "order_summary": order_status_summary,
         "total_loss":             round(total_loss, 2),
         "total_rto_loss":         round(total_rto_loss, 2),
@@ -1711,11 +1756,15 @@ def _estimated_profit_pricing_lookup(business):
 
     fp_all = list(FinalPrice.objects.filter(business=business).only(
         "sku_id", "item_price", "packaging_cost", "tax_percent", "parent_id"))
-    item_price_map = {fp.sku_id: fp.item_price or Decimal("0") for fp in fp_all}
-    packaging_map  = {fp.sku_id: fp.packaging_cost or Decimal("0") for fp in fp_all}
-    tax_map        = {fp.sku_id: fp.tax_percent or 0 for fp in fp_all}
-    sku_parent_map = {fp.sku_id: fp.parent_id for fp in fp_all if fp.parent_id}
+    item_price_map = _SkuMap((fp.sku_id, fp.item_price or Decimal("0")) for fp in fp_all)
+    packaging_map  = _SkuMap((fp.sku_id, fp.packaging_cost or Decimal("0")) for fp in fp_all)
+    tax_map        = _SkuMap((fp.sku_id, fp.tax_percent or 0) for fp in fp_all)
+    sku_parent_map = _SkuMap((fp.sku_id, fp.parent_id) for fp in fp_all if fp.parent_id)
+    # Canonical keys, so membership must be tested with _sku_key() too.
     known_skus     = set(item_price_map.keys())
+    # Any casing of a SKU -> the spelling stored in pricing, so the per-SKU
+    # aggregation shows one row per SKU rather than one per spelling.
+    canonical_sku  = _SkuMap((fp.sku_id, fp.sku_id) for fp in fp_all)
 
     parent_qs = ParentItemPrice.objects.filter(business=business).only(
         "id", "item_price", "tax_percent", "packaging_cost")
@@ -1738,6 +1787,8 @@ def _estimated_profit_pricing_lookup(business):
     def get_price(sku_id, order_date):
         if order_date is not None and hasattr(order_date, "date"):
             order_date = order_date.date()
+        # Parent price first, SKU price only as a fallback — and a parent with no
+        # price of its own must not zero out the cost.
         pid = sku_parent_map.get(sku_id)
         if pid:
             applicable = [
@@ -1746,19 +1797,22 @@ def _estimated_profit_pricing_lookup(business):
             ]
             if applicable:
                 _, ip, pkg, tax = applicable[-1]
-                return ip, pkg, tax
-            return (
-                parent_item_price_map.get(pid, Decimal("0")),
-                parent_packaging_map.get(pid, Decimal("0")),
-                parent_tax_map.get(pid, 0),
-            )
+                if ip:
+                    return ip, pkg, tax
+            p_item = parent_item_price_map.get(pid, Decimal("0"))
+            if p_item:
+                return (
+                    p_item,
+                    parent_packaging_map.get(pid, Decimal("0")),
+                    parent_tax_map.get(pid, 0),
+                )
         return (
             item_price_map.get(sku_id, Decimal("0")),
             packaging_map.get(sku_id, Decimal("0")),
             tax_map.get(sku_id, 0),
         )
 
-    return get_price, known_skus
+    return get_price, known_skus, canonical_sku
 
 
 def _to_num(v):
@@ -1783,7 +1837,7 @@ def _compute_estimated_profit_summary(business, date_from=None, date_to=None):
     row is dropped from the estimate entirely, the same as an In Transit / Ready
     To Ship row.
     """
-    get_price, known_skus = _estimated_profit_pricing_lookup(business)
+    get_price, known_skus, canonical_sku = _estimated_profit_pricing_lookup(business)
 
     qs = EstimatedProfitOrder.objects.filter(business=business)
     if date_from:
@@ -1805,6 +1859,7 @@ def _compute_estimated_profit_summary(business, date_from=None, date_to=None):
     sku_agg = {}
 
     def _bump_sku(sku_id, bucket, payout_value, final_cost, net, one_unit_price):
+        sku_id = canonical_sku.get(sku_id, sku_id)
         if sku_id not in sku_agg:
             sku_agg[sku_id] = {
                 "sku_id": sku_id, "order_count": 0,
@@ -1860,7 +1915,7 @@ def _compute_estimated_profit_summary(business, date_from=None, date_to=None):
 
         # Remaining rows deduct cost and need pricing: Delivered, Exchanged, an
         # approved Claim.
-        if sku_id not in known_skus:
+        if _sku_key(sku_id) not in known_skus:
             missing_price_skus_seen.append(sku_id)
             missing_price_payout += payout_value
             missing_price_count += 1
@@ -2090,11 +2145,14 @@ def ads_sku_analysis(request, business_id):
 
     # Pricing lookups — mirrors profit_summary
     _fp_all        = list(FinalPrice.objects.filter(business=business).only("sku_id", "final_price", "packaging_cost", "parent_id", "item_price", "tax_percent"))
-    price_map      = {fp.sku_id: fp.final_price    or Decimal("0") for fp in _fp_all}
-    packaging_map  = {fp.sku_id: fp.packaging_cost or Decimal("0") for fp in _fp_all}
-    item_price_map = {fp.sku_id: fp.item_price     or Decimal("0") for fp in _fp_all}
-    tax_map        = {fp.sku_id: fp.tax_percent    or 0            for fp in _fp_all}
-    sku_parent_map = {fp.sku_id: fp.parent_id for fp in _fp_all if fp.parent_id}
+    price_map      = _SkuMap((fp.sku_id, fp.final_price    or Decimal("0")) for fp in _fp_all)
+    packaging_map  = _SkuMap((fp.sku_id, fp.packaging_cost or Decimal("0")) for fp in _fp_all)
+    item_price_map = _SkuMap((fp.sku_id, fp.item_price     or Decimal("0")) for fp in _fp_all)
+    tax_map        = _SkuMap((fp.sku_id, fp.tax_percent    or 0)            for fp in _fp_all)
+    sku_parent_map = _SkuMap((fp.sku_id, fp.parent_id) for fp in _fp_all if fp.parent_id)
+    # Any casing of a SKU -> the spelling stored in pricing, so orders that spell
+    # the same SKU differently accumulate into one row instead of two.
+    canonical_sku  = _SkuMap((fp.sku_id, fp.sku_id) for fp in _fp_all)
 
     _fp_parent     = list(ParentItemPrice.objects.filter(business=business).only("item_id", "item_price", "tax_percent", "packaging_cost", "final_price"))
     parent_price_map      = {fp.id: fp.final_price    or Decimal("0") for fp in _fp_parent}
@@ -2121,21 +2179,44 @@ def ads_sku_analysis(request, business_id):
         ))
 
     def get_eff_price(sku_id, order_date):
-        if order_date:
-            if hasattr(order_date, "date"):
-                order_date = order_date.date()
-            pid = sku_parent_map.get(sku_id)
-            if pid:
-                applicable = [(d, fp, pkg, ip, tax) for d, fp, pkg, ip, tax in _parent_histories[pid] if d <= order_date]
+        """
+        (final_price, packaging_cost, item_price, tax_percent) for a SKU.
+
+        Priority is the parent's price, then the SKU's own — in that order and
+        regardless of whether an order date is known. Previously the parent was
+        only consulted when an order_date was present, so any order without one
+        silently fell back to SKU pricing even when a parent existed.
+
+        A parent counts as "priced" only if it actually carries an item price;
+        an empty parent record falls through to the SKU so a missing parent
+        price can't zero out a cost.
+        """
+        pid = sku_parent_map.get(sku_id)
+
+        if pid:
+            # Dated parent price history wins when we know when the order was placed.
+            if order_date:
+                od = order_date.date() if hasattr(order_date, "date") else order_date
+                applicable = [
+                    (d, fp, pkg, ip, tax)
+                    for d, fp, pkg, ip, tax in _parent_histories[pid] if d <= od
+                ]
                 if applicable:
                     _, fp, pkg, ip, tax = applicable[-1]
-                    return fp, pkg, ip, tax
+                    if ip:
+                        return fp, pkg, ip, tax
+
+            # Otherwise the parent's current price.
+            p_item = parent_item_price_map.get(pid, Decimal("0"))
+            if p_item:
                 return (
                     parent_price_map.get(pid,      Decimal("0")),
                     parent_packaging_map.get(pid,  Decimal("0")),
-                    parent_item_price_map.get(pid, Decimal("0")),
+                    p_item,
                     parent_tax_map.get(pid, 0),
                 )
+
+        # No parent, or the parent has no price of its own — use the SKU.
         return (
             price_map.get(sku_id,      Decimal("0")),
             packaging_map.get(sku_id,  Decimal("0")),
@@ -2180,7 +2261,7 @@ def ads_sku_analysis(request, business_id):
 
         is_ad = sub_no in ad_sub_orders
         bucket = ad_profit if is_ad else org_profit
-        accumulate_sku_profit(sku, bucket, result, price_map, packaging_map, unique_statuses)
+        accumulate_sku_profit(canonical_sku.get(sku, sku), bucket, result, price_map, packaging_map, unique_statuses)
 
         # Same order, grouped by month instead of SKU — reuses the identical
         # accumulator so the monthly trend stays consistent with the per-SKU totals.
@@ -2520,10 +2601,10 @@ def order_status_breakdown(request, business_id):
 
 def _compute_purchase_cost():
     """Sum final_price × quantity for orders matched by supplier_sku → sku_id."""
-    price_map = {
-        fp.sku_id: fp.final_price or Decimal("0")
+    price_map = _SkuMap(
+        (fp.sku_id, fp.final_price or Decimal("0"))
         for fp in FinalPrice.objects.all()
-    }
+    )
     total = Decimal("0")
     matched = 0
     missing = 0
@@ -2554,10 +2635,37 @@ def final_price_list(request, business_id):
             "results": FinalPriceSerializer(items, many=True).data,
         })
 
-    serializer = FinalPriceSerializer(data=request.data)
+    # Save = create-or-update. Posting a SKU that already has a price row used to
+    # raise a duplicate-key IntegrityError and 500, which the UI could only show
+    # as "Save failed". That bit hardest with a casing difference: MySQL compares
+    # these case-insensitively (utf8mb4_unicode_ci), so saving
+    # "brass_wooden_panchaarti_155555" collided with the stored
+    # "BRASS_WOODEN_panchaarti_155555" even though no visible duplicate existed.
+    sku_id = (request.data.get("sku_id") or "").strip()
+    if not sku_id:
+        return Response({"sku_id": ["This field is required."]},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    # Case-insensitive so the lookup finds the row the database would collide with.
+    existing = FinalPrice.objects.filter(business=business, sku_id__iexact=sku_id).first()
+
+    payload = dict(request.data)
+    payload["sku_id"] = existing.sku_id if existing else sku_id   # keep the stored spelling
+
+    serializer = FinalPriceSerializer(existing, data=payload, partial=bool(existing))
     serializer.is_valid(raise_exception=True)
-    serializer.save(business=business, parent=_resolve_parent(request.data.get("parent"), business))
-    return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+    # Only touch the parent link when the caller actually sent one — the
+    # SKU-analysis dialog doesn't, and it must not silently unlink the parent.
+    extra = {"business": business}
+    if "parent" in request.data:
+        extra["parent"] = _resolve_parent(request.data.get("parent"), business)
+
+    serializer.save(**extra)
+    return Response(
+        serializer.data,
+        status=status.HTTP_200_OK if existing else status.HTTP_201_CREATED,
+    )
 
 
 def _resolve_parent(parent_item_id, business):
@@ -2771,11 +2879,15 @@ def unlinked_skus(request, business_id):
     business = get_authorized_business(request, business_id)
     q = request.GET.get("q", "").strip().lower()
 
-    linked = set(
+    # Compared on the canonical key, not the raw string: a SKU stored as
+    # "BRASS_WOODEN_x" is the same SKU as an order's "brass_wooden_x", and
+    # matching case-sensitively left a freshly-linked SKU showing here forever.
+    linked = {
+        _sku_key(sku) for sku in
         FinalPrice.objects
         .filter(business=business, parent__isnull=False)
         .values_list("sku_id", flat=True)
-    )
+    }
 
     results = {}
 
@@ -2783,10 +2895,11 @@ def unlinked_skus(request, business_id):
     for row in (
         FinalPrice.objects
         .filter(business=business, parent__isnull=True)
-        .values("sku_id", "item_price", "final_price")
+        .values("id", "sku_id", "item_price", "final_price")
     ):
-        results[row["sku_id"]] = {
-            "sku_id": row["sku_id"],
+        results[_sku_key(row["sku_id"])] = {
+            "id": row["id"],                 # stable row id — safe to key a UI row on
+            "sku_id": row["sku_id"],         # the stored spelling
             "item_price": row["item_price"],
             "final_price": row["final_price"],
             "has_price": True,
@@ -2804,12 +2917,16 @@ def unlinked_skus(request, business_id):
     )
     for row in order_counts:
         sku = row["sku"]
-        if sku in linked:
+        key = _sku_key(sku)
+        if key in linked:
             continue
-        if sku in results:
-            results[sku]["order_count"] = row["n"]
+        if key in results:
+            # Same SKU, possibly a different casing in the orders table — add the
+            # order count to the existing entry instead of listing it twice.
+            results[key]["order_count"] += row["n"]
         else:
-            results[sku] = {
+            results[key] = {
+                "id": None,                  # not priced yet, so no row id exists
                 "sku_id": sku,
                 "item_price": None,
                 "final_price": None,
@@ -2917,14 +3034,71 @@ def create_parent_from_sku(request, business_id):
     return Response(ParentItemPriceSerializer(parent).data, status=status.HTTP_201_CREATED)
 
 
+def _sku_key(sku_id):
+    """
+    Canonical form used whenever two SKU ids are compared in Python.
+
+    The database compares sku_id case-insensitively (the schema uses
+    utf8mb4_unicode_ci), so "Foo" and "foo" are the *same* SKU as far as the
+    unique key on (business, sku_id) is concerned. Python's `==`/`in` are
+    case-sensitive, and that mismatch caused two real bugs: a linked SKU kept
+    appearing in the unlinked list, and linking one whose casing differed from
+    the stored row tried to insert a duplicate. Comparing on this key keeps the
+    application's idea of identity the same as the database's.
+    """
+    return (sku_id or "").strip().casefold()
+
+
+class _SkuMap(dict):
+    """
+    A dict keyed by SKU id that matches keys the way the database does.
+
+    Orders and pricing rows don't always agree on the casing of a SKU — Meesho's
+    exports have changed spelling over time, and the DB's case-insensitive
+    collation happily treats them as one SKU. Plain dicts don't, so a lookup of
+    the order's spelling against a map keyed on the pricing row's spelling
+    missed, and the order was costed at zero. Keying through _sku_key() makes the
+    lookup agree with the database.
+
+    Note keys()/items() yield the canonical (case-folded) form, so use the value
+    from the database when a SKU needs to be displayed.
+    """
+
+    def __init__(self, source=()):
+        super().__init__()
+        pairs = source.items() if isinstance(source, dict) else source
+        for k, v in pairs:
+            self[k] = v
+
+    def __setitem__(self, key, value):
+        super().__setitem__(_sku_key(key), value)
+
+    def __getitem__(self, key):
+        return super().__getitem__(_sku_key(key))
+
+    def __contains__(self, key):
+        return super().__contains__(_sku_key(key))
+
+    def get(self, key, default=None):
+        return super().get(_sku_key(key), default)
+
+    def setdefault(self, key, default=None):
+        return super().setdefault(_sku_key(key), default)
+
+    def pop(self, key, *args):
+        return super().pop(_sku_key(key), *args)
+
+
 def _normalize_sku_ids(raw_sku_ids):
+    """Trim, drop blanks, and de-duplicate case-insensitively (first spelling wins)."""
     seen = set()
     out = []
     for sku in raw_sku_ids or []:
         s = (sku or "").strip()
-        if not s or s in seen:
+        k = _sku_key(s)
+        if not s or k in seen:
             continue
-        seen.add(s)
+        seen.add(k)
         out.append(s)
     return out
 
@@ -2938,13 +3112,19 @@ def _bulk_link_skus_to_parent(*, business, parent, sku_ids):
     # sku_id is unique per-business now, so a SKU existing in another business
     # is not a conflict — we only look at this business's rows.
     conflicts = []
+    # Keyed on the canonical form: the DB lookup below is case-insensitive, so
+    # keying on the stored spelling would miss a row that differs only in case
+    # and then try to insert a duplicate.
     existing_business_rows = {
-        row.sku_id: row
+        _sku_key(row.sku_id): row
         for row in FinalPrice.objects.filter(business=business, sku_id__in=sku_ids)
     }
 
-    to_create_ids = [sku for sku in sku_ids if sku not in existing_business_rows]
-    to_update = [existing_business_rows[sku] for sku in sku_ids if sku in existing_business_rows]
+    to_create_ids = [sku for sku in sku_ids if _sku_key(sku) not in existing_business_rows]
+    to_update = [
+        existing_business_rows[_sku_key(sku)]
+        for sku in sku_ids if _sku_key(sku) in existing_business_rows
+    ]
 
     for row in to_update:
         row.parent = parent
@@ -4036,7 +4216,7 @@ def upload_labels_pdf(request, business_id):
     _fp_qs = FinalPrice.objects.filter(
         business=business, sku_id__in=list(sku_data.keys())
     ).select_related("parent").values("sku_id", "parent__item_id")
-    sku_to_parent = {row["sku_id"]: row["parent__item_id"] for row in _fp_qs}
+    sku_to_parent = _SkuMap((row["sku_id"], row["parent__item_id"]) for row in _fp_qs)
 
     # Enrich page_details with parent SKU
     for _pd in page_details:
@@ -4366,11 +4546,11 @@ def label_orders_list(request, business_id):
     # the UI can show the parent instead of the variant-level SKU. Bulk map to
     # avoid N+1; falls back to None when the SKU isn't linked to a parent.
     skus = {row.get("sku") for row in serialized if row.get("sku")}
-    sku_to_parent = dict(
+    sku_to_parent = _SkuMap(
         FinalPrice.objects.filter(business=business, sku_id__in=skus)
         .select_related("parent")
         .values_list("sku_id", "parent__item_id")
-    ) if skus else {}
+    ) if skus else _SkuMap()
 
     for row in serialized:
         row["is_blocked"] = (row.get("customer_name", ""), row.get("customer_pincode", "")) in blocked_set
@@ -4979,8 +5159,10 @@ def inventory_view(request, business_id):
         .values_list("id", "item_id")
     )
 
-    # 3. Map child SKU → parent SKU
-    sku_to_parent = dict(
+    # 3. Map child SKU → parent SKU. Case-insensitive, because step 5 rolls up
+    # using the *orders* spelling of the SKU, which doesn't always match the
+    # pricing row's — a plain dict dropped those quantities from the parent.
+    sku_to_parent = _SkuMap(
         FinalPrice.objects
         .filter(business=business, parent_id__in=all_parent_ids)
         .values_list("sku_id", "parent_id")
@@ -5702,7 +5884,7 @@ def inventory_charts(request, business_id):
 
     all_parents = set(purchased_by_parent.keys()) | set(adj_agg.keys())
     parent_name = dict(ParentItemPrice.objects.filter(business=business, id__in=all_parents).values_list("id", "item_id"))
-    sku_to_parent = dict(FinalPrice.objects.filter(business=business, parent_id__in=all_parents).values_list("sku_id", "parent_id"))
+    sku_to_parent = _SkuMap(FinalPrice.objects.filter(business=business, parent_id__in=all_parents).values_list("sku_id", "parent_id"))
     child_skus = list(sku_to_parent.keys())
 
     del_by_sku = dict(Order.objects.filter(business=business, reason_for_credit_entry="DELIVERED", sku__in=child_skus).values("sku").annotate(q=Sum("quantity")).values_list("sku", "q"))
@@ -6460,8 +6642,8 @@ def meesho_price_update_list(request, business_id):
     listing_map = {r["supplier_sku"]: float(r["last_price"] or 0) for r in listing_agg}
 
     # Cost from FinalPrice
-    fp_map = {fp.sku_id: float(fp.final_price or 0)
-              for fp in FinalPrice.objects.filter(business=business).only("sku_id", "final_price")}
+    fp_map = _SkuMap((fp.sku_id, float(fp.final_price or 0))
+                     for fp in FinalPrice.objects.filter(business=business).only("sku_id", "final_price"))
 
     # Existing price updates
     pu_map = {pu.inventory_id: pu
@@ -6916,8 +7098,11 @@ def tax_check(request, business_id):
         results.append(row)
 
     # SKUs Meesho charges GST on but that have no FinalPrice row (unpriced).
-    priced_skus = set(FinalPrice.objects.filter(business=business).values_list("sku_id", flat=True))
-    unpriced_with_orders = sum(1 for s in gst_counts if s not in priced_skus)
+    priced_skus = {
+        _sku_key(s) for s in
+        FinalPrice.objects.filter(business=business).values_list("sku_id", flat=True)
+    }
+    unpriced_with_orders = sum(1 for s in gst_counts if _sku_key(s) not in priced_skus)
 
     # Mismatches first, biggest |diff| first.
     order_rank = {"mismatch": 0, "unset": 1, "no_data": 2, "match": 3}
@@ -7476,6 +7661,467 @@ def return_delivery_detail(request, business_id, pk):
     data = ReturnDeliverySerializer(row).data
     data["order_context"] = _order_context(business, row.suborder_no)
     return Response(data)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Order scanning — record outgoing parcels at the desk and track their status
+# ══════════════════════════════════════════════════════════════════════════════
+
+# The only fields a client may change on a recorded scan. Everything else is
+# either identity or scan bookkeeping: letting the UI rewrite those would make
+# the log unreliable, which is the one thing it exists to be.
+_SCAN_WRITABLE = {"status", "notes"}
+
+_SCAN_STATUSES = {c[0] for c in ScannedOrder.STATUS_CHOICES}
+
+# Meesho's own live_order_status strings, normalised to the buckets the UI
+# colours. Anything unrecognised is passed through as-is rather than dropped.
+_MEESHO_STATUS_BUCKETS = (
+    ("DELIVERED", "delivered"),
+    ("RTO",       "rto"),
+    ("RETURN",    "return"),
+    ("CANCEL",    "cancelled"),
+    ("SHIP",      "shipped"),
+    ("DOOR",      "shipped"),      # "Door Step Exchanged" and friends
+)
+
+
+def _meesho_bucket(raw):
+    """Which coarse bucket a Meesho status string falls into."""
+    s = (raw or "").upper()
+    for needle, bucket in _MEESHO_STATUS_BUCKETS:
+        if needle in s:
+            return bucket
+    return "other" if s else None
+
+
+def _local_day_start(day):
+    """
+    The aware datetime at which a local calendar day begins.
+
+    Used instead of filtering a DateTimeField with `__date`: on MySQL that
+    compiles to CONVERT_TZ(), which returns NULL unless the server's timezone
+    tables have been loaded (`mysql_tzinfo_to_sql`) — and they are not on this
+    deployment, so such a filter silently matches *nothing* rather than erroring.
+    An explicit half-open datetime range is correct on every backend.
+    """
+    return timezone.make_aware(datetime.combine(day, time.min))
+
+
+def _parse_day(raw):
+    """A "YYYY-MM-DD" query param as a date, or None when absent/unparseable."""
+    text = (raw or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def _clean_scan_code(raw):
+    """
+    Scanners append whitespace/newlines and sometimes wrap the value in quotes.
+    Trim to what a barcode can actually contain before matching on it.
+    """
+    return (raw or "").strip().strip("\r\n\t ").strip('"').strip("'")
+
+
+def _resolve_scan_code(business, code):
+    """
+    Work out which order a scanned code belongs to, and snapshot what we know
+    about it.
+
+    Sources in order of richness: the shipping label (has courier, customer and
+    AWB), then the payments sheet, then the orders sheet. An unmatched code is
+    not an error — it is recorded as-is so the scan is never lost, and it will
+    read as "not recognised" in the table.
+    """
+    snapshot = {
+        "sub_order_no": code,
+        "awb_number": "",
+        "matched_from": ScannedOrder.MATCH_NONE,
+        "sku": "", "product_name": "", "size": "", "qty": 1,
+        "courier_name": "", "payment_type": "",
+        "customer_name": "", "customer_city": "", "customer_state": "",
+        "customer_pincode": "", "order_date": None,
+    }
+
+    labels = LabelOrder.objects.filter(business=business)
+    # AWB first: it is what is actually printed as a barcode on the parcel.
+    label = (
+        labels.filter(awb_number__iexact=code).first()
+        or labels.filter(order_id__iexact=code).first()
+    )
+    if label is None and len(code) >= _MIN_PARTIAL_SCAN_LEN:
+        # A partially-read code, or one the courier prefixes — still resolvable.
+        label = labels.filter(
+            DQ(awb_number__icontains=code) | DQ(order_id__icontains=code)
+        ).first()
+
+    if label:
+        snapshot.update({
+            "sub_order_no": label.order_id,
+            "awb_number": label.awb_number or "",
+            "matched_from": ScannedOrder.MATCH_LABEL,
+            "sku": label.sku or "",
+            "size": label.size or "",
+            "qty": label.qty or 1,
+            "courier_name": label.courier_name or "",
+            "payment_type": label.payment_type or "",
+            "customer_name": label.customer_name or "",
+            "customer_city": label.customer_city or "",
+            "customer_state": label.customer_state or "",
+            "customer_pincode": label.customer_pincode or "",
+            "order_date": label.order_date,
+        })
+        return snapshot
+
+    payment = (
+        OrderPayment.objects.filter(business=business, sub_order_no__iexact=code)
+        .order_by("-order_date")
+        .first()
+    )
+    if payment:
+        snapshot.update({
+            "sub_order_no": payment.sub_order_no,
+            "matched_from": ScannedOrder.MATCH_PAYMENT,
+            "sku": payment.supplier_sku or "",
+            "product_name": payment.product_name or "",
+            "qty": payment.quantity or 1,
+            "order_date": timezone.localtime(payment.order_date).date() if payment.order_date else None,
+        })
+        return snapshot
+
+    order = (
+        Order.objects.filter(business=business, sub_order_no__iexact=code)
+        .order_by("-order_date")
+        .first()
+    )
+    if order:
+        snapshot.update({
+            "sub_order_no": order.sub_order_no,
+            "matched_from": ScannedOrder.MATCH_ORDER,
+            "sku": order.sku or "",
+            "product_name": order.product_name or "",
+            "size": order.size or "",
+            "qty": order.quantity or 1,
+            "customer_state": order.customer_state or "",
+            "order_date": order.order_date,
+        })
+
+    return snapshot
+
+
+def _meesho_status_map(business, sub_order_nos):
+    """
+    Meesho's own status for a batch of sub-orders, in two queries rather than
+    two per row.
+
+    This is the half of "what happened to it" we can't know at the desk: it only
+    becomes available once the payment / orders sheet for that period is
+    uploaded. Absent from the map means Meesho hasn't reported on it yet.
+    """
+    nos = [n for n in sub_order_nos if n]
+    if not nos:
+        return {}
+
+    resolved = {}
+
+    # Orders sheet is the coarser source — fill from it first so the payments
+    # sheet (which carries the live status verbatim) can overwrite it.
+    for row in Order.objects.filter(
+        business=business, sub_order_no__in=nos
+    ).values("sub_order_no", "reason_for_credit_entry", "order_date").order_by("order_date"):
+        raw = row["reason_for_credit_entry"]
+        if not raw:
+            continue
+        resolved[row["sub_order_no"]] = {
+            "status": raw.replace("_", " ").title(),
+            "bucket": _meesho_bucket(raw),
+            "source": "orders",
+            "as_of": row["order_date"],
+        }
+
+    for row in OrderPayment.objects.filter(
+        business=business, sub_order_no__in=nos, live_order_status__isnull=False
+    ).exclude(live_order_status="").values(
+        "sub_order_no", "live_order_status", "payment_date"
+    ).order_by("payment_date"):
+        resolved[row["sub_order_no"]] = {
+            "status": row["live_order_status"],
+            "bucket": _meesho_bucket(row["live_order_status"]),
+            "source": "payments",
+            "as_of": row["payment_date"],
+        }
+
+    return resolved
+
+
+def _attach_meesho_status(business, rows):
+    """Hang the resolved Meesho status on each row for the serializer to pick up."""
+    rows = list(rows)
+    status_map = _meesho_status_map(business, [r.sub_order_no for r in rows])
+    for row in rows:
+        row.meesho_status = status_map.get(row.sub_order_no)
+    return rows
+
+
+def _scanned_order_stats(business):
+    """
+    Scan workload for the whole business — counted in the database so it stays
+    cheap as the log grows, and never narrowed by the period filter so nothing
+    on hold can hide behind the selected month.
+    """
+    base = ScannedOrder.objects.filter(business=business)
+    today = timezone.localdate()
+
+    by_status = {
+        row["status"]: row["n"]
+        for row in base.values("status").annotate(n=Count("id"))
+    }
+
+    return {
+        "total":       base.count(),
+        "scanned":     by_status.get(ScannedOrder.STATUS_SCANNED, 0),
+        "packed":      by_status.get(ScannedOrder.STATUS_PACKED, 0),
+        "dispatched":  by_status.get(ScannedOrder.STATUS_DISPATCHED, 0),
+        "on_hold":     by_status.get(ScannedOrder.STATUS_ON_HOLD, 0),
+        "issue":       by_status.get(ScannedOrder.STATUS_ISSUE, 0),
+        "cancelled":   by_status.get(ScannedOrder.STATUS_CANCELLED, 0),
+        "open":        base.filter(status__in=ScannedOrder.OPEN_STATUSES).count(),
+        "needs_attention": base.filter(status__in=ScannedOrder.ATTENTION_STATUSES).count(),
+        "unrecognised":    base.filter(matched_from=ScannedOrder.MATCH_NONE).count(),
+        "scanned_today":   base.filter(
+            last_scanned_at__gte=_local_day_start(today),
+            last_scanned_at__lt=_local_day_start(today + timedelta(days=1)),
+        ).count(),
+        "rescanned":       base.filter(scan_count__gt=1).count(),
+    }
+
+
+@api_view(["GET", "POST"])
+def scanned_orders_list(request, business_id):
+    """
+    GET — the scan log, paginated, with each row's current Meesho status attached.
+
+      q          — matches sub-order / AWB / scanned code / SKU / product / customer
+      status     — a STATUS_* value, or "OPEN" for anything still in our hands
+      matched    — "yes" | "no" (whether the code resolved to a known order)
+      date_from / date_to — on the scan date
+      page, page_size
+
+    POST — record a scan: {"code": "...", "status": "...", "notes": "..."}.
+      Re-scanning an order already in the log bumps its scan_count and returns
+      already_scanned=true instead of creating a second row, so the desk is told
+      about the duplicate rather than silently logging it twice.
+    """
+    business = get_authorized_business(request, business_id)
+
+    if request.method == "POST":
+        payload = request.data if isinstance(request.data, dict) else {}
+        code = _clean_scan_code(payload.get("code") or payload.get("q"))
+        if not code:
+            return Response({"error": "Nothing scanned."}, status=status.HTTP_400_BAD_REQUEST)
+        if len(code) > 200:
+            return Response({"error": "That code is too long to be a barcode."},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        new_status = str(payload.get("status") or ScannedOrder.STATUS_SCANNED).strip().upper()
+        if new_status not in _SCAN_STATUSES:
+            return Response(
+                {"error": f"Invalid status. Expected one of: {', '.join(sorted(_SCAN_STATUSES))}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        snapshot = _resolve_scan_code(business, code)
+        now = timezone.now()
+
+        existing = ScannedOrder.objects.filter(
+            business=business, sub_order_no=snapshot["sub_order_no"]
+        ).first()
+
+        if existing:
+            # Already logged. Bump the scan, and only move the status when the
+            # caller actually asked for one — a plain re-scan must not quietly
+            # reset a parcel that was already marked dispatched.
+            existing.scan_count += 1
+            existing.last_scanned_at = now
+            existing.scanned_code = code
+            existing.scanned_by = request.user
+            fields = ["scan_count", "last_scanned_at", "scanned_code", "scanned_by", "updated_at"]
+
+            if payload.get("status") and new_status != existing.status:
+                existing.status = new_status
+                existing.status_updated_at = now
+                fields += ["status", "status_updated_at"]
+            if "notes" in payload:
+                existing.notes = str(payload["notes"] or "").strip()
+                fields.append("notes")
+
+            existing.save(update_fields=fields)
+            row = _attach_meesho_status(business, [existing])[0]
+            return Response({
+                "already_scanned": True,
+                "scan_count": row.scan_count,
+                "matched_from": row.matched_from,
+                "row": ScannedOrderSerializer(row).data,
+                "stats": _scanned_order_stats(business),
+            })
+
+        row = ScannedOrder.objects.create(
+            business=business,
+            scanned_code=code,
+            status=new_status,
+            status_updated_at=now if new_status != ScannedOrder.STATUS_SCANNED else None,
+            notes=str(payload.get("notes") or "").strip(),
+            last_scanned_at=now,
+            scanned_by=request.user,
+            **snapshot,
+        )
+        row = _attach_meesho_status(business, [row])[0]
+        return Response({
+            "already_scanned": False,
+            "scan_count": 1,
+            "matched_from": row.matched_from,
+            "row": ScannedOrderSerializer(row).data,
+            "stats": _scanned_order_stats(business),
+        }, status=status.HTTP_201_CREATED)
+
+    qs = ScannedOrder.objects.filter(business=business).select_related("scanned_by")
+
+    # Half-open datetime bounds rather than __date — see _local_day_start.
+    date_from = _parse_day(request.GET.get("date_from"))
+    date_to   = _parse_day(request.GET.get("date_to"))
+    if date_from:
+        qs = qs.filter(last_scanned_at__gte=_local_day_start(date_from))
+    if date_to:
+        qs = qs.filter(last_scanned_at__lt=_local_day_start(date_to + timedelta(days=1)))
+
+    search = request.GET.get("q", "").strip()
+    if search:
+        qs = qs.filter(
+            DQ(sub_order_no__icontains=search) |
+            DQ(scanned_code__icontains=search) |
+            DQ(awb_number__icontains=search) |
+            DQ(sku__icontains=search) |
+            DQ(product_name__icontains=search) |
+            DQ(customer_name__icontains=search)
+        )
+
+    wanted = request.GET.get("status", "").strip().upper()
+    if wanted == "OPEN":
+        qs = qs.filter(status__in=ScannedOrder.OPEN_STATUSES)
+    elif wanted == "ATTENTION":
+        qs = qs.filter(status__in=ScannedOrder.ATTENTION_STATUSES)
+    elif wanted:
+        qs = qs.filter(status=wanted)
+
+    matched = request.GET.get("matched", "").strip().lower()
+    if matched == "no":
+        qs = qs.filter(matched_from=ScannedOrder.MATCH_NONE)
+    elif matched == "yes":
+        qs = qs.exclude(matched_from=ScannedOrder.MATCH_NONE)
+
+    total = qs.count()
+
+    try:
+        page = max(1, int(request.GET.get("page", 1)))
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        page_size = min(200, max(1, int(request.GET.get("page_size", 50))))
+    except (TypeError, ValueError):
+        page_size = 50
+
+    start = (page - 1) * page_size
+    rows  = _attach_meesho_status(business, qs[start:start + page_size])
+
+    return Response({
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "results": ScannedOrderSerializer(rows, many=True).data,
+        "stats": _scanned_order_stats(business),
+        "statuses": [{"value": v, "label": l} for v, l in ScannedOrder.STATUS_CHOICES],
+    })
+
+
+@api_view(["GET", "PATCH", "DELETE"])
+def scanned_order_detail(request, business_id, pk):
+    """Read one recorded scan, update its status/notes, or delete a mis-scan."""
+    business = get_authorized_business(request, business_id)
+
+    try:
+        row = ScannedOrder.objects.select_related("scanned_by").get(pk=pk, business=business)
+    except ScannedOrder.DoesNotExist:
+        return Response({"error": "Scan not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == "DELETE":
+        row.delete()
+        return Response({"deleted": True, "stats": _scanned_order_stats(business)})
+
+    if request.method == "PATCH":
+        payload = request.data if isinstance(request.data, dict) else {}
+        unknown = set(payload) - _SCAN_WRITABLE
+        if unknown:
+            return Response(
+                {"error": f"Not editable: {', '.join(sorted(unknown))}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if "status" in payload:
+            new_status = str(payload["status"] or "").strip().upper()
+            if new_status not in _SCAN_STATUSES:
+                return Response(
+                    {"error": f"Invalid status. Expected one of: {', '.join(sorted(_SCAN_STATUSES))}"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if new_status != row.status:
+                row.status = new_status
+                row.status_updated_at = timezone.now()
+
+        if "notes" in payload:
+            row.notes = str(payload["notes"] or "").strip()
+
+        row.save()
+
+    row = _attach_meesho_status(business, [row])[0]
+    data = ScannedOrderSerializer(row).data
+    data["stats"] = _scanned_order_stats(business)
+    return Response(data)
+
+
+@api_view(["POST"])
+def scanned_orders_bulk_status(request, business_id):
+    """
+    Move a list of recorded scans to one status — the "select the day's pile and
+    mark it all dispatched" action.
+    """
+    business = get_authorized_business(request, business_id)
+    payload  = request.data if isinstance(request.data, dict) else {}
+
+    ids = payload.get("ids") or []
+    if not isinstance(ids, list) or not ids:
+        return Response({"error": "Give a non-empty list of scan ids."},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    new_status = str(payload.get("status") or "").strip().upper()
+    if new_status not in _SCAN_STATUSES:
+        return Response(
+            {"error": f"Invalid status. Expected one of: {', '.join(sorted(_SCAN_STATUSES))}"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    updated = ScannedOrder.objects.filter(business=business, id__in=ids).exclude(
+        status=new_status
+    ).update(status=new_status, status_updated_at=timezone.now())
+
+    return Response({
+        "updated": updated,
+        "status": new_status,
+        "stats": _scanned_order_stats(business),
+    })
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -8290,10 +8936,10 @@ def gst_mismatches(request, business_id):
         sku_of.setdefault(so, sku)
 
     # SKU → the rate configured in pricing.
-    configured = {
-        sku: rate for sku, rate in FinalPrice.objects.filter(business=business)
+    configured = _SkuMap(
+        FinalPrice.objects.filter(business=business)
         .exclude(tax_percent__isnull=True).values_list("sku_id", "tax_percent")
-    }
+    )
 
     groups = {}
     unmatched_suborder = 0
@@ -8534,10 +9180,10 @@ def label_customers(request, business_id):
     # SKU → parent name, so the customer view speaks the same language as the
     # labels table.
     all_skus = {r["sku"] for rows in groups.values() for r in rows if r["sku"]}
-    sku_to_parent = dict(
+    sku_to_parent = _SkuMap(
         FinalPrice.objects.filter(business=business, sku_id__in=all_skus)
         .select_related("parent").values_list("sku_id", "parent__item_id")
-    ) if all_skus else {}
+    ) if all_skus else _SkuMap()
 
     customers = []
     for key, rows in groups.items():

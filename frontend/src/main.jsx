@@ -8,6 +8,7 @@ import App from "./App.jsx";
 import theme from "./theme.js";
 import { AuthProvider } from "./contexts/AuthContext.jsx";
 import { BusinessProvider } from "./contexts/BusinessContext.jsx";
+import { AccessProvider } from "./contexts/AccessContext.jsx";
 import "./index.css";
 
 ReactDOM.createRoot(document.getElementById("root")).render(
@@ -17,7 +18,11 @@ ReactDOM.createRoot(document.getElementById("root")).render(
         <CssBaseline />
         <AuthProvider>
           <BusinessProvider>
-            <App />
+            {/* Inside BusinessProvider: access rules are resolved per business,
+                so this needs to know which one is active. */}
+            <AccessProvider>
+              <App />
+            </AccessProvider>
           </BusinessProvider>
         </AuthProvider>
       </ThemeProvider>

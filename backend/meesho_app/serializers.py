@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, ParentItemPrice, ParentPriceHistory, Order, LabelOrder, ReturnDelivery
+from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, ParentItemPrice, ParentPriceHistory, Order, LabelOrder, ReturnDelivery, ScannedOrder
 
 
 class OrderPaymentSerializer(serializers.ModelSerializer):
@@ -104,3 +104,30 @@ class ReturnDeliverySerializer(serializers.ModelSerializer):
 
     def get_claim_urgency(self, obj):
         return obj.claim_urgency()
+
+
+class ScannedOrderSerializer(serializers.ModelSerializer):
+    """
+    A recorded scan. `scanned_by_name` is flattened onto the row so the table can
+    show who scanned it without the client resolving user ids.
+
+    `meesho_status` is *not* set here — it is looked up in bulk by the view for a
+    whole page of rows at once, because resolving it per row would be a query per
+    row. The field is declared so it always appears in the payload (null when the
+    view has nothing to attach).
+    """
+    scanned_by_name = serializers.CharField(source="scanned_by.username", read_only=True, default=None)
+    scan_date       = serializers.DateField(read_only=True)
+    meesho_status   = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ScannedOrder
+        fields = "__all__"
+        read_only_fields = [
+            "business", "scan_count", "first_scanned_at", "last_scanned_at",
+            "updated_at", "matched_from",
+        ]
+
+    def get_meesho_status(self, obj):
+        # Attached by the view (see _meesho_status_map) — absent means "unknown".
+        return getattr(obj, "meesho_status", None)

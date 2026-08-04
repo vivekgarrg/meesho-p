@@ -94,6 +94,10 @@ urlpatterns = [
     path("returns/upload/",             views.return_deliveries_upload, name="return_deliveries_upload"),
     path("returns/lookup/",             views.return_delivery_lookup,   name="return_delivery_lookup"),
     path("returns/<int:pk>/",           views.return_delivery_detail,   name="return_delivery_detail"),
+    # Order scanning — log outgoing parcels at the desk and track their status
+    path("order-scan/",              views.scanned_orders_list,        name="scanned_orders_list"),
+    path("order-scan/bulk-status/",  views.scanned_orders_bulk_status, name="scanned_orders_bulk_status"),
+    path("order-scan/<int:pk>/",     views.scanned_order_detail,       name="scanned_order_detail"),
     # GST — monthly liability from Meesho TCS exports
     path("gst/upload/",      views.gst_upload,      name="gst_upload"),
     path("gst/periods/",     views.gst_periods,     name="gst_periods"),

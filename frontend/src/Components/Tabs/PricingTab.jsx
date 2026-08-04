@@ -177,7 +177,7 @@ function SkuDropdown({ parentId, onSelect, unlinked = [] }) {
           {sorted.length === 0
             ? <div style={{ padding: "12px 14px", fontSize: 12, color: C.gray400 }}>No unlinked SKUs</div>
             : sorted.map(s => (
-              <div key={s.sku_id} onMouseDown={() => { onSelect(s.sku_id); setQ(""); setOpen(false); }}
+              <div key={s.id ?? s.sku_id} onMouseDown={() => { onSelect(s.sku_id); setQ(""); setOpen(false); }}
                 style={{ padding: "8px 14px", cursor: "pointer", fontSize: 12, display: "flex", justifyContent: "space-between", borderBottom: `1px solid ${C.gray100}` }}
                 onMouseEnter={e => e.currentTarget.style.background = C.orangeLight}
                 onMouseLeave={e => e.currentTarget.style.background = "transparent"}
@@ -661,7 +661,7 @@ function UnlinkedSkuTray({ unlinked, dragging, setDragging }) {
           ) : (
             <div style={{ display: "flex", flexWrap: "wrap", gap: 8, maxHeight: 200, overflowY: "auto", padding: 2 }}>
               {filtered.map(s => (
-                <SkuChip key={s.sku_id} sku={s} dragging={dragging}
+                <SkuChip key={s.id ?? s.sku_id} sku={s} dragging={dragging}
                   onDragStart={setDragging} onDragEnd={() => setDragging(null)} />
               ))}
             </div>
@@ -1112,7 +1112,7 @@ export function PricingTab() {
                 const selected = selectedUnlinked.has(s.sku_id);
                 return (
                   <div
-                    key={s.sku_id}
+                    key={s.id ?? s.sku_id}
                     draggable
                     onDragStart={e => { e.dataTransfer.setData("text/plain", s.sku_id); setDragging(s.sku_id); }}
                     onDragEnd={() => setDragging(null)}

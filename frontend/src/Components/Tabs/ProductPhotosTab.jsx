@@ -89,7 +89,7 @@ export function ProductPhotosTab() {
 
       {/* API Key + Upload row */}
       <Grid container spacing={2.5}>
-        <Grid item xs={12} md={6}>
+        <Grid size={{ xs: 12, md: 6 }}>
           <Card elevation={1}>
             <CardContent>
               <Typography variant="subtitle2" sx={{ mb: 1.5 }}>Stability AI API Key</Typography>
@@ -109,7 +109,7 @@ export function ProductPhotosTab() {
           </Card>
         </Grid>
 
-        <Grid item xs={12} md={6}>
+        <Grid size={{ xs: 12, md: 6 }}>
           <Card elevation={1} sx={{ height: "100%" }}>
             <CardContent>
               <Typography variant="subtitle2" sx={{ mb: 1.5 }}>Product Image</Typography>
@@ -182,7 +182,7 @@ export function ProductPhotosTab() {
             <Typography variant="subtitle2" sx={{ mb: 2 }}>10 Aesthetic Styles Will Be Generated</Typography>
             <Grid container spacing={1.5}>
               {STYLE_LABELS.map((label, i) => (
-                <Grid item xs={6} sm={4} md={2.4} key={i}>
+                <Grid size={{ xs: 6, sm: 4, md: 2.4 }} key={i}>
                   <Paper variant="outlined" sx={{ p: 1.5, textAlign: "center", bgcolor: "grey.50" }}>
                     <Typography sx={{ fontSize: 22, mb: 0.5 }}>{STYLE_ICONS[i]}</Typography>
                     <Typography variant="caption" sx={{ fontWeight: 600, color: "text.secondary" }}>{label}</Typography>
@@ -198,7 +198,7 @@ export function ProductPhotosTab() {
       {loading && (
         <Grid container spacing={2}>
           {Array.from({ length: 10 }).map((_, i) => (
-            <Grid item xs={6} sm={4} md={2.4} key={i}>
+            <Grid size={{ xs: 6, sm: 4, md: 2.4 }} key={i}>
               <Box sx={{ border: "1px solid", borderColor: "divider", borderRadius: 3, overflow: "hidden" }}>
                 <Skeleton variant="rectangular" sx={{ aspectRatio: "1/1", width: "100%" }} animation="wave" />
                 <Box sx={{ p: 1.5, textAlign: "center" }}>
@@ -222,7 +222,7 @@ export function ProductPhotosTab() {
           </Box>
           <Grid container spacing={2}>
             {results.map((r, i) => (
-              <Grid item xs={6} sm={4} md={2.4} key={i}>
+              <Grid size={{ xs: 6, sm: 4, md: 2.4 }} key={i}>
                 <Card elevation={1} sx={{ overflow: "hidden" }}>
                   {r?.status === "ok" ? (
                     <>

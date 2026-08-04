@@ -9,39 +9,15 @@ async function fetchMe() {
   return res.json();
 }
 
-async function fetchNavVisibility() {
-  const res = await fetch("/api/auth/nav-visibility/");
-  if (!res.ok) throw new Error("Failed to fetch sidebar visibility");
-  return res.json(); // { visible_paths: string[], configured: bool }
-}
-
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
-  // null while unknown; once loaded: { visiblePaths: string[], configured: bool }
-  const [navVisibility, setNavVisibility] = useState(null);
-
-  const refreshNavVisibility = useCallback(async () => {
-    try {
-      const d = await fetchNavVisibility();
-      const next = { visiblePaths: d.visible_paths || [], configured: !!d.configured };
-      setNavVisibility(next);
-      return next;
-    } catch {
-      // On failure, fall back to showing everything (configured: false).
-      const next = { visiblePaths: [], configured: false };
-      setNavVisibility(next);
-      return next;
-    }
-  }, []);
-
   useEffect(() => {
     (async () => {
       if (getAccessToken()) {
         try {
           const me = await fetchMe();
           setUser(me);
-          await refreshNavVisibility();
         } catch {
           clearTokens();
           setUser(null);
@@ -49,7 +25,7 @@ export function AuthProvider({ children }) {
       }
       setLoading(false);
     })();
-  }, [refreshNavVisibility]);
+  }, []);
 
   const login = useCallback(async (username, password) => {
     const res = await fetch("/api/auth/login/", {
@@ -71,37 +47,12 @@ export function AuthProvider({ children }) {
     setTokens({ access, refresh });
     const me = await fetchMe();
     setUser(me);
-    await refreshNavVisibility();
     return me;
-  }, [refreshNavVisibility]);
+  }, []);
 
   const logout = useCallback(() => {
     clearTokens();
     setUser(null);
-    setNavVisibility(null);
-  }, []);
-
-  // Super-admin: replace the global list of sidebar tabs visible to everyone.
-  const updateNavVisibility = useCallback(async (paths) => {
-    const res = await fetch("/api/auth/nav-visibility/", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ visible_paths: paths }),
-    });
-    if (!res.ok) {
-      let message = "Could not update sidebar visibility";
-      try {
-        const body = await res.json();
-        message = body.error || body.detail || message;
-      } catch {
-        // ignore body parse errors
-      }
-      throw new Error(message);
-    }
-    const d = await res.json();
-    const next = { visiblePaths: d.visible_paths || [], configured: !!d.configured };
-    setNavVisibility(next);
-    return next;
   }, []);
 
   // Re-fetch the current user (e.g. after an admin creates/edits businesses so
@@ -138,7 +89,6 @@ export function AuthProvider({ children }) {
     <AuthContext.Provider
       value={{
         user, loading, login, logout, refreshUser, changePassword, isSuperAdmin,
-        navVisibility, refreshNavVisibility, updateNavVisibility,
       }}
     >
       {children}

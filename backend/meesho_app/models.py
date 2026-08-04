@@ -1053,3 +1053,123 @@ class GstInvoiceDetail(models.Model):
 
     def __str__(self):
         return f"{self.doc_type} {self.invoice_no} ({self.suborder_no})"
+
+
+class ScannedOrder(models.Model):
+    """
+    One outgoing order recorded at the scanning desk, so its progress can be
+    looked up later.
+
+    Why this exists separately from LabelOrder: a label only tells us what
+    *should* go out — it is created by a PDF upload and says nothing about what
+    was physically handled. This table is the log of what someone actually
+    scanned, when, and what state they put it in. It also survives the order
+    being absent from every other table: a code that matches nothing at all is
+    still recorded (matched_from = NONE), because "I scanned this and the system
+    didn't know it" is exactly the kind of thing worth being able to look up.
+
+    The product/customer columns are a *snapshot* copied from whatever source
+    resolved the code. They are deliberately denormalised rather than a FK: the
+    point of the log is what was true at the desk on the day, and a later label
+    re-upload must not silently rewrite history.
+
+    Natural key is (business, sub_order_no) — one row per order, and re-scanning
+    the same parcel bumps scan_count instead of adding a duplicate, so the desk
+    gets told "already scanned" rather than quietly logging it twice.
+    """
+
+    # ── Where the parcel is in our own process ────────────────────────────
+    STATUS_SCANNED    = "SCANNED"
+    STATUS_PACKED     = "PACKED"
+    STATUS_DISPATCHED = "DISPATCHED"
+    STATUS_ON_HOLD    = "ON_HOLD"
+    STATUS_ISSUE      = "ISSUE"
+    STATUS_CANCELLED  = "CANCELLED"
+
+    STATUS_CHOICES = [
+        (STATUS_SCANNED,    "Scanned"),
+        (STATUS_PACKED,     "Packed"),
+        (STATUS_DISPATCHED, "Dispatched"),
+        (STATUS_ON_HOLD,    "On hold"),
+        (STATUS_ISSUE,      "Problem"),
+        (STATUS_CANCELLED,  "Cancelled"),
+    ]
+
+    # Still somewhere in our hands — the ones a "what's left to do" view wants.
+    OPEN_STATUSES = (STATUS_SCANNED, STATUS_PACKED, STATUS_ON_HOLD, STATUS_ISSUE)
+    # Needs a person to look at it.
+    ATTENTION_STATUSES = (STATUS_ON_HOLD, STATUS_ISSUE)
+
+    # ── Which table the scanned code was recognised from ──────────────────
+    MATCH_LABEL   = "LABEL"      # shipping label PDF — the richest source
+    MATCH_PAYMENT = "PAYMENT"    # payments sheet
+    MATCH_ORDER   = "ORDER"      # orders sheet
+    MATCH_NONE    = "NONE"       # nothing in the system knows this code (yet)
+
+    MATCH_CHOICES = [
+        (MATCH_LABEL,   "Shipping label"),
+        (MATCH_PAYMENT, "Payments sheet"),
+        (MATCH_ORDER,   "Orders sheet"),
+        (MATCH_NONE,    "Not recognised"),
+    ]
+
+    # ── Identity ──────────────────────────────────────────────────────────
+    scanned_code = models.CharField(max_length=200, db_index=True,
+                                    help_text="Exactly what the scanner read, before resolution")
+    sub_order_no = models.CharField(max_length=100, db_index=True,
+                                    help_text="Resolved sub-order, or the raw code when unrecognised")
+    awb_number   = models.CharField(max_length=100, blank=True, db_index=True)
+    matched_from = models.CharField(max_length=20, choices=MATCH_CHOICES, default=MATCH_NONE)
+
+    # ── Snapshot of the order as it was at scan time ──────────────────────
+    sku          = models.CharField(max_length=300, blank=True, db_index=True)
+    product_name = models.TextField(blank=True)
+    size         = models.CharField(max_length=100, blank=True)
+    qty          = models.PositiveIntegerField(default=1)
+    courier_name = models.CharField(max_length=100, blank=True, db_index=True)
+    payment_type = models.CharField(max_length=20, blank=True)   # "Prepaid" | "COD"
+
+    customer_name    = models.CharField(max_length=255, blank=True)
+    customer_city    = models.CharField(max_length=100, blank=True)
+    customer_state   = models.CharField(max_length=100, blank=True)
+    customer_pincode = models.CharField(max_length=10, blank=True)
+
+    order_date = models.DateField(null=True, blank=True)
+
+    # ── Progress recorded at the desk ──────────────────────────────────────
+    status            = models.CharField(max_length=20, choices=STATUS_CHOICES,
+                                         default=STATUS_SCANNED, db_index=True)
+    status_updated_at = models.DateTimeField(null=True, blank=True)
+    notes             = models.TextField(blank=True)
+
+    # ── Scan bookkeeping ──────────────────────────────────────────────────
+    scan_count      = models.PositiveIntegerField(default=1)
+    first_scanned_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    last_scanned_at  = models.DateTimeField(db_index=True)
+    scanned_by = models.ForeignKey(
+        "accounts.User", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="order_scans",
+    )
+
+    updated_at = models.DateTimeField(auto_now=True)
+
+    business = models.ForeignKey(
+        "accounts.Business", on_delete=models.PROTECT,
+    )
+
+    class Meta:
+        db_table = "scanned_orders"
+        ordering = ["-last_scanned_at"]
+        unique_together = [("business", "sub_order_no")]
+        indexes = [
+            models.Index(fields=["business", "status"]),
+            models.Index(fields=["business", "last_scanned_at"]),
+        ]
+
+    def __str__(self):
+        return f"{self.sub_order_no} | {self.sku} | {self.status}"
+
+    @property
+    def scan_date(self):
+        """Local date the parcel was last scanned — what the desk groups by."""
+        return timezone.localtime(self.last_scanned_at).date() if self.last_scanned_at else None

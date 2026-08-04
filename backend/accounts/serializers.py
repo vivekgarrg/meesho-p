@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
-from .models import MAX_BUSINESSES_PER_USER, Business, Membership, User
+from .models import MAX_BUSINESSES_PER_USER, Business, BusinessProfile, Membership, User
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -76,11 +76,50 @@ class ChangePasswordSerializer(serializers.Serializer):
     new_password = serializers.CharField(write_only=True, min_length=4)
 
 
+class BusinessProfileSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = BusinessProfile
+        exclude = ["business", "id"]
+        read_only_fields = ["created_at", "updated_at"]
+
+
 class BusinessSerializer(serializers.ModelSerializer):
+    """
+    A business plus its profile. `profile` is writable so the Business Profile
+    screen can save the details and the transport-deduction switch in one call,
+    and it is always present in the response — an absent row reads as defaults
+    rather than null, so the client never has to special-case a new business.
+    """
+    profile = BusinessProfileSerializer(required=False)
+
     class Meta:
         model = Business
-        fields = ["id", "name", "is_active", "created_at", "updated_at"]
+        fields = ["id", "name", "is_active", "created_at", "updated_at", "profile"]
         read_only_fields = ["id", "created_at", "updated_at"]
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if data.get("profile") is None:
+            # Defaults for a business that has no profile row yet.
+            data["profile"] = BusinessProfileSerializer(BusinessProfile(business=instance)).data
+        return data
+
+    def update(self, instance, validated_data):
+        profile_data = validated_data.pop("profile", None)
+        instance = super().update(instance, validated_data)
+        if profile_data is not None:
+            profile, _ = BusinessProfile.objects.get_or_create(business=instance)
+            for field, value in profile_data.items():
+                setattr(profile, field, value)
+            profile.save()
+        return instance
+
+    def create(self, validated_data):
+        profile_data = validated_data.pop("profile", None)
+        business = super().create(validated_data)
+        if profile_data:
+            BusinessProfile.objects.create(business=business, **profile_data)
+        return business
 
 
 class MembershipSerializer(serializers.ModelSerializer):

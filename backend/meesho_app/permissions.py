@@ -1,6 +1,18 @@
+import re
+
 from rest_framework.exceptions import NotFound, PermissionDenied
 
+from accounts.access import api_access_denied
 from accounts.models import Business, Membership, User
+
+# /api/business/<id>/<the part we care about>
+_SUB_PATH_RE = re.compile(r"^/api/business/\d+/(?P<sub>.*)$")
+
+
+def _api_sub_path(request):
+    """The endpoint path with the /api/business/<id>/ prefix stripped."""
+    match = _SUB_PATH_RE.match(request.path or "")
+    return match.group("sub") if match else ""
 
 
 def get_authorized_business(request, business_id):
@@ -13,6 +25,12 @@ def get_authorized_business(request, business_id):
     super_admin). A wrong business_id for a real business intentionally
     raises the same NotFound a nonexistent id would, so a business_user
     can't distinguish "not yours" from "doesn't exist".
+
+    It is also where per-user / per-business area restrictions are enforced.
+    Every business-scoped endpoint already funnels through here, so checking in
+    one place means a hidden tab is genuinely unreachable rather than just
+    missing from the sidebar. Endpoints shared by many screens are left
+    unguarded on purpose — see accounts.nav.API_OWNERSHIP.
     """
     try:
         business = Business.objects.get(pk=business_id, is_active=True)
@@ -20,8 +38,15 @@ def get_authorized_business(request, business_id):
         raise NotFound("Business not found.")
 
     user = request.user
-    if user.role == User.ROLE_SUPER_ADMIN:
-        return business
-    if Membership.objects.filter(user=user, business=business).exists():
-        return business
-    raise NotFound("Business not found.")
+    is_member = (
+        user.role == User.ROLE_SUPER_ADMIN
+        or Membership.objects.filter(user=user, business=business).exists()
+    )
+    if not is_member:
+        raise NotFound("Business not found.")
+
+    denial = api_access_denied(user, business, _api_sub_path(request))
+    if denial:
+        raise PermissionDenied(denial)
+
+    return business
