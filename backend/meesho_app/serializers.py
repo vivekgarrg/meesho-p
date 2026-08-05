@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, ParentItemPrice, ParentPriceHistory, Order, LabelOrder, ReturnDelivery, ScannedOrder
+from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, ParentItemPrice, ParentPriceHistory, Order, LabelOrder, ReturnDelivery, ScannedOrder, ListingTemplate
 
 
 class OrderPaymentSerializer(serializers.ModelSerializer):
@@ -131,3 +131,41 @@ class ScannedOrderSerializer(serializers.ModelSerializer):
     def get_meesho_status(self, obj):
         # Attached by the view (see _meesho_status_map) — absent means "unknown".
         return getattr(obj, "meesho_status", None)
+
+
+class ListingTemplateSerializer(serializers.ModelSerializer):
+    """
+    A listing template as the browser extension consumes it.
+
+    Usernames are flattened onto the row because the extension popup has no way
+    to resolve user ids, and `field_count` is exposed so the template list can be
+    rendered without shipping every field value to a list view.
+    """
+    created_by_name = serializers.CharField(source="created_by.username", read_only=True, default=None)
+    updated_by_name = serializers.CharField(source="updated_by.username", read_only=True, default=None)
+    field_count     = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = ListingTemplate
+        fields = "__all__"
+        read_only_fields = ["business", "created_by", "updated_by", "created_at", "updated_at"]
+
+    def validate_name(self, value):
+        name = (value or "").strip()
+        if not name:
+            raise serializers.ValidationError("A template needs a name.")
+        return name
+
+    def validate_fields(self, value):
+        # The extension sends {logicalKey: value}. Anything else means a bug or a
+        # hand-edited import file, and storing it would break prefill silently.
+        if not isinstance(value, dict):
+            raise serializers.ValidationError("fields must be an object of key → value.")
+        return value
+
+    def validate_labels(self, value):
+        if value in (None, ""):
+            return {}
+        if not isinstance(value, dict):
+            raise serializers.ValidationError("labels must be an object of key → label.")
+        return value

@@ -98,6 +98,11 @@ urlpatterns = [
     path("order-scan/",              views.scanned_orders_list,        name="scanned_orders_list"),
     path("order-scan/bulk-status/",  views.scanned_orders_bulk_status, name="scanned_orders_bulk_status"),
     path("order-scan/<int:pk>/",     views.scanned_order_detail,       name="scanned_order_detail"),
+    # Listing templates — synced from the Meesho browser extension
+    path("listing-templates/",         views.listing_templates_list,   name="listing_templates_list"),
+    path("listing-templates/import/",  views.listing_templates_import, name="listing_templates_import"),
+    path("listing-templates/export/",  views.listing_templates_export, name="listing_templates_export"),
+    path("listing-templates/<int:pk>/", views.listing_template_detail, name="listing_template_detail"),
     # GST — monthly liability from Meesho TCS exports
     path("gst/upload/",      views.gst_upload,      name="gst_upload"),
     path("gst/periods/",     views.gst_periods,     name="gst_periods"),

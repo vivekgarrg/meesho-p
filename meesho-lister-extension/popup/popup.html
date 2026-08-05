@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Meesho Dynamic Lister</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand">
+      <span class="logo">M</span>
+      <div>
+        <h1>Meesho Dynamic Lister</h1>
+        <p id="status-line" class="muted">Checking page…</p>
+      </div>
+    </div>
+    <button id="btn-logout" class="linkbtn hidden" title="Sign out">Sign out</button>
+  </header>
+
+  <!-- ============================== SIGN IN ==============================
+       Shown until a Rudam session exists. Templates are stored per business on
+       the server, so there is nothing meaningful to show before signing in. -->
+  <section id="auth-gate" class="auth-gate hidden">
+    <h2 class="auth-title">Sign in to Rudam</h2>
+    <p class="muted tiny auth-sub">
+      Your listing templates are saved to your Rudam account, so they follow you
+      to any browser you sign in from.
+    </p>
+
+    <label class="field-label" for="auth-username">Username</label>
+    <input id="auth-username" type="text" autocomplete="username" placeholder="your username" />
+
+    <label class="field-label" for="auth-password">Password</label>
+    <input id="auth-password" type="password" autocomplete="current-password" placeholder="••••••••" />
+
+    <button id="btn-login" class="btn primary full">Sign in</button>
+    <p id="auth-error" class="auth-error hidden"></p>
+
+    <p class="muted tiny">
+      Signing in to <b id="auth-server">rudam.in</b>.
+      <a href="#" id="link-change-server">Change server</a>
+    </p>
+    <div id="server-row" class="row gap hidden">
+      <input id="auth-api-base" type="text" class="grow" placeholder="https://rudam.in" />
+      <button id="btn-save-server" class="btn ghost small">Save</button>
+    </div>
+  </section>
+
+  <!-- ============================ SIGNED IN ============================== -->
+  <div id="app-body" class="hidden">
+    <!-- Which business templates are read from and written to. Hidden entirely
+         when the account only has one, since there is no choice to make. -->
+    <div id="business-row" class="business-row hidden">
+      <label class="field-label tight" for="business-select">Business</label>
+      <select id="business-select"></select>
+    </div>
+
+    <nav class="tabs" role="tablist">
+      <button class="tab active" data-tab="fields" role="tab">Fields</button>
+      <button class="tab" data-tab="templates" role="tab">Templates</button>
+      <button class="tab" data-tab="images" role="tab">Images</button>
+      <button class="tab" data-tab="settings" role="tab">Settings</button>
+    </nav>
+
+    <main>
+      <!-- ============================ FIELDS ============================ -->
+      <section id="tab-fields" class="tab-panel active">
+        <div class="row gap">
+          <button id="btn-scan" class="btn primary">Scan page</button>
+          <button id="btn-fill-all" class="btn ghost" disabled>Prefill all</button>
+          <button id="btn-clear" class="btn ghost" disabled>Clear</button>
+        </div>
+        <p id="fields-empty" class="muted hint">Open a Meesho listing/catalog form, then click <b>Scan page</b>.</p>
+        <div id="fields-list" class="fields-list"></div>
+
+        <div id="save-template-row" class="save-row hidden">
+          <input id="template-name" type="text" placeholder="Template name (e.g. Cotton Kurti – Default)" />
+          <button id="btn-save-template" class="btn primary">Save to my account</button>
+        </div>
+      </section>
+
+      <!-- =========================== TEMPLATES =========================== -->
+      <section id="tab-templates" class="tab-panel">
+        <div class="row between">
+          <input id="template-search" type="text" placeholder="Search templates…" class="grow" />
+          <button id="btn-refresh" class="btn ghost small" title="Refresh from server">⟳</button>
+          <button id="btn-export" class="btn ghost small" title="Export all to a file">⬇︎</button>
+          <button id="btn-import" class="btn ghost small" title="Import from a file">⬆︎</button>
+          <input id="import-file" type="file" accept="application/json" hidden />
+        </div>
+        <p id="sync-status" class="muted tiny sync-status"></p>
+        <div id="templates-list" class="templates-list"></div>
+        <p id="templates-empty" class="muted hint">No templates yet. Scan a form and save one from the <b>Fields</b> tab.</p>
+      </section>
+
+      <!-- ============================ IMAGES ============================= -->
+      <section id="tab-images" class="tab-panel">
+        <label class="field-label">Image prompt</label>
+        <textarea id="img-prompt" rows="3" placeholder="e.g. Studio product photo of a maroon cotton anarkali kurti on a plain white background, soft lighting, e-commerce style"></textarea>
+        <div class="row gap">
+          <select id="img-size">
+            <option value="1024x1024">1024 × 1024 (square)</option>
+            <option value="1024x1536">1024 × 1536 (portrait)</option>
+            <option value="1536x1024">1536 × 1024 (landscape)</option>
+          </select>
+          <button id="btn-generate" class="btn primary grow">Generate image</button>
+        </div>
+        <p id="img-status" class="muted hint"></p>
+        <div id="img-result" class="img-result hidden">
+          <img id="img-preview" alt="Generated product image" />
+          <div class="row gap">
+            <button id="btn-download-img" class="btn ghost grow">Download</button>
+            <button id="btn-copy-img" class="btn ghost grow">Copy</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- =========================== SETTINGS ============================ -->
+      <section id="tab-settings" class="tab-panel">
+        <p class="section-label">Account</p>
+        <p id="account-line" class="muted tiny"></p>
+
+        <label class="field-label" for="set-api-base">Rudam server</label>
+        <input id="set-api-base" type="text" placeholder="https://rudam.in" />
+        <p class="muted tiny">
+          Where templates sync. Changing this signs you out, since a session only
+          works on the server that issued it.
+        </p>
+        <button id="btn-save-api-base" class="btn ghost full">Save server</button>
+
+        <hr />
+        <p class="section-label">Image generation</p>
+        <label class="field-label" for="api-provider">Image provider</label>
+        <select id="api-provider">
+          <option value="openai">OpenAI (gpt-image-1 / DALL·E 3)</option>
+          <option value="stability">Stability AI</option>
+        </select>
+
+        <label class="field-label" for="api-key">API key (stored locally on this device)</label>
+        <input id="api-key" type="password" placeholder="sk-…" autocomplete="off" />
+
+        <label class="field-label" for="api-model">Model</label>
+        <input id="api-model" type="text" placeholder="gpt-image-1" />
+
+        <button id="btn-save-settings" class="btn primary full">Save settings</button>
+        <p id="settings-status" class="muted hint"></p>
+
+        <hr />
+        <p class="muted tiny">
+          Your image API key stays in <code>chrome.storage.local</code> on this
+          device and is sent only to the provider you pick — never to Rudam.
+          Listing templates are saved to your Rudam business so your team can
+          reuse them.
+        </p>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="../config.js"></script>
+  <script src="storage.js"></script>
+  <script src="api.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

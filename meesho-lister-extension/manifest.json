@@ -1,0 +1,43 @@
+{
+  "manifest_version": 3,
+  "name": "Meesho Dynamic Lister",
+  "version": "1.1.0",
+  "description": "Auto-detect Meesho listing fields, save them as reusable templates on your Rudam account, prefill in one click, and generate product images.",
+  "permissions": ["storage", "activeTab", "scripting", "downloads"],
+  "host_permissions": [
+    "https://*.meesho.com/*",
+    "https://rudam.in/*",
+    "https://www.rudam.in/*",
+    "http://127.0.0.1:8000/*",
+    "http://localhost:8000/*",
+    "https://api.openai.com/*",
+    "https://api.stability.ai/*",
+    "https://*.blob.core.windows.net/*",
+    "https://oaidalleapiprodscus.blob.core.windows.net/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "Meesho Dynamic Lister",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://*.meesho.com/*"],
+      "js": ["content/fieldScanner.js", "content/content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

@@ -1173,3 +1173,68 @@ class ScannedOrder(models.Model):
     def scan_date(self):
         """Local date the parcel was last scanned — what the desk groups by."""
         return timezone.localtime(self.last_scanned_at).date() if self.last_scanned_at else None
+
+
+class ListingTemplate(models.Model):
+    """
+    A saved set of Meesho listing-form values, synced from the browser extension.
+
+    The extension scans whatever form is on screen and derives a *logical key*
+    per field (name → id → label → placeholder) rather than a CSS selector, so a
+    template keeps matching after Meesho ships a redesign. `fields` maps those
+    keys to the values to prefill; `labels` keeps the human label that was on
+    screen at save time, purely so the popup and the web UI can show something
+    readable next to each key.
+
+    Both are JSON because the shape is dictated by whatever form Meesho renders
+    — there is no fixed column set to model, and inventing one would break the
+    moment Meesho adds a field.
+
+    Scoped to a business rather than to a user: the rest of this schema is
+    business-scoped, and a team listing for the same catalogue needs to share
+    templates. `created_by` records who saved it, and survives that user being
+    deleted so the template isn't lost with them.
+
+    Natural key is (business, name) — saving under an existing name updates it in
+    place, which is what the extension's popup already does locally.
+    """
+
+    business = models.ForeignKey(
+        "accounts.Business", on_delete=models.PROTECT, related_name="listing_templates",
+    )
+
+    name = models.CharField(max_length=200, db_index=True)
+    fields = models.JSONField(default=dict, help_text="logical field key → value to prefill")
+    labels = models.JSONField(default=dict, blank=True,
+                              help_text="logical field key → the label shown on the page")
+
+    # The Meesho URL the template was captured from, so it's obvious which form
+    # a template belongs to when several look alike.
+    source_url = models.TextField(blank=True)
+
+    created_by = models.ForeignKey(
+        "accounts.User", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="listing_templates",
+    )
+    # Who last pushed a change from an extension, which is not necessarily the
+    # person who first created it once a template is shared across a team.
+    updated_by = models.ForeignKey(
+        "accounts.User", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="listing_templates_updated",
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True, db_index=True)
+
+    class Meta:
+        db_table = "listing_templates"
+        ordering = ["-updated_at"]
+        unique_together = [("business", "name")]
+        indexes = [models.Index(fields=["business", "updated_at"])]
+
+    def __str__(self):
+        return f"{self.name} ({len(self.fields or {})} fields)"
+
+    @property
+    def field_count(self):
+        return len(self.fields or {})

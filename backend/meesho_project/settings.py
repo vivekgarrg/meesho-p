@@ -142,6 +142,24 @@ raw_csrf = os.environ.get("CSRF_TRUSTED_ORIGINS", "")
 if raw_csrf:
     CSRF_TRUSTED_ORIGINS = [u.strip() for u in raw_csrf.split(",") if u.strip()]
 
+# The browser extension calls this API from an `Origin: chrome-extension://<id>`,
+# where <id> is derived from the unpacked folder and so differs per install —
+# there is no fixed origin to add to CORS_ALLOWED_ORIGINS. A regex is the only
+# workable form. Without this, production (CORS_ALLOW_ALL=false, origins locked
+# to rudam.in) rejects every request the extension makes.
+#
+# This grants no read access on its own: every endpoint the extension uses still
+# requires a valid JWT, and tokens live in that user's browser only.
+CORS_ALLOWED_ORIGIN_REGEXES = [
+    r"^chrome-extension://[a-p]{32}$",   # Chrome / Edge / Brave (32 chars, a–p)
+    r"^moz-extension://[0-9a-f-]{36}$",  # Firefox (a UUID per install)
+]
+
+# Extension requests are JWT-bearing, not cookie-bearing, so credentialed CORS is
+# not needed — keeping it off means the wildcard-ish regex above can never be
+# used to ride along on someone's session cookie.
+CORS_ALLOW_CREDENTIALS = False
+
 # ── Reverse proxy (nginx / Cloudflare) ───────────────────────────────────────
 # When the app runs behind nginx (and optionally Cloudflare), the TLS is
 # terminated upstream and the request reaches Django over plain HTTP. nginx

@@ -18,7 +18,7 @@ from .helpers.helper import status_wise_summary
 from .permissions import get_authorized_business
 from .helpers.label_pdf import extract_all_pages
 
-from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, PurchaseBill, PurchaseItem, BlockedCustomer, InventoryAdjustment, ConsumableItem, ConsumablePurchase, ConsumableUsage, InventoryLog, MeeshoInventory, MeeshoPriceUpdate, ExpenseInvoice, ExpenseInvoiceItem, TransportCharge, PackedStockEvent, EstimatedProfitOrder, ReturnDelivery, GstTransaction, GstInvoiceDetail, ScannedOrder
+from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, PurchaseBill, PurchaseItem, BlockedCustomer, InventoryAdjustment, ConsumableItem, ConsumablePurchase, ConsumableUsage, InventoryLog, MeeshoInventory, MeeshoPriceUpdate, ExpenseInvoice, ExpenseInvoiceItem, TransportCharge, PackedStockEvent, EstimatedProfitOrder, ReturnDelivery, GstTransaction, GstInvoiceDetail, ScannedOrder, ListingTemplate
 from .serializers import (
     OrderPaymentSerializer, AdsCostSerializer,
     ReferralPaymentSerializer, CompensationRecoverySerializer,
@@ -29,6 +29,7 @@ from .serializers import (
     LabelOrderSerializer,
     ReturnDeliverySerializer,
     ScannedOrderSerializer,
+    ListingTemplateSerializer,
 )
 
 
@@ -8122,6 +8123,239 @@ def scanned_orders_bulk_status(request, business_id):
         "status": new_status,
         "stats": _scanned_order_stats(business),
     })
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Listing templates — synced from the Meesho browser extension
+# ══════════════════════════════════════════════════════════════════════════════
+
+# The extension's export file is a plain object keyed by its own local template
+# id: {"tpl_123_ab": {name, fields, labels, sourceUrl, ...}}. Server ids differ
+# from those local ids, so imports are reconciled on name — see _import_templates.
+_TEMPLATE_WRITABLE = {"name", "fields", "labels", "source_url"}
+
+
+def _template_payload(raw):
+    """
+    Normalise one incoming template into our field names.
+
+    The extension speaks camelCase (`sourceUrl`) because that is what it stores
+    in chrome.storage; accepting both spellings means an export file taken from
+    an older build still imports.
+    """
+    if not isinstance(raw, dict):
+        return None
+    name = str(raw.get("name") or "").strip()
+    fields = raw.get("fields")
+    if not name or not isinstance(fields, dict):
+        return None
+    return {
+        "name": name[:200],
+        "fields": fields,
+        "labels": raw.get("labels") if isinstance(raw.get("labels"), dict) else {},
+        "source_url": str(raw.get("source_url") or raw.get("sourceUrl") or ""),
+    }
+
+
+def _import_templates(business, user, incoming):
+    """
+    Upsert a batch of templates by name, returning (created, updated, skipped).
+
+    Matching on name rather than id is deliberate: the id in an export file came
+    from whichever browser produced it, so importing on a second machine would
+    otherwise duplicate every template.
+    """
+    created = updated = skipped = 0
+    for raw in incoming:
+        payload = _template_payload(raw)
+        if payload is None:
+            skipped += 1
+            continue
+        existing = ListingTemplate.objects.filter(
+            business=business, name__iexact=payload["name"]
+        ).first()
+        if existing:
+            for key, value in payload.items():
+                setattr(existing, key, value)
+            existing.updated_by = user
+            existing.save()
+            updated += 1
+        else:
+            ListingTemplate.objects.create(
+                business=business, created_by=user, updated_by=user, **payload
+            )
+            created += 1
+    return created, updated, skipped
+
+
+def _incoming_template_list(data):
+    """
+    Accept every shape the extension might send: a bare list, the export object
+    keyed by local id, or {"templates": <either>}.
+    """
+    if isinstance(data, dict) and "templates" in data:
+        data = data["templates"]
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        return list(data.values())
+    return []
+
+
+@api_view(["GET", "POST"])
+def listing_templates_list(request, business_id):
+    """
+    GET  — every template for this business (newest first), optionally ?q= filtered.
+           Pass ?full=0 to omit field values when only the list is needed.
+    POST — save a template. An existing template with the same name is updated in
+           place, so the extension's "Save as template" is idempotent per name.
+    """
+    business = get_authorized_business(request, business_id)
+
+    if request.method == "POST":
+        payload = _template_payload(request.data if isinstance(request.data, dict) else {})
+        if payload is None:
+            return Response(
+                {"error": "Send at least a name and a fields object."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        existing = ListingTemplate.objects.filter(
+            business=business, name__iexact=payload["name"]
+        ).first()
+        if existing:
+            for key, value in payload.items():
+                setattr(existing, key, value)
+            existing.updated_by = request.user
+            existing.save()
+            row, created = existing, False
+        else:
+            row = ListingTemplate.objects.create(
+                business=business, created_by=request.user, updated_by=request.user, **payload
+            )
+            created = True
+
+        return Response(
+            {"created": created, "template": ListingTemplateSerializer(row).data},
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
+
+    qs = ListingTemplate.objects.filter(business=business).select_related(
+        "created_by", "updated_by"
+    )
+    search = request.GET.get("q", "").strip()
+    if search:
+        qs = qs.filter(DQ(name__icontains=search) | DQ(source_url__icontains=search))
+
+    rows = list(qs)
+    data = ListingTemplateSerializer(rows, many=True).data
+    if request.GET.get("full") == "0":
+        for item in data:
+            item.pop("fields", None)
+            item.pop("labels", None)
+
+    return Response({"total": len(data), "results": data})
+
+
+@api_view(["GET", "PATCH", "DELETE"])
+def listing_template_detail(request, business_id, pk):
+    """Read, rename/edit, or delete one template."""
+    business = get_authorized_business(request, business_id)
+
+    try:
+        row = ListingTemplate.objects.select_related("created_by", "updated_by").get(
+            pk=pk, business=business
+        )
+    except ListingTemplate.DoesNotExist:
+        return Response({"error": "Template not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == "DELETE":
+        row.delete()
+        return Response({"deleted": True})
+
+    if request.method == "PATCH":
+        payload = request.data if isinstance(request.data, dict) else {}
+        # Accept camelCase from the extension, then reject anything unknown so a
+        # typo fails loudly instead of being silently dropped.
+        if "sourceUrl" in payload:
+            payload = {**payload, "source_url": payload.pop("sourceUrl")}
+        unknown = set(payload) - _TEMPLATE_WRITABLE
+        if unknown:
+            return Response(
+                {"error": f"Not editable: {', '.join(sorted(unknown))}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = ListingTemplateSerializer(row, data=payload, partial=True)
+        serializer.is_valid(raise_exception=True)
+
+        new_name = serializer.validated_data.get("name")
+        if new_name and ListingTemplate.objects.filter(
+            business=business, name__iexact=new_name
+        ).exclude(pk=row.pk).exists():
+            return Response(
+                {"error": f'Another template is already called "{new_name}".'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer.save(updated_by=request.user)
+        row = serializer.instance
+
+    return Response(ListingTemplateSerializer(row).data)
+
+
+@api_view(["POST"])
+def listing_templates_import(request, business_id):
+    """
+    Bulk-import templates from an extension export file (or another browser).
+    Existing names are updated rather than duplicated.
+    """
+    business = get_authorized_business(request, business_id)
+
+    incoming = _incoming_template_list(request.data)
+    if not incoming:
+        return Response(
+            {"error": "No templates found in that file."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    created, updated, skipped = _import_templates(business, request.user, incoming)
+    return Response({
+        "created": created,
+        "updated": updated,
+        "skipped": skipped,
+        "total": ListingTemplate.objects.filter(business=business).count(),
+    })
+
+
+@api_view(["GET"])
+def listing_templates_export(request, business_id):
+    """
+    Every template as a JSON file, in the same shape the extension's own export
+    produces — so a file from here can be imported straight back into any browser
+    running the extension, and vice versa.
+    """
+    business = get_authorized_business(request, business_id)
+
+    payload = {}
+    for row in ListingTemplate.objects.filter(business=business):
+        key = f"tpl_{row.id}"
+        payload[key] = {
+            "id": key,
+            "name": row.name,
+            "fields": row.fields or {},
+            "labels": row.labels or {},
+            "sourceUrl": row.source_url or "",
+            "createdAt": int(row.created_at.timestamp() * 1000),
+            "updatedAt": int(row.updated_at.timestamp() * 1000),
+        }
+
+    stamp = timezone.localdate().isoformat()
+    response = Response(payload)
+    response["Content-Disposition"] = (
+        f'attachment; filename="meesho-templates-{business.id}-{stamp}.json"'
+    )
+    return response
 
 
 # ══════════════════════════════════════════════════════════════════════════════
