@@ -265,6 +265,7 @@ function ScannedCard({ result, onStatus, onNotes, saving, onClose }) {
           <Field label="Sub-order no" value={row.sub_order_no} mono />
           <Field label="AWB number" value={row.awb_number} mono />
           <Field label="Meesho status" value={row.ship_status_raw || (row.meesho_status && row.meesho_status.status)} />
+          <Field label="Status found via" value={row.ship_source} />
           <Field label="Customer" value={[row.customer_name, row.customer_city].filter(Boolean).join(" · ")} />
           <Field label="First scanned" value={fmtDateTime(row.first_scanned_at)} />
           <Field label="Scanned by" value={row.scanned_by_name} />
@@ -346,7 +347,8 @@ export function OrderScanTab() {
     const bad = row.ship_status === "NOT_SHIPPED" || row.ship_status === "CANCELLED";
     const lines = [];
     if (row.sku) lines.push(`${row.sku} × ${row.qty}`);
-    lines.push(`Meesho: ${ship.short}${row.ship_status_raw ? ` (${row.ship_status_raw})` : ""}`);
+    lines.push(`Meesho: ${ship.short}${row.ship_status_raw ? ` (${row.ship_status_raw})` : ""}`
+      + (row.ship_source ? ` · ${row.ship_source}` : ""));
     if (data.cross_business) lines.push(`↦ filed under ${data.business_name}`);
     if (data.already_scanned) lines.push(`Already scanned ${row.scan_count}×`);
     if (row.matched_from === "NONE") lines.push("Not recognised — no product details");
@@ -749,6 +751,13 @@ export function OrderScanTab() {
                           {r.ship_status_raw && (
                             <div style={{ fontSize: 10, color: C.gray400, fontFamily: "monospace", marginTop: 2 }}>
                               {r.ship_status_raw}
+                            </div>
+                          )}
+                          {/* Where the verdict came from — the first thing you
+                              want when a status looks wrong. */}
+                          {r.ship_source && (
+                            <div style={{ fontSize: 9.5, color: C.gray300, marginTop: 1 }}>
+                              from {r.ship_source}
                             </div>
                           )}
                         </td>

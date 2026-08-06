@@ -8093,62 +8093,172 @@ _SHIP_PRIORITY = {
 }
 
 
-def _resolve_ship_status(business, sub_order_no, status_hint=None):
+def _status_raws(businesses, sub_orders):
     """
-    Whether this order actually shipped, per the sheets we hold.
+    Every status string recorded against these sub-orders, with the business it
+    came from — two queries per business rather than per sub-order.
+    """
+    subs = [s for s in sub_orders if s]
+    if not subs:
+        return []
 
-    Returns (ship_status, raw_value).
+    found = []
+    for b in businesses:
+        for raw in (
+            Order.objects.filter(business=b, sub_order_no__in=subs)
+            .values_list("reason_for_credit_entry", flat=True)
+        ):
+            if raw:
+                found.append((raw, b, "orders"))
+        for raw in (
+            OrderPayment.objects.filter(business=b, sub_order_no__in=subs)
+            .exclude(live_order_status__isnull=True).exclude(live_order_status="")
+            .values_list("live_order_status", flat=True)
+        ):
+            found.append((raw, b, "payments"))
+    return found
+
+
+def _suborders_for_codes(businesses, codes):
+    """
+    Sub-order numbers reachable from a set of AWB / packet codes.
+
+    Two bridges exist and both are needed: the shipping label maps AWB →
+    sub-order for outbound parcels, and a return maps its reverse AWB →
+    sub-order. A scan that only ever carried an AWB is otherwise a dead end,
+    which is the main reason orders sat at "no status".
+    """
+    wanted = {c for c in codes if c}
+    if not wanted:
+        return set()
+
+    subs = set()
+    for b in businesses:
+        subs.update(
+            LabelOrder.objects.filter(business=b, awb_number__in=wanted)
+            .values_list("order_id", flat=True)
+        )
+        subs.update(
+            ReturnDelivery.objects.filter(business=b, awb_number__in=wanted)
+            .values_list("suborder_no", flat=True)
+        )
+    return subs
+
+
+def _returned_suborders(businesses, sub_orders):
+    """
+    Which of these sub-orders have a return on file.
+
+    A parcel that came back is proof it went out, whatever the Orders sheet says
+    — and for an order whose sheet was never uploaded, this may be the only
+    evidence we hold.
+    """
+    subs = [s for s in sub_orders if s]
+    if not subs:
+        return set()
+    found = set()
+    for b in businesses:
+        found.update(
+            ReturnDelivery.objects.filter(business=b, suborder_no__in=subs)
+            .values_list("suborder_no", flat=True)
+        )
+    return found
+
+
+def _resolve_ship_status(business, sub_order_no, status_hint=None, row=None, scope=None):
+    """
+    Whether this order actually shipped, per everything we hold.
+
+    Returns (ship_status, raw_value, source).
+
+    Resolution widens only as far as it has to, so the common case stays at two
+    queries and only genuinely unknown orders pay for the rest:
+
+      1. the sub-order, in its own business
+      2. the sub-order, in every business the user can reach — the parcel may be
+         filed under one business while its Orders sheet was uploaded to another
+      3. the AWB and the raw scanned code, mapped to sub-orders via labels and
+         returns, then looked up again across all of them
+      4. a return on file for any candidate, which proves it shipped
 
     A sub-order legitimately has several Orders rows — SHIPPED, then RTO_LOCKED,
     then RTO_COMPLETE — and in this data they all carry the *same* order_date, so
-    "the latest row" is decided only by upload time. That makes picking one row
-    unreliable: re-uploading an old export could flip a shipped parcel back to
-    READY_TO_SHIP. So every status for the sub-order is classified and the
-    most-advanced bucket wins, which no upload order can disturb.
-
-    The Orders sheet is preferred over Payments because it carries the
-    pre-dispatch states (READY_TO_SHIP, PENDING) that are the entire point of
-    this check; a row only reaches the Payments sheet once money moved, by which
-    time it has necessarily shipped.
+    "the latest row" is decided only by upload time. Picking one row would let a
+    re-uploaded old export flip a shipped parcel back to READY_TO_SHIP, so every
+    status found is classified and the most-advanced bucket wins.
     """
+    own = [business]
+    candidates = {sub_order_no}
+    if row is not None:
+        candidates.add(row.sub_order_no)
+
+    def _best(raws):
+        best, best_raw, best_src = ScannedOrder.SHIP_UNKNOWN, "", ""
+        for raw, biz, table in raws:
+            bucket = ScannedOrder.classify_ship_status(raw)
+            if _SHIP_PRIORITY[bucket] > _SHIP_PRIORITY[best]:
+                best, best_raw = bucket, (raw or "")
+                best_src = table if biz.pk == business.pk else f"{table} · {biz.name}"
+        return best, best_raw, best_src
+
+    # 1 — the hint the caller already has, plus this business's own sheets.
     raws = []
     if status_hint and status_hint.get("status"):
-        raws.append(status_hint["status"])
+        raws.append((status_hint["status"], business, "orders"))
+    raws += _status_raws(own, candidates)
+    best, best_raw, best_src = _best(raws)
+    if best != ScannedOrder.SHIP_UNKNOWN:
+        return best, best_raw, best_src
 
-    raws.extend(
-        Order.objects.filter(business=business, sub_order_no=sub_order_no)
-        .values_list("reason_for_credit_entry", flat=True)
-    )
-    if not raws:
-        raws.extend(
-            OrderPayment.objects.filter(business=business, sub_order_no=sub_order_no)
-            .exclude(live_order_status__isnull=True).exclude(live_order_status="")
-            .values_list("live_order_status", flat=True)
-        )
+    # Everything below is the widening path, reached only when we'd otherwise
+    # have to report "no status".
+    if scope is None:
+        scope = own
+    siblings = [b for b in scope if b.pk != business.pk]
 
-    best, best_raw = ScannedOrder.SHIP_UNKNOWN, ""
-    for raw in raws:
-        bucket = ScannedOrder.classify_ship_status(raw)
-        if _SHIP_PRIORITY[bucket] > _SHIP_PRIORITY[best]:
-            best, best_raw = bucket, (raw or "")
+    # 2 — the same sub-order, in the other businesses.
+    if siblings:
+        best, best_raw, best_src = _best(_status_raws(siblings, candidates))
+        if best != ScannedOrder.SHIP_UNKNOWN:
+            return best, best_raw, best_src
 
-    return best, best_raw
+    # 3 — reach the sub-order through the AWB or the raw code.
+    codes = {sub_order_no}
+    if row is not None:
+        codes.update({row.awb_number, row.scanned_code})
+    extra = _suborders_for_codes(scope, codes) - candidates
+    if extra:
+        candidates |= extra
+        best, best_raw, best_src = _best(_status_raws(scope, extra))
+        if best != ScannedOrder.SHIP_UNKNOWN:
+            return best, best_raw, f"{best_src} · via AWB"
+
+    # 4 — it came back, so it must have gone out.
+    if _returned_suborders(scope, candidates):
+        return ScannedOrder.SHIP_SHIPPED, "RETURNED", "return on file"
+
+    return ScannedOrder.SHIP_UNKNOWN, "", ""
 
 
-def _refresh_ship_status(business, row, status_hint=None, save=True):
+def _refresh_ship_status(business, row, status_hint=None, save=True, scope=None):
     """
     Re-resolve and store a row's shipping status.
 
     Worth re-running rather than trusting the stored value: a parcel scanned
     before its sheet was uploaded is UNKNOWN, and only becomes answerable later.
     """
-    ship, raw = _resolve_ship_status(business, row.sub_order_no, status_hint)
+    ship, raw, source = _resolve_ship_status(
+        business, row.sub_order_no, status_hint, row=row, scope=scope
+    )
     changed = (row.ship_status != ship) or (row.ship_status_raw != raw)
     row.ship_status = ship
     row.ship_status_raw = raw[:100]
+    row.ship_source = (source or "")[:100]
     row.ship_checked_at = timezone.now()
     if save:
-        row.save(update_fields=["ship_status", "ship_status_raw", "ship_checked_at", "updated_at"])
+        row.save(update_fields=[
+            "ship_status", "ship_status_raw", "ship_source", "ship_checked_at", "updated_at",
+        ])
     return changed
 
 
@@ -8261,7 +8371,8 @@ def scanned_orders_list(request, business_id):
             # Re-check on every scan: the sheet that answers this may have been
             # uploaded since the parcel was first seen. Resolved against the
             # owning business, which for a pooled scan is not the selected one.
-            _refresh_ship_status(owner, row, row.meesho_status)
+            _refresh_ship_status(owner, row, row.meesho_status,
+                                 scope=accessible_businesses(request, include=owner))
             return Response({
                 "already_scanned": True,
                 "scan_count": row.scan_count,
@@ -8285,7 +8396,8 @@ def scanned_orders_list(request, business_id):
             **snapshot,
         )
         row = _attach_meesho_status(business, [row])[0]
-        _refresh_ship_status(owner, row, row.meesho_status)
+        _refresh_ship_status(owner, row, row.meesho_status,
+                             scope=accessible_businesses(request, include=owner))
         return Response({
             "already_scanned": False,
             "scan_count": 1,
@@ -8444,10 +8556,13 @@ def scanned_orders_refresh_ship(request, business_id):
 
     rows = list(qs)
     status_map = _meesho_status_map(business, [r.sub_order_no for r in rows])
+    # Resolved with the full pool available, so a row whose Orders sheet was
+    # uploaded under a different business stops reading as "no status".
+    scope = accessible_businesses(request, include=business)
 
     changed = 0
     for row in rows:
-        if _refresh_ship_status(business, row, status_map.get(row.sub_order_no)):
+        if _refresh_ship_status(business, row, status_map.get(row.sub_order_no), scope=scope):
             changed += 1
 
     return Response({

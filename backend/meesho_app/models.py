@@ -1200,6 +1200,10 @@ class ScannedOrder(models.Model):
                                       default=SHIP_UNKNOWN, db_index=True)
     ship_status_raw = models.CharField(max_length=100, blank=True,
                                        help_text="The sheet value this was derived from")
+    # Where the answer came from — "orders", "payments · Rudam 2", "via AWB",
+    # "return on file". Recorded because "why does this say shipped?" is the
+    # first question asked when a status looks wrong.
+    ship_source     = models.CharField(max_length=100, blank=True)
     ship_checked_at = models.DateTimeField(null=True, blank=True)
 
     # ── Scan bookkeeping ──────────────────────────────────────────────────

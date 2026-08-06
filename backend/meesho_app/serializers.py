@@ -133,7 +133,7 @@ class ScannedOrderSerializer(serializers.ModelSerializer):
             "business", "scan_count", "first_scanned_at", "last_scanned_at",
             "updated_at", "matched_from",
             # Derived from the uploaded sheets, never client-supplied.
-            "ship_status", "ship_status_raw", "ship_checked_at",
+            "ship_status", "ship_status_raw", "ship_source", "ship_checked_at",
         ]
 
     def get_meesho_status(self, obj):
