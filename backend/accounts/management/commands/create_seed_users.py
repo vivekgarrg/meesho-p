@@ -19,6 +19,22 @@ class Command(BaseCommand):
         parser.add_argument(
             "--business-password", default=os.environ.get("SEED_BUSINESS_USER_PASSWORD", "changeme123")
         )
+        # Re-setting an existing admin's password is now opt-in.
+        #
+        # This command runs on every deploy (see deploy/hostinger/update.sh), and
+        # it used to reset the admin password unconditionally — so changing your
+        # password in the app was silently undone by the next push. A password
+        # you chose must outlive a deploy.
+        #
+        # Use --force-password (or SEED_ADMIN_FORCE_PASSWORD=true) for the one
+        # case the old behaviour was there for: being locked out and needing the
+        # documented credentials back.
+        parser.add_argument(
+            "--force-password",
+            action="store_true",
+            default=os.environ.get("SEED_ADMIN_FORCE_PASSWORD", "").lower() in ("1", "true", "yes"),
+            help="Reset the admin password even if the account already exists.",
+        )
         parser.add_argument("--business-name", default="Rudam")
         # Extra businesses to ensure exist (in addition to --business-name).
         parser.add_argument("--extra-businesses", nargs="*", default=["Rudam 2"])
@@ -46,9 +62,13 @@ class Command(BaseCommand):
             username=options["admin_username"],
             defaults={"role": User.ROLE_SUPER_ADMIN, "is_staff": True, "is_superuser": True},
         )
-        # The master admin password is authoritative: always (re)set it so the
-        # documented credentials stay valid even if the account already existed.
-        admin_user.set_password(options["admin_password"])
+        # Password is set when the account is first created, and after that only
+        # on explicit request. The role/staff flags are still enforced every run:
+        # those are what make the account usable at all, and unlike a password
+        # nobody deliberately changes them.
+        set_password = created or options["force_password"]
+        if set_password:
+            admin_user.set_password(options["admin_password"])
         admin_user.role = User.ROLE_SUPER_ADMIN
         admin_user.is_staff = True
         admin_user.is_superuser = True
@@ -56,8 +76,9 @@ class Command(BaseCommand):
         self.stdout.write(
             self.style.SUCCESS(
                 f"Super admin '{admin_user.username}' "
-                + ("created" if created else "updated")
-                + " (password set)"
+                + ("created (password set)" if created
+                   else "password reset (--force-password)" if set_password
+                   else "already existed — password left unchanged")
             )
         )
 
