@@ -150,10 +150,17 @@ function Panel({ title, count, hint, defaultOpen = false, right, children }) {
   );
 }
 
+// The labels table is read at arm's length while packing, off a screen on a
+// bench — 10px headers and 11px body text were being squinted at. Everything in
+// the table steps up, and rows get more vertical room so the two-line
+// parent/variant cell doesn't feel crushed.
 const thSx = {
-  fontSize: 10, fontWeight: 700, color: C.gray400, textTransform: "uppercase",
-  letterSpacing: "0.06em", whiteSpace: "nowrap", bgcolor: C.gray50, py: "8px",
+  fontSize: 12, fontWeight: 700, color: C.gray500, textTransform: "uppercase",
+  letterSpacing: "0.05em", whiteSpace: "nowrap", bgcolor: C.gray50, py: "11px",
 };
+
+/** Body-cell defaults for the labels table. */
+const tdSx = { fontSize: 14, py: "11px", color: C.gray800 };
 
 function SortTh({ label, field, sort, setSort, align = "left" }) {
   const active = sort === field || sort === `-${field}`;
@@ -169,24 +176,75 @@ function SortTh({ label, field, sort, setSort, align = "left" }) {
 
 // ── Parent / SKU ─────────────────────────────────────────────────────────────
 
-/** Create a parent for a SKU that has none, without leaving the table. */
-function AddParentInline({ sku, onDone }) {
+/**
+ * The list of parents, fetched once per tab and shared by every row's picker.
+ *
+ * A module-level promise rather than per-row state: the labels table renders
+ * hundreds of rows, and each one opening its own request would hammer the API
+ * with identical calls. Invalidated whenever a parent is created so a brand-new
+ * parent is immediately pickable elsewhere in the table.
+ */
+let _parentCache = null;
+function loadParents(force) {
+  if (force) _parentCache = null;
+  if (!_parentCache) {
+    _parentCache = fetch(`${API}/parent-prices/`)
+      .then((r) => (r.ok ? r.json() : { items: [] }))
+      .then((d) => {
+        const items = d.items || d.results || d || [];
+        return (Array.isArray(items) ? items : [])
+          .map((p) => (typeof p === "string" ? p : p.item_id))
+          .filter(Boolean)
+          .sort((a, b) => a.localeCompare(b));
+      })
+      .catch(() => []);
+  }
+  return _parentCache;
+}
+
+/**
+ * Link a SKU to a parent, from inside the table.
+ *
+ * Two things are possible and they are genuinely different operations: attaching
+ * to a parent that already exists (`link-sku/`, so the SKU inherits that
+ * parent's pricing) or inventing a new one (`parent-from-sku/`). The old control
+ * only did the second, which meant every SKU got its own parent and the grouping
+ * the parent level exists for never happened.
+ */
+function ParentLinkInline({ sku, currentParent, onDone }) {
   const [open, setOpen] = useState(false);
+  const [mode, setMode] = useState("link");      // "link" | "create"
+  const [parents, setParents] = useState(null);
+  const [choice, setChoice] = useState("");
   const [name, setName] = useState(sku || "");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
+  useEffect(() => {
+    if (!open) return;
+    let dead = false;
+    loadParents().then((list) => {
+      if (dead) return;
+      setParents(list);
+      // Nothing to link to yet — don't offer an empty dropdown, go straight to create.
+      if (!list.length) setMode("create");
+    });
+    return () => { dead = true; };
+  }, [open]);
+
   const save = async () => {
-    const parent_id = name.trim();
-    if (!parent_id) return;
+    const linking = mode === "link";
+    const parent_id = (linking ? choice : name).trim();
+    if (!parent_id) { setErr(linking ? "Pick a parent." : "Enter a name."); return; }
     setBusy(true); setErr("");
     try {
-      const res = await fetch(`${API}/parent-from-sku/`, {
+      const res = await fetch(`${API}/${linking ? "link-sku" : "parent-from-sku"}/`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sku_id: sku, parent_id }),
       });
       const d = await res.json().catch(() => ({}));
-      if (!res.ok) { setErr(d.error || "Could not create parent."); return; }
+      if (!res.ok) { setErr(d.error || `Could not ${linking ? "link" : "create"}.`); return; }
+      if (!linking) loadParents(true);   // new parent — everyone else can pick it now
       setOpen(false);
       onDone?.(sku, parent_id);
     } catch { setErr("Network error."); }
@@ -194,51 +252,97 @@ function AddParentInline({ sku, onDone }) {
   };
 
   if (!open) {
+    const relink = !!currentParent;
     return (
       <Button size="small" onClick={(e) => { e.stopPropagation(); setOpen(true); }}
-        sx={{ fontSize: 10, textTransform: "none", py: 0, px: "6px", minWidth: 0,
-              color: C.blue, border: `1px dashed ${C.blue}`, borderRadius: "6px" }}>
-        + parent
+        sx={{ fontSize: 11, textTransform: "none", py: "1px", px: "8px", minWidth: 0,
+              color: relink ? C.gray500 : C.blue, fontWeight: 600,
+              border: `1px dashed ${relink ? C.gray300 : C.blue}`, borderRadius: "6px" }}>
+        {relink ? "change parent" : "link to parent"}
       </Button>
     );
   }
+
   return (
-    <Box onClick={(e) => e.stopPropagation()} sx={{ display: "flex", alignItems: "center", gap: "4px", flexWrap: "wrap" }}>
-      <TextField value={name} onChange={(e) => setName(e.target.value)} size="small" autoFocus
-        placeholder="Parent name"
-        onKeyDown={(e) => { if (e.key === "Enter") save(); if (e.key === "Escape") setOpen(false); }}
-        sx={{ width: 150, "& input": { fontSize: 11, py: "4px" } }} />
-      <Button size="small" disabled={busy} onClick={save}
-        sx={{ fontSize: 10, textTransform: "none", py: 0, px: "8px", minWidth: 0, color: C.green }}>
-        {busy ? "…" : "Save"}
-      </Button>
-      <Button size="small" onClick={() => setOpen(false)}
-        sx={{ fontSize: 10, textTransform: "none", py: 0, px: "6px", minWidth: 0, color: C.gray400 }}>✕</Button>
-      {err && <Typography sx={{ fontSize: 10, color: C.red, width: "100%" }}>{err}</Typography>}
+    <Box onClick={(e) => e.stopPropagation()}
+      sx={{ display: "flex", flexDirection: "column", gap: "5px", mt: "3px",
+            p: "7px", borderRadius: "8px", background: C.gray50, border: `1px solid ${C.border}` }}>
+      <Box sx={{ display: "flex", gap: "4px" }}>
+        {["link", "create"].map((m) => (
+          <Button key={m} size="small" onClick={() => { setMode(m); setErr(""); }}
+            sx={{
+              fontSize: 10.5, textTransform: "none", py: 0, px: "8px", minWidth: 0, fontWeight: 700,
+              color: mode === m ? C.white : C.gray500,
+              background: mode === m ? C.orange : "transparent",
+              borderRadius: "6px", "&:hover": { background: mode === m ? C.orange : C.gray100 },
+            }}>
+            {m === "link" ? "Existing" : "New"}
+          </Button>
+        ))}
+      </Box>
+
+      {mode === "link" ? (
+        parents === null ? (
+          <Typography sx={{ fontSize: 11, color: C.gray400 }}>Loading parents…</Typography>
+        ) : (
+          <TextField select value={choice} onChange={(e) => setChoice(e.target.value)}
+            size="small" SelectProps={{ native: true }}
+            sx={{ minWidth: 170, "& select": { fontSize: 11.5, py: "5px" } }}>
+            <option value="">Pick a parent…</option>
+            {parents.map((p) => <option key={p} value={p}>{p}</option>)}
+          </TextField>
+        )
+      ) : (
+        <TextField value={name} onChange={(e) => setName(e.target.value)} size="small" autoFocus
+          placeholder="New parent name"
+          onKeyDown={(e) => { if (e.key === "Enter") save(); if (e.key === "Escape") setOpen(false); }}
+          sx={{ minWidth: 170, "& input": { fontSize: 11.5, py: "5px" } }} />
+      )}
+
+      <Box sx={{ display: "flex", gap: "4px", alignItems: "center" }}>
+        <Button size="small" disabled={busy} onClick={save}
+          sx={{ fontSize: 11, textTransform: "none", py: 0, px: "10px", minWidth: 0,
+                color: C.white, background: C.green, fontWeight: 700, borderRadius: "6px",
+                "&:hover": { background: C.green } }}>
+          {busy ? "…" : mode === "link" ? "Link" : "Create"}
+        </Button>
+        <Button size="small" onClick={() => { setOpen(false); setErr(""); }}
+          sx={{ fontSize: 11, textTransform: "none", py: 0, px: "6px", minWidth: 0, color: C.gray400 }}>
+          Cancel
+        </Button>
+      </Box>
+      {err && <Typography sx={{ fontSize: 10.5, color: C.red }}>{err}</Typography>}
     </Box>
   );
 }
 
 /** Parent above, variant indented below — the two levels must never blur. */
 function ParentSkuCell({ sku, parentSku, onParentAdded }) {
-  if (parentSku && parentSku !== sku) {
-    return (
-      <Box sx={{ minWidth: 0 }}>
-        <Typography sx={{ fontSize: 12, fontWeight: 800, color: C.orange, wordBreak: "break-all" }}>
-          {parentSku}
-        </Typography>
-        <Typography sx={{ fontSize: 11, color: C.gray500, fontFamily: "monospace", wordBreak: "break-all" }}>
-          ↳ {sku || "—"}
-        </Typography>
-      </Box>
-    );
-  }
+  const linked = parentSku && parentSku !== sku;
   return (
     <Box sx={{ minWidth: 0 }}>
-      <Typography sx={{ fontSize: 12, fontWeight: 700, color: C.gray700, fontFamily: "monospace", wordBreak: "break-all" }}>
-        {sku || "—"}
-      </Typography>
-      {sku && <Box sx={{ mt: "2px" }}><AddParentInline sku={sku} onDone={onParentAdded} /></Box>}
+      {linked ? (
+        <>
+          <Typography sx={{ fontSize: 14.5, fontWeight: 800, color: C.orange, wordBreak: "break-all", lineHeight: 1.3 }}>
+            {parentSku}
+          </Typography>
+          <Typography sx={{ fontSize: 13, color: C.gray600, fontFamily: "monospace",
+                            wordBreak: "break-all", lineHeight: 1.35, pl: "10px",
+                            borderLeft: `2px solid ${C.orangeBorder}`, ml: "1px", mt: "2px" }}>
+            {sku || "—"}
+          </Typography>
+        </>
+      ) : (
+        <Typography sx={{ fontSize: 14, fontWeight: 700, color: C.gray800, fontFamily: "monospace",
+                          wordBreak: "break-all", lineHeight: 1.3 }}>
+          {sku || "—"}
+        </Typography>
+      )}
+      {sku && (
+        <Box sx={{ mt: "4px" }}>
+          <ParentLinkInline sku={sku} currentParent={linked ? parentSku : null} onDone={onParentAdded} />
+        </Box>
+      )}
     </Box>
   );
 }
@@ -400,9 +504,18 @@ function BatchView({
   const [skuSearch, setSkuSearch] = useState("");
   const back = daysAgo(batchDate);
 
+  // Parents linked from inside this view. `result` is the stored parse output, so
+  // it can't know about a link made after the PDF was processed — without this,
+  // linking a SKU here would appear to do nothing until the batch was re-parsed.
+  const [parentOverride, setParentOverride] = useState({});
+  const onParentAdded = useCallback(
+    (sku, parentId) => setParentOverride((o) => ({ ...o, [sku]: parentId })), []);
+
   // Group SKUs under their parent so the dispatch list reads by product family.
   const skuGroups = useMemo(() => {
-    const rows = (result?.sku_table || []).filter(r =>
+    const withParents = (result?.sku_table || []).map(r =>
+      parentOverride[r.sku] ? { ...r, parent_sku: parentOverride[r.sku] } : r);
+    const rows = withParents.filter(r =>
       !skuSearch ||
       (r.sku || "").toLowerCase().includes(skuSearch.toLowerCase()) ||
       (r.parent_sku || "").toLowerCase().includes(skuSearch.toLowerCase()));
@@ -414,7 +527,7 @@ function BatchView({
     });
     return Object.values(m).sort((a, b) =>
       b.children.reduce((s, r) => s + r.count, 0) - a.children.reduce((s, r) => s + r.count, 0));
-  }, [result, skuSearch]);
+  }, [result, skuSearch, parentOverride]);
 
   const pages = result?.total_pages ?? 0;
   const labels = result?.total_labels ?? 0;
@@ -517,6 +630,42 @@ function BatchView({
             </Alert>
           )}
 
+          {/* One tray of labels can cover several businesses. Say where they went,
+              rather than silently filing another business's parcels here. */}
+          {Object.keys(result.per_business || {}).length > 1 && (
+            <Alert severity="info" sx={{ borderRadius: "10px" }}>
+              <Typography sx={{ fontSize: 13, fontWeight: 800, mb: "4px" }}>
+                This batch covers {Object.keys(result.per_business).length} businesses
+              </Typography>
+              {Object.entries(result.per_business).map(([name, n]) => (
+                <Typography key={name} sx={{ fontSize: 12.5 }}>
+                  <strong>{name}</strong> — {n} label{n === 1 ? "" : "s"}
+                </Typography>
+              ))}
+              <Typography sx={{ fontSize: 11.5, mt: "5px", opacity: 0.85 }}>
+                Each label was filed against the business whose catalogue prices its SKU.
+              </Typography>
+            </Alert>
+          )}
+
+          {(result.ambiguous_skus || []).length > 0 && (
+            <Alert severity="warning" sx={{ borderRadius: "10px" }}>
+              <Typography sx={{ fontSize: 13, fontWeight: 800, mb: "4px" }}>
+                {result.ambiguous_skus.length} SKU{result.ambiguous_skus.length > 1 ? "s are" : " is"} priced
+                by more than one business
+              </Typography>
+              {result.ambiguous_skus.map((a) => (
+                <Typography key={a.sku} sx={{ fontSize: 12.5, fontFamily: "monospace" }}>
+                  {a.sku} — {a.businesses.join(" · ")}
+                </Typography>
+              ))}
+              <Typography sx={{ fontSize: 11.5, mt: "5px", opacity: 0.85 }}>
+                There's no way to tell which one these belong to, so they were filed under the business
+                you have selected. Rename one side's SKU to split them properly.
+              </Typography>
+            </Alert>
+          )}
+
           {/* Slim stat strip — facts, not cards competing for attention */}
           <Paper elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: "12px", p: "14px 18px" }}>
             <Box sx={{ display: "flex", gap: "30px", flexWrap: "wrap", alignItems: "flex-start" }}>
@@ -573,25 +722,31 @@ function BatchView({
                     const maxQ = g.children.reduce((s, r) => Math.max(s, r.max_qty || 0), 0);
                     return (
                       <TableRow key={g.parent || g.children[0].sku} sx={{ bgcolor: gi % 2 ? C.gray50 : "#fff" }}>
-                        <TableCell sx={{ py: "8px" }}>
+                        <TableCell sx={tdSx}>
                           {g.parent ? (
                             <>
-                              <Typography sx={{ fontSize: 12, fontWeight: 800, color: C.orange, wordBreak: "break-all" }}>
+                              <Typography sx={{ fontSize: 15, fontWeight: 800, color: C.orange, wordBreak: "break-all", lineHeight: 1.3 }}>
                                 {g.parent}
                               </Typography>
-                              {g.children.map(ch => (
-                                <Typography key={ch.sku} sx={{ fontSize: 11, color: C.gray500, fontFamily: "monospace", wordBreak: "break-all" }}>
-                                  ↳ {ch.sku} <span style={{ color: C.gray400 }}>({ch.count})</span>
-                                </Typography>
-                              ))}
+                              {/* Children hang off a rule rather than an arrow glyph:
+                                  with several variants the arrows read as noise, a
+                                  rule reads as one family. */}
+                              <Box sx={{ pl: "11px", ml: "1px", mt: "3px", borderLeft: `2px solid ${C.orangeBorder}` }}>
+                                {g.children.map(ch => (
+                                  <Typography key={ch.sku} sx={{ fontSize: 13, color: C.gray600, fontFamily: "monospace", wordBreak: "break-all", lineHeight: 1.5 }}>
+                                    {ch.sku} <span style={{ color: C.gray400, fontWeight: 700 }}>×{ch.count}</span>
+                                  </Typography>
+                                ))}
+                              </Box>
                             </>
                           ) : (
-                            <ParentSkuCell sku={g.children[0].sku} parentSku={null} />
+                            <ParentSkuCell sku={g.children[0].sku} parentSku={null}
+                              onParentAdded={onParentAdded} />
                           )}
                         </TableCell>
-                        <TableCell sx={{ textAlign: "right", fontFamily: "monospace", fontWeight: 800, fontSize: 13 }}>{nLabels}</TableCell>
-                        <TableCell sx={{ textAlign: "right", fontFamily: "monospace", fontSize: 12 }}>{nUnits}</TableCell>
-                        <TableCell sx={{ textAlign: "right", fontFamily: "monospace", fontSize: 12,
+                        <TableCell sx={{ ...tdSx, textAlign: "right", fontFamily: "monospace", fontWeight: 800, fontSize: 17 }}>{nLabels}</TableCell>
+                        <TableCell sx={{ ...tdSx, textAlign: "right", fontFamily: "monospace", fontSize: 15 }}>{nUnits}</TableCell>
+                        <TableCell sx={{ ...tdSx, textAlign: "right", fontFamily: "monospace", fontSize: 15,
                                          color: maxQ > 1 ? C.amber : C.gray400, fontWeight: maxQ > 1 ? 800 : 400 }}>
                           {maxQ}
                         </TableCell>
@@ -809,38 +964,38 @@ function LabelsView({ onViewCustomer }) {
                     <TableRow key={o.order_id} hover
                       onClick={() => onViewCustomer({ name: o.customer_name, pincode: o.customer_pincode, address: o.customer_address })}
                       sx={{ cursor: "pointer", bgcolor: i % 2 ? C.gray50 : "#fff" }}>
-                      <TableCell sx={{ fontSize: 11, color: C.gray500, whiteSpace: "nowrap", fontFamily: "monospace" }}>
+                      <TableCell sx={{ ...tdSx, fontSize: 13, color: C.gray500, whiteSpace: "nowrap", fontFamily: "monospace" }}>
                         {o.uploaded_date || "—"}
                       </TableCell>
-                      <TableCell>
+                      <TableCell sx={tdSx}>
                         <Chip label={o.courier_name || "—"} size="small"
-                          sx={{ height: 20, fontSize: 10, fontWeight: 700, bgcolor: cst.bg, color: cst.fg }} />
+                          sx={{ height: 24, fontSize: 12, fontWeight: 700, bgcolor: cst.bg, color: cst.fg }} />
                       </TableCell>
-                      <TableCell sx={{ minWidth: 170, py: "8px" }}>
+                      <TableCell sx={{ ...tdSx, minWidth: 200 }}>
                         <ParentSkuCell sku={o.sku} parentSku={o.parent_sku} onParentAdded={onParentAdded} />
                       </TableCell>
-                      <TableCell sx={{ textAlign: "right", fontFamily: "monospace", fontWeight: 800, fontSize: 13,
+                      <TableCell sx={{ ...tdSx, textAlign: "right", fontFamily: "monospace", fontWeight: 800, fontSize: 17,
                                        color: (o.qty || 1) > 1 ? C.amber : C.gray700 }}>
                         {o.qty || 1}
                       </TableCell>
-                      <TableCell sx={{ maxWidth: 160 }}>
-                        <Typography sx={{ fontSize: 12, fontWeight: 700, color: C.gray800, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      <TableCell sx={{ ...tdSx, maxWidth: 180 }}>
+                        <Typography sx={{ fontSize: 14, fontWeight: 700, color: C.gray800, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                           {o.customer_name || "—"}
-                          {o.is_blocked && <Chip label="blocked" size="small" sx={{ ml: "5px", height: 15, fontSize: 8, bgcolor: C.redLight, color: C.red }} />}
+                          {o.is_blocked && <Chip label="blocked" size="small" sx={{ ml: "5px", height: 18, fontSize: 10, fontWeight: 700, bgcolor: C.redLight, color: C.red }} />}
                         </Typography>
-                        <Typography sx={{ fontSize: 10, color: C.gray400 }}>
+                        <Typography sx={{ fontSize: 12, color: C.gray400 }}>
                           {[o.customer_city, o.customer_pincode].filter(Boolean).join(" · ") || "—"}
                         </Typography>
                       </TableCell>
-                      <TableCell sx={{ fontSize: 10, fontFamily: "monospace", color: C.gray500, whiteSpace: "nowrap" }}>
+                      <TableCell sx={{ ...tdSx, fontSize: 12.5, fontFamily: "monospace", color: C.gray500, whiteSpace: "nowrap", lineHeight: 1.5 }}>
                         …{String(o.order_id).slice(-12)}
                         <br />{o.awb_number || "—"}
                       </TableCell>
-                      <TableCell>
+                      <TableCell sx={tdSx}>
                         {o.payment_type === "COD"
-                          ? <Chip label="COD" size="small" sx={{ height: 18, fontSize: 9, fontWeight: 700, bgcolor: C.amberLight, color: C.amber }} />
+                          ? <Chip label="COD" size="small" sx={{ height: 22, fontSize: 11, fontWeight: 700, bgcolor: C.amberLight, color: C.amber }} />
                           : o.payment_type
-                          ? <Chip label="Prepaid" size="small" sx={{ height: 18, fontSize: 9, fontWeight: 700, bgcolor: C.greenLight, color: C.green }} />
+                          ? <Chip label="Prepaid" size="small" sx={{ height: 22, fontSize: 11, fontWeight: 700, bgcolor: C.greenLight, color: C.green }} />
                           : <span style={{ color: C.gray300 }}>—</span>}
                       </TableCell>
                     </TableRow>

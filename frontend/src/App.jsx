@@ -36,6 +36,7 @@ import { MeeshoPricingTab } from "./Components/Tabs/MeeshoPricingTab";
 import { ReturnScanTab } from "./Components/Tabs/ReturnScanTab";
 import { OrderScanTab } from "./Components/Tabs/OrderScanTab";
 import { ExtensionTab } from "./Components/Tabs/ExtensionTab";
+import { ClaimSheetTab } from "./Components/Tabs/ClaimSheetTab";
 import { GstTab } from "./Components/Tabs/GstTab";
 import { SKU_PAGE_SIZE as skuPageSize } from "./lib/helper";
 import TableData from "./Components/Table/TableData";
@@ -730,6 +731,7 @@ function AppShell() {
             <Route path="/upload" element={<UploadTab />} />
             <Route path="/labels" element={<LabelsTab />} />
             <Route path="/returns" element={<ReturnScanTab />} />
+            <Route path="/claims" element={<ClaimSheetTab />} />
             <Route path="/purchases" element={<PurchasesTab />} />
             <Route path="/expenses" element={<ExpensesTab />} />
             <Route path="/inventory" element={<InventoryTab />} />

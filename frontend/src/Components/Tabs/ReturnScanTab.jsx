@@ -42,6 +42,27 @@ const CLAIM_TAG = {
   RAISED: "blue", APPROVED: "green", REJECTED: "red",
 };
 
+// The packet scanned off the returned parcel, checked against what we shipped.
+// Meesho rejects claims when the order/AWB on the reverse waybill isn't legible,
+// so this verdict is the difference between a claim that sticks and one that doesn't.
+const PACKET_META = {
+  MATCH: {
+    tag: "green", accent: C.green, bg: C.greenLight, border: C.greenBorder,
+    label: "Packet matches",
+    help: "The packet you scanned is the one we shipped — good evidence for the claim.",
+  },
+  MISMATCH: {
+    tag: "red", accent: C.red, bg: C.redLight, border: C.redBorder,
+    label: "Packet does NOT match",
+    help: "This packet is not the one recorded for this sub-order. Check you're holding the right parcel before raising a claim.",
+  },
+  UNKNOWN: {
+    tag: "amber", accent: C.amber, bg: C.amberLight, border: C.amberBorder,
+    label: "Nothing to compare",
+    help: "Recorded, but we hold no AWB for this sub-order to check it against. Upload the labels PDF for this batch.",
+  },
+};
+
 function claimWindowText(row) {
   const { claim_urgency: u, days_left: left, claim_status: cs } = row;
   if (cs === "RAISED" || cs === "APPROVED" || cs === "REJECTED") {
@@ -117,7 +138,71 @@ function StatPill({ label, value, accent, onClick, active }) {
 }
 
 // ── The scan-and-verify card ───────────────────────────────────────────────────
-function ReturnCard({ row, onPatch, saving, onClose }) {
+function PacketBlock({ row, onPatch, onScanPacket, saving }) {
+  const [packet, setPacket] = useState(row.packet_id ?? "");
+  useEffect(() => { setPacket(row.packet_id ?? ""); }, [row.id, row.packet_id]);
+
+  const verdict = row.packet_check ? PACKET_META[row.packet_check] : null;
+
+  return (
+    <div style={{
+      marginTop: 14, padding: "14px 16px", borderRadius: 10,
+      background: verdict ? verdict.bg : C.gray50,
+      border: `1px solid ${verdict ? verdict.border : C.border}`,
+    }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+        <QrCodeScannerIcon style={{ fontSize: 17, color: verdict ? verdict.accent : C.gray500 }} />
+        <span style={{ fontSize: 13, fontWeight: 700, color: C.gray800 }}>
+          Scan the packet on this parcel
+        </span>
+        {verdict && <Tag variant={verdict.tag} fontSize={11.5}>{verdict.label}</Tag>}
+      </div>
+
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <button onClick={onScanPacket} disabled={saving} style={{ ...btn("secondary", "md"), whiteSpace: "nowrap" }}>
+          <PhotoCameraIcon style={{ fontSize: 17, verticalAlign: "-4px" }} />
+          &nbsp;Scan packet
+        </button>
+        <input
+          value={packet}
+          onChange={(e) => setPacket(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") onPatch(row.id, { packet_id: packet }); }}
+          placeholder="…or type the packet / reverse AWB"
+          style={{ ...S.inp, flex: "1 1 180px", minWidth: 0, fontFamily: "monospace", fontWeight: 600 }}
+        />
+        <button onClick={() => onPatch(row.id, { packet_id: packet })}
+          disabled={saving || packet === (row.packet_id ?? "")}
+          style={{ ...btn("primary", "md"), opacity: saving || packet === (row.packet_id ?? "") ? 0.5 : 1 }}>
+          Save
+        </button>
+        {row.packet_id && (
+          <button onClick={() => onPatch(row.id, { packet_id: "" })} disabled={saving} style={btn("ghost", "md")}>
+            Clear
+          </button>
+        )}
+      </div>
+
+      {verdict && (
+        <div style={{ fontSize: 12, color: verdict.accent, fontWeight: 600, marginTop: 9, lineHeight: 1.5 }}>
+          {verdict.help}
+          {row.packet_matched_against && row.packet_check !== "UNKNOWN" && (
+            <div style={{ fontFamily: "monospace", fontSize: 11, opacity: 0.85, marginTop: 3 }}>
+              compared with {row.packet_matched_against}
+            </div>
+          )}
+        </div>
+      )}
+      {!verdict && (
+        <div style={{ fontSize: 11.5, color: C.gray500, marginTop: 8, lineHeight: 1.5 }}>
+          Meesho rejects claims when the order or AWB on the reverse waybill isn't legible — scanning it
+          here records the proof and checks it against what we shipped.
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ReturnCard({ row, onPatch, saving, onClose, onScanPacket }) {
   const isMobile = useIsMobile();
   const [amount, setAmount]       = useState(row.claim_amount ?? "");
   const [reference, setReference] = useState(row.claim_reference ?? "");
@@ -160,6 +245,9 @@ function ReturnCard({ row, onPatch, saving, onClose }) {
             <Tag variant={isRTO ? "red" : "orange"} fontSize={12}>{row.type_of_return || "Return"}</Tag>
             <Tag variant="gray" fontSize={12}>{row.sub_type || "—"}</Tag>
             <Tag variant={CLAIM_TAG[row.claim_status]} fontSize={12}>{CLAIM_LABELS[row.claim_status]}</Tag>
+            {/* Which business this return belongs to — one desk receives for
+                several, and the claim window is per business. */}
+            {row.business_name && <Tag variant="blue" fontSize={12}>◈ {row.business_name}</Tag>}
           </div>
           <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: C.gray400, padding: 2 }}>
             <CloseIcon style={{ fontSize: 20 }} />
@@ -311,7 +399,11 @@ function ReturnCard({ row, onPatch, saving, onClose }) {
 
         {row.claim_status === "REQUIRED" && (
           <div>
-            <div style={{ fontSize: 13, fontWeight: 600, color: C.gray700, marginBottom: 12 }}>
+            {/* Packet evidence comes first: it has to be captured while the
+                parcel is still in hand, before anyone starts filling in amounts. */}
+            <PacketBlock row={row} onPatch={onPatch} onScanPacket={onScanPacket} saving={saving} />
+
+            <div style={{ fontSize: 13, fontWeight: 600, color: C.gray700, margin: "18px 0 12px" }}>
               Claim flagged — record it once raised on Meesho
             </div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 12, marginBottom: 12 }}>
@@ -370,7 +462,11 @@ function ReturnCard({ row, onPatch, saving, onClose }) {
               <Field label="Reference" value={row.claim_reference} mono />
               <Field label="Raised at" value={row.claim_raised_at ? new Date(row.claim_raised_at).toLocaleString("en-IN") : null} />
               <Field label="Notes" value={row.claim_notes} />
+              <Field label="Packet scanned" value={row.packet_id} mono />
             </div>
+            {/* Still editable after raising: a claim often gets queried and the
+                packet evidence is exactly what Meesho asks for. */}
+            <PacketBlock row={row} onPatch={onPatch} onScanPacket={onScanPacket} saving={saving} />
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
               {row.claim_status === "RAISED" && (
                 <>
@@ -497,6 +593,12 @@ export function ReturnScanTab() {
   const [urgencyFilter, setUrgencyFilter] = useState("");   // "" | attention | expired | unreviewed
 
   const [cameraOpen, setCameraOpen] = useState(false);
+  // A second, single-shot camera for capturing the packet on the parcel in hand.
+  // Kept separate from the main scanner so a packet scan can never be mistaken
+  // for "look up the next return".
+  const [packetCameraFor, setPacketCameraFor] = useState(null);
+  const [feed, setFeed]             = useState([]);
+  const feedSeq                     = useRef(0);
   const [showUpload, setShowUpload] = useState(false);
   const [uploading, setUploading]   = useState(false);
   const [uploadMsg, setUploadMsg]   = useState(null);
@@ -534,6 +636,10 @@ export function ReturnScanTab() {
   useEffect(() => { setPage(1); }, [search, claimFilter, urgencyFilter, range.date_from, range.date_to]);
   useEffect(() => { scanRef.current?.focus(); }, []);
 
+  /** One line in the in-camera feed, so continuous scanning needs no glancing away. */
+  const pushFeed = (entry) =>
+    setFeed((prev) => [{ id: ++feedSeq.current, ...entry }, ...prev].slice(0, 30));
+
   const doLookup = async (codeRaw) => {
     const code = (codeRaw ?? "").trim();
     if (!code) return;
@@ -545,14 +651,38 @@ export function ReturnScanTab() {
       if (!res.ok || !data.found) {
         setMatches([]);
         setActive(null);
-        setScanError(data.message || data.error || "No matching return found.");
+        const msg = data.message || data.error || "No matching return found.";
+        setScanError(msg);
+        pushFeed({ code, kind: "err", title: "No matching return", lines: [msg] });
       } else {
         setMatches(data.matches);
         setActive(data.matches[0]);
         setScan("");
+
+        // Summarise the verdict in the camera: what came back, and whether a
+        // claim is owed — the two things that decide what happens to the parcel.
+        const m = data.matches[0];
+        const owed = m.claim_status === "UNREVIEWED" || m.claim_status === "REQUIRED";
+        const urgent = ["warning", "last_day", "expired"].includes(m.claim_urgency);
+        const lines = [`${m.sku || "unknown SKU"} × ${m.qty}`, CLAIM_LABELS[m.claim_status]];
+        if (m.days_left != null && owed) {
+          lines.push(m.days_left < 0
+            ? `Claim window missed by ${Math.abs(m.days_left)}d`
+            : m.days_left === 0 ? "TODAY is the last day to claim"
+            : `${m.days_left}d left to claim`);
+        }
+        if (data.cross_business) lines.push(`◈ belongs to ${data.business_name}`);
+        if (data.matches.length > 1) lines.push(`${data.matches.length} sub-orders match — pick one below`);
+        pushFeed({
+          code: m.suborder_no,
+          kind: urgent && owed ? "warn" : "ok",
+          title: owed ? "Needs a claim decision" : "Found",
+          lines,
+        });
       }
     } catch {
       setScanError("Network error — could not look up that code.");
+      pushFeed({ code, kind: "err", title: "Network error", lines: ["Could not look up that code."] });
     } finally {
       setScanning(false);
       // Hand focus straight back so the next parcel can be scanned immediately.
@@ -633,11 +763,32 @@ export function ReturnScanTab() {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 22 }}>
 
-      {/* ── Camera scanner overlay ── */}
+      {/* ── Camera scanner overlay ──
+          Continuous: working through a stack of returned parcels means scan,
+          read the verdict, set it aside, scan the next — closing the camera each
+          time made that four taps per parcel. The feed carries the verdict. */}
       {cameraOpen && (
         <BarcodeScanner
-          onDetected={(code) => { setCameraOpen(false); doLookup(code); }}
+          continuous
+          title="Scan returns"
+          hint="Scan each returned parcel — verdicts appear below"
+          results={feed}
+          busy={scanning}
+          onDetected={(code) => doLookup(code)}
           onClose={() => setCameraOpen(false)}
+        />
+      )}
+
+      {/* ── Packet capture: single-shot, so it closes and shows the match ── */}
+      {packetCameraFor && (
+        <BarcodeScanner
+          title="Scan the packet on this parcel"
+          hint="The order / AWB printed on the reverse waybill"
+          onDetected={(code) => {
+            setPacketCameraFor(null);
+            patchClaim(packetCameraFor, { packet_id: code });
+          }}
+          onClose={() => setPacketCameraFor(null)}
         />
       )}
 
@@ -775,10 +926,10 @@ export function ReturnScanTab() {
 
         {/* Phone camera scan — the primary action on a phone, and a convenience
             on desktop where a USB/bluetooth scanner types into the box instead. */}
-        <button onClick={() => setCameraOpen(true)}
+        <button onClick={() => { setFeed([]); setCameraOpen(true); }}
           style={{ ...btn("secondary", "lg"), width: "100%", marginBottom: 12, padding: "14px 20px", fontSize: 15 }}>
           <PhotoCameraIcon style={{ fontSize: 20, verticalAlign: "-5px" }} />
-          &nbsp;Scan with phone camera
+          &nbsp;Camera — keeps scanning
         </button>
 
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
@@ -839,6 +990,7 @@ export function ReturnScanTab() {
             row={active}
             onPatch={patchClaim}
             saving={saving}
+            onScanPacket={() => setPacketCameraFor(active.id)}
             onClose={() => { setActive(null); setMatches([]); scanRef.current?.focus(); }}
           />
           {/* One tap back into the camera, so working through a stack of

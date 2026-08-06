@@ -84,15 +84,39 @@ function beep() {
   } catch { /* audio blocked — the visual flash still confirms */ }
 }
 
+// How each scan outcome reads in the live feed. Kept here so every caller
+// describes success and trouble the same way.
+const FEED_META = {
+  ok:   { bg: "rgba(5,150,105,0.28)",  border: C.green, mark: "✓" },
+  warn: { bg: "rgba(217,119,6,0.28)",  border: C.amber, mark: "!" },
+  err:  { bg: "rgba(225,29,72,0.28)",  border: C.red,   mark: "✕" },
+};
+
 /**
  * Full-screen camera barcode scanner.
  *
  * onDetected(code) fires once per accepted scan. It closes on a hit by default:
  * the point of scanning is to then *read* the return's details, and a
  * full-screen camera would sit on top of them. Pass continuous to keep the
- * camera up (useful for bulk check-in where nothing needs reading).
+ * camera up, which is what you want when working through a stack of parcels.
+ *
+ * In continuous mode the caller should also pass `results` — the outcome of each
+ * scan so far, newest first — because the whole point of not closing is that the
+ * operator never has to look anywhere else. Without it they'd be scanning blind,
+ * with no idea whether a parcel was recorded, already scanned, or rejected.
+ *
+ *   results: [{ id, code, kind: "ok"|"warn"|"err", title, lines?: string[] }]
+ *   busy:    true while the caller is still resolving the most recent scan
  */
-export function BarcodeScanner({ onDetected, onClose, continuous = false }) {
+export function BarcodeScanner({
+  onDetected,
+  onClose,
+  continuous = false,
+  title = "Scan barcode",
+  hint,
+  results = [],
+  busy = false,
+}) {
   const videoRef    = useRef(null);
   const controlsRef = useRef(null);   // ZXing IScannerControls
   const streamRef   = useRef(null);   // raw MediaStream (native path)
@@ -291,12 +315,22 @@ export function BarcodeScanner({ onDetected, onClose, continuous = false }) {
         padding: "14px 18px", background: "rgba(0,0,0,0.75)", color: "#fff",
         flexShrink: 0,
       }}>
-        <div>
-          <div style={{ fontSize: 15, fontWeight: 700 }}>Scan return label</div>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 15, fontWeight: 700, display: "flex", alignItems: "center", gap: 8 }}>
+            {title}
+            {/* A running tally, so the operator can reconcile against the
+                physical pile without closing the camera to count rows. */}
+            {continuous && results.length > 0 && (
+              <span style={{
+                background: C.green, color: "#fff", fontSize: 11, fontWeight: 800,
+                borderRadius: 999, padding: "2px 8px",
+              }}>{results.length}</span>
+            )}
+          </div>
           <div style={{ fontSize: 11, opacity: 0.7 }}>
             {starting ? "Starting camera…"
               : unavailable ? "Camera unavailable"
-              : `Point at the barcode · ${engine === "native" ? "device scanner" : "ZXing"}`}
+              : hint || `Point at the barcode · ${engine === "native" ? "device scanner" : "ZXing"}`}
           </div>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -394,7 +428,54 @@ export function BarcodeScanner({ onDetected, onClose, continuous = false }) {
         padding: "14px 18px", background: "rgba(0,0,0,0.8)", color: "#fff",
         flexShrink: 0, display: "flex", flexDirection: "column", gap: 10,
       }}>
-        {lastHit && (
+        {/* Live outcome feed — what each scan actually did. Scrollable and
+            capped in height so a long session can't push the manual-entry box
+            and the close button off a phone screen. */}
+        {results.length > 0 ? (
+          <div style={{
+            display: "flex", flexDirection: "column", gap: 6,
+            maxHeight: 168, overflowY: "auto",
+          }}>
+            {busy && (
+              <div style={{
+                display: "flex", alignItems: "center", gap: 9,
+                background: "rgba(255,255,255,0.12)", borderRadius: 10, padding: "9px 13px",
+                fontSize: 13, fontWeight: 600,
+              }}>
+                <CircularProgress size={14} style={{ color: "#fff" }} />
+                Checking…
+              </div>
+            )}
+            {results.map((r) => {
+              const meta = FEED_META[r.kind] || FEED_META.ok;
+              return (
+                <div key={r.id} style={{
+                  background: meta.bg, border: `1px solid ${meta.border}`,
+                  borderRadius: 10, padding: "8px 12px",
+                }}>
+                  <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                    <span style={{ fontWeight: 800, fontSize: 13 }}>{meta.mark}</span>
+                    <span style={{ fontSize: 13, fontWeight: 700, flex: 1, minWidth: 0 }}>
+                      {r.title}
+                    </span>
+                  </div>
+                  {(r.lines || []).map((line, i) => (
+                    <div key={i} style={{
+                      fontSize: 11.5, opacity: 0.85, marginTop: 2, marginLeft: 21,
+                      wordBreak: "break-word",
+                    }}>{line}</div>
+                  ))}
+                  {r.code && (
+                    <div style={{
+                      fontSize: 10.5, opacity: 0.6, marginTop: 3, marginLeft: 21,
+                      fontFamily: "monospace", wordBreak: "break-all",
+                    }}>{r.code}</div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        ) : lastHit ? (
           <div style={{
             background: "rgba(5,150,105,0.25)", border: `1px solid ${C.green}`,
             borderRadius: 10, padding: "9px 13px",
@@ -403,7 +484,7 @@ export function BarcodeScanner({ onDetected, onClose, continuous = false }) {
           }}>
             ✓ {lastHit}
           </div>
-        )}
+        ) : null}
         <div style={{ display: "flex", gap: 8 }}>
           <input
             value={manual}
@@ -430,8 +511,13 @@ export function BarcodeScanner({ onDetected, onClose, continuous = false }) {
           </button>
         </div>
         {continuous && !unavailable && (
-          <div style={{ fontSize: 11, opacity: 0.6 }}>
-            Camera stays on — scan the next parcel, or close when you're done.
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <span style={{ fontSize: 11, opacity: 0.6, flex: 1 }}>
+              Camera stays on — keep scanning, results appear above.
+            </span>
+            <button onClick={stopAndClose} style={{ ...btn("ghost", "sm"), color: "#fff", borderColor: "rgba(255,255,255,0.3)" }}>
+              Done
+            </button>
           </div>
         )}
       </div>

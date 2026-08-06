@@ -31,6 +31,7 @@ export const NAV_GROUPS = [
       { path: "/mismatch", label: "Pay Mismatch", icon: "⊝" },
       { path: "/labels", label: "Labels", icon: "⊟" },
       { path: "/returns", label: "Returns & Claims", icon: "⟲" },
+      { path: "/claims", label: "Claim Sheet", icon: "₹" },
     ],
   },
   {

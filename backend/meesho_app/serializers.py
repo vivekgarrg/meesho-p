@@ -1,5 +1,7 @@
 from rest_framework import serializers
-from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, ParentItemPrice, ParentPriceHistory, Order, LabelOrder, ReturnDelivery, ScannedOrder, ListingTemplate
+
+from .helpers.helper import strip_html
+from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, ParentItemPrice, ParentPriceHistory, Order, LabelOrder, ReturnDelivery, ScannedOrder, ListingTemplate, ClaimTicket
 
 
 class OrderPaymentSerializer(serializers.ModelSerializer):
@@ -90,6 +92,7 @@ class ReturnDeliverySerializer(serializers.ModelSerializer):
     day_of_window  = serializers.SerializerMethodField()
     claim_urgency  = serializers.SerializerMethodField()
     claim_window_days = serializers.IntegerField(source="CLAIM_WINDOW_DAYS", read_only=True)
+    business_name  = serializers.CharField(source="business.name", read_only=True, default=None)
 
     class Meta:
         model = ReturnDelivery
@@ -119,6 +122,9 @@ class ScannedOrderSerializer(serializers.ModelSerializer):
     scanned_by_name = serializers.CharField(source="scanned_by.username", read_only=True, default=None)
     scan_date       = serializers.DateField(read_only=True)
     meesho_status   = serializers.SerializerMethodField()
+    needs_shipping_attention = serializers.BooleanField(read_only=True)
+    # Pooled lists mix businesses, so every row has to say which one it is.
+    business_name   = serializers.CharField(source="business.name", read_only=True, default=None)
 
     class Meta:
         model = ScannedOrder
@@ -126,6 +132,8 @@ class ScannedOrderSerializer(serializers.ModelSerializer):
         read_only_fields = [
             "business", "scan_count", "first_scanned_at", "last_scanned_at",
             "updated_at", "matched_from",
+            # Derived from the uploaded sheets, never client-supplied.
+            "ship_status", "ship_status_raw", "ship_checked_at",
         ]
 
     def get_meesho_status(self, obj):
@@ -169,3 +177,29 @@ class ListingTemplateSerializer(serializers.ModelSerializer):
         if not isinstance(value, dict):
             raise serializers.ValidationError("labels must be an object of key → label.")
         return value
+
+
+class ClaimTicketSerializer(serializers.ModelSerializer):
+    """
+    A claim ticket. Everything is read-only: this table is a faithful record of
+    what Meesho's export said, and letting a client edit it would make the
+    reconciliation it exists for meaningless.
+
+    `last_update_text` is the HTML rejection reason reduced to plain words —
+    exposed alongside the raw value so the UI can show something readable
+    without having to sanitise markup itself.
+    """
+    linked_suborder = serializers.CharField(source="linked_return.suborder_no",
+                                            read_only=True, default=None)
+    linked_sku      = serializers.CharField(source="linked_return.sku", read_only=True, default=None)
+    is_reopenable   = serializers.BooleanField(read_only=True)
+    days_to_reopen  = serializers.IntegerField(read_only=True)
+    last_update_text = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ClaimTicket
+        fields = "__all__"
+        read_only_fields = [f.name for f in ClaimTicket._meta.fields]
+
+    def get_last_update_text(self, obj):
+        return strip_html(obj.last_update)

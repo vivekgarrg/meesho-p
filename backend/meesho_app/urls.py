@@ -97,7 +97,12 @@ urlpatterns = [
     # Order scanning — log outgoing parcels at the desk and track their status
     path("order-scan/",              views.scanned_orders_list,        name="scanned_orders_list"),
     path("order-scan/bulk-status/",  views.scanned_orders_bulk_status, name="scanned_orders_bulk_status"),
+    path("order-scan/refresh-ship/", views.scanned_orders_refresh_ship, name="scanned_orders_refresh_ship"),
     path("order-scan/<int:pk>/",     views.scanned_order_detail,       name="scanned_order_detail"),
+    # Claim tickets — the Meesho supplier-panel ticket export
+    path("claims/",         views.claim_tickets_list,   name="claim_tickets_list"),
+    path("claims/upload/",  views.claim_tickets_upload, name="claim_tickets_upload"),
+    path("claims/relink/",  views.claim_tickets_relink, name="claim_tickets_relink"),
     # Listing templates — synced from the Meesho browser extension
     path("listing-templates/",         views.listing_templates_list,   name="listing_templates_list"),
     path("listing-templates/import/",  views.listing_templates_import, name="listing_templates_import"),

@@ -12,13 +12,15 @@ from datetime import datetime, time, timedelta
 import requests as http_requests
 import base64
 import io
+import re
 import concurrent.futures
 from PIL import Image
-from .helpers.helper import status_wise_summary
-from .permissions import get_authorized_business
+from .helpers.helper import status_wise_summary, strip_html
+from accounts.models import Business
+from .permissions import get_authorized_business, accessible_businesses
 from .helpers.label_pdf import extract_all_pages
 
-from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, PurchaseBill, PurchaseItem, BlockedCustomer, InventoryAdjustment, ConsumableItem, ConsumablePurchase, ConsumableUsage, InventoryLog, MeeshoInventory, MeeshoPriceUpdate, ExpenseInvoice, ExpenseInvoiceItem, TransportCharge, PackedStockEvent, EstimatedProfitOrder, ReturnDelivery, GstTransaction, GstInvoiceDetail, ScannedOrder, ListingTemplate
+from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, PurchaseBill, PurchaseItem, BlockedCustomer, InventoryAdjustment, ConsumableItem, ConsumablePurchase, ConsumableUsage, InventoryLog, MeeshoInventory, MeeshoPriceUpdate, ExpenseInvoice, ExpenseInvoiceItem, TransportCharge, PackedStockEvent, EstimatedProfitOrder, ReturnDelivery, GstTransaction, GstInvoiceDetail, ScannedOrder, ListingTemplate, ClaimTicket
 from .serializers import (
     OrderPaymentSerializer, AdsCostSerializer,
     ReferralPaymentSerializer, CompensationRecoverySerializer,
@@ -30,6 +32,7 @@ from .serializers import (
     ReturnDeliverySerializer,
     ScannedOrderSerializer,
     ListingTemplateSerializer,
+    ClaimTicketSerializer,
 )
 
 
@@ -4024,6 +4027,67 @@ def _parse_label_page(label_text, full_text, tables):
 
 # ── Meesho Labels PDF upload ──────────────────────────────────────────────────
 
+def _sku_business_owners(businesses, sku_ids, default):
+    """
+    Which business owns each SKU, across the ones this user can reach.
+
+    Returns (owner_by_sku, ambiguous) where `ambiguous` lists SKUs priced by more
+    than one business — the same SKU name genuinely exists in two catalogues, and
+    there is no honest way to pick. Those fall back to `default` and are reported
+    so the UI can show both business names rather than silently choosing.
+
+    Ownership is read from FinalPrice (the pricing catalogue) because that is
+    where a business declares "this SKU is mine"; label history would be
+    circular, since it is what we are trying to write.
+    """
+    wanted = {s for s in sku_ids if s}
+    if not wanted:
+        return {}, []
+
+    by_sku = {}
+    for b in businesses:
+        for sku in FinalPrice.objects.filter(
+            business=b, sku_id__in=wanted
+        ).values_list("sku_id", flat=True):
+            by_sku.setdefault(sku, []).append(b)
+
+    owner_by_sku, ambiguous = {}, []
+    for sku, owners in by_sku.items():
+        if len(owners) == 1:
+            owner_by_sku[sku] = owners[0]
+        else:
+            ambiguous.append({"sku": sku, "businesses": [o.name for o in owners]})
+            owner_by_sku[sku] = default
+    return owner_by_sku, ambiguous
+
+
+def _sku_parent_map_pooled(businesses, sku_ids):
+    """
+    Parent name per SKU, looked up across every reachable business.
+
+    A label batch spanning businesses needs each SKU grouped under *its own*
+    catalogue's parent; resolving only against the selected business would leave
+    the other business's SKUs looking unparented and break the grouping the
+    labels view is built around.
+    """
+    wanted = {s for s in sku_ids if s}
+    if not wanted:
+        return {}
+
+    mapping = {}
+    for b in businesses:
+        rows = (
+            FinalPrice.objects.filter(business=b, sku_id__in=wanted)
+            .select_related("parent").values("sku_id", "parent__item_id")
+        )
+        for row in rows:
+            # First business to claim a SKU wins; the selected business is first
+            # in `businesses`, so its own catalogue always takes precedence.
+            if row["sku_id"] not in mapping and row["parent__item_id"]:
+                mapping[row["sku_id"]] = row["parent__item_id"]
+    return mapping
+
+
 @api_view(["POST"])
 @parser_classes([MultiPartParser])
 def upload_labels_pdf(request, business_id):
@@ -4167,7 +4231,19 @@ def upload_labels_pdf(request, business_id):
     # and one bulk_update. The previous row-at-a-time get_or_create + update did
     # two queries per label, which dominated the non-parsing time of a large
     # batch. Semantics are unchanged.
+    # ── Which business owns each SKU in this PDF ─────────────────────────────
+    # One tray of labels covers several businesses, so a single upload has to
+    # split itself. Ownership is decided by which business already prices the
+    # SKU; a SKU nobody prices, or one priced by more than one business, stays
+    # with the business the operator had selected — guessing between two owners
+    # would file parcels somewhere they'd never be found.
+    scope = accessible_businesses(request, include=business)
+    sku_owner, ambiguous_skus = _sku_business_owners(
+        scope, {r.get("sku") or "" for r in db_rows}, default=business
+    )
+
     saved = updated = 0
+    per_business = {}
     if db_rows:
         # Last occurrence wins if the same order appears twice in one PDF —
         # matching the old loop, where the later row's update ran last.
@@ -4175,53 +4251,67 @@ def upload_labels_pdf(request, business_id):
         for row in db_rows:
             by_id[row["order_id"]] = row
 
+        # Group by owning business so each still gets one SELECT and one write.
+        rows_by_owner = {}
+        for oid, row in by_id.items():
+            owner = sku_owner.get(row.get("sku") or "", business)
+            rows_by_owner.setdefault(owner.pk, (owner, {}))[1][oid] = row
+
         with transaction.atomic():
-            existing_ids = set(
-                LabelOrder.objects
-                .filter(business=business, order_id__in=list(by_id.keys()))
-                .values_list("order_id", flat=True)
-            )
-
-            to_create, to_update = [], []
-            for oid, row in by_id.items():
-                data = {k: v for k, v in row.items() if k not in ("order_id", "uploaded_date")}
-                if oid in existing_ids:
-                    # uploaded_date deliberately absent: an order keeps the day
-                    # it first arrived and must not move to a later batch.
-                    to_update.append(LabelOrder(order_id=oid, business=business, **data))
-                else:
-                    to_create.append(LabelOrder(
-                        order_id=oid, business=business,
-                        uploaded_date=row["uploaded_date"], **data,
-                    ))
-
-            if to_create:
-                LabelOrder.objects.bulk_create(to_create, batch_size=500)
-                saved = len(to_create)
-            if to_update:
-                LabelOrder.objects.bulk_update(
-                    to_update,
-                    [
-                        "customer_name", "customer_address", "customer_city",
-                        "customer_state", "customer_pincode", "courier_name",
-                        "awb_number", "payment_type", "pickup_date",
-                        "sku", "size", "qty", "color", "order_date",
-                    ],
-                    batch_size=500,
+            for owner, owner_rows in rows_by_owner.values():
+                existing_ids = set(
+                    LabelOrder.objects
+                    .filter(business=owner, order_id__in=list(owner_rows.keys()))
+                    .values_list("order_id", flat=True)
                 )
-                updated = len(to_update)
+
+                to_create, to_update = [], []
+                for oid, row in owner_rows.items():
+                    data = {k: v for k, v in row.items() if k not in ("order_id", "uploaded_date")}
+                    if oid in existing_ids:
+                        # uploaded_date deliberately absent: an order keeps the day
+                        # it first arrived and must not move to a later batch.
+                        to_update.append(LabelOrder(order_id=oid, business=owner, **data))
+                    else:
+                        to_create.append(LabelOrder(
+                            order_id=oid, business=owner,
+                            uploaded_date=row["uploaded_date"], **data,
+                        ))
+
+                if to_create:
+                    LabelOrder.objects.bulk_create(to_create, batch_size=500)
+                    saved += len(to_create)
+                if to_update:
+                    LabelOrder.objects.bulk_update(
+                        to_update,
+                        [
+                            "customer_name", "customer_address", "customer_city",
+                            "customer_state", "customer_pincode", "courier_name",
+                            "awb_number", "payment_type", "pickup_date",
+                            "sku", "size", "qty", "color", "order_date",
+                        ],
+                        batch_size=500,
+                    )
+                    updated += len(to_update)
+
+                per_business[owner.name] = len(owner_rows)
 
     # ── Resolve parent NAME (ParentItemPrice.item_id) for each child SKU ─────────
     # Use the human parent name (not the surrogate parent_id) so the upload
     # preview/analytics group and label by parent instead of the variant SKU.
-    _fp_qs = FinalPrice.objects.filter(
-        business=business, sku_id__in=list(sku_data.keys())
-    ).select_related("parent").values("sku_id", "parent__item_id")
-    sku_to_parent = _SkuMap((row["sku_id"], row["parent__item_id"]) for row in _fp_qs)
+    # Pooled across businesses: a batch can contain another business's SKUs, and
+    # those must still group under their own catalogue's parent.
+    sku_to_parent = _SkuMap(
+        _sku_parent_map_pooled(scope, list(sku_data.keys())).items()
+    )
 
-    # Enrich page_details with parent SKU
+    # Enrich page_details with parent SKU and, when the label belongs to another
+    # business, which one — so the operator sorting the printed stack can tell.
     for _pd in page_details:
-        _pd["parent_sku"] = sku_to_parent.get(_pd.get("sku") or "")
+        _sku = _pd.get("sku") or ""
+        _pd["parent_sku"] = sku_to_parent.get(_sku)
+        _owner = sku_owner.get(_sku)
+        _pd["business_name"] = _owner.name if _owner and _owner.pk != business.pk else None
 
     # Build parent-level rank: aggregate child counts under each parent so the
     # most-dispatched parent group appears first in the cropped PDF.
@@ -4451,6 +4541,10 @@ def upload_labels_pdf(request, business_id):
     return Response({
         "success": True,
         "upload_date":      str(today),
+        # How this batch split across businesses, and any SKU whose owner was
+        # genuinely ambiguous (same name priced by two catalogues).
+        "per_business":     per_business,
+        "ambiguous_skus":   ambiguous_skus,
         "total_pages":      total_pages,
         "total_unique_skus":len(sku_data),
         "total_labels":     total_labels,
@@ -7157,7 +7251,54 @@ _RETURN_BLANK_VALUES = {"", "nan", "none", "null", "na", "n/a", "-", "--"}
 
 # Claim fields a client may write, and the statuses that mean the claim has
 # already been dealt with (so no countdown applies any more).
-_CLAIM_WRITABLE = {"claim_status", "claim_amount", "claim_reference", "claim_notes", "verify_result"}
+_CLAIM_WRITABLE = {
+    "claim_status", "claim_amount", "claim_reference", "claim_notes", "verify_result",
+    "packet_id",
+}
+
+
+def _check_packet(business, row, scanned):
+    """
+    Verify a scanned packet id against what we know went out for this sub-order.
+
+    Compared against, in order: the return's own reverse AWB, then the outbound
+    label's AWB, then the sub-order number itself — because what is printed on a
+    returned parcel varies by courier, and any of the three is a legitimate match.
+
+    Matching is loose on purpose: scanners pick up carrier prefixes and separators
+    that aren't part of the number, so both sides are reduced to their
+    alphanumerics and a containment test either way counts as a hit. A strict
+    equality test would flag genuine matches as mismatches, and a mismatch here
+    tells the operator to stop and look — it must not cry wolf.
+    """
+    def norm(value):
+        return "".join(ch for ch in str(value or "").upper() if ch.isalnum())
+
+    scanned_n = norm(scanned)
+    if not scanned_n:
+        return ReturnDelivery.PACKET_UNKNOWN, ""
+
+    label = LabelOrder.objects.filter(business=business, order_id=row.suborder_no).first()
+    candidates = [
+        row.awb_number,
+        label.awb_number if label else None,
+        row.suborder_no,
+        row.order_no,
+    ]
+
+    for candidate in candidates:
+        cand_n = norm(candidate)
+        if not cand_n:
+            continue
+        if scanned_n == cand_n or scanned_n in cand_n or cand_n in scanned_n:
+            return ReturnDelivery.PACKET_MATCH, str(candidate)
+
+    # Nothing to compare against is materially different from a real mismatch:
+    # one is missing data, the other is a wrong parcel in your hand.
+    if not any(norm(c) for c in candidates):
+        return ReturnDelivery.PACKET_UNKNOWN, ""
+
+    return ReturnDelivery.PACKET_MISMATCH, str(next((c for c in candidates if norm(c)), ""))
 _CLAIM_DECIDED  = (
     ReturnDelivery.CLAIM_RAISED,
     ReturnDelivery.CLAIM_APPROVED,
@@ -7537,34 +7678,46 @@ def return_delivery_lookup(request, business_id):
     if not code:
         return Response({"error": "Nothing scanned."}, status=status.HTTP_400_BAD_REQUEST)
 
-    base = ReturnDelivery.objects.filter(business=business)
-
-    # Most specific match first, so a code that is both an AWB and a
-    # sub-order prefix resolves to the AWB.
-    matched_by = None
-    rows = list(base.filter(awb_number__iexact=code))
-    if rows:
-        matched_by = "awb"
-    if not rows:
+    def _search(scope_business):
+        """Most specific match first, so a code that is both an AWB and a
+        sub-order prefix resolves to the AWB."""
+        base = ReturnDelivery.objects.filter(business=scope_business)
+        rows = list(base.filter(awb_number__iexact=code))
+        if rows:
+            return rows, "awb"
         rows = list(base.filter(suborder_no__iexact=code))
         if rows:
-            matched_by = "suborder"
-    if not rows:
+            return rows, "suborder"
         rows = list(base.filter(order_no__iexact=code))
         if rows:
-            matched_by = "order"
-    if not rows and len(code) >= _MIN_PARTIAL_SCAN_LEN:
-        # Fall back to a contains search — handles scanners that prepend a
-        # carrier prefix, and lets a partially-read code still resolve.
-        rows = list(
-            base.filter(
-                DQ(awb_number__icontains=code) |
-                DQ(suborder_no__icontains=code) |
-                DQ(order_no__icontains=code)
-            )[:10]
-        )
-        if rows:
-            matched_by = "partial"
+            return rows, "order"
+        if len(code) >= _MIN_PARTIAL_SCAN_LEN:
+            # Fall back to a contains search — handles scanners that prepend a
+            # carrier prefix, and lets a partially-read code still resolve.
+            rows = list(
+                base.filter(
+                    DQ(awb_number__icontains=code) |
+                    DQ(suborder_no__icontains=code) |
+                    DQ(order_no__icontains=code)
+                )[:10]
+            )
+            if rows:
+                return rows, "partial"
+        return [], None
+
+    # Selected business first; a returned parcel for a sibling business still
+    # resolves rather than reading as unknown, because one desk receives for all
+    # of them. Only businesses this user already belongs to are searched.
+    owner = business
+    rows, matched_by = _search(business)
+    if not rows:
+        for sibling in accessible_businesses(request, include=business):
+            if sibling.pk == business.pk:
+                continue
+            rows, matched_by = _search(sibling)
+            if rows:
+                owner = sibling
+                break
 
     if not rows:
         return Response({
@@ -7578,7 +7731,7 @@ def return_delivery_lookup(request, business_id):
     matches = []
     for row in rows:
         data = ReturnDeliverySerializer(row).data
-        data["order_context"] = _order_context(business, row.suborder_no)
+        data["order_context"] = _order_context(owner, row.suborder_no)
         matches.append(data)
 
     return Response({
@@ -7586,6 +7739,11 @@ def return_delivery_lookup(request, business_id):
         "scanned": code,
         "matched_by": matched_by,
         "match_count": len(matches),
+        # Which business the parcel actually belongs to — the UI badges it when
+        # it isn't the one currently selected.
+        "cross_business": owner.pk != business.pk,
+        "business_id": owner.pk,
+        "business_name": owner.name,
         "matches": matches,
     })
 
@@ -7657,6 +7815,19 @@ def return_delivery_detail(request, business_id, pk):
             row.verify_result = verify
             row.verified_at = now if verify else None
 
+        if "packet_id" in payload:
+            scanned = _clean_scan_code(payload["packet_id"])[:150]
+            row.packet_id = scanned
+            if scanned:
+                row.packet_check, row.packet_matched_against = _check_packet(business, row, scanned)
+                row.packet_scanned_at = now
+            else:
+                # Cleared — drop the verdict too, or a stale MATCH would keep
+                # vouching for a packet that is no longer recorded.
+                row.packet_check = ""
+                row.packet_matched_against = ""
+                row.packet_scanned_at = None
+
         row.save()
 
     data = ReturnDeliverySerializer(row).data
@@ -7726,6 +7897,34 @@ def _clean_scan_code(raw):
     Trim to what a barcode can actually contain before matching on it.
     """
     return (raw or "").strip().strip("\r\n\t ").strip('"').strip("'")
+
+
+def _resolve_scan_code_pooled(request, business, code):
+    """
+    Resolve a scanned code against every business the user can reach.
+
+    (owning_business, snapshot). The selected business is tried first so the
+    common case costs exactly one lookup and never changes owner unnecessarily;
+    only an unrecognised code falls through to the siblings.
+
+    Why the *owning* business is returned rather than always the selected one:
+    one desk packs for several businesses, and filing a Rudam 2 parcel under
+    Rudam because that happened to be the dropdown value would put the row where
+    nobody looks for it. The scan lands with its order, and the UI says so.
+    """
+    snapshot = _resolve_scan_code(business, code)
+    if snapshot["matched_from"] != ScannedOrder.MATCH_NONE:
+        return business, snapshot
+
+    for sibling in accessible_businesses(request, include=business):
+        if sibling.pk == business.pk:
+            continue
+        other = _resolve_scan_code(sibling, code)
+        if other["matched_from"] != ScannedOrder.MATCH_NONE:
+            return sibling, other
+
+    # Nothing anywhere — log it against the business the operator had selected.
+    return business, snapshot
 
 
 def _resolve_scan_code(business, code):
@@ -7860,12 +8059,97 @@ def _meesho_status_map(business, sub_order_nos):
 
 
 def _attach_meesho_status(business, rows):
-    """Hang the resolved Meesho status on each row for the serializer to pick up."""
+    """
+    Hang the resolved Meesho status on each row for the serializer to pick up.
+
+    Rows are grouped by their *own* business rather than resolved against the
+    passed one: a pooled list mixes businesses, and looking a Rudam 2 sub-order
+    up in Rudam's orders would report "not reported yet" for something we
+    actually know. One query pair per business present, not per row.
+    """
     rows = list(rows)
-    status_map = _meesho_status_map(business, [r.sub_order_no for r in rows])
+    by_business = {}
     for row in rows:
-        row.meesho_status = status_map.get(row.sub_order_no)
+        by_business.setdefault(row.business_id, []).append(row)
+
+    for business_id, group in by_business.items():
+        status_map = _meesho_status_map(
+            business if business_id == business.pk else Business.objects.get(pk=business_id),
+            [r.sub_order_no for r in group],
+        )
+        for row in group:
+            row.meesho_status = status_map.get(row.sub_order_no)
     return rows
+
+
+# Most-advanced-wins ordering. "Did it leave the building" is monotonic: once a
+# parcel has shipped, no later row makes it un-shipped. CANCELLED outranks
+# NOT_SHIPPED because a cancelled order is settled, not still waiting.
+_SHIP_PRIORITY = {
+    ScannedOrder.SHIP_SHIPPED: 3,
+    ScannedOrder.SHIP_CANCELLED: 2,
+    ScannedOrder.SHIP_NOT_SHIPPED: 1,
+    ScannedOrder.SHIP_UNKNOWN: 0,
+}
+
+
+def _resolve_ship_status(business, sub_order_no, status_hint=None):
+    """
+    Whether this order actually shipped, per the sheets we hold.
+
+    Returns (ship_status, raw_value).
+
+    A sub-order legitimately has several Orders rows — SHIPPED, then RTO_LOCKED,
+    then RTO_COMPLETE — and in this data they all carry the *same* order_date, so
+    "the latest row" is decided only by upload time. That makes picking one row
+    unreliable: re-uploading an old export could flip a shipped parcel back to
+    READY_TO_SHIP. So every status for the sub-order is classified and the
+    most-advanced bucket wins, which no upload order can disturb.
+
+    The Orders sheet is preferred over Payments because it carries the
+    pre-dispatch states (READY_TO_SHIP, PENDING) that are the entire point of
+    this check; a row only reaches the Payments sheet once money moved, by which
+    time it has necessarily shipped.
+    """
+    raws = []
+    if status_hint and status_hint.get("status"):
+        raws.append(status_hint["status"])
+
+    raws.extend(
+        Order.objects.filter(business=business, sub_order_no=sub_order_no)
+        .values_list("reason_for_credit_entry", flat=True)
+    )
+    if not raws:
+        raws.extend(
+            OrderPayment.objects.filter(business=business, sub_order_no=sub_order_no)
+            .exclude(live_order_status__isnull=True).exclude(live_order_status="")
+            .values_list("live_order_status", flat=True)
+        )
+
+    best, best_raw = ScannedOrder.SHIP_UNKNOWN, ""
+    for raw in raws:
+        bucket = ScannedOrder.classify_ship_status(raw)
+        if _SHIP_PRIORITY[bucket] > _SHIP_PRIORITY[best]:
+            best, best_raw = bucket, (raw or "")
+
+    return best, best_raw
+
+
+def _refresh_ship_status(business, row, status_hint=None, save=True):
+    """
+    Re-resolve and store a row's shipping status.
+
+    Worth re-running rather than trusting the stored value: a parcel scanned
+    before its sheet was uploaded is UNKNOWN, and only becomes answerable later.
+    """
+    ship, raw = _resolve_ship_status(business, row.sub_order_no, status_hint)
+    changed = (row.ship_status != ship) or (row.ship_status_raw != raw)
+    row.ship_status = ship
+    row.ship_status_raw = raw[:100]
+    row.ship_checked_at = timezone.now()
+    if save:
+        row.save(update_fields=["ship_status", "ship_status_raw", "ship_checked_at", "updated_at"])
+    return changed
 
 
 def _scanned_order_stats(business):
@@ -7898,6 +8182,15 @@ def _scanned_order_stats(business):
             last_scanned_at__lt=_local_day_start(today + timedelta(days=1)),
         ).count(),
         "rescanned":       base.filter(scan_count__gt=1).count(),
+
+        # Shipping cross-check: scanned by us, but what does Meesho say?
+        "ship_shipped":     base.filter(ship_status=ScannedOrder.SHIP_SHIPPED).count(),
+        "ship_not_shipped": base.filter(ship_status=ScannedOrder.SHIP_NOT_SHIPPED).count(),
+        "ship_cancelled":   base.filter(ship_status=ScannedOrder.SHIP_CANCELLED).count(),
+        "ship_unknown":     base.filter(ship_status=ScannedOrder.SHIP_UNKNOWN).count(),
+        "ship_problem":     base.filter(ship_status__in=[
+            ScannedOrder.SHIP_NOT_SHIPPED, ScannedOrder.SHIP_CANCELLED,
+        ]).count(),
     }
 
 
@@ -7935,11 +8228,14 @@ def scanned_orders_list(request, business_id):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        snapshot = _resolve_scan_code(business, code)
+        # Pooled: a code belonging to a sibling business resolves and is filed
+        # against that business, not the one in the dropdown.
+        owner, snapshot = _resolve_scan_code_pooled(request, business, code)
+        cross_business = owner.pk != business.pk
         now = timezone.now()
 
         existing = ScannedOrder.objects.filter(
-            business=business, sub_order_no=snapshot["sub_order_no"]
+            business=owner, sub_order_no=snapshot["sub_order_no"]
         ).first()
 
         if existing:
@@ -7962,16 +8258,24 @@ def scanned_orders_list(request, business_id):
 
             existing.save(update_fields=fields)
             row = _attach_meesho_status(business, [existing])[0]
+            # Re-check on every scan: the sheet that answers this may have been
+            # uploaded since the parcel was first seen. Resolved against the
+            # owning business, which for a pooled scan is not the selected one.
+            _refresh_ship_status(owner, row, row.meesho_status)
             return Response({
                 "already_scanned": True,
                 "scan_count": row.scan_count,
                 "matched_from": row.matched_from,
+                "ship_status": row.ship_status,
+                "cross_business": cross_business,
+                "business_id": owner.pk,
+                "business_name": owner.name,
                 "row": ScannedOrderSerializer(row).data,
                 "stats": _scanned_order_stats(business),
             })
 
         row = ScannedOrder.objects.create(
-            business=business,
+            business=owner,
             scanned_code=code,
             status=new_status,
             status_updated_at=now if new_status != ScannedOrder.STATUS_SCANNED else None,
@@ -7981,15 +8285,30 @@ def scanned_orders_list(request, business_id):
             **snapshot,
         )
         row = _attach_meesho_status(business, [row])[0]
+        _refresh_ship_status(owner, row, row.meesho_status)
         return Response({
             "already_scanned": False,
             "scan_count": 1,
             "matched_from": row.matched_from,
+            "ship_status": row.ship_status,
+            "cross_business": cross_business,
+            "business_id": owner.pk,
+            "business_name": owner.name,
             "row": ScannedOrderSerializer(row).data,
             "stats": _scanned_order_stats(business),
         }, status=status.HTTP_201_CREATED)
 
-    qs = ScannedOrder.objects.filter(business=business).select_related("scanned_by")
+    # ?pool=1 widens the list to every business the user belongs to. Off by
+    # default so the tab still means "this business" unless asked otherwise —
+    # but a scan filed against a sibling (see _resolve_scan_code_pooled) is
+    # invisible without it, which is exactly when you want it on.
+    pooled = request.GET.get("pool", "").strip() in ("1", "true", "yes")
+    if pooled:
+        scope = accessible_businesses(request, include=business)
+        qs = ScannedOrder.objects.filter(business__in=scope)
+    else:
+        qs = ScannedOrder.objects.filter(business=business)
+    qs = qs.select_related("scanned_by", "business")
 
     # Half-open datetime bounds rather than __date — see _local_day_start.
     date_from = _parse_day(request.GET.get("date_from"))
@@ -8023,6 +8342,15 @@ def scanned_orders_list(request, business_id):
         qs = qs.filter(matched_from=ScannedOrder.MATCH_NONE)
     elif matched == "yes":
         qs = qs.exclude(matched_from=ScannedOrder.MATCH_NONE)
+
+    # ?ship=shipped | not_shipped | cancelled | unknown | problem
+    ship = request.GET.get("ship", "").strip().upper()
+    if ship == "PROBLEM":
+        qs = qs.filter(ship_status__in=[
+            ScannedOrder.SHIP_NOT_SHIPPED, ScannedOrder.SHIP_CANCELLED,
+        ])
+    elif ship in {c[0] for c in ScannedOrder.SHIP_STATUS_CHOICES}:
+        qs = qs.filter(ship_status=ship)
 
     total = qs.count()
 
@@ -8094,6 +8422,42 @@ def scanned_order_detail(request, business_id, pk):
 
 
 @api_view(["POST"])
+def scanned_orders_refresh_ship(request, business_id):
+    """
+    Re-check every scan's shipping status against the sheets we now hold.
+
+    Needed because a parcel is usually scanned *before* the sheet that reports on
+    it exists, so a freshly-scanned row is legitimately UNKNOWN. Uploading this
+    week's Orders export is what turns those into real answers, and nothing else
+    would notice.
+
+    Only rows that could still change are touched: a SHIPPED row is terminal for
+    this purpose, so re-resolving thousands of them every time would be waste.
+    """
+    business = get_authorized_business(request, business_id)
+
+    qs = ScannedOrder.objects.filter(business=business).exclude(
+        ship_status=ScannedOrder.SHIP_SHIPPED
+    )
+    if request.data.get("all"):
+        qs = ScannedOrder.objects.filter(business=business)
+
+    rows = list(qs)
+    status_map = _meesho_status_map(business, [r.sub_order_no for r in rows])
+
+    changed = 0
+    for row in rows:
+        if _refresh_ship_status(business, row, status_map.get(row.sub_order_no)):
+            changed += 1
+
+    return Response({
+        "checked": len(rows),
+        "changed": changed,
+        "stats": _scanned_order_stats(business),
+    })
+
+
+@api_view(["POST"])
 def scanned_orders_bulk_status(request, business_id):
     """
     Move a list of recorded scans to one status — the "select the day's pile and
@@ -8122,6 +8486,456 @@ def scanned_orders_bulk_status(request, business_id):
         "updated": updated,
         "status": new_status,
         "stats": _scanned_order_stats(business),
+    })
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Claim tickets — the Meesho supplier-panel ticket export
+# ══════════════════════════════════════════════════════════════════════════════
+
+_CLAIM_COL_MAP = {
+    "s no":              "s_no",
+    "sno":               "s_no",
+    "product name":      "product_name",
+    "sku":               "sku",
+    "variation":         "variation",
+    "qty":               "qty",
+    "meesho pid":        "meesho_pid",
+    "order number":      "order_no",
+    "suborder number":   "suborder_no",
+    "sub order number":  "suborder_no",
+    "ticket id":         "ticket_id",
+    "ticket status":     "ticket_status",
+    "created date":      "created_date",
+    "issue":             "issue",
+    "last update":       "last_update",
+    "reopen validity":   "reopen_validity",
+    "cpp flag":          "cpp_flag",
+}
+
+# Money in the prose: "Rs 511.56", "Rs. 356.26", "Rs 1,024.50".
+_CLAIM_AMOUNT_RE = re.compile(r"Rs\.?\s*([\d,]+(?:\.\d+)?)", re.IGNORECASE)
+_CLAIM_TXN_RE = re.compile(r"transaction\s*id\s*[:\-]?\s*([A-Za-z0-9._/-]+)", re.IGNORECASE)
+# "was done on 05 Aug 2026" / "has been scheduled on 2026-07-15"
+_CLAIM_PAID_ON_RE = re.compile(r"was\s+done\s+on\s+([0-9]{1,2}\s+\w+\s+[0-9]{4}|[0-9]{4}-[0-9]{2}-[0-9]{2})", re.IGNORECASE)
+_CLAIM_SCHED_ON_RE = re.compile(r"scheduled\s+on\s+([0-9]{1,2}\s+\w+\s+[0-9]{4}|[0-9]{4}-[0-9]{2}-[0-9]{2})", re.IGNORECASE)
+
+_CLAIM_STATUS_MAP = {
+    "open": ClaimTicket.STATUS_OPEN,
+    "approved": ClaimTicket.STATUS_APPROVED,
+    "rejected": ClaimTicket.STATUS_REJECTED,
+}
+
+# A ticket outcome maps onto the claim state we track per return, so uploading
+# the sheet moves the return's claim forward without anyone retyping it.
+_TICKET_TO_CLAIM_STATUS = {
+    ClaimTicket.STATUS_OPEN:     ReturnDelivery.CLAIM_RAISED,
+    ClaimTicket.STATUS_APPROVED: ReturnDelivery.CLAIM_APPROVED,
+    ClaimTicket.STATUS_REJECTED: ReturnDelivery.CLAIM_REJECTED,
+}
+
+
+def _parse_claim_outcome(last_update):
+    """
+    (claim_amount, transaction_id, settled_on, payment_state) out of the prose.
+
+    Only the *paid* wording yields a transaction id, so the presence of one is
+    what distinguishes money that moved from money that is merely promised —
+    which is the distinction that matters when reconciling against a bank
+    statement.
+    """
+    text = strip_html(last_update)
+    if not text:
+        return None, "", None, ClaimTicket.PAY_NONE
+
+    amount = None
+    m = _CLAIM_AMOUNT_RE.search(text)
+    if m:
+        amount = safe_decimal(m.group(1).replace(",", ""))
+
+    txn = ""
+    m = _CLAIM_TXN_RE.search(text)
+    if m:
+        txn = m.group(1).strip().rstrip(".")
+
+    settled_on, state = None, ClaimTicket.PAY_NONE
+    m = _CLAIM_PAID_ON_RE.search(text)
+    if m:
+        settled_on, state = safe_date(m.group(1)), ClaimTicket.PAY_PAID
+    else:
+        m = _CLAIM_SCHED_ON_RE.search(text)
+        if m:
+            settled_on, state = safe_date(m.group(1)), ClaimTicket.PAY_SCHEDULED
+    # A transaction id with no parseable date still means it was paid.
+    if state == ClaimTicket.PAY_NONE and txn:
+        state = ClaimTicket.PAY_PAID
+
+    return amount, txn, settled_on, state
+
+
+def _find_claim_header_row(lines):
+    for idx, line in enumerate(lines[:60]):
+        low = line.lower()
+        if "ticket id" in low and "ticket status" in low:
+            return idx
+    return None
+
+
+def _read_claim_sheet(file):
+    """Parse the uploaded ticket export into a DataFrame with mapped columns."""
+    name = (file.name or "").lower()
+
+    if name.endswith((".xlsx", ".xls")):
+        file.seek(0)
+        raw = pd.read_excel(file, header=None, dtype=str)
+        header_idx = None
+        for idx, row in raw.iterrows():
+            joined = " ".join(str(c).lower() for c in row.tolist() if c is not None)
+            if "ticket id" in joined and "ticket status" in joined:
+                header_idx = idx
+                break
+        if header_idx is None:
+            raise ValueError("Could not find the header row (expected 'Ticket ID' and 'Ticket Status').")
+        df = raw.iloc[header_idx + 1:].copy()
+        df.columns = [str(c) for c in raw.iloc[header_idx].tolist()]
+    else:
+        blob = file.read()
+        text = None
+        for encoding in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
+            try:
+                text = blob.decode(encoding)
+                break
+            except UnicodeDecodeError:
+                continue
+        if text is None:
+            text = blob.decode("utf-8", errors="replace")
+
+        lines = text.splitlines()
+        header_idx = _find_claim_header_row(lines)
+        if header_idx is None:
+            raise ValueError("Could not find the header row (expected 'Ticket ID' and 'Ticket Status').")
+        # The Last Update column contains embedded newlines inside quotes, so the
+        # whole remaining text is handed to the CSV parser rather than split by
+        # line — splitting would tear those cells apart.
+        df = pd.read_csv(io.StringIO("\n".join(lines[header_idx:])), dtype=str)
+
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    df.rename(columns=_CLAIM_COL_MAP, inplace=True)
+    return df
+
+
+def _link_ticket_to_return(business, ticket, apply_status=True):
+    """
+    Attach a ticket to its return and, optionally, move the return's claim state.
+
+    A sub-order can have more than one ReturnDelivery row (a second return leg
+    travels back on a different AWB), so the most recent is chosen — that is the
+    leg a freshly-raised ticket refers to.
+
+    Claim notes are never touched: they are hand-written at the desk and the
+    sheet has no business overwriting them.
+    """
+    if not ticket.suborder_no:
+        return False
+
+    ret = (
+        ReturnDelivery.objects.filter(business=business, suborder_no=ticket.suborder_no)
+        .order_by("-delivered_date", "-uploaded_at")
+        .first()
+    )
+    if ret is None:
+        return False
+
+    ticket.linked_return = ret
+
+    if not apply_status:
+        return True
+
+    new_claim = _TICKET_TO_CLAIM_STATUS.get(ticket.ticket_status)
+    fields = []
+    if new_claim and ret.claim_status != new_claim:
+        ret.claim_status = new_claim
+        fields.append("claim_status")
+        if not ret.claim_marked_at:
+            ret.claim_marked_at = ticket.created_at_meesho or timezone.now()
+            fields.append("claim_marked_at")
+        # The ticket existing at all means the claim was raised on Meesho.
+        if not ret.claim_raised_at:
+            ret.claim_raised_at = ticket.created_at_meesho or timezone.now()
+            fields.append("claim_raised_at")
+
+    # The sheet is authoritative on money and on the ticket reference.
+    if ticket.claim_amount is not None and ret.claim_amount != ticket.claim_amount:
+        ret.claim_amount = ticket.claim_amount
+        fields.append("claim_amount")
+    if ticket.ticket_id and ret.claim_reference != ticket.ticket_id:
+        ret.claim_reference = ticket.ticket_id
+        fields.append("claim_reference")
+
+    if fields:
+        ret.save(update_fields=fields + ["updated_at"])
+    return True
+
+
+def _claim_stats(business):
+    """Claim workload and money, counted in the database."""
+    base = ClaimTicket.objects.filter(business=business)
+    today = timezone.localdate()
+
+    by_status = {
+        r["ticket_status"]: r["n"]
+        for r in base.values("ticket_status").annotate(n=Count("id"))
+    }
+
+    def money(**flt):
+        return float(base.filter(**flt).aggregate(t=Sum("claim_amount"))["t"] or 0)
+
+    approved = base.filter(ticket_status=ClaimTicket.STATUS_APPROVED)
+    return {
+        "total":    base.count(),
+        "open":     by_status.get(ClaimTicket.STATUS_OPEN, 0),
+        "approved": by_status.get(ClaimTicket.STATUS_APPROVED, 0),
+        "rejected": by_status.get(ClaimTicket.STATUS_REJECTED, 0),
+
+        "amount_approved":  money(ticket_status=ClaimTicket.STATUS_APPROVED),
+        "amount_paid":      money(payment_state=ClaimTicket.PAY_PAID),
+        "amount_scheduled": money(payment_state=ClaimTicket.PAY_SCHEDULED),
+
+        "paid_count":      approved.filter(payment_state=ClaimTicket.PAY_PAID).count(),
+        "scheduled_count": approved.filter(payment_state=ClaimTicket.PAY_SCHEDULED).count(),
+
+        # Rejections you can still argue, and the ones whose window has closed.
+        "reopenable": base.filter(
+            ticket_status=ClaimTicket.STATUS_REJECTED, reopen_validity__gte=today
+        ).count(),
+        "reopen_expired": base.filter(
+            ticket_status=ClaimTicket.STATUS_REJECTED, reopen_validity__lt=today
+        ).count(),
+
+        # Tickets we can't tie to a return — almost always a missing returns export.
+        "unlinked": base.filter(linked_return__isnull=True).count(),
+    }
+
+
+@api_view(["POST"])
+@parser_classes([MultiPartParser])
+def claim_tickets_upload(request, business_id):
+    """
+    Upload the Meesho supplier-panel ticket export (CSV or Excel).
+
+    Keyed on ticket id, so re-uploading an overlapping date range updates rows
+    instead of duplicating them. Each ticket is then linked to its return and the
+    return's claim status is moved to match — which is the point of the upload.
+    """
+    business = get_authorized_business(request, business_id)
+    file = request.FILES.get("file")
+    if not file:
+        return Response({"error": "No file provided."}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        df = _read_claim_sheet(file)
+    except Exception as exc:
+        return Response({"error": f"Could not read file: {exc}"}, status=status.HTTP_400_BAD_REQUEST)
+
+    if "ticket_id" not in df.columns:
+        return Response({"error": "Missing required column: Ticket ID"},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    created = updated = skipped = linked = stale = 0
+    seen = set()
+
+    with transaction.atomic():
+        for _, row in df.iterrows():
+            ticket_id = _return_text(row.get("ticket_id"))
+            if not ticket_id:
+                skipped += 1
+                continue
+            if ticket_id in seen:
+                skipped += 1          # listed twice in one file — keep the first
+                continue
+            seen.add(ticket_id)
+
+            raw_status = _return_text(row.get("ticket_status"))
+            status_key = _CLAIM_STATUS_MAP.get(raw_status.strip().lower(), ClaimTicket.STATUS_OTHER)
+            last_update = _return_text(row.get("last_update"), blank_as_empty=False)
+            amount, txn, settled_on, pay_state = _parse_claim_outcome(last_update)
+
+            qty_raw = _return_text(row.get("qty"))
+            try:
+                qty = int(float(qty_raw)) if qty_raw else None
+            except ValueError:
+                qty = None
+
+            payload = {
+                "suborder_no":       _return_text(row.get("suborder_no")),
+                "order_no":          _return_text(row.get("order_no")),
+                "product_name":      _return_text(row.get("product_name")),
+                "sku":               _return_text(row.get("sku")),
+                "variation":         _return_text(row.get("variation")),
+                "meesho_pid":        _return_text(row.get("meesho_pid")),
+                "qty":               qty,
+                "ticket_status":     status_key,
+                "ticket_status_raw": raw_status[:60],
+                "issue":             _return_text(row.get("issue"))[:255],
+                "created_at_meesho": safe_datetime(row.get("created_date")),
+                "last_update":       last_update or "",
+                "reopen_validity":   safe_date(_return_text(row.get("reopen_validity")) or None),
+                "cpp_flag":          _return_text(row.get("cpp_flag"))[:40],
+                "claim_amount":      amount,
+                "transaction_id":    txn[:80],
+                "settled_on":        settled_on,
+                "payment_state":     pay_state,
+            }
+
+            existing = ClaimTicket.objects.filter(
+                business=business, ticket_id=ticket_id
+            ).first()
+
+            # Guard against an older export reverting a decided ticket.
+            #
+            # The panel exports carry no "last modified" column, so two files
+            # covering overlapping ranges are indistinguishable by content — yet
+            # they disagree: in the real exports, 21 tickets read Open in the
+            # older file and Approved/Rejected in the newer one, never the
+            # reverse. Uploading the older file second would therefore throw away
+            # the outcome *and* its amount, and drag the linked return's claim
+            # status back to "raised". A decision is not something a stale sheet
+            # gets to undo, so keep it and report the row as stale instead.
+            if (
+                existing
+                and existing.ticket_status in (ClaimTicket.STATUS_APPROVED, ClaimTicket.STATUS_REJECTED)
+                and status_key == ClaimTicket.STATUS_OPEN
+            ):
+                stale += 1
+                continue
+
+            ticket, was_created = ClaimTicket.objects.update_or_create(
+                business=business, ticket_id=ticket_id, defaults=payload,
+            )
+            created += 1 if was_created else 0
+            updated += 0 if was_created else 1
+
+            if _link_ticket_to_return(business, ticket):
+                linked += 1
+                ticket.save(update_fields=["linked_return", "updated_at"])
+
+    return Response({
+        "success": True,
+        "created": created,
+        "updated": updated,
+        "skipped": skipped,
+        # Rows an older export would have reverted — kept as-is on purpose.
+        "stale_kept": stale,
+        "linked": linked,
+        "unlinked": created + updated - linked,
+        "stats": _claim_stats(business),
+    })
+
+
+@api_view(["POST"])
+def claim_tickets_relink(request, business_id):
+    """
+    Re-run linking for tickets that never found a return.
+
+    Needed because the two exports arrive independently: tickets uploaded before
+    the matching returns sheet have nothing to attach to, and only a later pass
+    can join them up.
+    """
+    business = get_authorized_business(request, business_id)
+
+    qs = ClaimTicket.objects.filter(business=business, linked_return__isnull=True)
+    if request.data.get("all"):
+        qs = ClaimTicket.objects.filter(business=business)
+
+    linked = 0
+    for ticket in qs:
+        if _link_ticket_to_return(business, ticket):
+            ticket.save(update_fields=["linked_return", "updated_at"])
+            linked += 1
+
+    return Response({"checked": qs.count(), "linked": linked, "stats": _claim_stats(business)})
+
+
+@api_view(["GET"])
+def claim_tickets_list(request, business_id):
+    """
+    Paginated claim tickets.
+
+      q           — ticket id / sub-order / order no / SKU / issue
+      ticket_status — OPEN | APPROVED | REJECTED, or REOPENABLE for arguable rejections
+      payment     — PAID | SCHEDULED | NONE
+      issue       — exact issue text
+      linked      — "no" for tickets with no matching return
+      date_from / date_to — on the ticket's created date
+      page, page_size
+    """
+    business = get_authorized_business(request, business_id)
+
+    qs = ClaimTicket.objects.filter(business=business).select_related("linked_return")
+
+    date_from = _parse_day(request.GET.get("date_from"))
+    date_to   = _parse_day(request.GET.get("date_to"))
+    if date_from:
+        qs = qs.filter(created_at_meesho__gte=_local_day_start(date_from))
+    if date_to:
+        qs = qs.filter(created_at_meesho__lt=_local_day_start(date_to + timedelta(days=1)))
+
+    search = request.GET.get("q", "").strip()
+    if search:
+        qs = qs.filter(
+            DQ(ticket_id__icontains=search) |
+            DQ(suborder_no__icontains=search) |
+            DQ(order_no__icontains=search) |
+            DQ(sku__icontains=search) |
+            DQ(issue__icontains=search) |
+            DQ(transaction_id__icontains=search)
+        )
+
+    wanted = request.GET.get("ticket_status", "").strip().upper()
+    if wanted == "REOPENABLE":
+        qs = qs.filter(ticket_status=ClaimTicket.STATUS_REJECTED,
+                       reopen_validity__gte=timezone.localdate())
+    elif wanted:
+        qs = qs.filter(ticket_status=wanted)
+
+    payment = request.GET.get("payment", "").strip().upper()
+    if payment in {c[0] for c in ClaimTicket.PAYMENT_STATE_CHOICES}:
+        qs = qs.filter(payment_state=payment)
+
+    issue = request.GET.get("issue", "").strip()
+    if issue:
+        qs = qs.filter(issue=issue)
+
+    if request.GET.get("linked", "").strip().lower() == "no":
+        qs = qs.filter(linked_return__isnull=True)
+
+    total = qs.count()
+    try:
+        page = max(1, int(request.GET.get("page", 1)))
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        page_size = min(200, max(1, int(request.GET.get("page_size", 50))))
+    except (TypeError, ValueError):
+        page_size = 50
+
+    start = (page - 1) * page_size
+    rows = qs[start:start + page_size]
+
+    # The issue list drives a filter dropdown; taken from the data so a new
+    # Meesho issue type appears without a code change.
+    issues = list(
+        ClaimTicket.objects.filter(business=business)
+        .exclude(issue="").values_list("issue", flat=True).distinct().order_by("issue")
+    )
+
+    return Response({
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "results": ClaimTicketSerializer(rows, many=True).data,
+        "stats": _claim_stats(business),
+        "issues": issues,
     })
 
 

@@ -15,6 +15,34 @@ def _api_sub_path(request):
     return match.group("sub") if match else ""
 
 
+def accessible_businesses(request, include=None):
+    """
+    Every active business this user may read, for the screens that pool across
+    them (scanning, returns, labels).
+
+    Pooling exists because one desk packs and receives parcels for several
+    businesses at once: a scanned code that belongs to a sibling business should
+    resolve, not read as "unrecognised". It is deliberately limited to
+    memberships the user already has, so pooling can never widen what someone can
+    see — it only saves them switching business to find something they were
+    always allowed to look at.
+
+    `include` guarantees the currently-selected business is in the list even if
+    the membership query somehow misses it (a super admin looking at a business
+    they aren't a member of).
+    """
+    user = request.user
+    if user.role == User.ROLE_SUPER_ADMIN:
+        qs = Business.objects.filter(is_active=True)
+    else:
+        qs = Business.objects.filter(memberships__user=user, is_active=True).distinct()
+
+    businesses = list(qs)
+    if include is not None and not any(b.pk == include.pk for b in businesses):
+        businesses.append(include)
+    return businesses
+
+
 def get_authorized_business(request, business_id):
     """
     Call at the top of every business-scoped view in meesho_app.

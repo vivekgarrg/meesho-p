@@ -877,6 +877,29 @@ class ReturnDelivery(models.Model):
     verify_result = models.CharField(max_length=20, choices=VERIFY_CHOICES, blank=True)
     verified_at   = models.DateTimeField(null=True, blank=True)
 
+    # ── Packet scanned as claim evidence ──────────────────────────────────
+    # Meesho rejects claims when the order/AWB on the reverse waybill isn't
+    # legible (see the "Order ID and AWB number are not visible" rejections), so
+    # capturing the packet actually scanned — and proving it matches what we
+    # shipped — is what makes a claim defensible later.
+    PACKET_UNCHECKED = ""
+    PACKET_MATCH     = "MATCH"
+    PACKET_MISMATCH  = "MISMATCH"
+    PACKET_UNKNOWN   = "UNKNOWN"      # scanned, but we hold nothing to compare against
+
+    PACKET_CHECK_CHOICES = [
+        (PACKET_MATCH,    "Packet matches what we shipped"),
+        (PACKET_MISMATCH, "Packet does not match"),
+        (PACKET_UNKNOWN,  "Nothing on file to compare"),
+    ]
+
+    packet_id       = models.CharField(max_length=150, blank=True, db_index=True,
+                                       help_text="Packet / reverse-AWB scanned off the returned parcel")
+    packet_check    = models.CharField(max_length=20, choices=PACKET_CHECK_CHOICES, blank=True)
+    packet_matched_against = models.CharField(max_length=150, blank=True,
+                                              help_text="The value it was compared with")
+    packet_scanned_at = models.DateTimeField(null=True, blank=True)
+
     uploaded_at = models.DateTimeField(auto_now_add=True)
     updated_at  = models.DateTimeField(auto_now=True)
 
@@ -1100,6 +1123,33 @@ class ScannedOrder(models.Model):
     # Needs a person to look at it.
     ATTENTION_STATUSES = (STATUS_ON_HOLD, STATUS_ISSUE)
 
+    # ── Did it actually leave the building? ───────────────────────────────
+    # Derived from the uploaded Orders / Payments sheets, which are the only
+    # status Meesho gives us — there is no live Meesho API in this app. So this
+    # answers "as far as our data knows", and UNKNOWN is a real, common answer
+    # for a parcel scanned today whose sheet lands next week.
+    SHIP_SHIPPED     = "SHIPPED"      # dispatched, delivered, or already back (RTO)
+    SHIP_NOT_SHIPPED = "NOT_SHIPPED"  # Meesho still has it as pending / ready-to-ship
+    SHIP_CANCELLED   = "CANCELLED"    # cancelled before dispatch
+    SHIP_UNKNOWN     = "UNKNOWN"      # no sheet covers this order yet
+
+    SHIP_STATUS_CHOICES = [
+        (SHIP_SHIPPED,     "Shipped"),
+        (SHIP_NOT_SHIPPED, "Not shipped yet"),
+        (SHIP_CANCELLED,   "Cancelled"),
+        (SHIP_UNKNOWN,     "No status yet"),
+    ]
+
+    # Raw sheet values, upper-cased, that mean the parcel has left. RTO_* counts
+    # as shipped: it went out and came back, so it is emphatically not "waiting
+    # to be dispatched", which is the thing the desk needs to catch.
+    SHIPPED_MARKERS = (
+        "SHIPPED", "DELIVERED", "RTO", "RTO_COMPLETE", "RTO_LOCKED",
+        "RETURN", "EXCHANGE", "DOOR_STEP_EXCHANGED",
+    )
+    NOT_SHIPPED_MARKERS = ("READY_TO_SHIP", "PENDING")
+    CANCELLED_MARKERS = ("CANCELLED",)
+
     # ── Which table the scanned code was recognised from ──────────────────
     MATCH_LABEL   = "LABEL"      # shipping label PDF — the richest source
     MATCH_PAYMENT = "PAYMENT"    # payments sheet
@@ -1142,6 +1192,16 @@ class ScannedOrder(models.Model):
     status_updated_at = models.DateTimeField(null=True, blank=True)
     notes             = models.TextField(blank=True)
 
+    # ── Shipping status, as resolved at scan time ─────────────────────────
+    # Stored rather than always computed so the log records what the desk was
+    # told when it acted. It is re-resolved on every scan and on demand, because
+    # a later sheet upload can turn UNKNOWN into a real answer.
+    ship_status    = models.CharField(max_length=20, choices=SHIP_STATUS_CHOICES,
+                                      default=SHIP_UNKNOWN, db_index=True)
+    ship_status_raw = models.CharField(max_length=100, blank=True,
+                                       help_text="The sheet value this was derived from")
+    ship_checked_at = models.DateTimeField(null=True, blank=True)
+
     # ── Scan bookkeeping ──────────────────────────────────────────────────
     scan_count      = models.PositiveIntegerField(default=1)
     first_scanned_at = models.DateTimeField(auto_now_add=True, db_index=True)
@@ -1173,6 +1233,33 @@ class ScannedOrder(models.Model):
     def scan_date(self):
         """Local date the parcel was last scanned — what the desk groups by."""
         return timezone.localtime(self.last_scanned_at).date() if self.last_scanned_at else None
+
+    @classmethod
+    def classify_ship_status(cls, raw):
+        """
+        Turn a sheet's status string into one of our four buckets.
+
+        Matching is substring-based on purpose: the Orders sheet says
+        RTO_COMPLETE while the Payments sheet says RTO for the same thing, and
+        new Meesho variants (DOOR_STEP_EXCHANGED) keep appearing. Cancelled is
+        checked before the shipped markers so "CANCELLED" can never be read as
+        shipped by a partial match.
+        """
+        text = (raw or "").strip().upper()
+        if not text:
+            return cls.SHIP_UNKNOWN
+        if any(m in text for m in cls.CANCELLED_MARKERS):
+            return cls.SHIP_CANCELLED
+        if any(m in text for m in cls.NOT_SHIPPED_MARKERS):
+            return cls.SHIP_NOT_SHIPPED
+        if any(m in text for m in cls.SHIPPED_MARKERS):
+            return cls.SHIP_SHIPPED
+        return cls.SHIP_UNKNOWN
+
+    @property
+    def needs_shipping_attention(self):
+        """Scanned and packed by us, but Meesho says it never went out."""
+        return self.ship_status in (self.SHIP_NOT_SHIPPED, self.SHIP_CANCELLED)
 
 
 class ListingTemplate(models.Model):
@@ -1238,3 +1325,118 @@ class ListingTemplate(models.Model):
     @property
     def field_count(self):
         return len(self.fields or {})
+
+
+class ClaimTicket(models.Model):
+    """
+    One claim ticket from the Meesho supplier panel's ticket export
+    (Supplier-<id>_Status-all_Created-from-<date>-to-<date>.csv).
+
+    This is the other half of the returns story: ReturnDelivery records what we
+    decided at the scanning desk, while this records what Meesho actually did
+    about it — approved, rejected, or still open — with the money and the reason.
+    Uploading it is what closes the loop, because nothing else tells us a claim
+    was paid or why one was refused.
+
+    The sheet keeps the outcome in prose rather than columns, e.g.
+      "Your claim payment of Rs 511.56 for this order was done on 05 Aug 2026
+       with a transaction id: AXISCN1427572435"
+      "Your claim of Rs. 356.26 for this order has been scheduled on 2026-07-15"
+    so `claim_amount`, `transaction_id`, `settled_on` and `payment_state` are
+    parsed out of `last_update` at import time. They are stored rather than
+    re-parsed on read because the wording changes between Meesho releases, and a
+    figure already extracted shouldn't silently disappear when it does.
+
+    Natural key is (business, ticket_id): a ticket id is unique in the panel, so
+    re-uploading an overlapping date range updates in place.
+    """
+
+    STATUS_OPEN     = "OPEN"
+    STATUS_APPROVED = "APPROVED"
+    STATUS_REJECTED = "REJECTED"
+    STATUS_OTHER    = "OTHER"
+
+    STATUS_CHOICES = [
+        (STATUS_OPEN,     "Open"),
+        (STATUS_APPROVED, "Approved"),
+        (STATUS_REJECTED, "Rejected"),
+        (STATUS_OTHER,    "Other"),
+    ]
+
+    # Whether the approved money has actually moved.
+    PAY_PAID      = "PAID"        # "...was done on <date> with a transaction id"
+    PAY_SCHEDULED = "SCHEDULED"   # "...has been scheduled on <date>"
+    PAY_NONE      = "NONE"
+
+    PAYMENT_STATE_CHOICES = [
+        (PAY_PAID,      "Paid"),
+        (PAY_SCHEDULED, "Scheduled"),
+        (PAY_NONE,      "Not applicable"),
+    ]
+
+    # ── Identity ──────────────────────────────────────────────────────────
+    ticket_id   = models.CharField(max_length=60, db_index=True)
+    suborder_no = models.CharField(max_length=100, blank=True, db_index=True)
+    order_no    = models.CharField(max_length=100, blank=True, db_index=True)
+
+    # ── Product, as the sheet reports it (often blank in the panel export) ──
+    product_name = models.TextField(blank=True)
+    sku          = models.CharField(max_length=300, blank=True, db_index=True)
+    variation    = models.CharField(max_length=255, blank=True)
+    meesho_pid   = models.CharField(max_length=100, blank=True)
+    qty          = models.PositiveIntegerField(null=True, blank=True)
+
+    # ── The ticket ────────────────────────────────────────────────────────
+    ticket_status     = models.CharField(max_length=20, choices=STATUS_CHOICES,
+                                         default=STATUS_OPEN, db_index=True)
+    ticket_status_raw = models.CharField(max_length=60, blank=True)
+    issue             = models.CharField(max_length=255, blank=True, db_index=True)
+    created_at_meesho = models.DateTimeField(null=True, blank=True, db_index=True)
+    last_update       = models.TextField(blank=True)
+    reopen_validity   = models.DateField(null=True, blank=True)
+    cpp_flag          = models.CharField(max_length=40, blank=True)
+
+    # ── Parsed out of last_update ──────────────────────────────────────────
+    claim_amount   = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    transaction_id = models.CharField(max_length=80, blank=True, db_index=True)
+    settled_on     = models.DateField(null=True, blank=True)
+    payment_state  = models.CharField(max_length=20, choices=PAYMENT_STATE_CHOICES,
+                                      default=PAY_NONE, db_index=True)
+
+    # Whether this ticket found a ReturnDelivery to attach to. Recorded so the
+    # UI can say "42 tickets have no matching return" instead of silently
+    # dropping them — usually it means the returns export hasn't been uploaded.
+    linked_return = models.ForeignKey(
+        "ReturnDelivery", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="claim_tickets",
+    )
+
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+    updated_at  = models.DateTimeField(auto_now=True)
+
+    business = models.ForeignKey("accounts.Business", on_delete=models.PROTECT)
+
+    class Meta:
+        db_table = "claim_tickets"
+        ordering = ["-created_at_meesho", "-uploaded_at"]
+        unique_together = [("business", "ticket_id")]
+        indexes = [
+            models.Index(fields=["business", "ticket_status"]),
+            models.Index(fields=["business", "suborder_no"]),
+        ]
+
+    def __str__(self):
+        return f"{self.ticket_id} · {self.ticket_status} · {self.suborder_no}"
+
+    @property
+    def is_reopenable(self):
+        """A rejected ticket can be argued again until its reopen date passes."""
+        if self.ticket_status != self.STATUS_REJECTED or not self.reopen_validity:
+            return False
+        return self.reopen_validity >= timezone.localdate()
+
+    @property
+    def days_to_reopen(self):
+        if self.ticket_status != self.STATUS_REJECTED or not self.reopen_validity:
+            return None
+        return (self.reopen_validity - timezone.localdate()).days

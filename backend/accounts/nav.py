@@ -27,6 +27,7 @@ NAV_CATALOG = [
     {"path": "/mismatch",          "label": "Pay Mismatch",      "group": "Operations"},
     {"path": "/labels",            "label": "Labels",            "group": "Operations"},
     {"path": "/returns",           "label": "Returns & Claims",  "group": "Operations"},
+    {"path": "/claims",            "label": "Claim Sheet",       "group": "Operations"},
 
     {"path": "/pricing",           "label": "SKU Pricing",       "group": "Catalog"},
     {"path": "/tax-check",         "label": "Tax Check",         "group": "Catalog"},
@@ -74,6 +75,8 @@ API_OWNERSHIP = {
 
     "labels/":               ["/labels"],
     "returns/":              ["/returns"],
+    # The claim sheet writes back onto returns, so either screen may reach it.
+    "claims/":               ["/claims", "/returns"],
     "order-scan/":           ["/order-scan"],
 
     # The extension is the main consumer of these, and it authenticates as a real
