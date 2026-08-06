@@ -16,11 +16,11 @@ import re
 import concurrent.futures
 from PIL import Image
 from .helpers.helper import status_wise_summary, strip_html
-from accounts.models import Business
+from accounts.models import Business, User
 from .permissions import get_authorized_business, accessible_businesses
 from .helpers.label_pdf import extract_all_pages
 
-from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, PurchaseBill, PurchaseItem, BlockedCustomer, InventoryAdjustment, ConsumableItem, ConsumablePurchase, ConsumableUsage, InventoryLog, MeeshoInventory, MeeshoPriceUpdate, ExpenseInvoice, ExpenseInvoiceItem, TransportCharge, PackedStockEvent, EstimatedProfitOrder, ReturnDelivery, GstTransaction, GstInvoiceDetail, ScannedOrder, ListingTemplate, ClaimTicket
+from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, PurchaseBill, PurchaseItem, BlockedCustomer, InventoryAdjustment, ConsumableItem, ConsumablePurchase, ConsumableUsage, InventoryLog, MeeshoInventory, MeeshoPriceUpdate, ExpenseInvoice, ExpenseInvoiceItem, TransportCharge, PackedStockEvent, EstimatedProfitOrder, ReturnDelivery, GstTransaction, GstInvoiceDetail, ScannedOrder, ListingTemplate, ClaimTicket, WorkerTask, WalletEntry, WalletSettlement
 from .serializers import (
     OrderPaymentSerializer, AdsCostSerializer,
     ReferralPaymentSerializer, CompensationRecoverySerializer,
@@ -33,6 +33,9 @@ from .serializers import (
     ScannedOrderSerializer,
     ListingTemplateSerializer,
     ClaimTicketSerializer,
+    WorkerTaskSerializer,
+    WalletEntrySerializer,
+    WalletSettlementSerializer,
 )
 
 
@@ -8605,6 +8608,520 @@ def scanned_orders_bulk_status(request, business_id):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Worker tasks + wallet — paid piecework for the team
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _is_admin(user):
+    """
+    Who may create, review and pay.
+
+    Workers are ordinary business_user accounts (no separate role), so the
+    dividing line is super_admin. Everything below treats a non-admin as a
+    worker who can only ever see and act on their own tasks — enforced here in
+    the queryset, not just hidden in the UI.
+    """
+    return getattr(user, "role", None) == User.ROLE_SUPER_ADMIN
+
+
+def _credit(task, kind, amount, user, note=""):
+    """
+    Write one ledger line, or nothing if there's nothing to pay.
+
+    Returns the entry (or None). Callers guard against double-payment with the
+    task's *_credited_at stamps; this stays dumb on purpose so the "has it been
+    paid" question has exactly one owner.
+    """
+    amount = safe_decimal(amount) or Decimal("0")
+    if amount == 0:
+        return None
+    return WalletEntry.objects.create(
+        business=task.business,
+        user=task.assigned_to,
+        task=task,
+        kind=kind,
+        amount=amount,
+        note=note,
+        created_by=user,
+    )
+
+
+def _wallet_totals(qs):
+    """(earned, settled, pending) for a set of ledger entries."""
+    earned = qs.aggregate(t=Sum("amount"))["t"] or Decimal("0")
+    settled = qs.filter(settlement__isnull=False).aggregate(t=Sum("amount"))["t"] or Decimal("0")
+    return float(earned), float(settled), float(earned - settled)
+
+
+@api_view(["GET", "POST"])
+def worker_tasks_list(request, business_id):
+    """
+    GET  — tasks. Admins see everything for the business; a worker sees only
+           their own, whatever they ask for.
+           Filters: status, task_type, assigned_to (admin only), q
+    POST — create and assign a task (admin only).
+    """
+    business = get_authorized_business(request, business_id)
+    admin = _is_admin(request.user)
+
+    if request.method == "POST":
+        if not admin:
+            return Response({"error": "Only an admin can create tasks."},
+                            status=status.HTTP_403_FORBIDDEN)
+        payload = request.data if isinstance(request.data, dict) else {}
+
+        task_type = str(payload.get("task_type") or "").strip().upper()
+        if task_type not in {c[0] for c in WorkerTask.TYPE_CHOICES}:
+            return Response({"error": "task_type must be LISTING or RETURN_CLAIM."},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        assignee_id = payload.get("assigned_to")
+        if not assignee_id:
+            return Response({"error": "Pick who this task is for."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        try:
+            assignee = User.objects.get(pk=assignee_id)
+        except (User.DoesNotExist, ValueError, TypeError):
+            return Response({"error": "That worker doesn't exist."},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        reward = safe_decimal(payload.get("reward_amount")) or Decimal("0")
+        bonus = safe_decimal(payload.get("bonus_amount")) or Decimal("0")
+        if reward < 0 or bonus < 0:
+            return Response({"error": "Amounts can't be negative."},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        task = WorkerTask.objects.create(
+            business=business,
+            task_type=task_type,
+            title=str(payload.get("title") or "").strip()[:200],
+            source_link=str(payload.get("source_link") or "").strip(),
+            instructions=str(payload.get("instructions") or "").strip(),
+            suborder_no=str(payload.get("suborder_no") or "").strip()[:100],
+            assigned_to=assignee,
+            created_by=request.user,
+            reward_amount=reward,
+            bonus_amount=bonus if task_type == WorkerTask.TYPE_RETURN_CLAIM else Decimal("0"),
+        )
+        return Response(WorkerTaskSerializer(task).data, status=status.HTTP_201_CREATED)
+
+    qs = WorkerTask.objects.filter(business=business).select_related(
+        "assigned_to", "created_by", "reviewed_by", "business"
+    ).prefetch_related("wallet_entries")
+
+    if not admin:
+        qs = qs.filter(assigned_to=request.user)
+    elif request.GET.get("assigned_to"):
+        qs = qs.filter(assigned_to_id=request.GET["assigned_to"])
+
+    wanted = request.GET.get("status", "").strip().upper()
+    if wanted == "OPEN":
+        qs = qs.filter(status__in=WorkerTask.OPEN_STATUSES)
+    elif wanted:
+        qs = qs.filter(status=wanted)
+
+    task_type = request.GET.get("task_type", "").strip().upper()
+    if task_type:
+        qs = qs.filter(task_type=task_type)
+
+    search = request.GET.get("q", "").strip()
+    if search:
+        qs = qs.filter(
+            DQ(title__icontains=search) |
+            DQ(submitted_sku__icontains=search) |
+            DQ(suborder_no__icontains=search) |
+            DQ(submitted_reference__icontains=search)
+        )
+
+    rows = list(qs[:500])
+    by_status = {
+        r["status"]: r["n"]
+        for r in qs.values("status").annotate(n=Count("id"))
+    }
+
+    # The wallet summary alongside the tasks, scoped the same way — a worker
+    # sees their own balance, an admin sees the whole business's liability.
+    ledger = WalletEntry.objects.filter(business=business)
+    if not admin:
+        ledger = ledger.filter(user=request.user)
+    earned, settled, pending = _wallet_totals(ledger)
+
+    return Response({
+        "is_admin": admin,
+        "total": len(rows),
+        "results": WorkerTaskSerializer(rows, many=True).data,
+        "stats": {
+            "assigned":  by_status.get(WorkerTask.STATUS_ASSIGNED, 0),
+            "submitted": by_status.get(WorkerTask.STATUS_SUBMITTED, 0),
+            "approved":  by_status.get(WorkerTask.STATUS_APPROVED, 0),
+            "rejected":  by_status.get(WorkerTask.STATUS_REJECTED, 0),
+            "awaiting_bonus": qs.filter(
+                task_type=WorkerTask.TYPE_RETURN_CLAIM,
+                status=WorkerTask.STATUS_APPROVED,
+                bonus_credited_at__isnull=True,
+            ).exclude(bonus_amount=0).count(),
+            "earned": earned,
+            "settled": settled,
+            "pending": pending,
+        },
+    })
+
+
+@api_view(["GET", "PATCH", "DELETE"])
+def worker_task_detail(request, business_id, pk):
+    """Read one task; an admin may edit its brief or delete it before work starts."""
+    business = get_authorized_business(request, business_id)
+    admin = _is_admin(request.user)
+
+    try:
+        task = WorkerTask.objects.select_related(
+            "assigned_to", "created_by", "reviewed_by", "business"
+        ).get(pk=pk, business=business)
+    except WorkerTask.DoesNotExist:
+        return Response({"error": "Task not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    if not admin and task.assigned_to_id != request.user.pk:
+        return Response({"error": "That task isn't yours."}, status=status.HTTP_403_FORBIDDEN)
+
+    if request.method == "DELETE":
+        if not admin:
+            return Response({"error": "Only an admin can delete a task."},
+                            status=status.HTTP_403_FORBIDDEN)
+        if task.wallet_entries.exists():
+            # Deleting would orphan money already credited; the ledger has to
+            # stay explainable, so an already-paid task is kept.
+            return Response(
+                {"error": "This task has already paid out. Reject or adjust it instead of deleting."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        task.delete()
+        return Response({"deleted": True})
+
+    if request.method == "PATCH":
+        if not admin:
+            return Response({"error": "Only an admin can edit a task."},
+                            status=status.HTTP_403_FORBIDDEN)
+        editable = {"title", "source_link", "instructions", "suborder_no",
+                    "reward_amount", "bonus_amount", "assigned_to"}
+        payload = request.data if isinstance(request.data, dict) else {}
+        unknown = set(payload) - editable
+        if unknown:
+            return Response({"error": f"Not editable: {', '.join(sorted(unknown))}"},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        for field in ("title", "source_link", "instructions", "suborder_no"):
+            if field in payload:
+                setattr(task, field, str(payload[field] or "").strip())
+        for field in ("reward_amount", "bonus_amount"):
+            if field in payload:
+                value = safe_decimal(payload[field]) or Decimal("0")
+                if value < 0:
+                    return Response({"error": "Amounts can't be negative."},
+                                    status=status.HTTP_400_BAD_REQUEST)
+                setattr(task, field, value)
+        if "assigned_to" in payload:
+            try:
+                task.assigned_to = User.objects.get(pk=payload["assigned_to"])
+            except (User.DoesNotExist, ValueError, TypeError):
+                return Response({"error": "That worker doesn't exist."},
+                                status=status.HTTP_400_BAD_REQUEST)
+        task.save()
+
+    return Response(WorkerTaskSerializer(task).data)
+
+
+@api_view(["POST"])
+def worker_task_submit(request, business_id, pk):
+    """
+    The worker reporting the job done — the SKU they listed, or the claim they
+    raised. Re-submitting a rejected task is allowed and puts it back in the
+    review queue, because "fix it and send it again" is the normal path.
+    """
+    business = get_authorized_business(request, business_id)
+
+    try:
+        task = WorkerTask.objects.select_related("assigned_to", "business").get(
+            pk=pk, business=business
+        )
+    except WorkerTask.DoesNotExist:
+        return Response({"error": "Task not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    if task.assigned_to_id != request.user.pk and not _is_admin(request.user):
+        return Response({"error": "That task isn't yours."}, status=status.HTTP_403_FORBIDDEN)
+    if task.status == WorkerTask.STATUS_APPROVED:
+        return Response({"error": "This task is already approved."},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    payload = request.data if isinstance(request.data, dict) else {}
+    sku = str(payload.get("submitted_sku") or "").strip()[:300]
+    reference = str(payload.get("submitted_reference") or "").strip()[:200]
+
+    if task.task_type == WorkerTask.TYPE_LISTING and not sku:
+        return Response({"error": "Enter the SKU id of the listing you created."},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    task.submitted_sku = sku
+    task.submitted_reference = reference
+    task.submitted_note = str(payload.get("submitted_note") or "").strip()
+    task.submitted_at = timezone.now()
+    task.status = WorkerTask.STATUS_SUBMITTED
+    # A resubmission is a fresh ask, so the previous verdict shouldn't linger.
+    task.review_comment = ""
+    task.reviewed_by = None
+    task.reviewed_at = None
+    task.save()
+
+    return Response(WorkerTaskSerializer(task).data)
+
+
+@api_view(["POST"])
+def worker_task_review(request, business_id, pk):
+    """
+    Approve or reject submitted work. Approving is what pays:
+
+      LISTING       → the task's reward
+      RETURN_CLAIM  → the raise fee now; the Meesho-approval bonus is released
+                      later by the claim sheet (see _release_claim_bonuses)
+
+    Rejecting pays nothing and records why. Money already credited is never
+    clawed back automatically — use a manual adjustment, so a reversal is always
+    a deliberate, attributable act.
+    """
+    business = get_authorized_business(request, business_id)
+    if not _is_admin(request.user):
+        return Response({"error": "Only an admin can review work."},
+                        status=status.HTTP_403_FORBIDDEN)
+
+    try:
+        task = WorkerTask.objects.select_related("assigned_to", "business").get(
+            pk=pk, business=business
+        )
+    except WorkerTask.DoesNotExist:
+        return Response({"error": "Task not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    payload = request.data if isinstance(request.data, dict) else {}
+    decision = str(payload.get("decision") or "").strip().upper()
+    if decision not in ("APPROVE", "REJECT"):
+        return Response({"error": "decision must be APPROVE or REJECT."},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    now = timezone.now()
+    task.review_comment = str(payload.get("comment") or "").strip()
+    task.reviewed_by = request.user
+    task.reviewed_at = now
+    credited = None
+
+    if decision == "REJECT":
+        task.status = WorkerTask.STATUS_REJECTED
+        task.save()
+        return Response({"task": WorkerTaskSerializer(task).data, "credited": None})
+
+    task.status = WorkerTask.STATUS_APPROVED
+    if task.reward_credited_at is None:
+        kind = (WalletEntry.KIND_LISTING if task.task_type == WorkerTask.TYPE_LISTING
+                else WalletEntry.KIND_CLAIM_RAISED)
+        entry = _credit(task, kind, task.reward_amount, request.user,
+                        note=task.title or task.submitted_sku or task.suborder_no)
+        if entry:
+            task.reward_credited_at = now
+            credited = float(entry.amount)
+    task.save()
+
+    return Response({
+        "task": WorkerTaskSerializer(task).data,
+        "credited": credited,
+        "awaiting_bonus": task.awaiting_bonus,
+    })
+
+
+def _release_claim_bonuses(business, user=None):
+    """
+    Pay the Meesho-approval bonus on claim tasks whose ticket now reads Approved.
+
+    Called after a ticket sheet import, which is the only thing that can tell us
+    Meesho accepted a claim. Matching is on sub-order, and the task must already
+    be approved by you — the bonus rewards a claim that stuck, not one that was
+    never accepted internally.
+    """
+    pending = WorkerTask.objects.filter(
+        business=business,
+        task_type=WorkerTask.TYPE_RETURN_CLAIM,
+        status=WorkerTask.STATUS_APPROVED,
+        bonus_credited_at__isnull=True,
+    ).exclude(bonus_amount=0).exclude(suborder_no="")
+
+    if not pending:
+        return 0, 0.0
+
+    approved_subs = set(
+        ClaimTicket.objects.filter(
+            business=business,
+            ticket_status=ClaimTicket.STATUS_APPROVED,
+            suborder_no__in=[t.suborder_no for t in pending],
+        ).values_list("suborder_no", flat=True)
+    )
+
+    now = timezone.now()
+    count, total = 0, Decimal("0")
+    for task in pending:
+        if task.suborder_no not in approved_subs:
+            continue
+        entry = _credit(task, WalletEntry.KIND_CLAIM_BONUS, task.bonus_amount, user,
+                        note=f"Meesho approved claim for {task.suborder_no}")
+        if entry:
+            task.bonus_credited_at = now
+            task.save(update_fields=["bonus_credited_at", "updated_at"])
+            count += 1
+            total += entry.amount
+    return count, float(total)
+
+
+@api_view(["GET"])
+def wallet_summary(request, business_id):
+    """
+    Balances. An admin gets one row per worker plus the ledger; a worker gets
+    only their own, because a wallet is nobody else's business.
+    """
+    business = get_authorized_business(request, business_id)
+    admin = _is_admin(request.user)
+
+    entries = WalletEntry.objects.filter(business=business).select_related(
+        "user", "task", "business"
+    )
+    if not admin:
+        entries = entries.filter(user=request.user)
+
+    per_user = []
+    grouped = entries.values("user_id", "user__username").annotate(
+        earned=Sum("amount"), n=Count("id"),
+    ).order_by("user__username")
+    for row in grouped:
+        user_entries = entries.filter(user_id=row["user_id"])
+        earned, settled, pending = _wallet_totals(user_entries)
+        per_user.append({
+            "user_id": row["user_id"],
+            "username": row["user__username"],
+            "entries": row["n"],
+            "earned": earned,
+            "settled": settled,
+            "pending": pending,
+        })
+
+    earned, settled, pending = _wallet_totals(entries)
+    return Response({
+        "is_admin": admin,
+        "totals": {"earned": earned, "settled": settled, "pending": pending},
+        "per_user": per_user,
+        "entries": WalletEntrySerializer(entries[:300], many=True).data,
+        "settlements": WalletSettlementSerializer(
+            WalletSettlement.objects.filter(business=business).select_related("user", "created_by")[:100]
+            if admin else
+            WalletSettlement.objects.filter(business=business, user=request.user).select_related("user", "created_by")[:100],
+            many=True,
+        ).data,
+    })
+
+
+@api_view(["POST"])
+def wallet_settle(request, business_id):
+    """
+    Record a payout: stamps this worker's unsettled entries as covered.
+
+    The amount is computed from the entries rather than taken from the client —
+    paying against a number the browser supplied would let a stale page settle
+    the wrong balance.
+    """
+    business = get_authorized_business(request, business_id)
+    if not _is_admin(request.user):
+        return Response({"error": "Only an admin can settle payments."},
+                        status=status.HTTP_403_FORBIDDEN)
+
+    payload = request.data if isinstance(request.data, dict) else {}
+    try:
+        worker = User.objects.get(pk=payload.get("user_id"))
+    except (User.DoesNotExist, ValueError, TypeError):
+        return Response({"error": "Pick a worker to settle."},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    with transaction.atomic():
+        outstanding = (
+            WalletEntry.objects
+            .select_for_update()
+            .filter(business=business, user=worker, settlement__isnull=True)
+        )
+        total = outstanding.aggregate(t=Sum("amount"))["t"] or Decimal("0")
+        if total <= 0:
+            return Response({"error": "Nothing outstanding for that worker."},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        settlement = WalletSettlement.objects.create(
+            business=business,
+            user=worker,
+            amount=total,
+            paid_on=_parse_day(payload.get("paid_on")) or timezone.localdate(),
+            method=str(payload.get("method") or "").strip()[:60],
+            reference=str(payload.get("reference") or "").strip()[:150],
+            note=str(payload.get("note") or "").strip(),
+            created_by=request.user,
+        )
+        covered = outstanding.update(settlement=settlement)
+
+    return Response({
+        "settlement": WalletSettlementSerializer(settlement).data,
+        "entries_covered": covered,
+    })
+
+
+@api_view(["POST"])
+def wallet_adjust(request, business_id):
+    """
+    A manual ledger line — a bonus, a correction, or a clawback (negative).
+
+    Exists so that fixing a mistake is a recorded event with a reason, rather
+    than someone editing a balance.
+    """
+    business = get_authorized_business(request, business_id)
+    if not _is_admin(request.user):
+        return Response({"error": "Only an admin can adjust a wallet."},
+                        status=status.HTTP_403_FORBIDDEN)
+
+    payload = request.data if isinstance(request.data, dict) else {}
+    try:
+        worker = User.objects.get(pk=payload.get("user_id"))
+    except (User.DoesNotExist, ValueError, TypeError):
+        return Response({"error": "Pick a worker."}, status=status.HTTP_400_BAD_REQUEST)
+
+    amount = safe_decimal(payload.get("amount"))
+    if amount is None or amount == 0:
+        return Response({"error": "Enter a non-zero amount."},
+                        status=status.HTTP_400_BAD_REQUEST)
+    note = str(payload.get("note") or "").strip()
+    if not note:
+        return Response({"error": "Say why — an unexplained adjustment is worse than none."},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    entry = WalletEntry.objects.create(
+        business=business, user=worker, kind=WalletEntry.KIND_ADJUSTMENT,
+        amount=amount, note=note, created_by=request.user,
+    )
+    return Response(WalletEntrySerializer(entry).data, status=status.HTTP_201_CREATED)
+
+
+@api_view(["GET"])
+def worker_list(request, business_id):
+    """Who tasks can be assigned to — members of this business, admins aside."""
+    business = get_authorized_business(request, business_id)
+    if not _is_admin(request.user):
+        return Response({"results": []})
+
+    users = User.objects.filter(
+        memberships__business=business
+    ).distinct().order_by("username")
+    return Response({"results": [
+        {"id": u.pk, "username": u.username, "role": u.role} for u in users
+    ]})
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Claim tickets — the Meesho supplier-panel ticket export
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -8934,6 +9451,10 @@ def claim_tickets_upload(request, business_id):
                 linked += 1
                 ticket.save(update_fields=["linked_return", "updated_at"])
 
+    # An imported ticket reading Approved is the only signal that Meesho
+    # accepted a claim, so this is the moment worker bonuses can be released.
+    bonus_count, bonus_total = _release_claim_bonuses(business, request.user)
+
     return Response({
         "success": True,
         "created": created,
@@ -8943,6 +9464,8 @@ def claim_tickets_upload(request, business_id):
         "stale_kept": stale,
         "linked": linked,
         "unlinked": created + updated - linked,
+        "bonuses_released": bonus_count,
+        "bonus_total": bonus_total,
         "stats": _claim_stats(business),
     })
 

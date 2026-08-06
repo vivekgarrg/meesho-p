@@ -1,7 +1,7 @@
 from rest_framework import serializers
 
 from .helpers.helper import strip_html
-from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, ParentItemPrice, ParentPriceHistory, Order, LabelOrder, ReturnDelivery, ScannedOrder, ListingTemplate, ClaimTicket
+from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, ParentItemPrice, ParentPriceHistory, Order, LabelOrder, ReturnDelivery, ScannedOrder, ListingTemplate, ClaimTicket, WorkerTask, WalletEntry, WalletSettlement
 
 
 class OrderPaymentSerializer(serializers.ModelSerializer):
@@ -203,3 +203,57 @@ class ClaimTicketSerializer(serializers.ModelSerializer):
 
     def get_last_update_text(self, obj):
         return strip_html(obj.last_update)
+
+
+class WorkerTaskSerializer(serializers.ModelSerializer):
+    """
+    A task as both sides see it. Usernames and the earned-so-far figure are
+    flattened on because the worker's phone shouldn't need a second request to
+    render a list row.
+    """
+    assigned_to_name = serializers.CharField(source="assigned_to.username", read_only=True, default=None)
+    created_by_name  = serializers.CharField(source="created_by.username", read_only=True, default=None)
+    reviewed_by_name = serializers.CharField(source="reviewed_by.username", read_only=True, default=None)
+    business_name    = serializers.CharField(source="business.name", read_only=True, default=None)
+    total_possible   = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
+    awaiting_bonus   = serializers.BooleanField(read_only=True)
+    earned           = serializers.SerializerMethodField()
+
+    class Meta:
+        model = WorkerTask
+        fields = "__all__"
+        read_only_fields = [
+            "business", "created_by", "reviewed_by", "reviewed_at", "submitted_at",
+            "status", "reward_credited_at", "bonus_credited_at", "created_at", "updated_at",
+        ]
+
+    def get_earned(self, obj):
+        """What this task has actually paid so far — summed from the ledger."""
+        return float(sum(e.amount for e in obj.wallet_entries.all()))
+
+
+class WalletEntrySerializer(serializers.ModelSerializer):
+    user_name     = serializers.CharField(source="user.username", read_only=True, default=None)
+    business_name = serializers.CharField(source="business.name", read_only=True, default=None)
+    task_type     = serializers.CharField(source="task.task_type", read_only=True, default=None)
+    task_title    = serializers.CharField(source="task.title", read_only=True, default=None)
+    is_settled    = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = WalletEntry
+        fields = "__all__"
+        read_only_fields = [f.name for f in WalletEntry._meta.fields]
+
+
+class WalletSettlementSerializer(serializers.ModelSerializer):
+    user_name       = serializers.CharField(source="user.username", read_only=True, default=None)
+    created_by_name = serializers.CharField(source="created_by.username", read_only=True, default=None)
+    entry_count     = serializers.SerializerMethodField()
+
+    class Meta:
+        model = WalletSettlement
+        fields = "__all__"
+        read_only_fields = ["business", "created_by", "created_at"]
+
+    def get_entry_count(self, obj):
+        return obj.entries.count()

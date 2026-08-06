@@ -28,6 +28,7 @@ NAV_CATALOG = [
     {"path": "/labels",            "label": "Labels",            "group": "Operations"},
     {"path": "/returns",           "label": "Returns & Claims",  "group": "Operations"},
     {"path": "/claims",            "label": "Claim Sheet",       "group": "Operations"},
+    {"path": "/tasks",             "label": "Team Tasks",        "group": "Operations"},
 
     {"path": "/pricing",           "label": "SKU Pricing",       "group": "Catalog"},
     {"path": "/tax-check",         "label": "Tax Check",         "group": "Catalog"},
@@ -77,6 +78,10 @@ API_OWNERSHIP = {
     "returns/":              ["/returns"],
     # The claim sheet writes back onto returns, so either screen may reach it.
     "claims/":               ["/claims", "/returns"],
+    # The tasks screen is the one thing a worker account needs; the API enforces
+    # per-user scoping on top, so granting it exposes only their own tasks.
+    "worker-tasks/":         ["/tasks"],
+    "wallet/":               ["/tasks"],
     "order-scan/":           ["/order-scan"],
 
     # The extension is the main consumer of these, and it authenticates as a real

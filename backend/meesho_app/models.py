@@ -1444,3 +1444,220 @@ class ClaimTicket(models.Model):
         if self.ticket_status != self.STATUS_REJECTED or not self.reopen_validity:
             return None
         return (self.reopen_validity - timezone.localdate()).days
+
+
+class WorkerTask(models.Model):
+    """
+    A piece of paid piecework handed to a team member.
+
+    Two kinds today, and they pay differently because the work differs:
+
+      LISTING       Download the photo from a Drive link, edit it, create the
+                    listing on Meesho, report the SKU id. Paid a per-task rate
+                    you set when creating it, once you approve the SKU.
+
+      RETURN_CLAIM  Download the unboxing video, compress it under Meesho's
+                    size limit, raise the claim. Paid a flat fee once you
+                    confirm the claim went up, plus a bonus if Meesho actually
+                    approves it — which is not the worker's doing, but is worth
+                    incentivising.
+
+    Money is never written on this row. Every rupee lands as a WalletEntry, so
+    the wallet is a ledger you can audit rather than a number that changed for
+    reasons nobody recorded. `*_credited_at` here only marks that the entry has
+    already been written, so a re-review or a re-imported sheet can't pay twice.
+    """
+
+    TYPE_LISTING = "LISTING"
+    TYPE_RETURN_CLAIM = "RETURN_CLAIM"
+    TYPE_CHOICES = [
+        (TYPE_LISTING, "Listing"),
+        (TYPE_RETURN_CLAIM, "Return claim"),
+    ]
+
+    # Meesho rejects claim videos above this, which is the whole reason the
+    # compression step exists in the worker's instructions.
+    CLAIM_VIDEO_MAX_MB = 22
+
+    STATUS_ASSIGNED  = "ASSIGNED"    # waiting on the worker
+    STATUS_SUBMITTED = "SUBMITTED"   # worker says it's done, waiting on you
+    STATUS_APPROVED  = "APPROVED"    # you accepted it — this is what pays
+    STATUS_REJECTED  = "REJECTED"    # not acceptable, nothing paid
+
+    STATUS_CHOICES = [
+        (STATUS_ASSIGNED,  "To do"),
+        (STATUS_SUBMITTED, "Awaiting review"),
+        (STATUS_APPROVED,  "Approved"),
+        (STATUS_REJECTED,  "Rejected"),
+    ]
+
+    OPEN_STATUSES = (STATUS_ASSIGNED, STATUS_SUBMITTED)
+
+    business = models.ForeignKey("accounts.Business", on_delete=models.PROTECT,
+                                 related_name="worker_tasks")
+    task_type = models.CharField(max_length=20, choices=TYPE_CHOICES, db_index=True)
+
+    title        = models.CharField(max_length=200, blank=True)
+    source_link  = models.TextField(blank=True,
+                                    help_text="Drive folder with the photo, or the claim video")
+    instructions = models.TextField(blank=True)
+
+    # RETURN_CLAIM only: which return this claim is for. This is what lets the
+    # uploaded ticket sheet find the task later and release the bonus.
+    suborder_no = models.CharField(max_length=100, blank=True, db_index=True)
+
+    assigned_to = models.ForeignKey("accounts.User", on_delete=models.PROTECT,
+                                    related_name="worker_tasks")
+    created_by  = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True,
+                                    blank=True, related_name="worker_tasks_created")
+
+    # ── What it pays ───────────────────────────────────────────────────────
+    # Rates are copied onto the task at creation rather than read from a
+    # setting at payout time: changing your standard rate must not silently
+    # re-price work somebody already finished.
+    reward_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0,
+                                        help_text="LISTING: paid on approval. "
+                                                  "RETURN_CLAIM: paid once the claim is up.")
+    bonus_amount  = models.DecimalField(max_digits=10, decimal_places=2, default=0,
+                                        help_text="RETURN_CLAIM: extra, paid if Meesho approves the claim")
+
+    # ── Progress ───────────────────────────────────────────────────────────
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES,
+                              default=STATUS_ASSIGNED, db_index=True)
+
+    submitted_sku       = models.CharField(max_length=300, blank=True,
+                                           help_text="LISTING: the SKU id the worker created")
+    submitted_reference = models.CharField(max_length=200, blank=True,
+                                           help_text="RETURN_CLAIM: ticket id / reference")
+    submitted_note      = models.TextField(blank=True)
+    submitted_at        = models.DateTimeField(null=True, blank=True)
+
+    review_comment = models.TextField(blank=True)
+    reviewed_by    = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True,
+                                       blank=True, related_name="worker_tasks_reviewed")
+    reviewed_at    = models.DateTimeField(null=True, blank=True)
+
+    # Paid-once guards.
+    reward_credited_at = models.DateTimeField(null=True, blank=True)
+    bonus_credited_at  = models.DateTimeField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True, db_index=True)
+
+    class Meta:
+        db_table = "worker_tasks"
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["business", "status"]),
+            models.Index(fields=["assigned_to", "status"]),
+            models.Index(fields=["business", "suborder_no"]),
+        ]
+
+    def __str__(self):
+        return f"{self.task_type} · {self.assigned_to_id} · {self.status}"
+
+    @property
+    def total_possible(self):
+        """What this task pays if everything goes right."""
+        return (self.reward_amount or 0) + (self.bonus_amount or 0)
+
+    @property
+    def awaiting_bonus(self):
+        """Approved claim work whose Meesho outcome hasn't paid out yet."""
+        return (
+            self.task_type == self.TYPE_RETURN_CLAIM
+            and self.status == self.STATUS_APPROVED
+            and self.bonus_credited_at is None
+            and (self.bonus_amount or 0) > 0
+        )
+
+
+class WalletEntry(models.Model):
+    """
+    One line of a worker's ledger. Balance is the sum of these, never a stored
+    number — a stored balance and a ledger that disagree is a support ticket you
+    can't answer.
+
+    Earnings are positive. A settlement does NOT write a negative line; it
+    stamps the entries it covers (see `settlement`), so "what have I paid" and
+    "what is still owed" are both answerable, and paying someone can never be
+    confused with them earning less.
+    """
+
+    KIND_LISTING       = "LISTING"        # approved listing task
+    KIND_CLAIM_RAISED  = "CLAIM_RAISED"   # claim task accepted
+    KIND_CLAIM_BONUS   = "CLAIM_BONUS"    # Meesho approved that claim
+    KIND_ADJUSTMENT    = "ADJUSTMENT"     # manual correction, can be negative
+
+    KIND_CHOICES = [
+        (KIND_LISTING,      "Listing approved"),
+        (KIND_CLAIM_RAISED, "Claim raised"),
+        (KIND_CLAIM_BONUS,  "Claim approved bonus"),
+        (KIND_ADJUSTMENT,   "Manual adjustment"),
+    ]
+
+    business = models.ForeignKey("accounts.Business", on_delete=models.PROTECT,
+                                 related_name="wallet_entries")
+    user = models.ForeignKey("accounts.User", on_delete=models.PROTECT,
+                             related_name="wallet_entries")
+    task = models.ForeignKey(WorkerTask, on_delete=models.SET_NULL, null=True, blank=True,
+                             related_name="wallet_entries")
+
+    kind   = models.CharField(max_length=20, choices=KIND_CHOICES, db_index=True)
+    amount = models.DecimalField(max_digits=10, decimal_places=2,
+                                 help_text="INR. Positive is earned; adjustments may be negative.")
+    note   = models.TextField(blank=True)
+
+    settlement = models.ForeignKey("WalletSettlement", on_delete=models.SET_NULL, null=True,
+                                   blank=True, related_name="entries")
+
+    created_by = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True,
+                                   blank=True, related_name="wallet_entries_created")
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        db_table = "wallet_entries"
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["user", "settlement"]),
+            models.Index(fields=["business", "user"]),
+        ]
+
+    def __str__(self):
+        return f"{self.user_id} {self.kind} ₹{self.amount}"
+
+    @property
+    def is_settled(self):
+        return self.settlement_id is not None
+
+
+class WalletSettlement(models.Model):
+    """
+    A payout: money actually handed over, and the ledger lines it covers.
+
+    Recorded as its own row rather than a flag on each entry so there is one
+    place that says how much was paid, when, and by what means — which is what
+    you need when a worker asks about a payment from three weeks ago.
+    """
+
+    business = models.ForeignKey("accounts.Business", on_delete=models.PROTECT,
+                                 related_name="wallet_settlements")
+    user = models.ForeignKey("accounts.User", on_delete=models.PROTECT,
+                             related_name="wallet_settlements")
+
+    amount    = models.DecimalField(max_digits=12, decimal_places=2)
+    paid_on   = models.DateField(default=timezone.localdate)
+    method    = models.CharField(max_length=60, blank=True, help_text="UPI / cash / bank transfer")
+    reference = models.CharField(max_length=150, blank=True, help_text="UTR or transaction note")
+    note      = models.TextField(blank=True)
+
+    created_by = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True,
+                                   blank=True, related_name="wallet_settlements_created")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "wallet_settlements"
+        ordering = ["-paid_on", "-created_at"]
+
+    def __str__(self):
+        return f"{self.user_id} paid ₹{self.amount} on {self.paid_on}"

@@ -99,6 +99,15 @@ urlpatterns = [
     path("order-scan/bulk-status/",  views.scanned_orders_bulk_status, name="scanned_orders_bulk_status"),
     path("order-scan/refresh-ship/", views.scanned_orders_refresh_ship, name="scanned_orders_refresh_ship"),
     path("order-scan/<int:pk>/",     views.scanned_order_detail,       name="scanned_order_detail"),
+    # Worker tasks + wallet
+    path("worker-tasks/",              views.worker_tasks_list,   name="worker_tasks_list"),
+    path("worker-tasks/workers/",      views.worker_list,         name="worker_list"),
+    path("worker-tasks/<int:pk>/",     views.worker_task_detail,  name="worker_task_detail"),
+    path("worker-tasks/<int:pk>/submit/", views.worker_task_submit, name="worker_task_submit"),
+    path("worker-tasks/<int:pk>/review/", views.worker_task_review, name="worker_task_review"),
+    path("wallet/",        views.wallet_summary, name="wallet_summary"),
+    path("wallet/settle/", views.wallet_settle,  name="wallet_settle"),
+    path("wallet/adjust/", views.wallet_adjust,  name="wallet_adjust"),
     # Claim tickets — the Meesho supplier-panel ticket export
     path("claims/",         views.claim_tickets_list,   name="claim_tickets_list"),
     path("claims/upload/",  views.claim_tickets_upload, name="claim_tickets_upload"),
