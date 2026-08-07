@@ -9004,15 +9004,12 @@ def worker_task_detail(request, business_id, pk):
         if not admin:
             return Response({"error": "Only an admin can delete a task."},
                             status=status.HTTP_403_FORBIDDEN)
-        if task.wallet_entries.exists():
-            # Deleting would orphan money already credited; the ledger has to
-            # stay explainable, so an already-paid task is kept.
-            return Response(
-                {"error": "This task has already paid out. Reject or adjust it instead of deleting."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        # Deleting a paid task is allowed: the ledger survives it. WalletEntry
+        # keeps the money with the worker and nulls its task link, so balances
+        # and settlement history are unaffected — only the brief disappears.
+        paid = float(task.wallet_entries.aggregate(t=Sum("amount"))["t"] or 0)
         task.delete()
-        return Response({"deleted": True})
+        return Response({"deleted": True, "wallet_entries_kept": paid > 0, "amount_kept": paid})
 
     if request.method == "PATCH":
         if not admin:
@@ -9351,6 +9348,12 @@ _LISTING_WRITABLE = {
     "sku_id", "listing_price", "wrong_defective_price", "mrp",
     "min_settlement_amount", "sku_prefix", "hsn_code", "tax_percent", "notes",
 }
+
+# What a worker is allowed to send. Prices, HSN, tax and the required prefix are
+# decided by the admin on the task and inherited by every SKU — a worker typing
+# their own price would make the catalogue unreliable, and these are commercial
+# decisions rather than data entry. Enforced here, not merely hidden in the UI.
+_LISTING_WORKER_WRITABLE = {"sku_id", "notes"}
 _LISTING_MONEY = {"listing_price", "wrong_defective_price", "mrp", "min_settlement_amount"}
 
 
@@ -9441,6 +9444,15 @@ def task_listing_add(request, business_id, pk):
             "duplicate_of": {"task_id": clash.task_id, "listing_id": clash.pk, "by": who},
         }, status=status.HTTP_409_CONFLICT)
 
+    if not admin:
+        forbidden = set(payload) - _LISTING_WORKER_WRITABLE
+        if forbidden:
+            return Response(
+                {"error": "Those details are set by the admin on the task: "
+                          + ", ".join(sorted(forbidden))},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
     # Anything the worker leaves blank falls back to what you set on the task,
     # so the values you decided are applied even if the form is rushed.
     defaults = task.listing_defaults or {}
@@ -9459,7 +9471,7 @@ def task_listing_add(request, business_id, pk):
     listing = TaskListing.objects.create(
         business=business, task=task, created_by=request.user, sku_id=sku_id, **fields
     )
-    return Response(TaskListingSerializer(listing).data, status=status.HTTP_201_CREATED)
+    return Response(TaskListingSerializer(listing, context={"request": request}).data, status=status.HTTP_201_CREATED)
 
 
 @api_view(["GET", "PATCH", "DELETE"])
@@ -9480,7 +9492,7 @@ def task_listing_detail(request, business_id, pk):
         return Response({"error": "That listing isn't yours."}, status=status.HTTP_403_FORBIDDEN)
 
     if request.method == "GET":
-        return Response(TaskListingSerializer(listing).data)
+        return Response(TaskListingSerializer(listing, context={"request": request}).data)
 
     frozen = listing.task.is_paused or listing.status == TaskListing.STATUS_APPROVED
     if frozen and not admin:
@@ -9496,10 +9508,14 @@ def task_listing_detail(request, business_id, pk):
         return Response({"deleted": True})
 
     payload = request.data if isinstance(request.data, dict) else {}
-    unknown = set(payload) - _LISTING_WRITABLE
+    allowed = _LISTING_WRITABLE if admin else _LISTING_WORKER_WRITABLE
+    unknown = set(payload) - allowed
     if unknown:
-        return Response({"error": f"Not editable: {', '.join(sorted(unknown))}"},
-                        status=status.HTTP_400_BAD_REQUEST)
+        return Response(
+            {"error": ("Those details are set by the admin on the task: "
+                       if not admin else "Not editable: ") + ", ".join(sorted(unknown))},
+            status=status.HTTP_403_FORBIDDEN if not admin else status.HTTP_400_BAD_REQUEST,
+        )
 
     if "sku_id" in payload:
         new_sku = str(payload["sku_id"] or "").strip()[:300]
@@ -9523,7 +9539,7 @@ def task_listing_detail(request, business_id, pk):
         listing.status = TaskListing.STATUS_PENDING
         listing.review_comment = ""
     listing.save()
-    return Response(TaskListingSerializer(listing).data)
+    return Response(TaskListingSerializer(listing, context={"request": request}).data)
 
 
 @api_view(["POST"])
@@ -9559,7 +9575,7 @@ def task_listing_review(request, business_id, pk):
     if decision == "REJECT":
         listing.status = TaskListing.STATUS_REJECTED
         listing.save()
-        return Response({"listing": TaskListingSerializer(listing).data, "credited": None})
+        return Response({"listing": TaskListingSerializer(listing, context={"request": request}).data, "credited": None})
 
     listing.status = TaskListing.STATUS_APPROVED
     if listing.reward_credited_at is None:
@@ -9570,9 +9586,28 @@ def task_listing_review(request, business_id, pk):
         if entry:
             listing.reward_credited_at = now
             credited = float(entry.amount)
+
+    # Approving is what makes the SKU real: it joins the pricing catalogue so
+    # the rest of the app (pricing, inventory, SKU analysis) can see it. Only
+    # ever done here, so a SKU can't enter the catalogue without your sign-off.
+    #
+    # Deliberately only the tax rate is carried over. FinalPrice.item_price is
+    # the *purchase* cost, and the listing's price is what it sells for —
+    # copying one into the other would quietly corrupt every profit figure.
+    catalog_created = False
+    if listing.added_to_catalog_at is None:
+        _, catalog_created = FinalPrice.objects.get_or_create(
+            business=business, sku_id=listing.sku_id,
+            defaults={"tax_percent": int(listing.tax_percent) if listing.tax_percent is not None else None},
+        )
+        listing.added_to_catalog_at = now
     listing.save()
 
-    return Response({"listing": TaskListingSerializer(listing).data, "credited": credited})
+    return Response({
+        "listing": TaskListingSerializer(listing, context={"request": request}).data,
+        "credited": credited,
+        "catalog_sku_created": catalog_created,
+    })
 
 
 @api_view(["GET", "PUT"])

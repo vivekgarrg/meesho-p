@@ -1759,6 +1759,10 @@ class TaskListing(models.Model):
                                        blank=True, related_name="task_listings_reviewed")
     reviewed_at    = models.DateTimeField(null=True, blank=True)
 
+    # Stamped when approval registered this SKU in the pricing catalogue, so a
+    # re-approval can't create it twice and you can see which SKUs are live.
+    added_to_catalog_at = models.DateTimeField(null=True, blank=True)
+
     # What this listing paid, frozen at approval. Copied from the task so that
     # changing a rate later cannot retroactively alter what somebody was paid.
     reward_amount      = models.DecimalField(max_digits=10, decimal_places=2, default=0)

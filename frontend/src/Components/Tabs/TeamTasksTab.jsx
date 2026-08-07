@@ -106,9 +106,14 @@ function ListingRow({ listing, isAdmin, platform, reference, frozen, onSave, onD
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
 
   const save = async () => {
-    const payload = {};
-    LISTING_FIELDS.forEach((f) => { payload[f.key] = form[f.key] ?? ""; });
-    payload.notes = form.notes ?? "";
+    let payload;
+    if (isAdmin) {
+      payload = {};
+      LISTING_FIELDS.forEach((f) => { payload[f.key] = form[f.key] ?? ""; });
+      payload.notes = form.notes ?? "";
+    } else {
+      payload = { sku_id: form.sku_id, notes: form.notes ?? "" };
+    }
     const e = await onSave(listing.id, payload);
     if (e) setErr(e); else { setEdit(false); setErr(""); }
   };
@@ -116,7 +121,15 @@ function ListingRow({ listing, isAdmin, platform, reference, frozen, onSave, onD
   if (edit) {
     return (
       <div style={{ border: `1px solid ${C.orangeBorder}`, borderRadius: 10, padding: 12, background: C.orangeLight }}>
-        <ListingFields form={form} set={set} platform={platform} reference={reference} />
+        {isAdmin ? (
+          <ListingFields form={form} set={set} platform={platform} reference={reference} />
+        ) : (
+          <div style={{ maxWidth: 320 }}>
+            <label style={{ ...S.label, marginBottom: 3 }}>SKU id</label>
+            <input value={form.sku_id ?? ""} onChange={set("sku_id")}
+              style={{ ...S.inp, fontFamily: "monospace", fontWeight: 700 }} />
+          </div>
+        )}
         {err && <div style={{ fontSize: 12, color: C.red, fontWeight: 600, marginTop: 8 }}>{err}</div>}
         <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
           <button onClick={save} disabled={busy} style={btn("primary", "sm")}>Save</button>
@@ -139,7 +152,9 @@ function ListingRow({ listing, isAdmin, platform, reference, frozen, onSave, onD
         {listing.prefix_ok === false && (
           <Tag variant="amber" fontSize={11}>doesn't start with {listing.sku_prefix}</Tag>
         )}
-        {isAdmin && <span style={{ fontSize: 11.5, color: C.gray400 }}>by {listing.created_by_name}</span>}
+        {isAdmin && listing.created_by_name && (
+          <span style={{ fontSize: 11.5, color: C.gray400 }}>by {listing.created_by_name}</span>
+        )}
         <span style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
           {listing.reward_credited_at && <Money value={listing.reward_amount} />}
           {!frozen && (
@@ -230,7 +245,7 @@ function ListingFields({ form, set, platform, reference, hideSku }) {
   );
 }
 
-function AddListing({ task, reference, onAdd, busy }) {
+function AddListing({ task, reference, onAdd, busy, isAdmin }) {
   // Second and later SKUs of the same product share almost everything with the
   // first, so the form opens pre-filled from the last one added — only the SKU
   // itself is cleared.
@@ -252,7 +267,9 @@ function AddListing({ task, reference, onAdd, busy }) {
 
   const add = async () => {
     if (!form.sku_id.trim()) return setErr("Enter the SKU id.");
-    const e = await onAdd(task.id, form);
+    // A worker sends only the id; everything else is inherited server-side.
+    const body = isAdmin ? form : { sku_id: form.sku_id };
+    const e = await onAdd(task.id, body);
     if (e) { setErr(e); return; }
     setForm({ ...seed(), sku_id: "" });
     setErr("");
@@ -261,10 +278,43 @@ function AddListing({ task, reference, onAdd, busy }) {
   return (
     <div style={{ border: `1px dashed ${C.gray200}`, borderRadius: 10, padding: 12, background: C.gray50 }}>
       <div style={{ fontSize: 12.5, fontWeight: 700, color: C.gray700, marginBottom: 8 }}>
-        Add a SKU{last ? " — prefilled from the last one"
-          : Object.keys(defaults).length ? " — prefilled from the task" : ""}
+        Add a SKU
       </div>
-      <ListingFields form={form} set={set} platform={task.platform} reference={reference} />
+      {isAdmin ? (
+        <ListingFields form={form} set={set} platform={task.platform} reference={reference} />
+      ) : (
+        <>
+          <div style={{ maxWidth: 320 }}>
+            <label style={{ ...S.label, marginBottom: 3 }}>SKU id *</label>
+            <input value={form.sku_id} onChange={set("sku_id")} autoFocus
+              placeholder={defaults.sku_prefix ? `${defaults.sku_prefix}…` : "the SKU you created"}
+              style={{ ...S.inp, fontFamily: "monospace", fontWeight: 700 }} />
+          </div>
+          {/* The commercial values are the admin's; shown so the worker lists
+              against the right numbers, but not editable. */}
+          {Object.keys(defaults).length > 0 && (
+            <div style={{ marginTop: 10, padding: "9px 12px", borderRadius: 8,
+              background: C.white, border: `1px solid ${C.border}` }}>
+              <div style={{ fontSize: 10.5, fontWeight: 700, color: C.gray400,
+                letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: 5 }}>
+                Use these values — set by the admin
+              </div>
+              <div style={{ display: "flex", gap: 14, flexWrap: "wrap", fontSize: 12.5, color: C.gray700 }}>
+                {LISTING_FIELDS.filter((f) => f.key !== "sku_id" && defaults[f.key]).map((f) => (
+                  <span key={f.key}>
+                    <span style={{ color: C.gray400 }}>
+                      {f.platformLabel ? `${task.platform} price` : f.label}:{" "}
+                    </span>
+                    <b style={{ fontFamily: f.type === "money" ? "monospace" : "inherit" }}>
+                      {f.type === "money" ? fmt(defaults[f.key]) : defaults[f.key]}{f.type === "tax" ? "%" : ""}
+                    </b>
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+        </>
+      )}
       {err && (
         <div style={{ marginTop: 8, padding: "8px 11px", borderRadius: 8, background: C.redLight,
           border: `1px solid ${C.redBorder}`, color: C.red, fontSize: 12.5, fontWeight: 700 }}>
@@ -278,7 +328,7 @@ function AddListing({ task, reference, onAdd, busy }) {
   );
 }
 
-function TaskCard({ task, isAdmin, reference, onSubmit, onReview, onPause, onListingAdd,
+function TaskCard({ task, isAdmin, reference, onSubmit, onReview, onPause, onDelete, onListingAdd,
                     onListingSave, onListingDelete, onListingReview, busy }) {
   const isMobile = useIsMobile();
   const meta = STATUS_META[task.status] || STATUS_META.ASSIGNED;
@@ -301,9 +351,11 @@ function TaskCard({ task, isAdmin, reference, onSubmit, onReview, onPause, onLis
           {task.is_paused && <Tag variant="gray" fontSize={11.5}>⏸ paused</Tag>}
           {!listing && <Tag variant={meta.tag} fontSize={11.5}>{meta.label}</Tag>}
           {task.awaiting_bonus && <Tag variant="amber" fontSize={11.5}>bonus pending</Tag>}
-          <span style={{ fontSize: 11.5, color: C.gray400 }}>
-            {(task.assignee_names || []).join(", ")}
-          </span>
+          {(task.assignee_names || []).length > 0 && (
+            <span style={{ fontSize: 11.5, color: C.gray400 }}>
+              {task.assignee_names.join(", ")}
+            </span>
+          )}
           <span style={{ marginLeft: "auto", display: "flex", alignItems: "baseline", gap: 6 }}>
             <span style={{ fontSize: 11, color: C.gray400 }}>{fmt(task.reward_amount)}/SKU</span>
             {Number(task.earned) > 0 && <Money value={task.earned} />}
@@ -333,8 +385,15 @@ function TaskCard({ task, isAdmin, reference, onSubmit, onReview, onPause, onLis
             </span>
           )}
           {isAdmin && (
+            <button onClick={() => onDelete(task.id, task.title)} disabled={busy}
+              title="Delete this task"
+              style={{ ...btn("ghost", "sm"), marginLeft: "auto", color: C.red, borderColor: C.redBorder }}>
+              <DeleteOutlineIcon style={{ fontSize: 15, verticalAlign: "-3px" }} />&nbsp;Delete
+            </button>
+          )}
+          {isAdmin && (
             <button onClick={() => onPause(task.id, !task.is_paused)} disabled={busy}
-              style={{ ...btn("ghost", "sm"), marginLeft: "auto" }}>
+              style={btn("ghost", "sm")}>
               {task.is_paused
                 ? <><PlayCircleIcon style={{ fontSize: 15, verticalAlign: "-3px" }} />&nbsp;Resume</>
                 : <><PauseCircleIcon style={{ fontSize: 15, verticalAlign: "-3px" }} />&nbsp;Pause</>}
@@ -360,7 +419,7 @@ function TaskCard({ task, isAdmin, reference, onSubmit, onReview, onPause, onLis
               Paused — existing SKUs stay visible, but no new ones can be added.
             </div>
           ) : (
-            <AddListing task={task} reference={reference} onAdd={onListingAdd} busy={busy} />
+            <AddListing task={task} reference={reference} onAdd={onListingAdd} busy={busy} isAdmin={isAdmin} />
           )}
         </div>
       )}
@@ -497,6 +556,13 @@ export function TeamTasksTab() {
   const pauseTask = (id, paused) =>
     post(`${API}/worker-tasks/${id}/`, { is_paused: paused },
       paused ? "Task paused — no new SKUs." : "Task resumed.", "PATCH");
+  const deleteTask = async (id, title) => {
+    if (!window.confirm(`Delete "${title || "this task"}"? Any wallet balance already earned from it is kept.`)) return;
+    const e = await post(`${API}/worker-tasks/${id}/`, {}, (d) =>
+      d.wallet_entries_kept ? `Task deleted — ${fmt(d.amount_kept)} already earned stays in the wallet.`
+                            : "Task deleted.", "DELETE");
+    if (e) setMsg({ type: "error", text: e });
+  };
   const addListing = (taskId, form) => post(`${API}/worker-tasks/${taskId}/listings/`, form, "SKU added.");
   const saveListing = (id, form) => post(`${API}/task-listings/${id}/`, form, "Saved.", "PATCH");
   const deleteListing = async (id) => {
@@ -510,6 +576,17 @@ export function TeamTasksTab() {
       (d) => d.credited ? `Approved — ${fmt(d.credited)} added.` : "Recorded.");
     if (e) setMsg({ type: "error", text: e });
   };
+  /** A manual ledger line — a correction or a bonus. Requires a reason, so the
+      balance never moves without an explanation attached. */
+  const adjust = (userId, username) => {
+    const raw = window.prompt(`Adjust ${username}'s balance by how much? Use a minus for a deduction.`, "");
+    if (!raw) return;
+    const note = window.prompt("Why? (recorded against the entry)", "");
+    if (!note) { setMsg({ type: "error", text: "An adjustment needs a reason." }); return; }
+    post(`${API}/wallet/adjust/`, { user_id: userId, amount: raw, note },
+      `Adjusted ${username}'s balance by ${fmt(raw)}.`);
+  };
+
   const settle = (userId, username) => {
     if (!window.confirm(`Mark everything outstanding for ${username} as paid?`)) return;
     const method = window.prompt("How was it paid? (UPI / cash / bank)", "UPI") || "";
@@ -644,10 +721,17 @@ export function TeamTasksTab() {
                     <td style={S.td}><Money value={u.settled} muted /></td>
                     <td style={S.td}><Money value={u.pending} /></td>
                     <td style={S.td}>
-                      {isAdmin && u.pending > 0 && (
-                        <button onClick={() => settle(u.user_id, u.username)} disabled={busy} style={btn("ghost", "sm")}>
-                          Mark paid
-                        </button>
+                      {isAdmin && (
+                        <span style={{ display: "flex", gap: 6 }}>
+                          {u.pending > 0 && (
+                            <button onClick={() => settle(u.user_id, u.username)} disabled={busy} style={btn("ghost", "sm")}>
+                              Mark paid
+                            </button>
+                          )}
+                          <button onClick={() => adjust(u.user_id, u.username)} disabled={busy} style={btn("ghost", "sm")}>
+                            Adjust
+                          </button>
+                        </span>
                       )}
                     </td>
                   </tr>
@@ -716,7 +800,7 @@ export function TeamTasksTab() {
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           {tasks.map((t) => (
             <TaskCard key={t.id} task={t} isAdmin={isAdmin} reference={reference} busy={busy}
-              onSubmit={submitTask} onReview={reviewTask} onPause={pauseTask}
+              onSubmit={submitTask} onReview={reviewTask} onPause={pauseTask} onDelete={deleteTask}
               onListingAdd={addListing} onListingSave={saveListing}
               onListingDelete={deleteListing} onListingReview={reviewListing} />
           ))}

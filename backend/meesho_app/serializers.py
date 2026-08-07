@@ -237,10 +237,24 @@ class WorkerTaskSerializer(serializers.ModelSerializer):
         """What this task has actually paid so far — summed from the ledger."""
         return float(sum(e.amount for e in obj.wallet_entries.all()))
 
+    def _asking_admin(self):
+        request = self.context.get("request")
+        user = request.user if request is not None else None
+        return getattr(user, "role", None) == "super_admin"
+
     def get_assignee_names(self, obj):
+        """
+        Who else has this task is the admin's business, not a worker's. A worker
+        sees the job, not the roster — knowing who else was given the same brief
+        invites comparison and tells them nothing useful about their own work.
+        """
+        if not self._asking_admin():
+            return []
         return [u.username for u in obj.assignees.all()]
 
     def get_assignee_ids(self, obj):
+        if not self._asking_admin():
+            return []
         return [u.pk for u in obj.assignees.all()]
 
     def get_listing_count(self, obj):
@@ -259,7 +273,7 @@ class WorkerTaskSerializer(serializers.ModelSerializer):
                 if self.context.get("request") is not None else None)
         if user is not None and getattr(user, "role", None) != "super_admin":
             rows = [r for r in rows if r.created_by_id == user.pk]
-        return TaskListingSerializer(rows, many=True).data
+        return TaskListingSerializer(rows, many=True, context=self.context).data
 
 
 class WalletEntrySerializer(serializers.ModelSerializer):
@@ -291,10 +305,24 @@ class WalletSettlementSerializer(serializers.ModelSerializer):
 
 class TaskListingSerializer(serializers.ModelSerializer):
     created_by_name  = serializers.CharField(source="created_by.username", read_only=True, default=None)
+    locked_fields    = serializers.SerializerMethodField()
     reviewed_by_name = serializers.CharField(source="reviewed_by.username", read_only=True, default=None)
     platform         = serializers.CharField(source="task.platform", read_only=True, default=None)
     task_title       = serializers.CharField(source="task.title", read_only=True, default=None)
     prefix_ok        = serializers.BooleanField(read_only=True)
+
+    def get_locked_fields(self, obj):
+        """
+        Which fields the caller may not change. The UI renders these read-only;
+        the API refuses them regardless, so this is a convenience rather than
+        the enforcement.
+        """
+        request = self.context.get("request")
+        user = request.user if request is not None else None
+        if getattr(user, "role", None) == "super_admin":
+            return []
+        return ["listing_price", "wrong_defective_price", "mrp",
+                "min_settlement_amount", "sku_prefix", "hsn_code", "tax_percent"]
 
     class Meta:
         model = TaskListing
