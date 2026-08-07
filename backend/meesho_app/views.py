@@ -12,6 +12,7 @@ from datetime import datetime, time, timedelta
 import requests as http_requests
 import base64
 import io
+import zipfile
 import re
 import concurrent.futures
 from PIL import Image
@@ -95,11 +96,69 @@ def safe_int(val):
         return None
 
 
+def _workbook_from_upload(uploaded):
+    """
+    The spreadsheet to parse, unwrapping a .zip if that's what arrived.
+
+    Returns (file_like, extracted_name). Meesho's payment export downloads as a
+    zip, and making people unzip it first is a step that only exists because we
+    didn't do it for them.
+
+    The catch worth knowing: an .xlsx *is* a zip archive, so "does it start with
+    PK" cannot decide this. The test is what's inside — an archive of exports
+    contains members ending in .xlsx/.xls, while a workbook contains
+    xl/workbook.xml and never another spreadsheet. Checking for members first is
+    therefore unambiguous in both directions.
+    """
+    uploaded.seek(0)
+    if uploaded.read(2) != b"PK":
+        uploaded.seek(0)
+        return uploaded, None          # .xls or anything else — hand it straight on
+    uploaded.seek(0)
+
+    try:
+        archive = zipfile.ZipFile(uploaded)
+        names = archive.namelist()
+    except zipfile.BadZipFile:
+        uploaded.seek(0)
+        return uploaded, None          # let pandas produce the real complaint
+
+    sheets = [
+        n for n in names
+        if n.lower().endswith((".xlsx", ".xls"))
+        and not n.startswith("__MACOSX/")
+        and not n.rsplit("/", 1)[-1].startswith(".")
+    ]
+
+    if not sheets:
+        if "xl/workbook.xml" in names:
+            uploaded.seek(0)
+            return uploaded, None      # it's the workbook itself
+        raise ValueError(
+            "That zip has no Excel file in it. Upload the payment .xlsx, or the "
+            "zip Meesho gave you with the sheet still inside."
+        )
+
+    # Several exports in one zip: the payment sheet is far and away the biggest,
+    # so size is a better guess than filename, which Meesho changes freely.
+    chosen = max(sheets, key=lambda n: archive.getinfo(n).file_size)
+    try:
+        data = archive.read(chosen)
+    except RuntimeError as exc:
+        if "password" in str(exc).lower() or "encrypted" in str(exc).lower():
+            raise ValueError(
+                "That zip is password-protected. Unzip it yourself and upload the "
+                "Excel file directly."
+            ) from exc
+        raise
+    return io.BytesIO(data), chosen
+
+
 @api_view(["POST"])
 @parser_classes([MultiPartParser])
 def upload_excel(request, business_id):
     """
-    Upload a Meesho payment Excel file.
+    Upload a Meesho payment Excel file, or the zip it came in.
     Parses all 4 sheets and inserts/updates rows in the DB.
     """
     business = get_authorized_business(request, business_id)
@@ -108,9 +167,16 @@ def upload_excel(request, business_id):
         return Response({"error": "No file provided."}, status=status.HTTP_400_BAD_REQUEST)
 
     try:
-        xl = pd.ExcelFile(file)
+        source, extracted = _workbook_from_upload(file)
+    except ValueError as exc:
+        return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        xl = pd.ExcelFile(source)
     except Exception as e:
-        return Response({"error": f"Could not read Excel file: {e}"}, status=status.HTTP_400_BAD_REQUEST)
+        hint = f" (from {extracted} inside the zip)" if extracted else ""
+        return Response({"error": f"Could not read Excel file{hint}: {e}"},
+                        status=status.HTTP_400_BAD_REQUEST)
 
     results = {}
 

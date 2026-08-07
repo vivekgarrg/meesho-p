@@ -160,7 +160,7 @@ export function UploadTab() {
           Upload Data
         </Typography>
         <Typography variant="body2" color="text.secondary">
-          Upload Meesho payment Excel report and Orders CSV to update the database.
+          Upload the Meesho payment report — the .xlsx, or the .zip straight from the panel — and the Orders CSV.
         </Typography>
       </Box>
 
@@ -175,12 +175,12 @@ export function UploadTab() {
           gap: { xs: 2, sm: 2.5 },
         }}
       >
-        <UploadCard eyebrow="Payment Report (Excel)">
+        <UploadCard eyebrow="Payment Report (Excel or ZIP)">
           <UploadSection
-            title="Drop Meesho Excel report here"
-            subtitle="SP_ORDER_ADS_REFERRAL_PAYMENT_FILE_*.xlsx"
+            title="Drop the Meesho payment file here"
+            subtitle="SP_ORDER_ADS_REFERRAL_PAYMENT_FILE_*.xlsx — or the .zip Meesho gives you, unopened"
             icon="📊"
-            accept=".xlsx,.xls"
+            accept=".xlsx,.xls,.zip"
             endpoint="/upload/"
             isOrders={false}
           />
