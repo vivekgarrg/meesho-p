@@ -104,22 +104,26 @@ export const S = {
   card: {
     background: C.white,
     border: `1px solid ${C.border}`,
-    borderRadius: 16,
-    padding: 24,
-    boxShadow: "0 1px 3px rgba(0,0,0,0.04), 0 4px 16px rgba(0,0,0,0.06)",
+    borderRadius: 14,
+    padding: 22,
+    // Softer and lower than before: the old double shadow made every card
+    // float at the same depth, so a page of eight cards read as noise.
+    boxShadow: "0 1px 2px rgba(19,17,28,0.04), 0 8px 24px rgba(19,17,28,0.05)",
   },
   cardTitle: {
-    fontSize: 11, fontWeight: 700, color: C.gray400,
-    marginBottom: 16, letterSpacing: "0.08em", textTransform: "uppercase",
+    fontSize: 11.5, fontWeight: 800, color: C.gray500,
+    marginBottom: 15, letterSpacing: "0.07em", textTransform: "uppercase",
   },
   th: {
     padding: "12px 16px", textAlign: "left", color: C.gray500,
-    fontSize: 11, fontWeight: 700, letterSpacing: "0.06em",
+    fontSize: 11.5, fontWeight: 800, letterSpacing: "0.05em",
     textTransform: "uppercase", borderBottom: `1px solid ${C.border}`,
     background: C.gray50, whiteSpace: "nowrap",
   },
   td: {
-    padding: "12px 16px", color: C.gray700, fontSize: 13,
+    // A row of numbers read at arm's length needs more than 13px and 12px of
+    // padding; this is the single change that most improves every table.
+    padding: "13px 16px", color: C.gray700, fontSize: 13.5,
     borderBottom: `1px solid ${C.gray100}`,
   },
   inp: {

@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
+import PublicShell, { BRAND, MUTED, OFFER } from "../Landing/PublicShell";
 import { C, S, btn } from "../../App";
 import { useAuth } from "../../contexts/AuthContext";
 
@@ -26,20 +27,21 @@ export default function LoginPage() {
   };
 
   return (
-    <div
-      style={{
-        height: "100vh",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        background: C.bg,
-        fontFamily: "'Inter', 'Segoe UI', system-ui, sans-serif",
-      }}
-    >
+    <PublicShell>
+      <div style={{
+        minHeight: "62vh", display: "flex", alignItems: "center",
+        justifyContent: "center", padding: "48px 20px",
+      }}>
       <form
         onSubmit={handleSubmit}
         style={{ ...S.card, width: 340, display: "flex", flexDirection: "column", gap: 16 }}
       >
+        <div style={{
+          background: "#F5F3FF", border: "1px solid #DDD6FE", borderRadius: 10,
+          padding: "9px 12px", fontSize: 12.5, fontWeight: 700, color: BRAND, textAlign: "center",
+        }}>
+          🎉 {OFFER}
+        </div>
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 4 }}>
           <div
             style={{
@@ -91,7 +93,15 @@ export default function LoginPage() {
         <button type="submit" disabled={submitting} style={{ ...btn("primary", "md"), opacity: submitting ? 0.7 : 1 }}>
           {submitting ? "Signing in…" : "Sign in"}
         </button>
+
+        <div style={{ fontSize: 12.5, color: MUTED, textAlign: "center" }}>
+          No account yet?{" "}
+          <Link to="/" style={{ color: BRAND, fontWeight: 700, textDecoration: "none" }}>
+            Get your free year
+          </Link>
+        </div>
       </form>
-    </div>
+      </div>
+    </PublicShell>
   );
 }

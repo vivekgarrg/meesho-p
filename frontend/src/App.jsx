@@ -334,33 +334,43 @@ function NavItem({ item, collapsed, onNavigate, touch }) {
       style={({ isActive }) => ({
         display: "flex", alignItems: "center", gap: 11, textDecoration: "none",
         // Roomier rows on touch, where a 30px target is a miss risk.
-        padding: collapsed ? "10px 0" : touch ? "12px 14px" : "8px 12px",
+        padding: collapsed ? "10px 0" : touch ? "12px 14px" : "9px 12px",
         justifyContent: collapsed ? "center" : "flex-start",
         margin: "1px 8px", borderRadius: 10,
-        transition: "background 0.12s, color 0.12s",
+        transition: "background 0.14s, color 0.14s",
         background: isActive
-          ? "rgba(167,139,250,0.14)"
-          : hovered ? "rgba(255,255,255,0.06)" : "transparent",
-        color: isActive ? "#E9D5FF" : hovered ? "rgba(255,255,255,0.8)" : "rgba(255,255,255,0.45)",
+          ? "linear-gradient(90deg, rgba(167,139,250,0.22), rgba(167,139,250,0.08))"
+          : hovered ? "rgba(255,255,255,0.07)" : "transparent",
+        color: isActive ? "#F3E8FF" : hovered ? "rgba(255,255,255,0.88)" : "rgba(255,255,255,0.5)",
         position: "relative",
       })}
     >
-      {/* Active left indicator */}
-      {!collapsed && (
-        <div style={{
-          position: "absolute", left: 0, top: "20%", bottom: "20%", width: 3,
-          borderRadius: "0 3px 3px 0",
-          background: "transparent",
-        }} />
-      )}
-      <span style={{
-        fontSize: 15, lineHeight: 1, flexShrink: 0, fontWeight: 500,
-        fontFamily: "system-ui, sans-serif",
-      }}>{item.icon}</span>
-      {!collapsed && (
-        <span style={{ fontSize: touch ? 14 : 13, fontWeight: 500, whiteSpace: "nowrap", letterSpacing: "0.005em" }}>
-          {item.label}
-        </span>
+      {({ isActive }) => (
+        <>
+          {/* The active marker was hardcoded transparent, so the rail never
+              actually showed which page you were on — only the row tint did,
+              which is easy to miss on a long sidebar. */}
+          {!collapsed && (
+            <span style={{
+              position: "absolute", left: 0, top: "22%", bottom: "22%", width: 3,
+              borderRadius: "0 3px 3px 0",
+              background: isActive ? "#C4B5FD" : "transparent",
+              transition: "background 0.14s",
+            }} />
+          )}
+          <span style={{
+            fontSize: 15, lineHeight: 1, flexShrink: 0,
+            fontWeight: isActive ? 700 : 500,
+            fontFamily: "system-ui, sans-serif",
+            opacity: isActive ? 1 : 0.9,
+          }}>{item.icon}</span>
+          {!collapsed && (
+            <span style={{
+              fontSize: touch ? 14 : 13, fontWeight: isActive ? 700 : 500,
+              whiteSpace: "nowrap", letterSpacing: "0.005em",
+            }}>{item.label}</span>
+          )}
+        </>
       )}
     </NavLink>
   );

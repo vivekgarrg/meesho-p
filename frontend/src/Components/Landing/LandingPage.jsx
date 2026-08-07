@@ -1,5 +1,9 @@
 import React, { useState, useRef } from "react";
 import { Link } from "react-router-dom";
+import PublicShell, {
+  WA_LINK, WHATSAPP_DISPLAY, OFFER,
+  INK, BRAND, BRAND_2, MUTED, LINE, SOFT, wrap,
+} from "./PublicShell";
 
 /*
  * The public front page.
@@ -11,18 +15,6 @@ import { Link } from "react-router-dom";
  * only page prospects ever see.
  */
 
-const WHATSAPP = "918273343222";
-const WHATSAPP_DISPLAY = "+91 82733 43222";
-const WA_LINK = `https://wa.me/${WHATSAPP}?text=${encodeURIComponent(
-  "Hi! I'd like to know more about Rudam Commerce OS."
-)}`;
-
-const INK = "#13111C";
-const BRAND = "#7C3AED";
-const BRAND_2 = "#F43397";
-const MUTED = "#6B6577";
-const LINE = "#E9E4EE";
-const SOFT = "#FAF8FC";
 
 const FEATURES = [
   {
@@ -113,9 +105,9 @@ function Mock({ kind }) {
             </div>
           ))}
         </div>
-        <Bar label="brass-lota-medium" value="+₹42,180" pct={88} tone="#16A34A" />
-        <Bar label="pragi-7-number" value="+₹19,640" pct={52} tone="#16A34A" />
-        <Bar label="chandan-lakdi-sm" value="−₹4,210" pct={22} tone="#DC2626" />
+        <Bar label="KURTI-COT-RED-M" value="+₹42,180" pct={88} tone="#16A34A" />
+        <Bar label="SAREE-SLK-BLU-FS" value="+₹19,640" pct={52} tone="#16A34A" />
+        <Bar label="DECOR-BRS-VAS-S" value="−₹4,210" pct={22} tone="#DC2626" />
       </Chrome>
     );
   }
@@ -160,9 +152,9 @@ function Mock({ kind }) {
   }
   return (
     <Chrome title="Team tasks">
-      {[["brass-lota-small-01", "Approved", "#16A34A", "₹60"],
-        ["brass-lota-medium-01", "Approved", "#16A34A", "₹60"],
-        ["brass-lota-large-01", "Pending", "#D97706", "—"]].map(([sku, st, c, amt]) => (
+      {[["KURTI-COT-RED-S", "Approved", "#16A34A", "₹60"],
+        ["KURTI-COT-RED-M", "Approved", "#16A34A", "₹60"],
+        ["KURTI-COT-RED-L", "Pending", "#D97706", "—"]].map(([sku, st, c, amt]) => (
         <div key={sku} style={{
           display: "flex", alignItems: "center", gap: 8, border: `1px solid ${LINE}`,
           borderRadius: 9, padding: "8px 10px", marginBottom: 6,
@@ -173,7 +165,7 @@ function Mock({ kind }) {
         </div>
       ))}
       <div style={{ marginTop: 10, padding: "8px 11px", background: SOFT, borderRadius: 9, fontSize: 11.5, color: MUTED }}>
-        Wallet · <b style={{ color: "#16A34A", fontFamily: "monospace" }}>₹120</b> owed to prakrati
+        Wallet · <b style={{ color: "#16A34A", fontFamily: "monospace" }}>₹120</b> owed to Priya
       </div>
     </Chrome>
   );
@@ -252,7 +244,8 @@ function SignupForm({ innerRef }) {
         Get started
       </h3>
       <p style={{ fontSize: 14, color: MUTED, margin: "0 0 20px", lineHeight: 1.6 }}>
-        Tell us about your shop and we'll set you up. No card, no commitment.
+        Tell us about your shop and we'll set you up. <b style={{ color: "#047857" }}>Your first year is
+        free</b> — no card, no commitment.
       </p>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
@@ -297,7 +290,7 @@ function SignupForm({ innerRef }) {
         fontSize: 15.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit",
         opacity: state === "sending" ? 0.6 : 1,
       }}>
-        {state === "sending" ? "Sending…" : "Request access"}
+        {state === "sending" ? "Sending…" : "Claim my free year"}
       </button>
 
       <p style={{ fontSize: 12.5, color: MUTED, textAlign: "center", margin: "12px 0 0" }}>
@@ -316,44 +309,9 @@ export default function LandingPage() {
     signupRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
   };
 
-  const wrap = { maxWidth: 1120, margin: "0 auto", padding: "0 22px" };
 
   return (
-    <div style={{
-      fontFamily: "'Inter', 'Segoe UI', system-ui, sans-serif",
-      color: INK, background: "#fff", minHeight: "100vh",
-    }}>
-      {/* Nav */}
-      <header style={{
-        position: "sticky", top: 0, zIndex: 50, background: "rgba(255,255,255,0.92)",
-        backdropFilter: "blur(10px)", borderBottom: `1px solid ${LINE}`,
-      }}>
-        <div style={{ ...wrap, display: "flex", alignItems: "center", gap: 12, height: 64 }}>
-          <div style={{
-            width: 34, height: 34, borderRadius: 10,
-            background: `linear-gradient(135deg, ${BRAND}, #4F46E5)`,
-            display: "grid", placeItems: "center", color: "#fff", fontWeight: 900, fontSize: 16,
-          }}>R</div>
-          <div style={{ fontWeight: 800, fontSize: 16 }}>Rudam <span style={{ color: BRAND }}>Commerce OS</span></div>
-          <nav style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
-            <a href={WA_LINK} target="_blank" rel="noreferrer" style={{
-              display: "flex", alignItems: "center", gap: 6, color: "#16A34A", textDecoration: "none",
-              fontWeight: 700, fontSize: 13.5, padding: "8px 12px", borderRadius: 9,
-              border: "1.5px solid #BBF7D0", background: "#F0FDF4",
-            }}>
-              <span aria-hidden>💬</span> {WHATSAPP_DISPLAY}
-            </a>
-            <Link to="/login" style={{
-              color: INK, textDecoration: "none", fontWeight: 700, fontSize: 13.5, padding: "8px 12px",
-            }}>Sign in</Link>
-            <a href="#signup" onClick={toSignup} style={{
-              background: INK, color: "#fff", textDecoration: "none", fontWeight: 700,
-              fontSize: 13.5, padding: "9px 16px", borderRadius: 9,
-            }}>Get started</a>
-          </nav>
-        </div>
-      </header>
-
+    <PublicShell>
       {/* Hero */}
       <section style={{ background: `linear-gradient(180deg, ${SOFT}, #fff)`, borderBottom: `1px solid ${LINE}` }}>
         <div style={{ ...wrap, padding: "62px 22px 56px", display: "grid",
@@ -363,6 +321,12 @@ export default function LandingPage() {
               display: "inline-block", background: "#F3E8FF", color: BRAND, fontSize: 12.5,
               fontWeight: 800, padding: "6px 12px", borderRadius: 999, marginBottom: 18,
             }}>For Meesho, Amazon &amp; Flipkart sellers</div>
+            <div style={{
+              display: "inline-flex", alignItems: "center", gap: 7, marginLeft: 9,
+              background: "#ECFDF5", color: "#047857", fontSize: 12.5, fontWeight: 800,
+              padding: "6px 12px", borderRadius: 999, marginBottom: 18,
+              border: "1.5px solid #A7F3D0",
+            }}>🎉 First year free</div>
             <h1 style={{ fontSize: 42, lineHeight: 1.12, fontWeight: 900, margin: "0 0 18px", letterSpacing: "-0.02em" }}>
               Run the whole shop from<br />one screen.
             </h1>
@@ -375,7 +339,7 @@ export default function LandingPage() {
               <a href="#signup" onClick={toSignup} style={{
                 background: `linear-gradient(135deg, ${BRAND}, ${BRAND_2})`, color: "#fff",
                 textDecoration: "none", fontWeight: 800, fontSize: 15.5, padding: "14px 26px", borderRadius: 11,
-              }}>Get started free</a>
+              }}>Start free for a year</a>
               <a href={WA_LINK} target="_blank" rel="noreferrer" style={{
                 background: "#25D366", color: "#fff", textDecoration: "none", fontWeight: 800,
                 fontSize: 15.5, padding: "14px 24px", borderRadius: 11,
@@ -439,7 +403,7 @@ export default function LandingPage() {
             And everything else you'd otherwise keep in spreadsheets
           </h2>
           <p style={{ fontSize: 14.5, color: MUTED, textAlign: "center", margin: "0 0 26px" }}>
-            All included — no per-module pricing.
+            All included — no per-module pricing, and free for your first year.
           </p>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 8, justifyContent: "center" }}>
             {MODULES.map((m) => (
@@ -457,13 +421,13 @@ export default function LandingPage() {
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 42, alignItems: "center" }}>
           <div>
             <h2 style={{ fontSize: 30, fontWeight: 900, margin: "0 0 14px", letterSpacing: "-0.02em" }}>
-              Start with your own numbers
+              Start with your own numbers — free for a year
             </h2>
             <p style={{ fontSize: 16, color: MUTED, lineHeight: 1.68, margin: "0 0 20px" }}>
               Send us your details and we'll get you set up — usually the same day. Upload one month of
               exports and you'll see your real profit, the claims still open, and where the money went.
             </p>
-            {["We set the account up for you", "Bring your existing exports — nothing to re-enter",
+            {[OFFER, "We set the account up for you", "Bring your existing exports — nothing to re-enter",
               "Talk to a person, on WhatsApp, not a ticket queue"].map((t) => (
               <div key={t} style={{ display: "flex", gap: 10, marginBottom: 11, fontSize: 15 }}>
                 <span style={{ color: "#16A34A", fontWeight: 900 }}>✓</span><span>{t}</span>
@@ -479,29 +443,6 @@ export default function LandingPage() {
         </div>
       </section>
 
-      {/* Footer */}
-      <footer style={{ background: INK, color: "rgba(255,255,255,0.72)" }}>
-        <div style={{ ...wrap, padding: "34px 22px", display: "flex", gap: 16, flexWrap: "wrap", alignItems: "center" }}>
-          <div>
-            <div style={{ color: "#fff", fontWeight: 800, fontSize: 15 }}>Rudam Commerce OS</div>
-            <div style={{ fontSize: 13, marginTop: 4 }}>Profit, returns, claims, GST and dispatch — in one place.</div>
-          </div>
-          <div style={{ marginLeft: "auto", display: "flex", gap: 18, alignItems: "center", flexWrap: "wrap" }}>
-            <a href={WA_LINK} target="_blank" rel="noreferrer" style={{ color: "#34D399", textDecoration: "none", fontWeight: 700, fontSize: 14 }}>
-              WhatsApp {WHATSAPP_DISPLAY}
-            </a>
-            <Link to="/login" style={{ color: "rgba(255,255,255,0.8)", textDecoration: "none", fontSize: 14 }}>Sign in</Link>
-          </div>
-        </div>
-      </footer>
-
-      {/* Floating WhatsApp — the one thing that should never scroll away */}
-      <a href={WA_LINK} target="_blank" rel="noreferrer" aria-label="Chat on WhatsApp" style={{
-        position: "fixed", right: 20, bottom: 20, zIndex: 100,
-        width: 56, height: 56, borderRadius: "50%", background: "#25D366",
-        display: "grid", placeItems: "center", fontSize: 26, textDecoration: "none",
-        boxShadow: "0 10px 28px rgba(37,211,102,0.45)",
-      }}>💬</a>
-    </div>
+    </PublicShell>
   );
 }
