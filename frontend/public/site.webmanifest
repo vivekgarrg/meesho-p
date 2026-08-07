@@ -1,0 +1,13 @@
+{
+  "name": "Rudam Commerce OS",
+  "short_name": "Rudam",
+  "description": "Profit, returns, claims, GST and dispatch for Meesho, Amazon and Flipkart sellers.",
+  "icons": [
+    { "src": "/static/frontend/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/static/frontend/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ],
+  "theme_color": "#7C3AED",
+  "background_color": "#ffffff",
+  "display": "standalone",
+  "start_url": "/"
+}
