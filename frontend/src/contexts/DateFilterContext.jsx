@@ -59,13 +59,18 @@ export function DateFilterProvider({ children }) {
         if (cancelled) return;
         const ms = Array.isArray(list) ? list : [];
         setMonths(ms);
-        const hadStoredPreference = !!loadStored();
-        if (!hadStoredPreference && ms.length > 0) {
-          // First-ever visit for this browser — default to the most recent month,
-          // matching the old per-tab dashboards' default instead of "all time".
+        if (ms.length > 0) {
+          // Always land on the newest month, on every load and on every business
+          // switch — not just a browser's first visit.
+          //
+          // The stored preference is deliberately not honoured here: it meant
+          // that whatever period you last looked at came back days later, so the
+          // app could open showing a stale month and quietly present old numbers
+          // as current. Defaulting forward is the safer surprise. The selection
+          // still persists while you navigate within a session.
           setMode("month");
           setSelectedMonth(ms[0]);
-        } else if (selectedMonth && !ms.includes(selectedMonth)) {
+        } else if (selectedMonth) {
           setMode("all");
           setSelectedMonth("");
         }

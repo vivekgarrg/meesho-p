@@ -20,7 +20,7 @@ from accounts.models import Business, User
 from .permissions import get_authorized_business, accessible_businesses
 from .helpers.label_pdf import extract_all_pages
 
-from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, PurchaseBill, PurchaseItem, BlockedCustomer, InventoryAdjustment, ConsumableItem, ConsumablePurchase, ConsumableUsage, InventoryLog, MeeshoInventory, MeeshoPriceUpdate, ExpenseInvoice, ExpenseInvoiceItem, TransportCharge, PackedStockEvent, EstimatedProfitOrder, ReturnDelivery, GstTransaction, GstInvoiceDetail, ScannedOrder, ListingTemplate, ClaimTicket, WorkerTask, WalletEntry, WalletSettlement
+from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, PurchaseBill, PurchaseItem, BlockedCustomer, InventoryAdjustment, ConsumableItem, ConsumablePurchase, ConsumableUsage, InventoryLog, MeeshoInventory, MeeshoPriceUpdate, ExpenseInvoice, ExpenseInvoiceItem, TransportCharge, PackedStockEvent, EstimatedProfitOrder, ReturnDelivery, GstTransaction, GstInvoiceDetail, ScannedOrder, ListingTemplate, ClaimTicket, WorkerTask, WalletEntry, WalletSettlement, TaskListing, PlatformRate, TaskDocument
 from .serializers import (
     OrderPaymentSerializer, AdsCostSerializer,
     ReferralPaymentSerializer, CompensationRecoverySerializer,
@@ -36,6 +36,9 @@ from .serializers import (
     WorkerTaskSerializer,
     WalletEntrySerializer,
     WalletSettlementSerializer,
+    TaskListingSerializer,
+    PlatformRateSerializer,
+    TaskDocumentSerializer,
 )
 
 
@@ -8816,25 +8819,29 @@ def _is_admin(user):
     return getattr(user, "role", None) == User.ROLE_SUPER_ADMIN
 
 
-def _credit(task, kind, amount, user, note=""):
+def _credit(task, kind, amount, by_user, earner, note="", listing=None):
     """
     Write one ledger line, or nothing if there's nothing to pay.
 
+    `earner` is explicit rather than read off the task: a task now has several
+    assignees, so who gets paid depends on who did that particular listing.
+
     Returns the entry (or None). Callers guard against double-payment with the
-    task's *_credited_at stamps; this stays dumb on purpose so the "has it been
-    paid" question has exactly one owner.
+    *_credited_at stamps; this stays dumb on purpose so "has it been paid" has
+    exactly one owner.
     """
     amount = safe_decimal(amount) or Decimal("0")
     if amount == 0:
         return None
     return WalletEntry.objects.create(
         business=task.business,
-        user=task.assigned_to,
+        user=earner,
         task=task,
+        listing=listing,
         kind=kind,
         amount=amount,
         note=note,
-        created_by=user,
+        created_by=by_user,
     )
 
 
@@ -8867,18 +8874,30 @@ def worker_tasks_list(request, business_id):
             return Response({"error": "task_type must be LISTING or RETURN_CLAIM."},
                             status=status.HTTP_400_BAD_REQUEST)
 
-        assignee_id = payload.get("assigned_to")
-        if not assignee_id:
-            return Response({"error": "Pick who this task is for."},
-                            status=status.HTTP_400_BAD_REQUEST)
-        try:
-            assignee = User.objects.get(pk=assignee_id)
-        except (User.DoesNotExist, ValueError, TypeError):
-            return Response({"error": "That worker doesn't exist."},
+        raw_ids = payload.get("assignees") or payload.get("assigned_to")
+        if not isinstance(raw_ids, list):
+            raw_ids = [raw_ids] if raw_ids else []
+        assignees = list(User.objects.filter(pk__in=[i for i in raw_ids if i]))
+        if not assignees:
+            return Response({"error": "Pick at least one person for this task."},
                             status=status.HTTP_400_BAD_REQUEST)
 
-        reward = safe_decimal(payload.get("reward_amount")) or Decimal("0")
-        bonus = safe_decimal(payload.get("bonus_amount")) or Decimal("0")
+        platform = str(payload.get("platform") or WorkerTask.PLATFORM_MEESHO).strip().upper()
+        if platform not in {c[0] for c in WorkerTask.PLATFORM_CHOICES}:
+            return Response({"error": "Unknown platform."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # The rate is whatever is currently set for this platform, unless the
+        # caller overrides it. Copied onto the task so a later rate change can
+        # never re-price work that has already been handed out.
+        rate = PlatformRate.objects.filter(
+            business=business, platform=platform, task_type=task_type
+        ).first()
+        reward = safe_decimal(payload.get("reward_amount"))
+        if reward is None:
+            reward = rate.reward_amount if rate else Decimal("0")
+        bonus = safe_decimal(payload.get("bonus_amount"))
+        if bonus is None:
+            bonus = rate.bonus_amount if rate else Decimal("0")
         if reward < 0 or bonus < 0:
             return Response({"error": "Amounts can't be negative."},
                             status=status.HTTP_400_BAD_REQUEST)
@@ -8886,25 +8905,30 @@ def worker_tasks_list(request, business_id):
         task = WorkerTask.objects.create(
             business=business,
             task_type=task_type,
+            platform=platform,
             title=str(payload.get("title") or "").strip()[:200],
             source_link=str(payload.get("source_link") or "").strip(),
             instructions=str(payload.get("instructions") or "").strip(),
             suborder_no=str(payload.get("suborder_no") or "").strip()[:100],
-            assigned_to=assignee,
             created_by=request.user,
             reward_amount=reward,
             bonus_amount=bonus if task_type == WorkerTask.TYPE_RETURN_CLAIM else Decimal("0"),
         )
-        return Response(WorkerTaskSerializer(task).data, status=status.HTTP_201_CREATED)
+        task.assignees.set(assignees)
+        return Response(WorkerTaskSerializer(task, context={"request": request}).data, status=status.HTTP_201_CREATED)
 
     qs = WorkerTask.objects.filter(business=business).select_related(
-        "assigned_to", "created_by", "reviewed_by", "business"
-    ).prefetch_related("wallet_entries")
+        "created_by", "reviewed_by", "business"
+    ).prefetch_related("wallet_entries", "assignees", "listings")
 
     if not admin:
-        qs = qs.filter(assigned_to=request.user)
+        qs = qs.filter(assignees=request.user)
     elif request.GET.get("assigned_to"):
-        qs = qs.filter(assigned_to_id=request.GET["assigned_to"])
+        qs = qs.filter(assignees__id=request.GET["assigned_to"])
+
+    platform = request.GET.get("platform", "").strip().upper()
+    if platform:
+        qs = qs.filter(platform=platform)
 
     wanted = request.GET.get("status", "").strip().upper()
     if wanted == "OPEN":
@@ -8941,7 +8965,7 @@ def worker_tasks_list(request, business_id):
     return Response({
         "is_admin": admin,
         "total": len(rows),
-        "results": WorkerTaskSerializer(rows, many=True).data,
+        "results": WorkerTaskSerializer(rows, many=True, context={"request": request}).data,
         "stats": {
             "assigned":  by_status.get(WorkerTask.STATUS_ASSIGNED, 0),
             "submitted": by_status.get(WorkerTask.STATUS_SUBMITTED, 0),
@@ -8967,12 +8991,12 @@ def worker_task_detail(request, business_id, pk):
 
     try:
         task = WorkerTask.objects.select_related(
-            "assigned_to", "created_by", "reviewed_by", "business"
-        ).get(pk=pk, business=business)
+            "created_by", "reviewed_by", "business"
+        ).prefetch_related("assignees", "listings").get(pk=pk, business=business)
     except WorkerTask.DoesNotExist:
         return Response({"error": "Task not found."}, status=status.HTTP_404_NOT_FOUND)
 
-    if not admin and task.assigned_to_id != request.user.pk:
+    if not admin and not task.assignees.filter(pk=request.user.pk).exists():
         return Response({"error": "That task isn't yours."}, status=status.HTTP_403_FORBIDDEN)
 
     if request.method == "DELETE":
@@ -8994,7 +9018,7 @@ def worker_task_detail(request, business_id, pk):
             return Response({"error": "Only an admin can edit a task."},
                             status=status.HTTP_403_FORBIDDEN)
         editable = {"title", "source_link", "instructions", "suborder_no",
-                    "reward_amount", "bonus_amount", "assigned_to"}
+                    "reward_amount", "bonus_amount", "assignees", "platform", "is_paused"}
         payload = request.data if isinstance(request.data, dict) else {}
         unknown = set(payload) - editable
         if unknown:
@@ -9011,15 +9035,25 @@ def worker_task_detail(request, business_id, pk):
                     return Response({"error": "Amounts can't be negative."},
                                     status=status.HTTP_400_BAD_REQUEST)
                 setattr(task, field, value)
-        if "assigned_to" in payload:
-            try:
-                task.assigned_to = User.objects.get(pk=payload["assigned_to"])
-            except (User.DoesNotExist, ValueError, TypeError):
-                return Response({"error": "That worker doesn't exist."},
-                                status=status.HTTP_400_BAD_REQUEST)
+        if "platform" in payload:
+            platform = str(payload["platform"] or "").strip().upper()
+            if platform not in {c[0] for c in WorkerTask.PLATFORM_CHOICES}:
+                return Response({"error": "Unknown platform."}, status=status.HTTP_400_BAD_REQUEST)
+            task.platform = platform
+        if "is_paused" in payload:
+            paused = bool(payload["is_paused"])
+            task.is_paused = paused
+            task.paused_at = timezone.now() if paused else None
         task.save()
+        if "assignees" in payload:
+            ids = payload["assignees"] if isinstance(payload["assignees"], list) else [payload["assignees"]]
+            people = list(User.objects.filter(pk__in=[i for i in ids if i]))
+            if not people:
+                return Response({"error": "A task needs at least one person."},
+                                status=status.HTTP_400_BAD_REQUEST)
+            task.assignees.set(people)
 
-    return Response(WorkerTaskSerializer(task).data)
+    return Response(WorkerTaskSerializer(task, context={"request": request}).data)
 
 
 @api_view(["POST"])
@@ -9032,13 +9066,11 @@ def worker_task_submit(request, business_id, pk):
     business = get_authorized_business(request, business_id)
 
     try:
-        task = WorkerTask.objects.select_related("assigned_to", "business").get(
-            pk=pk, business=business
-        )
+        task = WorkerTask.objects.select_related("business").get(pk=pk, business=business)
     except WorkerTask.DoesNotExist:
         return Response({"error": "Task not found."}, status=status.HTTP_404_NOT_FOUND)
 
-    if task.assigned_to_id != request.user.pk and not _is_admin(request.user):
+    if not task.assignees.filter(pk=request.user.pk).exists() and not _is_admin(request.user):
         return Response({"error": "That task isn't yours."}, status=status.HTTP_403_FORBIDDEN)
     if task.status == WorkerTask.STATUS_APPROVED:
         return Response({"error": "This task is already approved."},
@@ -9056,6 +9088,7 @@ def worker_task_submit(request, business_id, pk):
     task.submitted_reference = reference
     task.submitted_note = str(payload.get("submitted_note") or "").strip()
     task.submitted_at = timezone.now()
+    task.submitted_by = request.user
     task.status = WorkerTask.STATUS_SUBMITTED
     # A resubmission is a fresh ask, so the previous verdict shouldn't linger.
     task.review_comment = ""
@@ -9063,7 +9096,7 @@ def worker_task_submit(request, business_id, pk):
     task.reviewed_at = None
     task.save()
 
-    return Response(WorkerTaskSerializer(task).data)
+    return Response(WorkerTaskSerializer(task, context={"request": request}).data)
 
 
 @api_view(["POST"])
@@ -9085,9 +9118,7 @@ def worker_task_review(request, business_id, pk):
                         status=status.HTTP_403_FORBIDDEN)
 
     try:
-        task = WorkerTask.objects.select_related("assigned_to", "business").get(
-            pk=pk, business=business
-        )
+        task = WorkerTask.objects.select_related("business").get(pk=pk, business=business)
     except WorkerTask.DoesNotExist:
         return Response({"error": "Task not found."}, status=status.HTTP_404_NOT_FOUND)
 
@@ -9106,21 +9137,23 @@ def worker_task_review(request, business_id, pk):
     if decision == "REJECT":
         task.status = WorkerTask.STATUS_REJECTED
         task.save()
-        return Response({"task": WorkerTaskSerializer(task).data, "credited": None})
+        return Response({"task": WorkerTaskSerializer(task, context={"request": request}).data, "credited": None})
 
     task.status = WorkerTask.STATUS_APPROVED
-    if task.reward_credited_at is None:
-        kind = (WalletEntry.KIND_LISTING if task.task_type == WorkerTask.TYPE_LISTING
-                else WalletEntry.KIND_CLAIM_RAISED)
-        entry = _credit(task, kind, task.reward_amount, request.user,
-                        note=task.title or task.submitted_sku or task.suborder_no)
+    # Listing pay happens per SKU (see task_listing_review); only claim work is
+    # paid at the task level, and it goes to whoever submitted it.
+    if task.task_type == WorkerTask.TYPE_RETURN_CLAIM and task.reward_credited_at is None:
+        earner = task.submitted_by or task.assignees.first()
+        entry = _credit(task, WalletEntry.KIND_CLAIM_RAISED, task.reward_amount,
+                        request.user, earner,
+                        note=task.title or task.suborder_no) if earner else None
         if entry:
             task.reward_credited_at = now
             credited = float(entry.amount)
     task.save()
 
     return Response({
-        "task": WorkerTaskSerializer(task).data,
+        "task": WorkerTaskSerializer(task, context={"request": request}).data,
         "credited": credited,
         "awaiting_bonus": task.awaiting_bonus,
     })
@@ -9158,7 +9191,10 @@ def _release_claim_bonuses(business, user=None):
     for task in pending:
         if task.suborder_no not in approved_subs:
             continue
-        entry = _credit(task, WalletEntry.KIND_CLAIM_BONUS, task.bonus_amount, user,
+        earner = task.submitted_by or task.assignees.first()
+        if earner is None:
+            continue
+        entry = _credit(task, WalletEntry.KIND_CLAIM_BONUS, task.bonus_amount, user, earner,
                         note=f"Meesho approved claim for {task.suborder_no}")
         if entry:
             task.bonus_credited_at = now
@@ -9297,6 +9333,326 @@ def wallet_adjust(request, business_id):
         amount=amount, note=note, created_by=request.user,
     )
     return Response(WalletEntrySerializer(entry).data, status=status.HTTP_201_CREATED)
+
+
+# India's GST slabs. Fixed by law rather than by us, so they are a closed list —
+# a free-text tax field is how you end up with 5.5% on an invoice.
+GST_SLABS = ["0", "0.25", "3", "5", "12", "18", "28"]
+
+_LISTING_WRITABLE = {
+    "sku_id", "listing_price", "wrong_defective_price", "mrp",
+    "min_settlement_amount", "sku_prefix", "hsn_code", "tax_percent", "notes",
+}
+_LISTING_MONEY = {"listing_price", "wrong_defective_price", "mrp", "min_settlement_amount"}
+
+
+@api_view(["GET"])
+def listing_reference(request, business_id):
+    """
+    The dropdown data for a listing form: GST slabs, and the HSN codes this
+    business actually uses with the rate it has actually charged against each.
+
+    Derived from your own GST filings rather than a bundled HSN table: a generic
+    list would be thousands of irrelevant codes, and any rate in it would be our
+    guess. What you have invoiced is the honest answer for what you sell.
+    """
+    business = get_authorized_business(request, business_id)
+
+    # The tax lines carry both the HSN and the rate charged, so the suggestion
+    # is simply the rate this business has most often filed under that code.
+    tally = {}
+    for hsn, rate in (
+        GstTransaction.objects.filter(business=business).exclude(hsn_code="")
+        .values_list("hsn_code", "gst_rate")
+    ):
+        bucket = tally.setdefault(hsn, {"count": 0, "rates": {}})
+        bucket["count"] += 1
+        if rate is not None:
+            key = str(int(rate)) if rate == int(rate) else str(rate)
+            bucket["rates"][key] = bucket["rates"].get(key, 0) + 1
+
+    # Codes that appear on invoices but never on a tax line still belong in the
+    # dropdown — they're things this business genuinely sells.
+    for hsn in (
+        GstInvoiceDetail.objects.filter(business=business).exclude(hsn="")
+        .values_list("hsn", flat=True).distinct()
+    ):
+        tally.setdefault(hsn, {"count": 0, "rates": {}})
+
+    hsn_codes = []
+    for hsn, info in sorted(tally.items(), key=lambda kv: -kv[1]["count"]):
+        common = max(info["rates"].items(), key=lambda kv: kv[1])[0] if info["rates"] else None
+        hsn_codes.append({"hsn": hsn, "used": info["count"], "suggested_tax_percent": common})
+
+    return Response({
+        "gst_slabs": GST_SLABS,
+        "hsn_codes": hsn_codes,
+        "platforms": [{"value": v, "label": l} for v, l in WorkerTask.PLATFORM_CHOICES],
+    })
+
+
+@api_view(["POST"])
+def task_listing_add(request, business_id, pk):
+    """
+    Add one SKU to a listing task.
+
+    Refuses a duplicate SKU outright — the same SKU listed twice is either a
+    slip or two workers claiming the same job, and either way the tasker needs
+    telling immediately rather than at review time. The check spans the whole
+    business, not just this task, because that is the scope in which a SKU is
+    meant to be unique.
+    """
+    business = get_authorized_business(request, business_id)
+
+    try:
+        task = WorkerTask.objects.get(pk=pk, business=business)
+    except WorkerTask.DoesNotExist:
+        return Response({"error": "Task not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    admin = _is_admin(request.user)
+    if not admin and not task.assignees.filter(pk=request.user.pk).exists():
+        return Response({"error": "That task isn't yours."}, status=status.HTTP_403_FORBIDDEN)
+    if task.task_type != WorkerTask.TYPE_LISTING:
+        return Response({"error": "Only listing tasks take SKUs."},
+                        status=status.HTTP_400_BAD_REQUEST)
+    if task.is_paused:
+        return Response({"error": "This task is paused — no new SKUs can be added."},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    payload = request.data if isinstance(request.data, dict) else {}
+    sku_id = str(payload.get("sku_id") or "").strip()[:300]
+    if not sku_id:
+        return Response({"error": "Enter the SKU id."}, status=status.HTTP_400_BAD_REQUEST)
+
+    clash = TaskListing.objects.filter(business=business, sku_id__iexact=sku_id).first()
+    if clash:
+        who = clash.created_by.username if clash.created_by_id else "someone"
+        return Response({
+            "error": f"SKU '{sku_id}' is already listed"
+                     + (f" on task #{clash.task_id} by {who}." if clash.task_id else "."),
+            "duplicate_of": {"task_id": clash.task_id, "listing_id": clash.pk, "by": who},
+        }, status=status.HTTP_409_CONFLICT)
+
+    fields = {}
+    for key in _LISTING_WRITABLE - {"sku_id"}:
+        if key not in payload:
+            continue
+        if key in _LISTING_MONEY or key == "tax_percent":
+            fields[key] = safe_decimal(payload[key])
+        else:
+            fields[key] = str(payload[key] or "").strip()
+
+    listing = TaskListing.objects.create(
+        business=business, task=task, created_by=request.user, sku_id=sku_id, **fields
+    )
+    return Response(TaskListingSerializer(listing).data, status=status.HTTP_201_CREATED)
+
+
+@api_view(["GET", "PATCH", "DELETE"])
+def task_listing_detail(request, business_id, pk):
+    """Edit or remove one SKU. A paused task, or an approved listing, is frozen."""
+    business = get_authorized_business(request, business_id)
+    admin = _is_admin(request.user)
+
+    try:
+        listing = TaskListing.objects.select_related("task", "created_by", "reviewed_by").get(
+            pk=pk, business=business
+        )
+    except TaskListing.DoesNotExist:
+        return Response({"error": "Listing not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    mine = listing.created_by_id == request.user.pk
+    if not admin and not mine:
+        return Response({"error": "That listing isn't yours."}, status=status.HTTP_403_FORBIDDEN)
+
+    if request.method == "GET":
+        return Response(TaskListingSerializer(listing).data)
+
+    frozen = listing.task.is_paused or listing.status == TaskListing.STATUS_APPROVED
+    if frozen and not admin:
+        reason = ("This task is paused — its listings are read-only."
+                  if listing.task.is_paused else "This listing is approved and can't be changed.")
+        return Response({"error": reason}, status=status.HTTP_400_BAD_REQUEST)
+
+    if request.method == "DELETE":
+        if listing.wallet_entries.exists():
+            return Response({"error": "This listing has already been paid for."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        listing.delete()
+        return Response({"deleted": True})
+
+    payload = request.data if isinstance(request.data, dict) else {}
+    unknown = set(payload) - _LISTING_WRITABLE
+    if unknown:
+        return Response({"error": f"Not editable: {', '.join(sorted(unknown))}"},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    if "sku_id" in payload:
+        new_sku = str(payload["sku_id"] or "").strip()[:300]
+        if not new_sku:
+            return Response({"error": "SKU id can't be empty."}, status=status.HTTP_400_BAD_REQUEST)
+        if TaskListing.objects.filter(business=business, sku_id__iexact=new_sku).exclude(pk=listing.pk).exists():
+            return Response({"error": f"SKU '{new_sku}' is already listed."},
+                            status=status.HTTP_409_CONFLICT)
+        listing.sku_id = new_sku
+
+    for key in _LISTING_WRITABLE - {"sku_id"}:
+        if key not in payload:
+            continue
+        if key in _LISTING_MONEY or key == "tax_percent":
+            setattr(listing, key, safe_decimal(payload[key]))
+        else:
+            setattr(listing, key, str(payload[key] or "").strip())
+
+    # An edit is a fresh ask, so a previous rejection shouldn't stand.
+    if listing.status == TaskListing.STATUS_REJECTED:
+        listing.status = TaskListing.STATUS_PENDING
+        listing.review_comment = ""
+    listing.save()
+    return Response(TaskListingSerializer(listing).data)
+
+
+@api_view(["POST"])
+def task_listing_review(request, business_id, pk):
+    """
+    Approve or reject one SKU. Approving is what pays, at the task's rate,
+    frozen onto the listing so a later rate change can't rewrite history.
+    """
+    business = get_authorized_business(request, business_id)
+    if not _is_admin(request.user):
+        return Response({"error": "Only an admin can review listings."},
+                        status=status.HTTP_403_FORBIDDEN)
+
+    try:
+        listing = TaskListing.objects.select_related("task", "created_by").get(
+            pk=pk, business=business
+        )
+    except TaskListing.DoesNotExist:
+        return Response({"error": "Listing not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    payload = request.data if isinstance(request.data, dict) else {}
+    decision = str(payload.get("decision") or "").strip().upper()
+    if decision not in ("APPROVE", "REJECT"):
+        return Response({"error": "decision must be APPROVE or REJECT."},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    now = timezone.now()
+    listing.review_comment = str(payload.get("comment") or "").strip()
+    listing.reviewed_by = request.user
+    listing.reviewed_at = now
+    credited = None
+
+    if decision == "REJECT":
+        listing.status = TaskListing.STATUS_REJECTED
+        listing.save()
+        return Response({"listing": TaskListingSerializer(listing).data, "credited": None})
+
+    listing.status = TaskListing.STATUS_APPROVED
+    if listing.reward_credited_at is None:
+        listing.reward_amount = listing.task.reward_amount
+        entry = _credit(listing.task, WalletEntry.KIND_LISTING, listing.reward_amount,
+                        request.user, listing.created_by,
+                        note=f"{listing.sku_id} ({listing.task.platform})", listing=listing)
+        if entry:
+            listing.reward_credited_at = now
+            credited = float(entry.amount)
+    listing.save()
+
+    return Response({"listing": TaskListingSerializer(listing).data, "credited": credited})
+
+
+@api_view(["GET", "PUT"])
+def platform_rates(request, business_id):
+    """
+    The standing rate per platform. Read by everyone (a worker should be able to
+    see what work is worth); only an admin can change it.
+    """
+    business = get_authorized_business(request, business_id)
+
+    if request.method == "PUT":
+        if not _is_admin(request.user):
+            return Response({"error": "Only an admin can set rates."},
+                            status=status.HTTP_403_FORBIDDEN)
+        rows = request.data.get("rates") if isinstance(request.data, dict) else None
+        if not isinstance(rows, list):
+            return Response({"error": "Send a list of rates."}, status=status.HTTP_400_BAD_REQUEST)
+
+        for row in rows:
+            platform = str(row.get("platform") or "").strip().upper()
+            task_type = str(row.get("task_type") or WorkerTask.TYPE_LISTING).strip().upper()
+            if platform not in {c[0] for c in WorkerTask.PLATFORM_CHOICES}:
+                continue
+            reward = safe_decimal(row.get("reward_amount")) or Decimal("0")
+            bonus = safe_decimal(row.get("bonus_amount")) or Decimal("0")
+            if reward < 0 or bonus < 0:
+                return Response({"error": "Rates can't be negative."},
+                                status=status.HTTP_400_BAD_REQUEST)
+            PlatformRate.objects.update_or_create(
+                business=business, platform=platform, task_type=task_type,
+                defaults={"reward_amount": reward, "bonus_amount": bonus,
+                          "updated_by": request.user},
+            )
+
+    rates = PlatformRate.objects.filter(business=business).select_related("updated_by")
+    return Response({
+        "results": PlatformRateSerializer(rates, many=True).data,
+        "platforms": [{"value": v, "label": l} for v, l in WorkerTask.PLATFORM_CHOICES],
+        "task_types": [{"value": v, "label": l} for v, l in WorkerTask.TYPE_CHOICES],
+    })
+
+
+@api_view(["GET", "POST"])
+def task_documents(request, business_id):
+    """The how-to list. Everyone reads it; an admin maintains it."""
+    business = get_authorized_business(request, business_id)
+
+    if request.method == "POST":
+        if not _is_admin(request.user):
+            return Response({"error": "Only an admin can add documents."},
+                            status=status.HTTP_403_FORBIDDEN)
+        payload = request.data if isinstance(request.data, dict) else {}
+        title = str(payload.get("title") or "").strip()[:200]
+        if not title:
+            return Response({"error": "Give the document a title."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        doc = TaskDocument.objects.create(
+            business=business,
+            title=title,
+            url=str(payload.get("url") or "").strip(),
+            description=str(payload.get("description") or "").strip(),
+            platform=str(payload.get("platform") or "").strip().upper()[:20],
+            sort_order=int(payload.get("sort_order") or 0),
+            created_by=request.user,
+        )
+        return Response(TaskDocumentSerializer(doc).data, status=status.HTTP_201_CREATED)
+
+    docs = TaskDocument.objects.filter(business=business).select_related("created_by")
+    return Response({"results": TaskDocumentSerializer(docs, many=True).data})
+
+
+@api_view(["PATCH", "DELETE"])
+def task_document_detail(request, business_id, pk):
+    business = get_authorized_business(request, business_id)
+    if not _is_admin(request.user):
+        return Response({"error": "Only an admin can change documents."},
+                        status=status.HTTP_403_FORBIDDEN)
+    try:
+        doc = TaskDocument.objects.get(pk=pk, business=business)
+    except TaskDocument.DoesNotExist:
+        return Response({"error": "Document not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == "DELETE":
+        doc.delete()
+        return Response({"deleted": True})
+
+    payload = request.data if isinstance(request.data, dict) else {}
+    for field in ("title", "url", "description", "platform"):
+        if field in payload:
+            setattr(doc, field, str(payload[field] or "").strip())
+    if "sort_order" in payload:
+        doc.sort_order = int(payload["sort_order"] or 0)
+    doc.save()
+    return Response(TaskDocumentSerializer(doc).data)
 
 
 @api_view(["GET"])

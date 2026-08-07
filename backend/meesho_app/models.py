@@ -1475,6 +1475,17 @@ class WorkerTask(models.Model):
         (TYPE_RETURN_CLAIM, "Return claim"),
     ]
 
+    # Which marketplace the listing goes on. Rates are held per platform, since
+    # the work and what it's worth differ between them.
+    PLATFORM_MEESHO = "MEESHO"
+    PLATFORM_AMAZON = "AMAZON"
+    PLATFORM_FLIPKART = "FLIPKART"
+    PLATFORM_CHOICES = [
+        (PLATFORM_MEESHO, "Meesho"),
+        (PLATFORM_AMAZON, "Amazon"),
+        (PLATFORM_FLIPKART, "Flipkart"),
+    ]
+
     # Meesho rejects claim videos above this, which is the whole reason the
     # compression step exists in the worker's instructions.
     CLAIM_VIDEO_MAX_MB = 22
@@ -1506,8 +1517,19 @@ class WorkerTask(models.Model):
     # uploaded ticket sheet find the task later and release the bonus.
     suborder_no = models.CharField(max_length=100, blank=True, db_index=True)
 
-    assigned_to = models.ForeignKey("accounts.User", on_delete=models.PROTECT,
-                                    related_name="worker_tasks")
+    platform = models.CharField(max_length=20, choices=PLATFORM_CHOICES,
+                                default=PLATFORM_MEESHO, db_index=True)
+
+    # The same brief can go to several people, each doing their own listings and
+    # paid for their own. A single FK would have forced you to duplicate the task
+    # per person, and then the brief, the link and the rate could drift apart.
+    assignees = models.ManyToManyField("accounts.User", related_name="worker_tasks")
+
+    # Paused work stays visible but takes no new listings — the way to stop a
+    # job mid-flight without hiding what has already been done or deleting a
+    # task whose listings have already been paid for.
+    is_paused = models.BooleanField(default=False, db_index=True)
+    paused_at = models.DateTimeField(null=True, blank=True)
     created_by  = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True,
                                     blank=True, related_name="worker_tasks_created")
 
@@ -1531,6 +1553,10 @@ class WorkerTask(models.Model):
                                            help_text="RETURN_CLAIM: ticket id / reference")
     submitted_note      = models.TextField(blank=True)
     submitted_at        = models.DateTimeField(null=True, blank=True)
+    # Claim work is submitted by one person even when the brief went to several,
+    # so the payout has to know who actually did it.
+    submitted_by        = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True,
+                                            blank=True, related_name="worker_tasks_submitted")
 
     review_comment = models.TextField(blank=True)
     reviewed_by    = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True,
@@ -1549,12 +1575,11 @@ class WorkerTask(models.Model):
         ordering = ["-created_at"]
         indexes = [
             models.Index(fields=["business", "status"]),
-            models.Index(fields=["assigned_to", "status"]),
             models.Index(fields=["business", "suborder_no"]),
         ]
 
     def __str__(self):
-        return f"{self.task_type} · {self.assigned_to_id} · {self.status}"
+        return f"{self.task_type} · {self.platform} · {self.status}"
 
     @property
     def total_possible(self):
@@ -1602,6 +1627,10 @@ class WalletEntry(models.Model):
                              related_name="wallet_entries")
     task = models.ForeignKey(WorkerTask, on_delete=models.SET_NULL, null=True, blank=True,
                              related_name="wallet_entries")
+    # Listing pay is per SKU, so the ledger points at the exact listing it paid
+    # for — "which of my listings earned this" has to be answerable.
+    listing = models.ForeignKey("TaskListing", on_delete=models.SET_NULL, null=True, blank=True,
+                                related_name="wallet_entries")
 
     kind   = models.CharField(max_length=20, choices=KIND_CHOICES, db_index=True)
     amount = models.DecimalField(max_digits=10, decimal_places=2,
@@ -1661,3 +1690,151 @@ class WalletSettlement(models.Model):
 
     def __str__(self):
         return f"{self.user_id} paid ₹{self.amount} on {self.paid_on}"
+
+
+class TaskListing(models.Model):
+    """
+    One SKU created for a listing task.
+
+    A task is a *product*; a listing is one SKU of it. Workers routinely create
+    several variants from the same photo set, so the SKU had to stop being a
+    single field on the task — otherwise a second variant meant either a second
+    task (duplicating the brief and the rate) or overwriting the first.
+
+    Each row is priced and approved on its own, so pay is genuinely per listing
+    and rejecting one variant doesn't cost the worker the others.
+
+    `sku_id` is unique per business: the same SKU listed twice is either a
+    mistake or two people claiming the same work, and the database is the only
+    place that can catch it reliably.
+    """
+
+    STATUS_PENDING  = "PENDING"
+    STATUS_APPROVED = "APPROVED"
+    STATUS_REJECTED = "REJECTED"
+    STATUS_CHOICES = [
+        (STATUS_PENDING,  "Awaiting review"),
+        (STATUS_APPROVED, "Approved"),
+        (STATUS_REJECTED, "Rejected"),
+    ]
+
+    business = models.ForeignKey("accounts.Business", on_delete=models.PROTECT,
+                                 related_name="task_listings")
+    task = models.ForeignKey(WorkerTask, on_delete=models.CASCADE, related_name="listings")
+    created_by = models.ForeignKey("accounts.User", on_delete=models.PROTECT,
+                                   related_name="task_listings")
+
+    sku_id = models.CharField(max_length=300, db_index=True)
+
+    # ── What was listed, as entered by the worker ─────────────────────────
+    # Held here rather than on the task because they vary per variant, and
+    # because this is the record of what was actually put on the marketplace.
+    listing_price          = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True,
+                                                 help_text="Selling price on the platform")
+    wrong_defective_price  = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True,
+                                                 help_text="Price claimed back for a wrong/defective return")
+    mrp                    = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    min_settlement_amount  = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True,
+                                                 help_text="Lowest settlement worth accepting")
+    sku_prefix             = models.CharField(max_length=100, blank=True,
+                                              help_text="The agreed prefix this SKU should start with")
+    hsn_code               = models.CharField(max_length=20, blank=True, db_index=True)
+    tax_percent            = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    notes                  = models.TextField(blank=True)
+
+    # ── Review ────────────────────────────────────────────────────────────
+    status         = models.CharField(max_length=20, choices=STATUS_CHOICES,
+                                      default=STATUS_PENDING, db_index=True)
+    review_comment = models.TextField(blank=True)
+    reviewed_by    = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True,
+                                       blank=True, related_name="task_listings_reviewed")
+    reviewed_at    = models.DateTimeField(null=True, blank=True)
+
+    # What this listing paid, frozen at approval. Copied from the task so that
+    # changing a rate later cannot retroactively alter what somebody was paid.
+    reward_amount      = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    reward_credited_at = models.DateTimeField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "task_listings"
+        ordering = ["-created_at"]
+        unique_together = [("business", "sku_id")]
+        indexes = [
+            models.Index(fields=["task", "status"]),
+            models.Index(fields=["created_by", "status"]),
+        ]
+
+    def __str__(self):
+        return f"{self.sku_id} ({self.status})"
+
+    @property
+    def prefix_ok(self):
+        """Whether the SKU honours the prefix it was supposed to start with."""
+        if not self.sku_prefix:
+            return None
+        return self.sku_id.lower().startswith(self.sku_prefix.lower())
+
+
+class PlatformRate(models.Model):
+    """
+    What a piece of work pays, per platform.
+
+    Kept as its own table so a rate is decided once and stays put until somebody
+    changes it — task creation reads the current rate and copies it onto the
+    task, and approval copies it again onto the listing. Editing a rate here
+    therefore affects only future work, never anything already done.
+    """
+
+    business = models.ForeignKey("accounts.Business", on_delete=models.PROTECT,
+                                 related_name="platform_rates")
+    platform  = models.CharField(max_length=20, choices=WorkerTask.PLATFORM_CHOICES)
+    task_type = models.CharField(max_length=20, choices=WorkerTask.TYPE_CHOICES,
+                                 default=WorkerTask.TYPE_LISTING)
+
+    reward_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    bonus_amount  = models.DecimalField(max_digits=10, decimal_places=2, default=0,
+                                        help_text="Claim tasks only")
+
+    updated_by = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True,
+                                   blank=True, related_name="platform_rates_updated")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "platform_rates"
+        ordering = ["platform", "task_type"]
+        unique_together = [("business", "platform", "task_type")]
+
+    def __str__(self):
+        return f"{self.platform} {self.task_type} ₹{self.reward_amount}"
+
+
+class TaskDocument(models.Model):
+    """
+    A how-to the team can refer to — the listing manual, a video walkthrough,
+    the claim process. Just titled links, kept in a deliberate order, so the
+    answer to "how do I do this" lives next to the work instead of in a chat.
+    """
+
+    business = models.ForeignKey("accounts.Business", on_delete=models.PROTECT,
+                                 related_name="task_documents")
+    title       = models.CharField(max_length=200)
+    url         = models.TextField(blank=True)
+    description = models.TextField(blank=True)
+    # Which platform it explains, or blank for anything.
+    platform    = models.CharField(max_length=20, blank=True)
+    sort_order  = models.IntegerField(default=0)
+
+    created_by = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True,
+                                   blank=True, related_name="task_documents_created")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "task_documents"
+        ordering = ["sort_order", "title"]
+
+    def __str__(self):
+        return self.title

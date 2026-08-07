@@ -1,7 +1,7 @@
 from rest_framework import serializers
 
 from .helpers.helper import strip_html
-from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, ParentItemPrice, ParentPriceHistory, Order, LabelOrder, ReturnDelivery, ScannedOrder, ListingTemplate, ClaimTicket, WorkerTask, WalletEntry, WalletSettlement
+from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, ParentItemPrice, ParentPriceHistory, Order, LabelOrder, ReturnDelivery, ScannedOrder, ListingTemplate, ClaimTicket, WorkerTask, WalletEntry, WalletSettlement, TaskListing, PlatformRate, TaskDocument
 
 
 class OrderPaymentSerializer(serializers.ModelSerializer):
@@ -211,7 +211,12 @@ class WorkerTaskSerializer(serializers.ModelSerializer):
     flattened on because the worker's phone shouldn't need a second request to
     render a list row.
     """
-    assigned_to_name = serializers.CharField(source="assigned_to.username", read_only=True, default=None)
+    assignee_names   = serializers.SerializerMethodField()
+    assignee_ids     = serializers.SerializerMethodField()
+    submitted_by_name = serializers.CharField(source="submitted_by.username", read_only=True, default=None)
+    listing_count    = serializers.SerializerMethodField()
+    approved_count   = serializers.SerializerMethodField()
+    listings         = serializers.SerializerMethodField()
     created_by_name  = serializers.CharField(source="created_by.username", read_only=True, default=None)
     reviewed_by_name = serializers.CharField(source="reviewed_by.username", read_only=True, default=None)
     business_name    = serializers.CharField(source="business.name", read_only=True, default=None)
@@ -225,11 +230,36 @@ class WorkerTaskSerializer(serializers.ModelSerializer):
         read_only_fields = [
             "business", "created_by", "reviewed_by", "reviewed_at", "submitted_at",
             "status", "reward_credited_at", "bonus_credited_at", "created_at", "updated_at",
+            "submitted_by", "paused_at",
         ]
 
     def get_earned(self, obj):
         """What this task has actually paid so far — summed from the ledger."""
         return float(sum(e.amount for e in obj.wallet_entries.all()))
+
+    def get_assignee_names(self, obj):
+        return [u.username for u in obj.assignees.all()]
+
+    def get_assignee_ids(self, obj):
+        return [u.pk for u in obj.assignees.all()]
+
+    def get_listing_count(self, obj):
+        return obj.listings.count()
+
+    def get_approved_count(self, obj):
+        return sum(1 for l in obj.listings.all() if l.status == TaskListing.STATUS_APPROVED)
+
+    def get_listings(self, obj):
+        """
+        The SKUs on this task. A worker sees only their own — several people can
+        share a brief, and one worker's variants are not another's business.
+        """
+        rows = obj.listings.all()
+        user = (self.context.get("request").user
+                if self.context.get("request") is not None else None)
+        if user is not None and getattr(user, "role", None) != "super_admin":
+            rows = [r for r in rows if r.created_by_id == user.pk]
+        return TaskListingSerializer(rows, many=True).data
 
 
 class WalletEntrySerializer(serializers.ModelSerializer):
@@ -257,3 +287,37 @@ class WalletSettlementSerializer(serializers.ModelSerializer):
 
     def get_entry_count(self, obj):
         return obj.entries.count()
+
+
+class TaskListingSerializer(serializers.ModelSerializer):
+    created_by_name  = serializers.CharField(source="created_by.username", read_only=True, default=None)
+    reviewed_by_name = serializers.CharField(source="reviewed_by.username", read_only=True, default=None)
+    platform         = serializers.CharField(source="task.platform", read_only=True, default=None)
+    task_title       = serializers.CharField(source="task.title", read_only=True, default=None)
+    prefix_ok        = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = TaskListing
+        fields = "__all__"
+        read_only_fields = [
+            "business", "task", "created_by", "status", "reviewed_by", "reviewed_at",
+            "reward_amount", "reward_credited_at", "created_at", "updated_at",
+        ]
+
+
+class PlatformRateSerializer(serializers.ModelSerializer):
+    updated_by_name = serializers.CharField(source="updated_by.username", read_only=True, default=None)
+
+    class Meta:
+        model = PlatformRate
+        fields = "__all__"
+        read_only_fields = ["business", "updated_by", "updated_at"]
+
+
+class TaskDocumentSerializer(serializers.ModelSerializer):
+    created_by_name = serializers.CharField(source="created_by.username", read_only=True, default=None)
+
+    class Meta:
+        model = TaskDocument
+        fields = "__all__"
+        read_only_fields = ["business", "created_by", "created_at", "updated_at"]

@@ -82,6 +82,10 @@ API_OWNERSHIP = {
     # The tasks screen is the one thing a worker account needs; the API enforces
     # per-user scoping on top, so granting it exposes only their own tasks.
     "worker-tasks/":         ["/tasks"],
+    "task-listings/":        ["/tasks"],
+    "task-reference/":       ["/tasks"],
+    "task-documents/":       ["/tasks"],
+    "platform-rates/":       ["/tasks"],
     "wallet/":               ["/tasks"],
     "order-scan/":           ["/order-scan"],
 
