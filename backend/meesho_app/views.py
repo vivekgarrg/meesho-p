@@ -8913,6 +8913,7 @@ def worker_tasks_list(request, business_id):
             created_by=request.user,
             reward_amount=reward,
             bonus_amount=bonus if task_type == WorkerTask.TYPE_RETURN_CLAIM else Decimal("0"),
+            listing_defaults=payload.get("listing_defaults") or {},
         )
         task.assignees.set(assignees)
         return Response(WorkerTaskSerializer(task, context={"request": request}).data, status=status.HTTP_201_CREATED)
@@ -9018,7 +9019,8 @@ def worker_task_detail(request, business_id, pk):
             return Response({"error": "Only an admin can edit a task."},
                             status=status.HTTP_403_FORBIDDEN)
         editable = {"title", "source_link", "instructions", "suborder_no",
-                    "reward_amount", "bonus_amount", "assignees", "platform", "is_paused"}
+                    "reward_amount", "bonus_amount", "assignees", "platform", "is_paused",
+                    "listing_defaults"}
         payload = request.data if isinstance(request.data, dict) else {}
         unknown = set(payload) - editable
         if unknown:
@@ -9035,6 +9037,12 @@ def worker_task_detail(request, business_id, pk):
                     return Response({"error": "Amounts can't be negative."},
                                     status=status.HTTP_400_BAD_REQUEST)
                 setattr(task, field, value)
+        if "listing_defaults" in payload:
+            defaults = payload["listing_defaults"]
+            if not isinstance(defaults, dict):
+                return Response({"error": "listing_defaults must be an object."},
+                                status=status.HTTP_400_BAD_REQUEST)
+            task.listing_defaults = defaults
         if "platform" in payload:
             platform = str(payload["platform"] or "").strip().upper()
             if platform not in {c[0] for c in WorkerTask.PLATFORM_CHOICES}:
@@ -9433,14 +9441,20 @@ def task_listing_add(request, business_id, pk):
             "duplicate_of": {"task_id": clash.task_id, "listing_id": clash.pk, "by": who},
         }, status=status.HTTP_409_CONFLICT)
 
+    # Anything the worker leaves blank falls back to what you set on the task,
+    # so the values you decided are applied even if the form is rushed.
+    defaults = task.listing_defaults or {}
     fields = {}
     for key in _LISTING_WRITABLE - {"sku_id"}:
-        if key not in payload:
+        raw = payload.get(key)
+        if raw in (None, ""):
+            raw = defaults.get(key)
+        if raw in (None, ""):
             continue
         if key in _LISTING_MONEY or key == "tax_percent":
-            fields[key] = safe_decimal(payload[key])
+            fields[key] = safe_decimal(raw)
         else:
-            fields[key] = str(payload[key] or "").strip()
+            fields[key] = str(raw).strip()
 
     listing = TaskListing.objects.create(
         business=business, task=task, created_by=request.user, sku_id=sku_id, **fields

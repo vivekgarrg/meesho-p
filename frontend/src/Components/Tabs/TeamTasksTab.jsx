@@ -188,12 +188,12 @@ function ListingRow({ listing, isAdmin, platform, reference, frozen, onSave, onD
 }
 
 /** The per-SKU field set — shared by the add form and the edit row. */
-function ListingFields({ form, set, platform, reference }) {
+function ListingFields({ form, set, platform, reference, hideSku }) {
   const hsnList = reference?.hsn_codes || [];
   const slabs = reference?.gst_slabs || [];
   return (
     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 9 }}>
-      {LISTING_FIELDS.map((f) => (
+      {LISTING_FIELDS.filter((f) => !(hideSku && f.key === "sku_id")).map((f) => (
         <div key={f.key}>
           <label style={{ ...S.label, marginBottom: 3 }}>
             {f.platformLabel ? `${platform} price` : f.label}{f.required ? " *" : ""}
@@ -234,11 +234,15 @@ function AddListing({ task, reference, onAdd, busy }) {
   // Second and later SKUs of the same product share almost everything with the
   // first, so the form opens pre-filled from the last one added — only the SKU
   // itself is cleared.
+  // Prefer the last SKU added (variants of one product are nearly identical),
+  // and fall back to whatever the admin set on the task.
   const last = (task.listings || [])[0];
+  const defaults = task.listing_defaults || {};
   const seed = () => {
     const base = { sku_id: "" };
     LISTING_FIELDS.forEach((f) => {
-      if (f.key !== "sku_id") base[f.key] = last ? (last[f.key] ?? "") : "";
+      if (f.key === "sku_id") return;
+      base[f.key] = (last ? last[f.key] : null) ?? defaults[f.key] ?? "";
     });
     return base;
   };
@@ -257,7 +261,8 @@ function AddListing({ task, reference, onAdd, busy }) {
   return (
     <div style={{ border: `1px dashed ${C.gray200}`, borderRadius: 10, padding: 12, background: C.gray50 }}>
       <div style={{ fontSize: 12.5, fontWeight: 700, color: C.gray700, marginBottom: 8 }}>
-        Add a SKU{last ? " — prefilled from the last one" : ""}
+        Add a SKU{last ? " — prefilled from the last one"
+          : Object.keys(defaults).length ? " — prefilled from the task" : ""}
       </div>
       <ListingFields form={form} set={set} platform={task.platform} reference={reference} />
       {err && (
@@ -556,7 +561,7 @@ export function TeamTasksTab() {
       )}
 
       {creating && isAdmin && (
-        <NewTaskForm workers={workers} platforms={platforms} rates={rates}
+        <NewTaskForm workers={workers} platforms={platforms} rates={rates} reference={reference}
           onCancel={() => setCreating(false)}
           onCreate={async (body) => {
             const e = await post(`${API}/worker-tasks/`, body, "Task created.");
@@ -722,8 +727,10 @@ export function TeamTasksTab() {
 }
 
 // ── Create ────────────────────────────────────────────────────────────────────
-function NewTaskForm({ workers, platforms, rates, onCreate, onCancel }) {
+function NewTaskForm({ workers, platforms, rates, reference, onCreate, onCancel }) {
   const [type, setType] = useState("LISTING");
+  const [defaults, setDefaults] = useState({});
+  const setDefault = (k) => (e) => setDefaults((d) => ({ ...d, [k]: e.target.value }));
   const [platform, setPlatform] = useState("MEESHO");
   const [picked, setPicked] = useState([]);
   const [form, setForm] = useState({ title: "", source_link: "", instructions: "", suborder_no: "" });
@@ -741,6 +748,9 @@ function NewTaskForm({ workers, platforms, rates, onCreate, onCancel }) {
     if (!picked.length) return setErr("Pick at least one person.");
     const body = { ...form, task_type: type, platform, assignees: picked };
     if (rateOverride !== "") body.reward_amount = rateOverride;
+    // Drop empties so a blank field doesn't override the worker's own entry.
+    const kept = Object.fromEntries(Object.entries(defaults).filter(([, v]) => v !== "" && v != null));
+    if (type === "LISTING" && Object.keys(kept).length) body.listing_defaults = kept;
     const e = await onCreate(body);
     if (e) setErr(e);
   };
@@ -818,6 +828,22 @@ function NewTaskForm({ workers, platforms, rates, onCreate, onCancel }) {
               : `Download the video, compress under ${CLAIM_VIDEO_MAX_MB}MB, raise the claim.`} />
         </div>
       </div>
+
+      {/* Listing values you decide, not the worker: every SKU on this task
+          starts from these, and they can still be corrected per variant. */}
+      {type === "LISTING" && (
+        <div style={{ marginTop: 16, padding: 13, borderRadius: 10,
+          background: C.gray50, border: `1px solid ${C.border}` }}>
+          <div style={{ fontSize: 12.5, fontWeight: 700, color: C.gray700, marginBottom: 3 }}>
+            Listing details for every SKU on this task
+          </div>
+          <div style={{ fontSize: 11.5, color: C.gray400, marginBottom: 10 }}>
+            Optional — these prefill the worker's SKU form. Leave blank to let them fill it in.
+          </div>
+          <ListingFields form={defaults} set={setDefault} platform={platform} reference={reference}
+            hideSku />
+        </div>
+      )}
 
       {err && (
         <div style={{ marginTop: 12, padding: "10px 14px", borderRadius: 10, background: C.redLight,

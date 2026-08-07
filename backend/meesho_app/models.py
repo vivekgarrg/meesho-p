@@ -1525,6 +1525,15 @@ class WorkerTask(models.Model):
     # per person, and then the brief, the link and the rate could drift apart.
     assignees = models.ManyToManyField("accounts.User", related_name="worker_tasks")
 
+    # Values you decide up front, copied into every SKU form on this task.
+    #
+    # Held as JSON rather than a column per field because they mirror whatever
+    # TaskListing carries, and duplicating eight columns just to hold their
+    # defaults would mean changing two places every time a field is added.
+    # Purely a starting point: the worker can still correct any of them per SKU,
+    # since variants genuinely differ.
+    listing_defaults = models.JSONField(default=dict, blank=True)
+
     # Paused work stays visible but takes no new listings — the way to stop a
     # job mid-flight without hiding what has already been done or deleting a
     # task whose listings have already been paid for.
