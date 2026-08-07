@@ -1743,6 +1743,199 @@ def profit_summary(request, business_id):
     })
 
 
+@api_view(["GET"])
+def profit_daily_summary(request, business_id):
+    """
+    Per-day profit: for each day orders shipped (Order.order_date), how many
+    shipped, how each has settled so far (Delivered/RTO/Return/Exchange/Claim),
+    how many are still awaiting a Meesho payment sheet, and the resulting net
+    profit for that day's shipments.
+
+    Deliberately settlement-based, not a "T+N days" estimate: an order counts
+    toward its ship day's profit only once compute_order_net can classify it
+    from real OrderPayment data, same as /profit/. A day's numbers fill in and
+    firm up over the following days/weeks as more sheets are uploaded — a
+    "shipped today" row legitimately starts as all no_payment_count and settles
+    in over time, which is exactly what payment_delay looks like without having
+    to model it as a guess.
+
+    Uses its own copy of the SKU/parent pricing lookup (mirrors get_eff_price in
+    profit_summary, same as _estimated_profit_pricing_lookup does for the CSV
+    estimate) rather than refactoring that function, so this new endpoint can't
+    regress the existing /profit/ figures. The actual per-order math is the same
+    compute_order_net() used everywhere else — only the grouping key (ship day
+    instead of SKU) differs.
+
+    Accepts date_from / date_to (YYYY-MM-DD). Defaults to the last 30 days and
+    caps the window at 92 days — a per-day breakdown over someone's entire order
+    history isn't useful to render and would be a heavy per-order scan for every
+    day in between.
+    """
+    from collections import defaultdict
+
+    business = get_authorized_business(request, business_id)
+
+    today = timezone.localdate()
+    d_from = _parse_day(request.GET.get("date_from")) or (today - timedelta(days=29))
+    d_to   = _parse_day(request.GET.get("date_to")) or today
+    if d_to < d_from:
+        d_from, d_to = d_to, d_from
+    if (d_to - d_from).days > 92:
+        d_from = d_to - timedelta(days=92)
+
+    order_qs = Order.objects.filter(business=business, order_date__gte=d_from, order_date__lte=d_to)
+
+    # Shipped count per day — same grouping dashboard_analytics uses.
+    shipped_by_day = {
+        row["order_date"]: row["n"]
+        for row in order_qs.values("order_date").annotate(n=Count("sub_order_no", distinct=True))
+    }
+    # A sub-order's rows all share one order_date (see _resolve_ship_status), so
+    # any row gives the day it shipped, however its status later progresses.
+    order_date_map = dict(order_qs.values_list("sub_order_no", "order_date"))
+    sku_qty_map = {
+        row["sub_order_no"]: (row["sku"], row["quantity"])
+        for row in order_qs.values("sub_order_no", "sku", "quantity")
+    }
+
+    # ── Pricing lookup — see docstring: a deliberate copy, not a shared helper. ──
+    _fp_all = list(FinalPrice.objects.filter(business=business).only(
+        "sku_id", "final_price", "packaging_cost", "parent_id", "item_price", "tax_percent"))
+    price_map      = _SkuMap((fp.sku_id, fp.final_price    or Decimal("0")) for fp in _fp_all)
+    packaging_map  = _SkuMap((fp.sku_id, fp.packaging_cost or Decimal("0")) for fp in _fp_all)
+    item_price_map = _SkuMap((fp.sku_id, fp.item_price     or Decimal("0")) for fp in _fp_all)
+    tax_map        = _SkuMap((fp.sku_id, fp.tax_percent    or 0)            for fp in _fp_all)
+    sku_parent_map = _SkuMap((fp.sku_id, fp.parent_id) for fp in _fp_all if fp.parent_id)
+
+    _fp_parent = list(ParentItemPrice.objects.filter(business=business).only(
+        "item_id", "item_price", "tax_percent", "packaging_cost", "final_price"))
+    parent_price_map      = {fp.id: fp.final_price    or Decimal("0") for fp in _fp_parent}
+    parent_packaging_map  = {fp.id: fp.packaging_cost or Decimal("0") for fp in _fp_parent}
+    parent_item_price_map = {fp.id: fp.item_price     or Decimal("0") for fp in _fp_parent}
+    parent_tax_map        = {fp.id: fp.tax_percent    or 0            for fp in _fp_parent}
+
+    _hist = list(
+        ParentPriceHistory.objects.filter(business=business)
+        .values("parent_id", "effective_from", "final_price", "packaging_cost", "item_price", "tax_percent")
+        .order_by("effective_from")
+    )
+    _parent_histories = defaultdict(list)
+    for h in _hist:
+        _parent_histories[h["parent_id"]].append((
+            h["effective_from"], h["final_price"] or Decimal("0"),
+            h["packaging_cost"] or Decimal("0"), h["item_price"] or Decimal("0"),
+            h["tax_percent"] or 0,
+        ))
+
+    def get_eff_price(sku_id, order_date):
+        pid = sku_parent_map.get(sku_id)
+        if pid:
+            if order_date:
+                od = order_date.date() if hasattr(order_date, "date") else order_date
+                applicable = [
+                    (d, fp, pkg, ip, tax)
+                    for d, fp, pkg, ip, tax in _parent_histories[pid] if d <= od
+                ]
+                if applicable:
+                    _, fp, pkg, ip, tax = applicable[-1]
+                    if ip:
+                        return fp, pkg, ip, tax
+            p_item = parent_item_price_map.get(pid, Decimal("0"))
+            if p_item:
+                return (
+                    parent_price_map.get(pid, Decimal("0")),
+                    parent_packaging_map.get(pid, Decimal("0")),
+                    p_item, parent_tax_map.get(pid, 0),
+                )
+        return (
+            price_map.get(sku_id, Decimal("0")), packaging_map.get(sku_id, Decimal("0")),
+            item_price_map.get(sku_id, Decimal("0")), tax_map.get(sku_id, 0),
+        )
+
+    unique_statuses = ["Claim", "Cancelled", "Delivered", "Return", "RTO", "Shipped", "Exchange", "Unknown"]
+    STATUS_TO_KEY = {
+        "Delivered": "delivered", "Return": "return", "RTO": "rto",
+        "Exchange": "exchange", "Claim": "claim",
+        "Unknown": "unknown", "Cancelled": "unknown",
+    }
+    BUCKET_KEYS = ["delivered", "return", "rto", "exchange", "claim", "unknown"]
+
+    payments = OrderPayment.objects.filter(
+        business=business, sub_order_no__in=order_date_map.keys()
+    ).only(
+        "sub_order_no", "supplier_sku", "quantity", "final_settlement_amount",
+        "live_order_status", "recovery_reason", "claims", "return_shipping_charge",
+        "order_date", "payment_date",
+    ).order_by("-payment_date")
+
+    order_groups = defaultdict(list)
+    for payment in payments:
+        order_groups[payment.sub_order_no].append(payment)
+
+    days = {}
+
+    def day_bucket(d):
+        if d not in days:
+            days[d] = {
+                "date": d.isoformat(), "shipped_count": shipped_by_day.get(d, 0),
+                "delivered_count": 0, "return_count": 0, "rto_count": 0,
+                "exchange_count": 0, "claim_count": 0, "unknown_count": 0,
+                "settled_count": 0, "no_payment_count": 0, "missing_price_count": 0,
+                "net_profit": Decimal("0"),
+            }
+        return days[d]
+
+    # Every day with a shipment appears even if nothing on it has settled yet.
+    for d in shipped_by_day:
+        day_bucket(d)
+
+    for sub_no, group in order_groups.items():
+        d = order_date_map.get(sub_no)
+        if d is None:
+            continue
+        bucket = day_bucket(d)
+        sku, qty = sku_qty_map.get(sub_no, (None, None))
+        primary = next((p for p in group if p.live_order_status), group[0])
+        sku = sku or primary.supplier_sku
+        qty = qty or primary.quantity
+
+        if not sku or sku not in price_map:
+            bucket["missing_price_count"] += 1
+            bucket["unknown_count"] += 1
+            continue
+
+        eff_price, eff_pkg, eff_item_price, eff_tax_pct = get_eff_price(sku, primary.order_date)
+        result = compute_order_net(group, eff_price, eff_pkg, qty, unique_statuses, eff_item_price, eff_tax_pct)
+        key = STATUS_TO_KEY.get(result["status"], "unknown")
+        bucket[f"{key}_count"] += 1
+        if key != "unknown":
+            bucket["settled_count"] += 1
+            bucket["net_profit"] += result["net"]
+
+    for d, count in shipped_by_day.items():
+        bucket = day_bucket(d)
+        accounted = sum(bucket[f"{k}_count"] for k in BUCKET_KEYS)
+        bucket["no_payment_count"] = max(0, count - accounted)
+
+    ordered = sorted(days.values(), key=lambda r: r["date"])
+    for row in ordered:
+        row["net_profit"] = round(float(row["net_profit"]), 2)
+
+    totals = {key: sum(r[key] for r in ordered) for key in (
+        "shipped_count", "delivered_count", "return_count", "rto_count",
+        "exchange_count", "claim_count", "unknown_count", "no_payment_count",
+        "settled_count", "missing_price_count",
+    )}
+    totals["net_profit"] = round(sum(r["net_profit"] for r in ordered), 2)
+
+    return Response({
+        "date_from": d_from.isoformat(),
+        "date_to": d_to.isoformat(),
+        "days": ordered,
+        "totals": totals,
+    })
+
+
 # ── Estimated Profit from an uploaded Order Summary CSV ───────────────────────
 
 _ESTIMATED_PROFIT_EXCLUDED_STATUSES = {"in transit", "ready to ship"}

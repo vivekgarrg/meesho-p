@@ -18,6 +18,7 @@ NAV_CATALOG = [
     {"path": "/sku-analysis",      "label": "SKU Analysis",      "group": "Analytics"},
     {"path": "/ads-analysis",      "label": "Ads Analysis",      "group": "Analytics"},
     {"path": "/estimated-profit",  "label": "Estimated Profit",  "group": "Analytics"},
+    {"path": "/daily-profit",      "label": "Daily Profit",      "group": "Analytics"},
 
     {"path": "/orders",            "label": "Orders",            "group": "Operations"},
     {"path": "/order-scan",        "label": "Order Scan",        "group": "Operations"},

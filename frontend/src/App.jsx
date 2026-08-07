@@ -22,6 +22,7 @@ import { TaxCheckTab } from "./Components/Tabs/TaxCheckTab";
 import { UploadTab } from "./Components/Tabs/UploadTab";
 import { SKUAnalysisTab } from "./Components/Tabs/SKUProfitTab";
 import { EstimatedProfitTab } from "./Components/Tabs/EstimatedProfitTab";
+import { DailyProfitTab } from "./Components/Tabs/DailyProfitTab";
 import { LabelsTab } from "./Components/Tabs/LabelsTab";
 import { PurchasesTab } from "./Components/Tabs/PurchasesTab";
 import { InventoryTab } from "./Components/Tabs/InventoryTab";
@@ -726,6 +727,7 @@ function AppShell() {
             <Route path="/sku-analysis" element={<SKUAnalysisTab />} />
             <Route path="/ads-analysis" element={<AdsAnalysisTab />} />
             <Route path="/estimated-profit" element={<EstimatedProfitTab />} />
+            <Route path="/daily-profit" element={<DailyProfitTab />} />
             <Route path="/pricing" element={<PricingTab />} />
             <Route path="/tax-check" element={<TaxCheckTab />} />
             <Route path="/gst" element={<GstTab />} />
