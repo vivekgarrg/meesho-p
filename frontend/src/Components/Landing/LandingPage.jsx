@@ -1,6 +1,7 @@
-import React, { useState, useRef } from "react";
-import { Link } from "react-router-dom";
+import React, { useState, useRef, useEffect } from "react";
+import { Link, useLocation } from "react-router-dom";
 import PublicShell, {
+  useGoToSignup,
   WA_LINK, WHATSAPP_DISPLAY, OFFER,
   INK, BRAND, BRAND_2, MUTED, LINE, SOFT, wrap,
 } from "./PublicShell";
@@ -304,10 +305,17 @@ function SignupForm({ innerRef }) {
 
 export default function LandingPage() {
   const signupRef = useRef(null);
-  const toSignup = (e) => {
-    e?.preventDefault();
-    signupRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
-  };
+  const toSignup = useGoToSignup();
+  const location = useLocation();
+
+  // Arriving from another public page (or a shared /#signup link) should land
+  // on the form. Waits a frame so the section exists before scrolling to it.
+  useEffect(() => {
+    if (location.state?.scrollTo !== "signup" && location.hash !== "#signup") return;
+    const id = requestAnimationFrame(() =>
+      signupRef.current?.scrollIntoView({ behavior: "smooth", block: "center" }));
+    return () => cancelAnimationFrame(id);
+  }, [location]);
 
 
   return (

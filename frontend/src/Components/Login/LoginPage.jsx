@@ -1,11 +1,12 @@
 import React, { useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
-import PublicShell, { BRAND, MUTED, OFFER } from "../Landing/PublicShell";
+import PublicShell, { BRAND, MUTED, OFFER, useGoToSignup } from "../Landing/PublicShell";
 import { C, S, btn } from "../../App";
 import { useAuth } from "../../contexts/AuthContext";
 
 export default function LoginPage() {
   const { login } = useAuth();
+  const goToSignup = useGoToSignup();
   const navigate = useNavigate();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -96,9 +97,10 @@ export default function LoginPage() {
 
         <div style={{ fontSize: 12.5, color: MUTED, textAlign: "center" }}>
           No account yet?{" "}
-          <Link to="/" style={{ color: BRAND, fontWeight: 700, textDecoration: "none" }}>
+          <a href="/#signup" onClick={goToSignup}
+            style={{ color: BRAND, fontWeight: 700, textDecoration: "none", cursor: "pointer" }}>
             Get your free year
-          </Link>
+          </a>
         </div>
       </form>
       </div>

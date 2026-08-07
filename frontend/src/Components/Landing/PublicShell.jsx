@@ -1,5 +1,5 @@
 import React from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate, useLocation } from "react-router-dom";
 
 /*
  * The public chrome — offer ribbon, navbar and footer — shared by every page a
@@ -31,6 +31,28 @@ export const OFFER = "First year free — for sellers joining now";
 
 export const wrap = { maxWidth: 1120, margin: "0 auto", padding: "0 22px" };
 
+/**
+ * Jump to the signup form, from anywhere in the public site.
+ *
+ * A plain <Link to="/#signup"> does not work: React Router owns navigation and
+ * does not scroll to hash targets, so on the landing page it re-renders the
+ * same route and nothing moves at all. From the login page the form isn't even
+ * mounted yet, so the scroll has to wait for the landing page to render —
+ * hence the state flag rather than a timer, which would race the render.
+ */
+export function useGoToSignup() {
+  const navigate = useNavigate();
+  const { pathname } = useLocation();
+  return (e) => {
+    e?.preventDefault();
+    if (pathname === "/") {
+      document.getElementById("signup")?.scrollIntoView({ behavior: "smooth", block: "center" });
+    } else {
+      navigate("/", { state: { scrollTo: "signup" } });
+    }
+  };
+}
+
 export function OfferRibbon() {
   return (
     <div style={{
@@ -44,6 +66,7 @@ export function OfferRibbon() {
 }
 
 export function PublicNav() {
+  const goToSignup = useGoToSignup();
   return (
     <header style={{
       position: "sticky", top: 0, zIndex: 50, background: "rgba(255,255,255,0.92)",
@@ -71,10 +94,11 @@ export function PublicNav() {
           <Link to="/login" style={{
             color: INK, textDecoration: "none", fontWeight: 700, fontSize: 13.5, padding: "8px 12px",
           }}>Sign in</Link>
-          <Link to="/#signup" style={{
+          <a href="/#signup" onClick={goToSignup} style={{
             background: INK, color: "#fff", textDecoration: "none", fontWeight: 700,
             fontSize: 13.5, padding: "9px 16px", borderRadius: 9, whiteSpace: "nowrap",
-          }}>Get started</Link>
+            cursor: "pointer",
+          }}>Get started</a>
         </nav>
       </div>
     </header>
