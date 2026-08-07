@@ -8,13 +8,17 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
 echo "==> Pulling latest code"
+# Older deploys left templates/index.html modified (see above). Discard any such
+# leftover so the fast-forward can proceed; nothing of value is in it.
+git checkout -- backend/templates/index.html 2>/dev/null || true
 git pull --ff-only origin main
 
 echo "==> Building frontend"
 npm ci --prefix frontend
 npm run build --prefix frontend
-mkdir -p backend/templates
-cp backend/frontend_build/index.html backend/templates/index.html
+# No copy step: Django reads the built index.html from frontend_build directly
+# (see TEMPLATES DIRS). Copying it over the tracked templates/index.html left
+# that file permanently modified on the server and broke the next git pull.
 
 echo "==> Python deps + migrate + collectstatic"
 cd backend

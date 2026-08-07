@@ -25,6 +25,9 @@ jobs:
           script: |
             set -e
             cd ~/meesho-p
+            # Older deploys copied the built index.html over a tracked file,
+            # leaving it modified; discard that so the pull can fast-forward.
+            git checkout -- backend/templates/index.html 2>/dev/null || true
             git pull --ff-only origin main
             bash deploy/hostinger/update.sh
 

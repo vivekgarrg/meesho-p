@@ -54,7 +54,16 @@ ROOT_URLCONF = "meesho_project.urls"
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
-        "DIRS": [BASE_DIR / "templates"],
+        # The built index.html is served straight out of frontend_build, with
+        # the checked-in templates/index.html as the fallback when no build
+        # exists. Django takes the first DIRS hit, so ordering is the whole
+        # mechanism.
+        #
+        # This replaces a `cp frontend_build/index.html templates/index.html`
+        # in update.sh, which wrote over a *tracked* file. Every deploy left it
+        # dirty, so the first commit that touched it made `git pull --ff-only`
+        # refuse and the deploy died before it started.
+        "DIRS": [BASE_DIR / "frontend_build", BASE_DIR / "templates"],
         "APP_DIRS": True,
         "OPTIONS": {
             "context_processors": [
