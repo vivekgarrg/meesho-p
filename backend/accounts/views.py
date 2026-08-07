@@ -1,6 +1,9 @@
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework.decorators import (api_view, authentication_classes,
+                                       permission_classes, throttle_classes)
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.throttling import AnonRateThrottle
+from rest_framework import status
 from rest_framework_simplejwt.views import TokenObtainPairView
 
 from . import nav
@@ -13,7 +16,7 @@ from .access import (
     set_user_rule,
     user_rule,
 )
-from .models import MAX_BUSINESSES_PER_USER, Business, Membership, NavVisibilitySetting, User
+from .models import MAX_BUSINESSES_PER_USER, Business, Lead, Membership, NavVisibilitySetting, User
 from .permissions import IsSuperAdmin
 from .serializers import (
     AdminUserSerializer,
@@ -22,6 +25,7 @@ from .serializers import (
     CustomTokenObtainPairSerializer,
     MembershipSerializer,
     MeSerializer,
+    LeadSerializer,
 )
 
 
@@ -385,3 +389,88 @@ def membership_delete(request, business_id, membership_id):
         return Response({"error": "Membership not found."}, status=404)
     membership.delete()
     return Response(status=204)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Public enquiries from the marketing site
+# ══════════════════════════════════════════════════════════════════════════════
+
+class LeadThrottle(AnonRateThrottle):
+    """A public write endpoint needs a ceiling, or it becomes a spam sink."""
+    scope = "leads"
+
+
+@api_view(["POST"])
+@authentication_classes([])
+@permission_classes([AllowAny])
+@throttle_classes([LeadThrottle])
+def lead_create(request):
+    """
+    Record a request for access. Public on purpose — this is the signup form on
+    the landing page — so it is throttled, size-capped, and carries a honeypot.
+    """
+    payload = request.data if isinstance(request.data, dict) else {}
+
+    # Bots fill every field they find; a real browser never sees this one.
+    if str(payload.get("company_website") or "").strip():
+        # Answer as though it worked: telling a bot it was caught only helps it.
+        return Response({"success": True}, status=status.HTTP_201_CREATED)
+
+    # Coerced to "" rather than passed through: an absent optional field arrives
+    # as None, and a blank=True CharField rejects None even though it accepts "".
+    # Every optional field on the form would otherwise 400 the whole submission.
+    serializer = LeadSerializer(data={
+        k: (str(payload.get(k) or "").strip())[:500] for k in
+        ("name", "business_name", "phone", "email", "marketplaces", "monthly_orders", "message")
+    })
+    serializer.is_valid(raise_exception=True)
+
+    forwarded = request.META.get("HTTP_X_FORWARDED_FOR", "")
+    ip = (forwarded.split(",")[0].strip() if forwarded
+          else request.META.get("REMOTE_ADDR")) or None
+    serializer.save(
+        source="landing",
+        ip_address=ip,
+        user_agent=(request.META.get("HTTP_USER_AGENT") or "")[:500],
+    )
+    return Response({"success": True}, status=status.HTTP_201_CREATED)
+
+
+@api_view(["GET"])
+@permission_classes([IsSuperAdmin])
+def lead_list(request):
+    """Enquiries, newest first — the follow-up queue."""
+    qs = Lead.objects.all()
+    wanted = request.GET.get("status", "").strip().upper()
+    if wanted:
+        qs = qs.filter(status=wanted)
+    rows = list(qs[:500])
+    return Response({
+        "total": Lead.objects.count(),
+        "new": Lead.objects.filter(status=Lead.STATUS_NEW).count(),
+        "results": LeadSerializer(rows, many=True).data,
+    })
+
+
+@api_view(["PATCH", "DELETE"])
+@permission_classes([IsSuperAdmin])
+def lead_detail(request, pk):
+    try:
+        lead = Lead.objects.get(pk=pk)
+    except Lead.DoesNotExist:
+        return Response({"error": "Not found."}, status=404)
+
+    if request.method == "DELETE":
+        lead.delete()
+        return Response({"deleted": True})
+
+    payload = request.data if isinstance(request.data, dict) else {}
+    if "status" in payload:
+        wanted = str(payload["status"] or "").strip().upper()
+        if wanted not in {c[0] for c in Lead.STATUS_CHOICES}:
+            return Response({"error": "Unknown status."}, status=400)
+        lead.status = wanted
+    if "notes" in payload:
+        lead.notes = str(payload["notes"] or "").strip()
+    lead.save()
+    return Response(LeadSerializer(lead).data)

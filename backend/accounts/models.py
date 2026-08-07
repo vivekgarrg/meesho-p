@@ -177,3 +177,54 @@ class BusinessProfile(models.Model):
 
     def __str__(self):
         return f"Profile for {self.business.name}"
+
+
+class Lead(models.Model):
+    """
+    Someone who asked for access from the public site.
+
+    Deliberately NOT an account. Self-serve signup would have to create a
+    tenant, and today's super_admin role can read every business — so an
+    account created by a stranger would either see everyone's data or be unable
+    to run its own. Until there's a business-owner role, a signup is an enquiry
+    and onboarding stays a manual, deliberate act.
+    """
+
+    STATUS_NEW       = "NEW"
+    STATUS_CONTACTED = "CONTACTED"
+    STATUS_CONVERTED = "CONVERTED"
+    STATUS_DROPPED   = "DROPPED"
+    STATUS_CHOICES = [
+        (STATUS_NEW,       "New"),
+        (STATUS_CONTACTED, "Contacted"),
+        (STATUS_CONVERTED, "Converted"),
+        (STATUS_DROPPED,   "Not interested"),
+    ]
+
+    name          = models.CharField(max_length=120)
+    business_name = models.CharField(max_length=200, blank=True)
+    phone         = models.CharField(max_length=30, blank=True, db_index=True)
+    email         = models.EmailField(blank=True, db_index=True)
+    marketplaces  = models.CharField(max_length=200, blank=True,
+                                     help_text="Which platforms they sell on")
+    monthly_orders = models.CharField(max_length=60, blank=True)
+    message       = models.TextField(blank=True)
+
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES,
+                              default=STATUS_NEW, db_index=True)
+    notes  = models.TextField(blank=True)
+
+    # Kept for spam triage — a burst from one address is the usual signature.
+    source     = models.CharField(max_length=60, blank=True, default="landing")
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    user_agent = models.TextField(blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "leads"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.name} ({self.phone or self.email or 'no contact'})"

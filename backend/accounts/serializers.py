@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
-from .models import MAX_BUSINESSES_PER_USER, Business, BusinessProfile, Membership, User
+from .models import Lead, MAX_BUSINESSES_PER_USER, Business, BusinessProfile, Membership, User
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -168,3 +168,31 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         token = super().get_token(user)
         token["role"] = user.role
         return token
+
+
+class LeadSerializer(serializers.ModelSerializer):
+    """
+    A public enquiry. Only the contact fields are writable — status, notes and
+    the spam-triage columns are set by the server or by an admin later, and a
+    public form must not be able to plant them.
+    """
+
+    class Meta:
+        model = Lead
+        fields = "__all__"
+        read_only_fields = ["status", "notes", "source", "ip_address",
+                            "user_agent", "created_at", "updated_at"]
+
+    def validate_name(self, value):
+        name = (value or "").strip()
+        if len(name) < 2:
+            raise serializers.ValidationError("Please tell us your name.")
+        return name[:120]
+
+    def validate(self, attrs):
+        # One way to reach them is the entire point of the form.
+        if not (attrs.get("phone") or "").strip() and not (attrs.get("email") or "").strip():
+            raise serializers.ValidationError(
+                "Leave a phone number or an email so we can get back to you."
+            )
+        return attrs

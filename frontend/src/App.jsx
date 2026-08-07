@@ -43,6 +43,7 @@ import { GstTab } from "./Components/Tabs/GstTab";
 import { SKU_PAGE_SIZE as skuPageSize } from "./lib/helper";
 import TableData from "./Components/Table/TableData";
 import LoginPage from "./Components/Login/LoginPage";
+import LandingPage from "./Components/Landing/LandingPage";
 import BusinessProfilePage from "./Components/BusinessProfile/BusinessProfilePage";
 import BusinessSwitcher from "./Components/BusinessSwitcher";
 import { useBusiness } from "./contexts/BusinessContext";
@@ -435,7 +436,7 @@ function Sidebar({ collapsed, setCollapsed, isMobile, mobileOpen, closeMobile })
               Rudam
             </div>
             <div style={{ fontSize: 10, color: "rgba(255,255,255,0.35)", fontWeight: 500, whiteSpace: "nowrap", letterSpacing: "0.02em" }}>
-              Ecommerce Profit Analyser
+              Commerce OS
             </div>
           </div>
         )}
@@ -821,8 +822,11 @@ export default function App() {
     return user ? <Navigate to="/" replace /> : <LoginPage />;
   }
 
+  // Signed out: the marketing site, not a login wall. A prospect arriving at
+  // rudam.in should see what the product does before being asked for
+  // credentials they don't have yet.
   if (!user) {
-    return <Navigate to="/login" replace />;
+    return <LandingPage />;
   }
 
   return (

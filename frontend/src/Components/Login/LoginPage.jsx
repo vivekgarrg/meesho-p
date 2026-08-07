@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, Link } from "react-router-dom";
 import { C, S, btn } from "../../App";
 import { useAuth } from "../../contexts/AuthContext";
 
@@ -52,7 +52,10 @@ export default function LoginPage() {
             R
           </div>
           <div>
-            <div style={{ fontSize: 16, fontWeight: 800, color: C.gray800 }}>Rudam</div>
+            <div>
+              <div style={{ fontSize: 16, fontWeight: 800, color: C.gray800 }}>Rudam</div>
+              <div style={{ fontSize: 11, color: C.gray400, fontWeight: 600 }}>Commerce OS</div>
+            </div>
             <div style={{ fontSize: 11, color: C.gray400 }}>Sign in to continue</div>
           </div>
         </div>

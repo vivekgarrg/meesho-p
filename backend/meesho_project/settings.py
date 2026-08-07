@@ -177,6 +177,11 @@ REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": [
         "rest_framework.permissions.IsAuthenticated",
     ],
+    # Only the public enquiry form is throttled; everything else is behind auth
+    # and rate-limiting it would just get in a working seller's way.
+    "DEFAULT_THROTTLE_RATES": {
+        "leads": "12/hour",
+    },
 }
 
 SIMPLE_JWT = {
