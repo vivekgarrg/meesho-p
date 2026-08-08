@@ -223,6 +223,10 @@ class WorkerTaskSerializer(serializers.ModelSerializer):
     total_possible   = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
     awaiting_bonus   = serializers.BooleanField(read_only=True)
     earned           = serializers.SerializerMethodField()
+    parent_sku_item_id = serializers.CharField(source="parent_sku.item_id", read_only=True, default=None)
+    parent_sku_price = serializers.DecimalField(source="parent_sku.final_price", max_digits=12,
+                                                decimal_places=2, read_only=True, default=None)
+    listing_template_name = serializers.CharField(source="listing_template.name", read_only=True, default=None)
 
     class Meta:
         model = WorkerTask
@@ -335,6 +339,7 @@ class TaskListingSerializer(serializers.ModelSerializer):
 
 class PlatformRateSerializer(serializers.ModelSerializer):
     updated_by_name = serializers.CharField(source="updated_by.username", read_only=True, default=None)
+    user_name       = serializers.CharField(source="user.username", read_only=True, default=None)
 
     class Meta:
         model = PlatformRate

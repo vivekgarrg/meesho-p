@@ -263,6 +263,7 @@ function AddListing({ task, reference, onAdd, busy, isAdmin }) {
   };
   const [form, setForm] = useState(seed);
   const [err, setErr] = useState("");
+  const [generating, setGenerating] = useState(false);
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
 
   const add = async () => {
@@ -273,6 +274,23 @@ function AddListing({ task, reference, onAdd, busy, isAdmin }) {
     if (e) { setErr(e); return; }
     setForm({ ...seed(), sku_id: "" });
     setErr("");
+  };
+
+  // The prefix an admin can type into the SKU-starts-with field, or the one
+  // they already set on the task for a worker to inherit.
+  const prefix = (isAdmin ? form.sku_prefix : defaults.sku_prefix) || "";
+
+  const generateSku = async () => {
+    if (!prefix.trim()) return setErr("Set a SKU prefix first, then generate.");
+    setGenerating(true);
+    try {
+      const res = await fetch(`${API}/worker-tasks/${task.id}/generate-sku/?prefix=${encodeURIComponent(prefix.trim())}`);
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) { setErr(d.error || "Could not generate a SKU id."); return; }
+      setForm((f) => ({ ...f, sku_id: d.sku_id }));
+      setErr("");
+    } catch { setErr("Network error."); }
+    finally { setGenerating(false); }
   };
 
   return (
@@ -315,6 +333,11 @@ function AddListing({ task, reference, onAdd, busy, isAdmin }) {
           )}
         </>
       )}
+      {prefix.trim() && (
+        <button onClick={generateSku} disabled={generating} style={{ ...btn("ghost", "sm"), marginTop: 9 }}>
+          {generating ? "Generating…" : `Generate SKU id (${prefix}…)`}
+        </button>
+      )}
       {err && (
         <div style={{ marginTop: 8, padding: "8px 11px", borderRadius: 8, background: C.redLight,
           border: `1px solid ${C.redBorder}`, color: C.red, fontSize: 12.5, fontWeight: 700 }}>
@@ -328,8 +351,8 @@ function AddListing({ task, reference, onAdd, busy, isAdmin }) {
   );
 }
 
-function TaskCard({ task, isAdmin, reference, onSubmit, onReview, onPause, onDelete, onListingAdd,
-                    onListingSave, onListingDelete, onListingReview, busy }) {
+function TaskCard({ task, isAdmin, reference, collapsed, onToggleCollapse, onSubmit, onReview,
+                    onPause, onDelete, onListingAdd, onListingSave, onListingDelete, onListingReview, busy }) {
   const isMobile = useIsMobile();
   const meta = STATUS_META[task.status] || STATUS_META.ASSIGNED;
   const type = TYPE_META[task.task_type] || TYPE_META.LISTING;
@@ -360,15 +383,32 @@ function TaskCard({ task, isAdmin, reference, onSubmit, onReview, onPause, onDel
             <span style={{ fontSize: 11, color: C.gray400 }}>{fmt(task.reward_amount)}/SKU</span>
             {Number(task.earned) > 0 && <Money value={task.earned} />}
           </span>
+          <button onClick={onToggleCollapse} title={collapsed ? "Expand" : "Collapse"}
+            style={{ background: "none", border: "none", cursor: "pointer", color: C.gray400,
+              fontSize: 13, padding: "0 0 0 4px", lineHeight: 1 }}>
+            {collapsed ? "▸" : "▾"}
+          </button>
         </div>
 
-        <div style={{ fontSize: 15, fontWeight: 700, color: C.gray800 }}>
+        <div style={{ fontSize: 15, fontWeight: 700, color: C.gray800, cursor: "pointer" }} onClick={onToggleCollapse}>
           {task.title || (listing ? "Listing task" : "Return claim task")}
         </div>
         {task.suborder_no && (
           <div style={{ fontSize: 12, color: C.gray500, fontFamily: "monospace", marginTop: 2 }}>{task.suborder_no}</div>
         )}
-        {task.instructions && (
+        {(task.parent_sku_item_id || task.listing_template_name) && (
+          <div style={{ display: "flex", gap: 7, flexWrap: "wrap", marginTop: 6 }}>
+            {task.parent_sku_item_id && (
+              <Tag variant="blue" fontSize={11}>
+                Parent: {task.parent_sku_item_id}{task.parent_sku_price ? ` (${fmt(task.parent_sku_price)})` : ""}
+              </Tag>
+            )}
+            {task.listing_template_name && (
+              <Tag variant="gray" fontSize={11}>Template: {task.listing_template_name}</Tag>
+            )}
+          </div>
+        )}
+        {task.instructions && !collapsed && (
           <div style={{ fontSize: 13, color: C.gray600, marginTop: 7, lineHeight: 1.6 }}>{task.instructions}</div>
         )}
         <div style={{ display: "flex", gap: 12, alignItems: "center", marginTop: 9, flexWrap: "wrap" }}>
@@ -403,7 +443,7 @@ function TaskCard({ task, isAdmin, reference, onSubmit, onReview, onPause, onDel
       </div>
 
       {/* Listing tasks: many SKUs */}
-      {listing && (
+      {listing && !collapsed && (
         <div style={{ padding: isMobile ? "13px" : "14px 18px", background: C.gray50,
           display: "flex", flexDirection: "column", gap: 9 }}>
           <div style={{ fontSize: 12.5, fontWeight: 700, color: C.gray600 }}>
@@ -425,7 +465,7 @@ function TaskCard({ task, isAdmin, reference, onSubmit, onReview, onPause, onDel
       )}
 
       {/* Claim tasks: one submission */}
-      {!listing && (
+      {!listing && !collapsed && (
         <div style={{ padding: isMobile ? "13px" : "14px 18px", background: C.gray50 }}>
           {!isAdmin && task.status !== "APPROVED" ? (
             <>
@@ -466,7 +506,7 @@ function TaskCard({ task, isAdmin, reference, onSubmit, onReview, onPause, onDel
         </div>
       )}
 
-      {task.review_comment && task.status !== "SUBMITTED" && (
+      {task.review_comment && task.status !== "SUBMITTED" && !collapsed && (
         <div style={{ padding: "11px 18px",
           background: task.status === "REJECTED" ? C.redLight : C.greenLight,
           color: task.status === "REJECTED" ? C.red : C.green, fontSize: 12.5, fontWeight: 600 }}>
@@ -487,6 +527,9 @@ export function TeamTasksTab() {
   const [reference, setReference] = useState(null);
   const [docs, setDocs] = useState([]);
   const [rates, setRates] = useState([]);
+  const [parentSkus, setParentSkus] = useState([]);
+  const [templates, setTemplates] = useState([]);
+  const [collapsed, setCollapsed] = useState({});
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [view, setView] = useState("");
@@ -522,6 +565,8 @@ export function TeamTasksTab() {
     grab(`${API}/task-reference/`, setReference);
     grab(`${API}/task-documents/`, setDocs, "results");
     grab(`${API}/platform-rates/`, setRates, "results");
+    grab(`${API}/parent-prices/`, setParentSkus, "results");
+    grab(`${API}/listing-templates/?full=0`, setTemplates, "results");
   }, []);
 
   useEffect(() => { fetchTasks(); }, [fetchTasks]);
@@ -531,6 +576,26 @@ export function TeamTasksTab() {
     fetch(`${API}/worker-tasks/workers/`).then(r => r.json())
       .then(d => setWorkers(d.results || [])).catch(() => {});
   }, [isAdmin]);
+
+  // New tasks default expanded (need attention); approved/rejected ones default
+  // collapsed (nothing left to do). Only fills in ids we haven't seen before, so
+  // a manual toggle survives the next refetch.
+  useEffect(() => {
+    setCollapsed((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      tasks.forEach((t) => {
+        if (!(t.id in next)) {
+          next[t.id] = t.status === "APPROVED" || t.status === "REJECTED";
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
+    });
+  }, [tasks]);
+  const toggleCollapse = (id) => setCollapsed((c) => ({ ...c, [id]: !c[id] }));
+  const setAllCollapsed = (value) =>
+    setCollapsed((c) => ({ ...c, ...Object.fromEntries(tasks.map((t) => [t.id, value])) }));
 
   /** POST helper — returns an error string, or null on success. */
   const post = async (url, body, okMsg, method = "POST") => {
@@ -639,6 +704,7 @@ export function TeamTasksTab() {
 
       {creating && isAdmin && (
         <NewTaskForm workers={workers} platforms={platforms} rates={rates} reference={reference}
+          parentSkus={parentSkus} templates={templates}
           onCancel={() => setCreating(false)}
           onCreate={async (body) => {
             const e = await post(`${API}/worker-tasks/`, body, "Task created.");
@@ -698,6 +764,12 @@ export function TeamTasksTab() {
           open={panel === "rates"} onToggle={() => setPanel(p => p === "rates" ? null : "rates")}>
           <RatesEditor rates={rates} platforms={platforms} busy={busy}
             onSave={(rows) => post(`${API}/platform-rates/`, { rates: rows }, "Rates saved.", "PUT")} />
+          <div style={{ borderTop: `1px solid ${C.border}`, margin: "16px 0" }} />
+          <div style={{ fontSize: 12.5, fontWeight: 700, color: C.gray700, marginBottom: 3 }}>
+            Per-worker rates
+          </div>
+          <WorkerRatesEditor rates={rates} platforms={platforms} workers={workers} busy={busy}
+            onSave={(rows) => post(`${API}/platform-rates/`, { rates: rows }, "Rate saved.", "PUT")} />
         </Section>
       )}
 
@@ -784,6 +856,12 @@ export function TeamTasksTab() {
         </select>
         <input value={search} onChange={(e) => setSearch(e.target.value)}
           placeholder="Search title / SKU / sub-order…" style={{ ...S.inp, maxWidth: 260, flex: "1 1 170px" }} />
+        {tasks.length > 1 && (
+          <span style={{ display: "flex", gap: 6, marginLeft: "auto" }}>
+            <button onClick={() => setAllCollapsed(false)} style={btn("ghost", "sm")}>Expand all</button>
+            <button onClick={() => setAllCollapsed(true)} style={btn("ghost", "sm")}>Collapse all</button>
+          </span>
+        )}
       </div>
 
       {/* Tasks */}
@@ -800,6 +878,7 @@ export function TeamTasksTab() {
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           {tasks.map((t) => (
             <TaskCard key={t.id} task={t} isAdmin={isAdmin} reference={reference} busy={busy}
+              collapsed={!!collapsed[t.id]} onToggleCollapse={() => toggleCollapse(t.id)}
               onSubmit={submitTask} onReview={reviewTask} onPause={pauseTask} onDelete={deleteTask}
               onListingAdd={addListing} onListingSave={saveListing}
               onListingDelete={deleteListing} onListingReview={reviewListing} />
@@ -811,7 +890,7 @@ export function TeamTasksTab() {
 }
 
 // ── Create ────────────────────────────────────────────────────────────────────
-function NewTaskForm({ workers, platforms, rates, reference, onCreate, onCancel }) {
+function NewTaskForm({ workers, platforms, rates, reference, parentSkus, templates, onCreate, onCancel }) {
   const [type, setType] = useState("LISTING");
   const [defaults, setDefaults] = useState({});
   const setDefault = (k) => (e) => setDefaults((d) => ({ ...d, [k]: e.target.value }));
@@ -819,14 +898,22 @@ function NewTaskForm({ workers, platforms, rates, reference, onCreate, onCancel 
   const [picked, setPicked] = useState([]);
   const [form, setForm] = useState({ title: "", source_link: "", instructions: "", suborder_no: "" });
   const [rateOverride, setRateOverride] = useState("");
+  const [parentSkuId, setParentSkuId] = useState("");
+  const [templateId, setTemplateId] = useState("");
   const [err, setErr] = useState("");
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
 
-  // Whatever the standing rate is for this platform — the point of #6: decided
-  // once, shown here, and not retyped per task.
-  const standing = useMemo(
-    () => rates.find((r) => r.platform === platform && r.task_type === type),
-    [rates, platform, type]);
+  // The standing rate for this platform — a picked worker's own override (the
+  // point of req 2: an admin's per-person rate decision) takes precedence over
+  // the business-wide one. Only meaningful with a single assignee, since one
+  // task still pays one flat rate to everyone on it.
+  const standing = useMemo(() => {
+    if (picked.length === 1) {
+      const personal = rates.find((r) => r.platform === platform && r.task_type === type && r.user === picked[0]);
+      if (personal) return personal;
+    }
+    return rates.find((r) => r.platform === platform && r.task_type === type && !r.user);
+  }, [rates, platform, type, picked]);
 
   const submit = async () => {
     if (!picked.length) return setErr("Pick at least one person.");
@@ -834,7 +921,11 @@ function NewTaskForm({ workers, platforms, rates, reference, onCreate, onCancel 
     if (rateOverride !== "") body.reward_amount = rateOverride;
     // Drop empties so a blank field doesn't override the worker's own entry.
     const kept = Object.fromEntries(Object.entries(defaults).filter(([, v]) => v !== "" && v != null));
-    if (type === "LISTING" && Object.keys(kept).length) body.listing_defaults = kept;
+    if (type === "LISTING") {
+      if (Object.keys(kept).length) body.listing_defaults = kept;
+      if (parentSkuId) body.parent_sku_item_id = parentSkuId;
+      if (templateId) body.listing_template = templateId;
+    }
     const e = await onCreate(body);
     if (e) setErr(e);
   };
@@ -899,8 +990,9 @@ function NewTaskForm({ workers, platforms, rates, reference, onCreate, onCancel 
           <input value={rateOverride} onChange={(e) => setRateOverride(e.target.value)} type="number"
             style={S.inp} placeholder={standing ? `${standing.reward_amount} (standing rate)` : "set a rate below"} />
           <div style={{ fontSize: 11, color: C.gray400, marginTop: 4 }}>
-            {standing ? `Leave blank to use the ${platform} rate of ${fmt(standing.reward_amount)}.`
-                      : `No standing ${platform} rate yet — set one in "Rates per platform".`}
+            {standing
+              ? `Leave blank to use ${standing.user ? `${standing.user_name}'s rate` : `the ${platform} rate`} of ${fmt(standing.reward_amount)}.`
+              : `No standing ${platform} rate yet — set one in "Rates per platform".`}
           </div>
         </div>
         <div style={{ gridColumn: "1 / -1" }}>
@@ -926,6 +1018,35 @@ function NewTaskForm({ workers, platforms, rates, reference, onCreate, onCancel 
           </div>
           <ListingFields form={defaults} set={setDefault} platform={platform} reference={reference}
             hideSku />
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
+            gap: 9, marginTop: 12 }}>
+            <div>
+              <label style={{ ...S.label, marginBottom: 3 }}>Link to parent SKU</label>
+              <input list="parent-sku-options" value={parentSkuId}
+                onChange={(e) => setParentSkuId(e.target.value)}
+                placeholder="Search parent item id…" style={{ ...S.inp, fontSize: 12.5 }} />
+              <datalist id="parent-sku-options">
+                {parentSkus.map((p) => <option key={p.item_id} value={p.item_id} />)}
+              </datalist>
+              <div style={{ fontSize: 10.5, color: C.gray400, marginTop: 3 }}>
+                Every SKU approved on this task will link — and price itself — to this parent.
+              </div>
+            </div>
+            <div>
+              <label style={{ ...S.label, marginBottom: 3 }}>Use listing template</label>
+              <select value={templateId} onChange={(e) => setTemplateId(e.target.value)}
+                style={{ ...S.inp, fontSize: 12.5 }}>
+                <option value="">—</option>
+                {templates.map((t) => (
+                  <option key={t.id} value={t.id}>{t.name} ({t.field_count} fields)</option>
+                ))}
+              </select>
+              <div style={{ fontSize: 10.5, color: C.gray400, marginTop: 3 }}>
+                Shown on the task so the team applies the same extension template.
+              </div>
+            </div>
+          </div>
         </div>
       )}
 
@@ -943,10 +1064,13 @@ function NewTaskForm({ workers, platforms, rates, reference, onCreate, onCancel 
 
 function RatesEditor({ rates, platforms, onSave, busy }) {
   const [draft, setDraft] = useState({});
+  // Business-wide rows only — the array may also hold per-worker overrides
+  // (see WorkerRatesEditor), and those must never leak into the default table.
+  const businessRates = useMemo(() => rates.filter((r) => !r.user), [rates]);
   const value = (platform, type, field) => {
     const k = `${platform}|${type}|${field}`;
     if (k in draft) return draft[k];
-    const row = rates.find((r) => r.platform === platform && r.task_type === type);
+    const row = businessRates.find((r) => r.platform === platform && r.task_type === type);
     return row ? row[field] : "";
   };
   const set = (platform, type, field) => (e) =>
@@ -995,6 +1119,86 @@ function RatesEditor({ rates, platforms, onSave, busy }) {
         </table>
       </div>
       <button onClick={save} disabled={busy} style={{ ...btn("primary", "sm"), marginTop: 12 }}>Save rates</button>
+    </>
+  );
+}
+
+/** A standing rate for one specific worker — overrides the business-wide rate
+    above whenever a task is created for them alone (see NewTaskForm). */
+function WorkerRatesEditor({ rates, platforms, workers, onSave, busy }) {
+  const [workerId, setWorkerId] = useState(workers[0]?.id ?? "");
+  const [draft, setDraft] = useState({});
+  useEffect(() => { setDraft({}); }, [workerId]);
+
+  const personalRates = useMemo(
+    () => rates.filter((r) => String(r.user) === String(workerId)),
+    [rates, workerId]);
+  const value = (platform, type, field) => {
+    const k = `${platform}|${type}|${field}`;
+    if (k in draft) return draft[k];
+    const row = personalRates.find((r) => r.platform === platform && r.task_type === type);
+    return row ? row[field] : "";
+  };
+  const set = (platform, type, field) => (e) =>
+    setDraft((d) => ({ ...d, [`${platform}|${type}|${field}`]: e.target.value }));
+
+  const save = () => {
+    if (!workerId) return;
+    const rows = [];
+    platforms.forEach((p) => ["LISTING", "RETURN_CLAIM"].forEach((t) => {
+      rows.push({
+        platform: p.value, task_type: t, user_id: workerId,
+        reward_amount: value(p.value, t, "reward_amount") || 0,
+        bonus_amount: value(p.value, t, "bonus_amount") || 0,
+      });
+    }));
+    onSave(rows);
+    setDraft({});
+  };
+
+  if (workers.length === 0) {
+    return <div style={{ fontSize: 12.5, color: C.gray400 }}>No workers in this business yet.</div>;
+  }
+
+  return (
+    <>
+      <div style={{ fontSize: 12, color: C.gray500, marginBottom: 10, lineHeight: 1.6 }}>
+        Pay one person more or less than everyone else. Leaving a field blank here
+        (and saving) clears their override back to the business-wide rate.
+      </div>
+      <div style={{ marginBottom: 10, maxWidth: 220 }}>
+        <label style={S.label}>Worker</label>
+        <select value={workerId} onChange={(e) => setWorkerId(e.target.value)} style={S.inp}>
+          {workers.map((w) => <option key={w.id} value={w.id}>{w.username}</option>)}
+        </select>
+      </div>
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+          <thead><tr>{["Platform", "Listing / SKU", "Claim raised", "Claim bonus"].map(h => <th key={h} style={S.th}>{h}</th>)}</tr></thead>
+          <tbody>
+            {platforms.map((p, i) => (
+              <tr key={p.value} style={{ background: i % 2 ? C.gray50 : C.white }}>
+                <td style={{ ...S.td, fontWeight: 700 }}>{p.label}</td>
+                <td style={S.td}>
+                  <input value={value(p.value, "LISTING", "reward_amount")} onChange={set(p.value, "LISTING", "reward_amount")}
+                    type="number" style={{ ...S.inp, width: 90 }} />
+                </td>
+                <td style={S.td}>
+                  <input value={value(p.value, "RETURN_CLAIM", "reward_amount")} onChange={set(p.value, "RETURN_CLAIM", "reward_amount")}
+                    type="number" style={{ ...S.inp, width: 90 }} />
+                </td>
+                <td style={S.td}>
+                  <input value={value(p.value, "RETURN_CLAIM", "bonus_amount")} onChange={set(p.value, "RETURN_CLAIM", "bonus_amount")}
+                    type="number" style={{ ...S.inp, width: 90 }} />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <button onClick={save} disabled={busy || !workerId} style={{ ...btn("primary", "sm"), marginTop: 12 }}>
+        Save {workers.find((w) => String(w.id) === String(workerId))?.username}'s rates
+      </button>
     </>
   );
 }

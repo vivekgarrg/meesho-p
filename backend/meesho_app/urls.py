@@ -107,6 +107,7 @@ urlpatterns = [
     path("worker-tasks/<int:pk>/submit/", views.worker_task_submit, name="worker_task_submit"),
     path("worker-tasks/<int:pk>/review/", views.worker_task_review, name="worker_task_review"),
     path("worker-tasks/<int:pk>/listings/", views.task_listing_add, name="task_listing_add"),
+    path("worker-tasks/<int:pk>/generate-sku/", views.worker_task_generate_sku, name="worker_task_generate_sku"),
     path("task-listings/<int:pk>/",         views.task_listing_detail, name="task_listing_detail"),
     path("task-listings/<int:pk>/review/",  views.task_listing_review, name="task_listing_review"),
     path("task-reference/",   views.listing_reference,    name="listing_reference"),

@@ -1542,6 +1542,23 @@ class WorkerTask(models.Model):
     created_by  = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True,
                                     blank=True, related_name="worker_tasks_created")
 
+    # LISTING only. When set, every SKU approved on this task is linked to this
+    # parent (see task_listing_review) instead of joining the catalogue as a
+    # bare, unpriced row — so a whole product's variants inherit its price/tax
+    # automatically instead of an admin linking each one by hand afterwards.
+    parent_sku = models.ForeignKey(
+        "ParentItemPrice", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="worker_tasks", db_column="parent_sku_id",
+    )
+    # LISTING only. Which saved browser-extension template a worker should use
+    # to fill the listing form — purely informational here (the extension
+    # applies templates by name/id on its own), so teammates picking up the same
+    # brief use the same fields instead of guessing.
+    listing_template = models.ForeignKey(
+        "ListingTemplate", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="worker_tasks",
+    )
+
     # ── What it pays ───────────────────────────────────────────────────────
     # Rates are copied onto the task at creation rather than read from a
     # setting at payout time: changing your standard rate must not silently
@@ -1807,6 +1824,13 @@ class PlatformRate(models.Model):
     task_type = models.CharField(max_length=20, choices=WorkerTask.TYPE_CHOICES,
                                  default=WorkerTask.TYPE_LISTING)
 
+    # Null = the business-wide standing rate (today's only kind of row). A row
+    # with a user set is that person's override, checked first — an admin who
+    # wants to pay one worker more (or less) than the rest sets this instead of
+    # retyping a rate on every task handed to them.
+    user = models.ForeignKey("accounts.User", on_delete=models.CASCADE, null=True,
+                             blank=True, related_name="platform_rates")
+
     reward_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     bonus_amount  = models.DecimalField(max_digits=10, decimal_places=2, default=0,
                                         help_text="Claim tasks only")
@@ -1818,10 +1842,11 @@ class PlatformRate(models.Model):
     class Meta:
         db_table = "platform_rates"
         ordering = ["platform", "task_type"]
-        unique_together = [("business", "platform", "task_type")]
+        unique_together = [("business", "platform", "task_type", "user")]
 
     def __str__(self):
-        return f"{self.platform} {self.task_type} ₹{self.reward_amount}"
+        who = f" for {self.user.username}" if self.user_id else ""
+        return f"{self.platform} {self.task_type} ₹{self.reward_amount}{who}"
 
 
 class TaskDocument(models.Model):

@@ -8918,6 +8918,25 @@ def _wallet_totals(qs):
     return float(earned), float(settled), float(earned - settled)
 
 
+def _resolve_rate(business, platform, task_type, user=None):
+    """
+    The rate to use for a new task: that specific worker's override if the
+    admin has set one, else the business-wide standing rate. Same lookup for
+    both — a missing user-specific row falls straight through to today's
+    (business, platform, task_type) rate, so a business with no per-user rates
+    set behaves exactly as before.
+    """
+    if user is not None:
+        rate = PlatformRate.objects.filter(
+            business=business, platform=platform, task_type=task_type, user=user
+        ).first()
+        if rate:
+            return rate
+    return PlatformRate.objects.filter(
+        business=business, platform=platform, task_type=task_type, user__isnull=True
+    ).first()
+
+
 @api_view(["GET", "POST"])
 def worker_tasks_list(request, business_id):
     """
@@ -8953,11 +8972,14 @@ def worker_tasks_list(request, business_id):
             return Response({"error": "Unknown platform."}, status=status.HTTP_400_BAD_REQUEST)
 
         # The rate is whatever is currently set for this platform, unless the
-        # caller overrides it. Copied onto the task so a later rate change can
-        # never re-price work that has already been handed out.
-        rate = PlatformRate.objects.filter(
-            business=business, platform=platform, task_type=task_type
-        ).first()
+        # caller overrides it. A task with exactly one assignee prefers that
+        # person's own standing rate (if the admin set one) over the business
+        # default; a shared task with several people still pays one flat rate,
+        # since there's nowhere on a single task to hold a rate per assignee.
+        # Copied onto the task either way, so a later rate change can never
+        # re-price work that has already been handed out.
+        rate = _resolve_rate(business, platform, task_type,
+                             user=assignees[0] if len(assignees) == 1 else None)
         reward = safe_decimal(payload.get("reward_amount"))
         if reward is None:
             reward = rate.reward_amount if rate else Decimal("0")
@@ -8967,6 +8989,24 @@ def worker_tasks_list(request, business_id):
         if reward < 0 or bonus < 0:
             return Response({"error": "Amounts can't be negative."},
                             status=status.HTTP_400_BAD_REQUEST)
+
+        parent_sku = None
+        parent_item_id = str(payload.get("parent_sku_item_id") or "").strip()
+        if parent_item_id:
+            try:
+                parent_sku = ParentItemPrice.objects.get(business=business, item_id=parent_item_id)
+            except ParentItemPrice.DoesNotExist:
+                return Response({"error": f"No parent SKU '{parent_item_id}' in this business."},
+                                status=status.HTTP_400_BAD_REQUEST)
+
+        listing_template = None
+        template_id = payload.get("listing_template")
+        if template_id:
+            try:
+                listing_template = ListingTemplate.objects.get(pk=template_id, business=business)
+            except (ListingTemplate.DoesNotExist, ValueError, TypeError):
+                return Response({"error": "That listing template doesn't exist."},
+                                status=status.HTTP_400_BAD_REQUEST)
 
         task = WorkerTask.objects.create(
             business=business,
@@ -8980,6 +9020,8 @@ def worker_tasks_list(request, business_id):
             reward_amount=reward,
             bonus_amount=bonus if task_type == WorkerTask.TYPE_RETURN_CLAIM else Decimal("0"),
             listing_defaults=payload.get("listing_defaults") or {},
+            parent_sku=parent_sku,
+            listing_template=listing_template,
         )
         task.assignees.set(assignees)
         return Response(WorkerTaskSerializer(task, context={"request": request}).data, status=status.HTTP_201_CREATED)
@@ -9083,7 +9125,7 @@ def worker_task_detail(request, business_id, pk):
                             status=status.HTTP_403_FORBIDDEN)
         editable = {"title", "source_link", "instructions", "suborder_no",
                     "reward_amount", "bonus_amount", "assignees", "platform", "is_paused",
-                    "listing_defaults"}
+                    "listing_defaults", "parent_sku_item_id", "listing_template"}
         payload = request.data if isinstance(request.data, dict) else {}
         unknown = set(payload) - editable
         if unknown:
@@ -9115,6 +9157,26 @@ def worker_task_detail(request, business_id, pk):
             paused = bool(payload["is_paused"])
             task.is_paused = paused
             task.paused_at = timezone.now() if paused else None
+        if "parent_sku_item_id" in payload:
+            parent_item_id = str(payload["parent_sku_item_id"] or "").strip()
+            if not parent_item_id:
+                task.parent_sku = None
+            else:
+                try:
+                    task.parent_sku = ParentItemPrice.objects.get(business=business, item_id=parent_item_id)
+                except ParentItemPrice.DoesNotExist:
+                    return Response({"error": f"No parent SKU '{parent_item_id}' in this business."},
+                                    status=status.HTTP_400_BAD_REQUEST)
+        if "listing_template" in payload:
+            template_id = payload["listing_template"]
+            if not template_id:
+                task.listing_template = None
+            else:
+                try:
+                    task.listing_template = ListingTemplate.objects.get(pk=template_id, business=business)
+                except (ListingTemplate.DoesNotExist, ValueError, TypeError):
+                    return Response({"error": "That listing template doesn't exist."},
+                                    status=status.HTTP_400_BAD_REQUEST)
         task.save()
         if "assignees" in payload:
             ids = payload["assignees"] if isinstance(payload["assignees"], list) else [payload["assignees"]]
@@ -9540,6 +9602,55 @@ def task_listing_add(request, business_id, pk):
     return Response(TaskListingSerializer(listing, context={"request": request}).data, status=status.HTTP_201_CREATED)
 
 
+@api_view(["GET"])
+def worker_task_generate_sku(request, business_id, pk):
+    """
+    Suggest the next SKU id for this task: <prefix><next number>, zero-padded to
+    3 digits (widening automatically past 999). The prefix is whatever the
+    admin set on the task (listing_defaults.sku_prefix), or ?prefix= for an
+    ad-hoc one; the next number is one past the highest already used with that
+    prefix anywhere in the business, checked against both listed and catalogued
+    SKUs so it can't suggest something already taken by either.
+
+    Pure suggestion — nothing is written here, so nothing can race. The
+    duplicate check in task_listing_add is still what actually guards a save;
+    if two people generate the same number at once, the second one's Add just
+    gets a 409 and regenerates.
+    """
+    business = get_authorized_business(request, business_id)
+    try:
+        task = WorkerTask.objects.get(pk=pk, business=business)
+    except WorkerTask.DoesNotExist:
+        return Response({"error": "Task not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    admin = _is_admin(request.user)
+    if not admin and not task.assignees.filter(pk=request.user.pk).exists():
+        return Response({"error": "That task isn't yours."}, status=status.HTTP_403_FORBIDDEN)
+
+    prefix = str(request.GET.get("prefix") or (task.listing_defaults or {}).get("sku_prefix") or "").strip()
+    if not prefix:
+        return Response({"error": "Set a starting SKU prefix on this task first."},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    # Prefix match is cheap at the DB (indexed LIKE); the strict "prefix + only
+    # digits" check runs in Python on that much smaller set.
+    pattern = re.compile(r"^" + re.escape(prefix) + r"(\d+)$", re.IGNORECASE)
+    candidates = (
+        set(TaskListing.objects.filter(business=business, sku_id__istartswith=prefix)
+            .values_list("sku_id", flat=True))
+        | set(FinalPrice.objects.filter(business=business, sku_id__istartswith=prefix)
+              .values_list("sku_id", flat=True))
+    )
+    highest = 0
+    for sku_id in candidates:
+        m = pattern.match((sku_id or "").strip())
+        if m:
+            highest = max(highest, int(m.group(1)))
+
+    suggested = f"{prefix}{highest + 1:03d}"
+    return Response({"sku_id": suggested, "prefix": prefix})
+
+
 @api_view(["GET", "PATCH", "DELETE"])
 def task_listing_detail(request, business_id, pk):
     """Edit or remove one SKU. A paused task, or an approved listing, is frozen."""
@@ -9644,48 +9755,71 @@ def task_listing_review(request, business_id, pk):
         return Response({"listing": TaskListingSerializer(listing, context={"request": request}).data, "credited": None})
 
     listing.status = TaskListing.STATUS_APPROVED
-    if listing.reward_credited_at is None:
-        listing.reward_amount = listing.task.reward_amount
-        entry = _credit(listing.task, WalletEntry.KIND_LISTING, listing.reward_amount,
-                        request.user, listing.created_by,
-                        note=f"{listing.sku_id} ({listing.task.platform})", listing=listing)
-        if entry:
-            listing.reward_credited_at = now
-            credited = float(entry.amount)
 
-    # Approving is what makes the SKU real: it joins the pricing catalogue so
-    # the rest of the app (pricing, inventory, SKU analysis) can see it. Only
-    # ever done here, so a SKU can't enter the catalogue without your sign-off.
-    #
-    # Deliberately only the tax rate is carried over. FinalPrice.item_price is
-    # the *purchase* cost, and the listing's price is what it sells for —
-    # copying one into the other would quietly corrupt every profit figure.
+    # Everything approval does — joining the catalogue (and syncing to the
+    # task's parent SKU, if any) and paying out — happens in one transaction,
+    # so a failure partway through can't leave a listing marked "approved"
+    # without its SKU actually in the catalogue, or paid without being linked.
     catalog_created = False
-    if listing.added_to_catalog_at is None:
-        _, catalog_created = FinalPrice.objects.get_or_create(
-            business=business, sku_id=listing.sku_id,
-            defaults={"tax_percent": int(listing.tax_percent) if listing.tax_percent is not None else None},
-        )
-        listing.added_to_catalog_at = now
-    listing.save()
+    parent_linked = False
+    with transaction.atomic():
+        # Approving is what makes the SKU real: it joins the pricing catalogue
+        # so the rest of the app (pricing, inventory, SKU analysis) can see it.
+        # Only ever done here, so a SKU can't enter the catalogue without your
+        # sign-off.
+        if listing.added_to_catalog_at is None:
+            if listing.task.parent_sku_id:
+                # Linked to a parent: reuse the same bulk-link path the pricing
+                # tab uses, so the SKU is created *and* immediately inherits the
+                # parent's price/tax/packaging instead of landing unpriced.
+                result = _bulk_link_skus_to_parent(
+                    business=business, parent=listing.task.parent_sku, sku_ids=[listing.sku_id],
+                )
+                catalog_created = bool(result.get("created"))
+                parent_linked = result.get("failed", 0) == 0
+            else:
+                # Deliberately only the tax rate is carried over. FinalPrice.item_price
+                # is the *purchase* cost, and the listing's price is what it sells
+                # for — copying one into the other would quietly corrupt every
+                # profit figure.
+                _, catalog_created = FinalPrice.objects.get_or_create(
+                    business=business, sku_id=listing.sku_id,
+                    defaults={"tax_percent": int(listing.tax_percent) if listing.tax_percent is not None else None},
+                )
+            listing.added_to_catalog_at = now
+
+        if listing.reward_credited_at is None:
+            listing.reward_amount = listing.task.reward_amount
+            entry = _credit(listing.task, WalletEntry.KIND_LISTING, listing.reward_amount,
+                            request.user, listing.created_by,
+                            note=f"{listing.sku_id} ({listing.task.platform})", listing=listing)
+            if entry:
+                listing.reward_credited_at = now
+                credited = float(entry.amount)
+
+        listing.save()
 
     return Response({
         "listing": TaskListingSerializer(listing, context={"request": request}).data,
         "credited": credited,
         "catalog_sku_created": catalog_created,
+        "parent_linked": parent_linked,
     })
 
 
 @api_view(["GET", "PUT"])
 def platform_rates(request, business_id):
     """
-    The standing rate per platform. Read by everyone (a worker should be able to
-    see what work is worth); only an admin can change it.
+    The standing rate per platform, and optionally a per-worker override on top
+    of it (see PlatformRate.user). Read by everyone (a worker should be able to
+    see what work is worth, including their own override); only an admin can
+    change it, and only an admin can see someone else's override.
     """
     business = get_authorized_business(request, business_id)
+    admin = _is_admin(request.user)
 
     if request.method == "PUT":
-        if not _is_admin(request.user):
+        if not admin:
             return Response({"error": "Only an admin can set rates."},
                             status=status.HTTP_403_FORBIDDEN)
         rows = request.data.get("rates") if isinstance(request.data, dict) else None
@@ -9697,18 +9831,32 @@ def platform_rates(request, business_id):
             task_type = str(row.get("task_type") or WorkerTask.TYPE_LISTING).strip().upper()
             if platform not in {c[0] for c in WorkerTask.PLATFORM_CHOICES}:
                 continue
+            # A row without a user is the business default; one with a user_id
+            # is that specific person's override, checked first when a task is
+            # created for them (see _resolve_rate).
+            user = None
+            raw_user_id = row.get("user_id")
+            if raw_user_id:
+                user = User.objects.filter(pk=raw_user_id, memberships__business=business).first()
+                if user is None:
+                    return Response({"error": f"No such worker (id {raw_user_id}) in this business."},
+                                    status=status.HTTP_400_BAD_REQUEST)
             reward = safe_decimal(row.get("reward_amount")) or Decimal("0")
             bonus = safe_decimal(row.get("bonus_amount")) or Decimal("0")
             if reward < 0 or bonus < 0:
                 return Response({"error": "Rates can't be negative."},
                                 status=status.HTTP_400_BAD_REQUEST)
             PlatformRate.objects.update_or_create(
-                business=business, platform=platform, task_type=task_type,
+                business=business, platform=platform, task_type=task_type, user=user,
                 defaults={"reward_amount": reward, "bonus_amount": bonus,
                           "updated_by": request.user},
             )
 
-    rates = PlatformRate.objects.filter(business=business).select_related("updated_by")
+    rates = PlatformRate.objects.filter(business=business).select_related("updated_by", "user")
+    if not admin:
+        # A worker sees the business rate and their own override, never
+        # anyone else's — same boundary as the wallet and the task roster.
+        rates = rates.filter(DQ(user__isnull=True) | DQ(user=request.user))
     return Response({
         "results": PlatformRateSerializer(rates, many=True).data,
         "platforms": [{"value": v, "label": l} for v, l in WorkerTask.PLATFORM_CHOICES],
