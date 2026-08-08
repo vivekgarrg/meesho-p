@@ -1,9 +1,10 @@
 /**
  * content.js
  * -----------------------------------------------------------------------------
- * Message bridge between the popup and the live Meesho page.
- * Delegates the heavy lifting to window.MeeshoFieldScanner (fieldScanner.js,
- * injected just before this file per manifest order).
+ * Message bridge between the popup and the live Meesho or Flipkart Seller Hub
+ * listing page. Delegates the heavy lifting to window.MeeshoFieldScanner
+ * (fieldScanner.js, injected just before this file per manifest order) — the
+ * scanner itself is DOM-heuristic based, not tied to either site.
  *
  * Also draws a small floating badge so the user knows the extension is live and
  * how many fields were detected on the current page.
@@ -13,9 +14,12 @@
 
   const Scanner = window.MeeshoFieldScanner;
   if (!Scanner) {
-    console.warn("[MeeshoLister] field scanner not loaded");
+    console.warn("[RudamLister] field scanner not loaded");
     return;
   }
+
+  /** Which marketplace this tab is on, purely for the badge text. */
+  const PLATFORM_LABEL = /flipkart\.com$/i.test(location.hostname) ? "Flipkart" : "Meesho";
 
   /* ---------------------------- message handling --------------------------- */
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
@@ -62,7 +66,7 @@
     if (badgeEl) return badgeEl;
     badgeEl = document.createElement("div");
     badgeEl.id = "ml-badge";
-    badgeEl.textContent = "Meesho Lister";
+    badgeEl.textContent = `Rudam Lister · ${PLATFORM_LABEL}`;
     Object.assign(badgeEl.style, {
       position: "fixed",
       bottom: "16px",
@@ -110,7 +114,7 @@
         const n = Scanner.scan().length;
         if (n > 0) {
           const b = ensureBadge();
-          b.textContent = `Meesho Lister · ${n} fields`;
+          b.textContent = `Rudam Lister · ${PLATFORM_LABEL} · ${n} fields`;
         }
       } catch (_) {}
     }, 1200);

@@ -1,11 +1,12 @@
 {
   "manifest_version": 3,
-  "name": "Meesho Dynamic Lister",
-  "version": "1.1.0",
-  "description": "Auto-detect Meesho listing fields, save them as reusable templates on your Rudam account, prefill in one click, and generate product images.",
+  "name": "Meesho & Flipkart Dynamic Lister",
+  "version": "1.2.0",
+  "description": "Auto-detect Meesho and Flipkart Seller Hub listing fields, save them as reusable templates on your Rudam account, prefill in one click, and generate product images.",
   "permissions": ["storage", "activeTab", "scripting", "downloads"],
   "host_permissions": [
     "https://*.meesho.com/*",
+    "https://seller.flipkart.com/*",
     "https://rudam.in/*",
     "https://www.rudam.in/*",
     "http://127.0.0.1:8000/*",
@@ -21,7 +22,7 @@
   },
   "action": {
     "default_popup": "popup/popup.html",
-    "default_title": "Meesho Dynamic Lister",
+    "default_title": "Meesho & Flipkart Dynamic Lister",
     "default_icon": {
       "16": "icons/icon16.png",
       "48": "icons/icon48.png",
@@ -35,7 +36,7 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://*.meesho.com/*"],
+      "matches": ["https://*.meesho.com/*", "https://seller.flipkart.com/*"],
       "js": ["content/fieldScanner.js", "content/content.js"],
       "run_at": "document_idle"
     }

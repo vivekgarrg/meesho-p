@@ -1,13 +1,16 @@
 /**
  * fieldScanner.js
  * -----------------------------------------------------------------------------
- * Shared, framework-agnostic field detection for the Meesho listing form.
+ * Shared, framework-agnostic field detection for the Meesho and Flipkart
+ * Seller Hub listing forms.
  *
- * Meesho's catalog/listing UI is a React app whose DOM (ids, class names) is
- * minified and changes between deploys. Hardcoding selectors is brittle, so we
- * derive a *stable logical key* for every editable field from human-facing
- * signals (associated <label>, aria-label, placeholder, name) that tend to
- * survive redesigns. Templates are keyed on that logical key, not on DOM paths.
+ * Both are React apps whose DOM (ids, class names) is minified and changes
+ * between deploys. Hardcoding selectors is brittle, so we derive a *stable
+ * logical key* for every editable field from human-facing signals (associated
+ * <label>, aria-label, placeholder, name) that tend to survive redesigns and
+ * differ from one site to the other anyway. Templates are keyed on that
+ * logical key, not on DOM paths, and naturally only match the site (and
+ * often the exact form) they were captured on.
  *
  * Exposed on window as `MeeshoFieldScanner` (no modules in content scripts).
  */

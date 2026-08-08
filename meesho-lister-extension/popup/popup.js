@@ -38,9 +38,26 @@
     $(el).classList.toggle("hidden", !visible);
   }
 
-  async function activeMeeshoTab() {
+  async function activeTargetTab() {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     return tab;
+  }
+
+  /**
+   * Which marketplace a URL belongs to, or null if it's neither. Used both to
+   * gate scan/apply on the active tab and to label a saved template by where
+   * it was captured (see templateCard).
+   */
+  function platformOf(url) {
+    let host;
+    try {
+      host = new URL(url || "").hostname.toLowerCase();
+    } catch {
+      return null;
+    }
+    if (/(^|\.)meesho\.com$/.test(host)) return "Meesho";
+    if (host === "seller.flipkart.com") return "Flipkart";
+    return null;
   }
 
   function sendToTab(tabId, message) {
@@ -176,15 +193,16 @@
 
   /* ------------------------------ page status ------------------------------ */
   async function refreshStatus() {
-    const tab = await activeMeeshoTab();
+    const tab = await activeTargetTab();
     const line = $("#status-line");
-    if (!tab || !/meesho\.com/.test(tab.url || "")) {
-      line.textContent = "Open a Meesho page to begin.";
+    const platform = tab && platformOf(tab.url);
+    if (!platform) {
+      line.textContent = "Open a Meesho or Flipkart Seller Hub listing page to begin.";
       $("#btn-scan").disabled = true;
       return;
     }
     const resp = await sendToTab(tab.id, { type: "ML_PING" });
-    line.textContent = resp.ok ? "Connected to Meesho ✓" : "Reload the Meesho tab to connect.";
+    line.textContent = resp.ok ? `Connected to ${platform} ✓` : `Reload the ${platform} tab to connect.`;
     $("#btn-scan").disabled = false;
   }
 
@@ -203,7 +221,7 @@
 
   /* ------------------------------ FIELDS tab ------------------------------- */
   async function scanPage() {
-    const tab = await activeMeeshoTab();
+    const tab = await activeTargetTab();
     if (!tab) return;
     const resp = await sendToTab(tab.id, { type: "ML_SCAN", visibleOnly: true });
     if (!resp.ok) {
@@ -249,7 +267,7 @@
     locate.className = "fc-locate";
     locate.textContent = "locate";
     locate.addEventListener("click", async () => {
-      const tab = await activeMeeshoTab();
+      const tab = await activeTargetTab();
       sendToTab(tab.id, { type: "ML_HIGHLIGHT", key: f.key });
     });
     head.appendChild(locate);
@@ -271,7 +289,7 @@
   }
 
   async function fillAll() {
-    const tab = await activeMeeshoTab();
+    const tab = await activeTargetTab();
     if (!tab) return;
     const resp = await sendToTab(tab.id, { type: "ML_APPLY", values: editBuffer });
     if (!resp.ok) return toast(resp.error || "Fill failed", "err");
@@ -304,7 +322,7 @@
       return toast("Nothing to save — every field is empty", "err");
     }
 
-    const tab = await activeMeeshoTab();
+    const tab = await activeTargetTab();
     const btn = $("#btn-save-template");
     btn.disabled = true;
     const saved = await guarded(
@@ -389,8 +407,14 @@
     const count = t.field_count ?? Object.keys(t.fields || {}).length;
     const when = t.updated_at ? new Date(t.updated_at).toLocaleString() : "";
     const who = t.updated_by_name || t.created_by_name;
+    // Captured pages carry their own field keys, so a template only ever fills
+    // matching fields anyway — this tag is just so you can tell at a glance
+    // which site it was saved from before hitting Apply.
+    const platform = platformOf(t.source_url);
     card.innerHTML = `
-      <div class="tpl-name">${escapeHtml(t.name)}</div>
+      <div class="tpl-name">${escapeHtml(t.name)}${
+      platform ? ` <span class="tpl-platform">${escapeHtml(platform)}</span>` : ""
+    }</div>
       <div class="tpl-meta">${count} field(s) · updated ${escapeHtml(when)}${
       who ? " · by " + escapeHtml(who) : ""
     }</div>`;
@@ -423,9 +447,9 @@
   }
 
   async function applyTemplate(t) {
-    const tab = await activeMeeshoTab();
-    if (!tab || !/meesho\.com/.test(tab.url || "")) {
-      return toast("Open a Meesho form tab first", "err");
+    const tab = await activeTargetTab();
+    if (!tab || !platformOf(tab.url)) {
+      return toast("Open a Meesho or Flipkart Seller Hub listing tab first", "err");
     }
     const full = await withFields(t);
     if (!full) return;
