@@ -11,6 +11,7 @@ import PlayCircleIcon from "@mui/icons-material/PlayCircleFilled";
 import MenuBookIcon from "@mui/icons-material/MenuBook";
 import PriceChangeIcon from "@mui/icons-material/PriceChange";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutlineOutlined";
+import SettingsIcon from "@mui/icons-material/Settings";
 import { CircularProgress } from "@mui/material";
 
 const TYPE_META = {
@@ -49,6 +50,17 @@ const LISTING_FIELDS = [
 
 const fmtDate = (v) => (v ? new Date(v).toLocaleString("en-IN", {
   day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }) : "—");
+
+/** A small numbered-circle label, used to walk through the SKU steps. */
+function StepBadge({ n }) {
+  return (
+    <span style={{
+      display: "inline-flex", alignItems: "center", justifyContent: "center",
+      width: 17, height: 17, borderRadius: "50%", background: C.orange, color: C.white,
+      fontSize: 10.5, fontWeight: 800, flexShrink: 0, marginRight: 6,
+    }}>{n}</span>
+  );
+}
 
 function Money({ value, muted }) {
   return <span style={{ fontFamily: "monospace", fontWeight: 800,
@@ -203,12 +215,12 @@ function ListingRow({ listing, isAdmin, platform, reference, frozen, onSave, onD
 }
 
 /** The per-SKU field set — shared by the add form and the edit row. */
-function ListingFields({ form, set, platform, reference, hideSku }) {
+function ListingFields({ form, set, platform, reference, hideSku, excludeKeys = [] }) {
   const hsnList = reference?.hsn_codes || [];
   const slabs = reference?.gst_slabs || [];
   return (
     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 9 }}>
-      {LISTING_FIELDS.filter((f) => !(hideSku && f.key === "sku_id")).map((f) => (
+      {LISTING_FIELDS.filter((f) => !(hideSku && f.key === "sku_id") && !excludeKeys.includes(f.key)).map((f) => (
         <div key={f.key}>
           <label style={{ ...S.label, marginBottom: 3 }}>
             {f.platformLabel ? `${platform} price` : f.label}{f.required ? " *" : ""}
@@ -241,6 +253,91 @@ function ListingFields({ form, set, platform, reference, hideSku }) {
           )}
         </div>
       ))}
+    </div>
+  );
+}
+
+/**
+ * Parent-SKU + listing-template pickers — shared by task creation
+ * (NewTaskForm) and editing an existing task (TaskSettingsPanel). Both are
+ * optional and only meaningful for LISTING tasks.
+ */
+function TaskLinkFields({ parentSkus, templates, parentSkuId, setParentSkuId, templateId, setTemplateId, datalistId }) {
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 9 }}>
+      <div>
+        <label style={{ ...S.label, marginBottom: 3 }}>Link to parent SKU</label>
+        <input list={datalistId} value={parentSkuId} onChange={(e) => setParentSkuId(e.target.value)}
+          placeholder="Search parent item id…" style={{ ...S.inp, fontSize: 12.5 }} />
+        <datalist id={datalistId}>
+          {parentSkus.map((p) => <option key={p.item_id} value={p.item_id} />)}
+        </datalist>
+        <div style={{ fontSize: 10.5, color: C.gray400, marginTop: 3 }}>
+          Every SKU approved on this task links — and prices itself — to this parent.
+        </div>
+      </div>
+      <div>
+        <label style={{ ...S.label, marginBottom: 3 }}>Use listing template</label>
+        <select value={templateId} onChange={(e) => setTemplateId(e.target.value)} style={{ ...S.inp, fontSize: 12.5 }}>
+          <option value="">—</option>
+          {templates.map((t) => (
+            <option key={t.id} value={t.id}>{t.name} ({t.field_count} fields)</option>
+          ))}
+        </select>
+        <div style={{ fontSize: 10.5, color: C.gray400, marginTop: 3 }}>
+          Shown on the task so the team applies the same browser-extension template.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Admin-only editor for the three "set up once" things a LISTING task can
+ * carry: the SKU prefix that powers auto-generation, a linked parent SKU, and
+ * a linked browser-extension template. Separate from the create form so these
+ * can be added or changed on a task that already exists, not just at creation.
+ */
+function TaskSettingsPanel({ task, parentSkus, templates, onSave, onCancel, busy }) {
+  const [prefix, setPrefix] = useState(task.listing_defaults?.sku_prefix || "");
+  const [parentSkuId, setParentSkuId] = useState(task.parent_sku_item_id || "");
+  const [templateId, setTemplateId] = useState(task.listing_template ? String(task.listing_template) : "");
+  const [err, setErr] = useState("");
+
+  const save = async () => {
+    const listing_defaults = { ...(task.listing_defaults || {}) };
+    if (prefix.trim()) listing_defaults.sku_prefix = prefix.trim();
+    else delete listing_defaults.sku_prefix;
+    const e = await onSave(task.id, {
+      listing_defaults,
+      parent_sku_item_id: parentSkuId,
+      listing_template: templateId || "",
+    });
+    if (e) setErr(e); else onCancel();
+  };
+
+  return (
+    <div style={{ border: `1px solid ${C.blue}44`, borderRadius: 10, padding: 12, background: C.blueLight }}>
+      <div style={{ fontSize: 12.5, fontWeight: 700, color: C.gray700, marginBottom: 8 }}>
+        Task settings
+      </div>
+      <div style={{ marginBottom: 10, maxWidth: 320 }}>
+        <label style={{ ...S.label, marginBottom: 3 }}>Starting SKU name (prefix)</label>
+        <input value={prefix} onChange={(e) => setPrefix(e.target.value)}
+          placeholder="e.g. BRS-" style={{ ...S.inp, fontFamily: "monospace" }} />
+        <div style={{ fontSize: 10.5, color: C.gray400, marginTop: 3 }}>
+          Powers "Generate SKU id" below — e.g. BRS- generates BRS-001, BRS-002…
+        </div>
+      </div>
+      <TaskLinkFields parentSkus={parentSkus} templates={templates}
+        parentSkuId={parentSkuId} setParentSkuId={setParentSkuId}
+        templateId={templateId} setTemplateId={setTemplateId}
+        datalistId={`parent-sku-options-task-${task.id}`} />
+      {err && <div style={{ fontSize: 12, color: C.red, fontWeight: 600, marginTop: 8 }}>{err}</div>}
+      <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+        <button onClick={save} disabled={busy} style={btn("primary", "sm")}>Save</button>
+        <button onClick={onCancel} style={btn("ghost", "sm")}>Cancel</button>
+      </div>
     </div>
   );
 }
@@ -295,70 +392,122 @@ function AddListing({ task, reference, onAdd, busy, isAdmin }) {
 
   return (
     <div style={{ border: `1px dashed ${C.gray200}`, borderRadius: 10, padding: 12, background: C.gray50 }}>
-      <div style={{ fontSize: 12.5, fontWeight: 700, color: C.gray700, marginBottom: 8 }}>
-        Add a SKU
+      <div style={{ fontSize: 12.5, fontWeight: 700, color: C.gray700, marginBottom: 10 }}>
+        Add a SKU — 3 steps
       </div>
-      {isAdmin ? (
-        <ListingFields form={form} set={set} platform={task.platform} reference={reference} />
-      ) : (
-        <>
-          <div style={{ maxWidth: 320 }}>
-            <label style={{ ...S.label, marginBottom: 3 }}>SKU id *</label>
-            <input value={form.sku_id} onChange={set("sku_id")} autoFocus
-              placeholder={defaults.sku_prefix ? `${defaults.sku_prefix}…` : "the SKU you created"}
-              style={{ ...S.inp, fontFamily: "monospace", fontWeight: 700 }} />
-          </div>
-          {/* The commercial values are the admin's; shown so the worker lists
-              against the right numbers, but not editable. */}
-          {Object.keys(defaults).length > 0 && (
-            <div style={{ marginTop: 10, padding: "9px 12px", borderRadius: 8,
-              background: C.white, border: `1px solid ${C.border}` }}>
-              <div style={{ fontSize: 10.5, fontWeight: 700, color: C.gray400,
-                letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: 5 }}>
-                Use these values — set by the admin
-              </div>
-              <div style={{ display: "flex", gap: 14, flexWrap: "wrap", fontSize: 12.5, color: C.gray700 }}>
-                {LISTING_FIELDS.filter((f) => f.key !== "sku_id" && defaults[f.key]).map((f) => (
-                  <span key={f.key}>
-                    <span style={{ color: C.gray400 }}>
-                      {f.platformLabel ? `${task.platform} price` : f.label}:{" "}
-                    </span>
-                    <b style={{ fontFamily: f.type === "money" ? "monospace" : "inherit" }}>
-                      {f.type === "money" ? fmt(defaults[f.key]) : defaults[f.key]}{f.type === "tax" ? "%" : ""}
-                    </b>
-                  </span>
-                ))}
-              </div>
+
+      {/* Step 1 — the prefix. Admin sets/edits it right here; a worker just
+          sees what it currently is, since they can't change it. */}
+      <div style={{ marginBottom: 12 }}>
+        <div style={{ display: "flex", alignItems: "center", marginBottom: 4 }}>
+          <StepBadge n={1} />
+          <span style={{ fontSize: 12, fontWeight: 700, color: C.gray700 }}>Starting SKU name</span>
+        </div>
+        {isAdmin ? (
+          <>
+            <input value={form.sku_prefix ?? ""} onChange={set("sku_prefix")}
+              placeholder="e.g. BRS-" style={{ ...S.inp, maxWidth: 240, fontFamily: "monospace" }} />
+            <div style={{ fontSize: 10.5, color: C.gray400, marginTop: 3, marginLeft: 23 }}>
+              Powers Generate below — e.g. BRS- generates BRS-001, BRS-002…
             </div>
-          )}
-        </>
-      )}
-      {prefix.trim() && (
-        <button onClick={generateSku} disabled={generating} style={{ ...btn("ghost", "sm"), marginTop: 9 }}>
-          {generating ? "Generating…" : `Generate SKU id (${prefix}…)`}
+          </>
+        ) : prefix.trim() ? (
+          <div style={{ marginLeft: 23, fontSize: 13, fontFamily: "monospace", fontWeight: 700, color: C.gray800 }}>
+            {prefix}
+          </div>
+        ) : (
+          <div style={{ marginLeft: 23, fontSize: 12, color: C.amber, fontWeight: 600 }}>
+            Not set yet — ask your admin to set one in this task's settings.
+          </div>
+        )}
+      </div>
+
+      {/* Step 2 — generate. Always visible so it's never a mystery why the
+          button isn't there; disabled with the reason instead of hiding. */}
+      <div style={{ marginBottom: 12 }}>
+        <div style={{ display: "flex", alignItems: "center", marginBottom: 6 }}>
+          <StepBadge n={2} />
+          <span style={{ fontSize: 12, fontWeight: 700, color: C.gray700 }}>Generate the next SKU id</span>
+        </div>
+        <button onClick={generateSku} disabled={generating || !prefix.trim()}
+          title={!prefix.trim() ? "Set a starting SKU name in step 1 first" : ""}
+          style={{ ...btn("secondary", "sm"), marginLeft: 23 }}>
+          {generating ? "Generating…" : prefix.trim() ? `Generate SKU id (${prefix}…)` : "Generate SKU id"}
         </button>
-      )}
+      </div>
+
+      {/* Step 3 — review/edit and send it. */}
+      <div style={{ marginBottom: 4 }}>
+        <div style={{ display: "flex", alignItems: "center", marginBottom: 6 }}>
+          <StepBadge n={3} />
+          <span style={{ fontSize: 12, fontWeight: 700, color: C.gray700 }}>
+            {isAdmin ? "Check it, then add it" : "Check it, then add it — sent to your admin for approval"}
+          </span>
+        </div>
+        <div style={{ marginLeft: 23 }}>
+          {isAdmin ? (
+            <ListingFields form={form} set={set} platform={task.platform} reference={reference}
+              excludeKeys={["sku_prefix"]} />
+          ) : (
+            <>
+              <div style={{ maxWidth: 320 }}>
+                <label style={{ ...S.label, marginBottom: 3 }}>SKU id *</label>
+                <input value={form.sku_id} onChange={set("sku_id")}
+                  placeholder={defaults.sku_prefix ? `${defaults.sku_prefix}…` : "the SKU you created"}
+                  style={{ ...S.inp, fontFamily: "monospace", fontWeight: 700 }} />
+              </div>
+              {/* The commercial values are the admin's; shown so the worker lists
+                  against the right numbers, but not editable. */}
+              {Object.keys(defaults).length > 0 && (
+                <div style={{ marginTop: 10, padding: "9px 12px", borderRadius: 8,
+                  background: C.white, border: `1px solid ${C.border}` }}>
+                  <div style={{ fontSize: 10.5, fontWeight: 700, color: C.gray400,
+                    letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: 5 }}>
+                    Use these values — set by the admin
+                  </div>
+                  <div style={{ display: "flex", gap: 14, flexWrap: "wrap", fontSize: 12.5, color: C.gray700 }}>
+                    {LISTING_FIELDS.filter((f) => f.key !== "sku_id" && defaults[f.key]).map((f) => (
+                      <span key={f.key}>
+                        <span style={{ color: C.gray400 }}>
+                          {f.platformLabel ? `${task.platform} price` : f.label}:{" "}
+                        </span>
+                        <b style={{ fontFamily: f.type === "money" ? "monospace" : "inherit" }}>
+                          {f.type === "money" ? fmt(defaults[f.key]) : defaults[f.key]}{f.type === "tax" ? "%" : ""}
+                        </b>
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+
       {err && (
-        <div style={{ marginTop: 8, padding: "8px 11px", borderRadius: 8, background: C.redLight,
+        <div style={{ marginTop: 8, marginLeft: 23, padding: "8px 11px", borderRadius: 8, background: C.redLight,
           border: `1px solid ${C.redBorder}`, color: C.red, fontSize: 12.5, fontWeight: 700 }}>
           {err}
         </div>
       )}
-      <button onClick={add} disabled={busy} style={{ ...btn("primary", "sm"), marginTop: 10 }}>
+      <button onClick={add} disabled={busy} style={{ ...btn("primary", "sm"), marginTop: 10, marginLeft: 23 }}>
         <AddIcon style={{ fontSize: 15, verticalAlign: "-3px" }} />&nbsp;Add SKU
       </button>
     </div>
   );
 }
 
-function TaskCard({ task, isAdmin, reference, collapsed, onToggleCollapse, onSubmit, onReview,
-                    onPause, onDelete, onListingAdd, onListingSave, onListingDelete, onListingReview, busy }) {
+function TaskCard({ task, isAdmin, reference, parentSkus, templates, collapsed, onToggleCollapse,
+                    onSubmit, onReview, onPause, onDelete, onSaveSettings,
+                    onListingAdd, onListingSave, onListingDelete, onListingReview, busy }) {
   const isMobile = useIsMobile();
   const meta = STATUS_META[task.status] || STATUS_META.ASSIGNED;
   const type = TYPE_META[task.task_type] || TYPE_META.LISTING;
   const listing = task.task_type === "LISTING";
   const [reference_, setRef] = useState(task.submitted_reference || "");
   const [note, setNote] = useState(task.submitted_note || "");
+  const [showSettings, setShowSettings] = useState(false);
+  const prefix = task.listing_defaults?.sku_prefix || "";
 
   const listings = task.listings || [];
   const approved = listings.filter((l) => l.status === "APPROVED").length;
@@ -396,8 +545,11 @@ function TaskCard({ task, isAdmin, reference, collapsed, onToggleCollapse, onSub
         {task.suborder_no && (
           <div style={{ fontSize: 12, color: C.gray500, fontFamily: "monospace", marginTop: 2 }}>{task.suborder_no}</div>
         )}
-        {(task.parent_sku_item_id || task.listing_template_name) && (
+        {listing && (prefix || task.parent_sku_item_id || task.listing_template_name) && (
           <div style={{ display: "flex", gap: 7, flexWrap: "wrap", marginTop: 6 }}>
+            {prefix && (
+              <Tag variant="amber" fontSize={11}>SKU prefix: {prefix}</Tag>
+            )}
             {task.parent_sku_item_id && (
               <Tag variant="blue" fontSize={11}>
                 Parent: {task.parent_sku_item_id}{task.parent_sku_price ? ` (${fmt(task.parent_sku_price)})` : ""}
@@ -424,10 +576,16 @@ function TaskCard({ task, isAdmin, reference, collapsed, onToggleCollapse, onSub
               Compress under {CLAIM_VIDEO_MAX_MB}MB before uploading the claim.
             </span>
           )}
+          {isAdmin && listing && (
+            <button onClick={() => setShowSettings((s) => !s)} disabled={busy}
+              style={{ ...btn(showSettings ? "secondary" : "ghost", "sm"), marginLeft: "auto" }}>
+              <SettingsIcon style={{ fontSize: 15, verticalAlign: "-3px" }} />&nbsp;Task settings
+            </button>
+          )}
           {isAdmin && (
             <button onClick={() => onDelete(task.id, task.title)} disabled={busy}
               title="Delete this task"
-              style={{ ...btn("ghost", "sm"), marginLeft: "auto", color: C.red, borderColor: C.redBorder }}>
+              style={{ ...btn("ghost", "sm"), marginLeft: listing ? 0 : "auto", color: C.red, borderColor: C.redBorder }}>
               <DeleteOutlineIcon style={{ fontSize: 15, verticalAlign: "-3px" }} />&nbsp;Delete
             </button>
           )}
@@ -440,6 +598,13 @@ function TaskCard({ task, isAdmin, reference, collapsed, onToggleCollapse, onSub
             </button>
           )}
         </div>
+
+        {isAdmin && listing && showSettings && (
+          <div style={{ marginTop: 10 }}>
+            <TaskSettingsPanel task={task} parentSkus={parentSkus} templates={templates} busy={busy}
+              onSave={onSaveSettings} onCancel={() => setShowSettings(false)} />
+          </div>
+        )}
       </div>
 
       {/* Listing tasks: many SKUs */}
@@ -621,6 +786,8 @@ export function TeamTasksTab() {
   const pauseTask = (id, paused) =>
     post(`${API}/worker-tasks/${id}/`, { is_paused: paused },
       paused ? "Task paused — no new SKUs." : "Task resumed.", "PATCH");
+  const saveTaskSettings = (id, body) =>
+    post(`${API}/worker-tasks/${id}/`, body, "Task settings saved.", "PATCH");
   const deleteTask = async (id, title) => {
     if (!window.confirm(`Delete "${title || "this task"}"? Any wallet balance already earned from it is kept.`)) return;
     const e = await post(`${API}/worker-tasks/${id}/`, {}, (d) =>
@@ -878,8 +1045,10 @@ export function TeamTasksTab() {
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           {tasks.map((t) => (
             <TaskCard key={t.id} task={t} isAdmin={isAdmin} reference={reference} busy={busy}
+              parentSkus={parentSkus} templates={templates}
               collapsed={!!collapsed[t.id]} onToggleCollapse={() => toggleCollapse(t.id)}
               onSubmit={submitTask} onReview={reviewTask} onPause={pauseTask} onDelete={deleteTask}
+              onSaveSettings={saveTaskSettings}
               onListingAdd={addListing} onListingSave={saveListing}
               onListingDelete={deleteListing} onListingReview={reviewListing} />
           ))}
@@ -966,6 +1135,19 @@ function NewTaskForm({ workers, platforms, rates, reference, parentSkus, templat
         </div>
       </div>
 
+      {type === "LISTING" && (
+        <div style={{ marginBottom: 12, border: `1px solid ${C.blue}44`, borderRadius: 10,
+          padding: 12, background: C.blueLight }}>
+          <div style={{ fontSize: 12.5, fontWeight: 700, color: C.gray700, marginBottom: 8 }}>
+            Link to parent SKU &amp; template (optional)
+          </div>
+          <TaskLinkFields parentSkus={parentSkus} templates={templates}
+            parentSkuId={parentSkuId} setParentSkuId={setParentSkuId}
+            templateId={templateId} setTemplateId={setTemplateId}
+            datalistId="parent-sku-options-new" />
+        </div>
+      )}
+
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 12 }}>
         <div>
           <label style={S.label}>Title</label>
@@ -1018,35 +1200,6 @@ function NewTaskForm({ workers, platforms, rates, reference, parentSkus, templat
           </div>
           <ListingFields form={defaults} set={setDefault} platform={platform} reference={reference}
             hideSku />
-
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
-            gap: 9, marginTop: 12 }}>
-            <div>
-              <label style={{ ...S.label, marginBottom: 3 }}>Link to parent SKU</label>
-              <input list="parent-sku-options" value={parentSkuId}
-                onChange={(e) => setParentSkuId(e.target.value)}
-                placeholder="Search parent item id…" style={{ ...S.inp, fontSize: 12.5 }} />
-              <datalist id="parent-sku-options">
-                {parentSkus.map((p) => <option key={p.item_id} value={p.item_id} />)}
-              </datalist>
-              <div style={{ fontSize: 10.5, color: C.gray400, marginTop: 3 }}>
-                Every SKU approved on this task will link — and price itself — to this parent.
-              </div>
-            </div>
-            <div>
-              <label style={{ ...S.label, marginBottom: 3 }}>Use listing template</label>
-              <select value={templateId} onChange={(e) => setTemplateId(e.target.value)}
-                style={{ ...S.inp, fontSize: 12.5 }}>
-                <option value="">—</option>
-                {templates.map((t) => (
-                  <option key={t.id} value={t.id}>{t.name} ({t.field_count} fields)</option>
-                ))}
-              </select>
-              <div style={{ fontSize: 10.5, color: C.gray400, marginTop: 3 }}>
-                Shown on the task so the team applies the same extension template.
-              </div>
-            </div>
-          </div>
         </div>
       )}
 
