@@ -12,6 +12,12 @@ import MenuBookIcon from "@mui/icons-material/MenuBook";
 import PriceChangeIcon from "@mui/icons-material/PriceChange";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutlineOutlined";
 import SettingsIcon from "@mui/icons-material/Settings";
+import EditOutlinedIcon from "@mui/icons-material/EditOutlined";
+import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
+import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
+import SendIcon from "@mui/icons-material/Send";
+import SearchIcon from "@mui/icons-material/Search";
+import TaskAltIcon from "@mui/icons-material/TaskAlt";
 import { CircularProgress } from "@mui/material";
 
 const TYPE_META = {
@@ -27,9 +33,9 @@ const STATUS_META = {
 };
 
 const LISTING_STATUS = {
-  PENDING:  { label: "Pending",  tag: "amber" },
-  APPROVED: { label: "Approved", tag: "green" },
-  REJECTED: { label: "Rejected", tag: "red" },
+  PENDING:  { label: "Waiting for approval", short: "Waiting",  tag: "amber", accent: C.amber },
+  APPROVED: { label: "Approved",             short: "Approved", tag: "green", accent: C.green },
+  REJECTED: { label: "Needs a fix",          short: "Rejected", tag: "red",   accent: C.red },
 };
 
 const PLATFORM_TAG = { MEESHO: "orange", AMAZON: "amber", FLIPKART: "blue" };
@@ -51,14 +57,28 @@ const LISTING_FIELDS = [
 const fmtDate = (v) => (v ? new Date(v).toLocaleString("en-IN", {
   day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }) : "—");
 
-/** A small numbered-circle label, used to walk through the SKU steps. */
-function StepBadge({ n }) {
+/**
+ * Inputs are 13px on desktop, but iOS Safari zooms the whole page whenever a
+ * focused input is under 16px — so every field grows on a phone. One helper so
+ * no field in this tab can forget.
+ */
+const field = (isMobile, extra) => ({ ...S.inp, fontSize: isMobile ? 16 : 13, ...extra });
+
+/** Buttons need a 40px tap target on touch; ghost icon buttons especially. */
+const tap = (isMobile, extra) => ({
+  background: "none", border: "none", cursor: "pointer", color: C.gray400,
+  display: "inline-flex", alignItems: "center", justifyContent: "center",
+  width: isMobile ? 40 : 30, height: isMobile ? 40 : 30, borderRadius: 9,
+  padding: 0, flexShrink: 0, ...extra,
+});
+
+function Chevron({ open, size = 20, color = C.gray400 }) {
   return (
-    <span style={{
-      display: "inline-flex", alignItems: "center", justifyContent: "center",
-      width: 17, height: 17, borderRadius: "50%", background: C.orange, color: C.white,
-      fontSize: 10.5, fontWeight: 800, flexShrink: 0, marginRight: 6,
-    }}>{n}</span>
+    <ExpandMoreIcon style={{
+      fontSize: size, color, flexShrink: 0,
+      transition: "transform 0.18s ease",
+      transform: open ? "rotate(180deg)" : "rotate(0deg)",
+    }} />
   );
 }
 
@@ -73,10 +93,11 @@ function Metric({ label, value, accent, money, onClick, active }) {
       background: active ? accent : C.white,
       border: `1px solid ${active ? accent : C.border}`,
       borderLeft: `3px solid ${accent}`,
-      borderRadius: 9, padding: "9px 15px", minWidth: 92,
+      borderRadius: 11, padding: "10px 15px", minWidth: 96,
       cursor: onClick ? "pointer" : "default",
       display: "flex", flexDirection: "column", gap: 2,
-      fontFamily: "inherit", textAlign: "left",
+      fontFamily: "inherit", textAlign: "left", flexShrink: 0,
+      boxShadow: active ? "none" : "0 1px 2px rgba(19,17,28,0.04)",
     }}>
       <span style={{ fontSize: 18, fontWeight: 800, fontFamily: "monospace", lineHeight: 1.1,
         color: active ? C.white : money ? C.green : C.gray800 }}>
@@ -99,16 +120,37 @@ function Section({ icon, title, open, onToggle, right, children }) {
         <span style={{ fontSize: 13.5, fontWeight: 700, color: C.gray800 }}>{title}</span>
         <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}
           onClick={(e) => e.stopPropagation()}>{right}</div>
-        <span style={{ color: C.gray400, fontSize: 13 }}>{open ? "▾" : "▸"}</span>
+        <Chevron open={open} size={18} />
       </div>
       {open && <div style={{ padding: 16 }}>{children}</div>}
     </div>
   );
 }
 
-/** One SKU row — editable by its owner, reviewable by an admin. */
+/** A three-segment bar: approved / waiting / rejected out of the whole task. */
+function ProgressBar({ approved, pending, rejected }) {
+  const total = approved + pending + rejected;
+  if (!total) return null;
+  const seg = (n, color) => n > 0 && (
+    <div style={{ width: `${(n / total) * 100}%`, background: color }} />
+  );
+  return (
+    <div style={{ display: "flex", height: 5, borderRadius: 99, overflow: "hidden",
+      background: C.gray200 }}>
+      {seg(approved, C.green)}
+      {seg(pending, C.amber)}
+      {seg(rejected, C.red)}
+    </div>
+  );
+}
+
+/** One SKU — compact by default, with its details a tap away on a phone. */
 function ListingRow({ listing, isAdmin, platform, reference, frozen, onSave, onDelete, onReview, busy }) {
+  const isMobile = useIsMobile();
   const [edit, setEdit] = useState(false);
+  const [showDetails, setShowDetails] = useState(false);
+  const [rejecting, setRejecting] = useState(false);
+  const [reason, setReason] = useState("");
   const [form, setForm] = useState(listing);
   const [err, setErr] = useState("");
   const st = LISTING_STATUS[listing.status] || LISTING_STATUS.PENDING;
@@ -116,6 +158,11 @@ function ListingRow({ listing, isAdmin, platform, reference, frozen, onSave, onD
   useEffect(() => { setForm(listing); setErr(""); }, [listing]);
 
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+
+  // sku_prefix is a property of the task, not of this SKU — it's already a chip
+  // on the card header, so repeating it on every row is pure noise.
+  const details = LISTING_FIELDS.filter(
+    (f) => f.key !== "sku_id" && f.key !== "sku_prefix" && listing[f.key]);
 
   const save = async () => {
     let payload;
@@ -132,20 +179,31 @@ function ListingRow({ listing, isAdmin, platform, reference, frozen, onSave, onD
 
   if (edit) {
     return (
-      <div style={{ border: `1px solid ${C.orangeBorder}`, borderRadius: 10, padding: 12, background: C.orangeLight }}>
+      <div style={{ border: `1.5px solid ${C.orangeBorder}`, borderRadius: 12, padding: 13,
+        background: C.orangeLight }}>
+        <div style={{ fontSize: 11, fontWeight: 800, color: C.orange, letterSpacing: "0.06em",
+          textTransform: "uppercase", marginBottom: 9 }}>
+          {listing.status === "REJECTED" ? "Fix and send again" : "Edit SKU"}
+        </div>
         {isAdmin ? (
           <ListingFields form={form} set={set} platform={platform} reference={reference} />
         ) : (
-          <div style={{ maxWidth: 320 }}>
+          <div style={{ maxWidth: 340 }}>
             <label style={{ ...S.label, marginBottom: 3 }}>SKU id</label>
             <input value={form.sku_id ?? ""} onChange={set("sku_id")}
-              style={{ ...S.inp, fontFamily: "monospace", fontWeight: 700 }} />
+              style={field(isMobile, { fontFamily: "monospace", fontWeight: 700 })} />
           </div>
         )}
-        {err && <div style={{ fontSize: 12, color: C.red, fontWeight: 600, marginTop: 8 }}>{err}</div>}
-        <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
-          <button onClick={save} disabled={busy} style={btn("primary", "sm")}>Save</button>
-          <button onClick={() => { setEdit(false); setForm(listing); setErr(""); }} style={btn("ghost", "sm")}>Cancel</button>
+        {err && <div style={{ fontSize: 12.5, color: C.red, fontWeight: 700, marginTop: 9 }}>{err}</div>}
+        <div style={{ display: "flex", gap: 8, marginTop: 11 }}>
+          <button onClick={save} disabled={busy}
+            style={{ ...btn("primary", "sm"), flex: isMobile ? 1 : "none", padding: isMobile ? "10px 14px" : undefined }}>
+            {listing.status === "REJECTED" ? "Save & resend" : "Save"}
+          </button>
+          <button onClick={() => { setEdit(false); setForm(listing); setErr(""); }}
+            style={{ ...btn("ghost", "sm"), flex: isMobile ? 1 : "none", padding: isMobile ? "10px 14px" : undefined }}>
+            Cancel
+          </button>
         </div>
       </div>
     );
@@ -153,61 +211,118 @@ function ListingRow({ listing, isAdmin, platform, reference, frozen, onSave, onD
 
   return (
     <div style={{
-      border: `1px solid ${C.border}`, borderRadius: 10, padding: "10px 12px",
+      border: `1px solid ${listing.status === "REJECTED" ? C.redBorder : C.border}`,
+      borderLeft: `3px solid ${st.accent}`,
+      borderRadius: 12, padding: isMobile ? "11px 12px" : "11px 14px",
       background: listing.status === "REJECTED" ? C.redLight : C.white,
     }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <span style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 14, color: C.gray900 }}>
-          {listing.sku_id}
-        </span>
-        <Tag variant={st.tag} fontSize={11}>{st.label}</Tag>
-        {listing.prefix_ok === false && (
-          <Tag variant="amber" fontSize={11}>doesn't start with {listing.sku_prefix}</Tag>
-        )}
-        {isAdmin && listing.created_by_name && (
-          <span style={{ fontSize: 11.5, color: C.gray400 }}>by {listing.created_by_name}</span>
-        )}
-        <span style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
+      {/* Line 1 — the identity of the SKU and where it stands. */}
+      <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <span style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 14.5,
+              color: C.gray900, wordBreak: "break-all" }}>
+              {listing.sku_id}
+            </span>
+            <Tag variant={st.tag} fontSize={10.5}>{st.short}</Tag>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginTop: 3 }}>
+            {isAdmin && listing.created_by_name && (
+              <span style={{ fontSize: 11.5, color: C.gray400 }}>by {listing.created_by_name}</span>
+            )}
+            {listing.prefix_ok === false && (
+              <span style={{ fontSize: 11.5, color: C.amber, fontWeight: 600 }}>
+                doesn't start with {listing.sku_prefix}
+              </span>
+            )}
+            {/* Only on a phone — on desktop the details are already on screen,
+                so a toggle beside them just reads as a broken control. */}
+            {isMobile && details.length > 0 && (
+              <button onClick={() => setShowDetails((s) => !s)} style={{
+                background: "none", border: "none", padding: 0, cursor: "pointer",
+                fontFamily: "inherit", fontSize: 11.5, fontWeight: 700, color: C.blue,
+                display: "inline-flex", alignItems: "center", gap: 2 }}>
+                {showDetails ? "Hide" : "Details"}<Chevron open={showDetails} size={14} color={C.blue} />
+              </button>
+            )}
+          </div>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
           {listing.reward_credited_at && <Money value={listing.reward_amount} />}
           {!frozen && (
-            <button onClick={() => setEdit(true)} style={btn("ghost", "sm")}>Edit</button>
-          )}
-          {!frozen && !listing.reward_credited_at && (
-            <button onClick={() => onDelete(listing.id)} disabled={busy}
-              style={{ background: "none", border: "none", cursor: "pointer", color: C.gray300, padding: 2 }}>
-              <DeleteOutlineIcon style={{ fontSize: 17 }} />
+            <button onClick={() => setEdit(true)} title="Edit" style={tap(isMobile, { color: C.gray500 })}>
+              <EditOutlinedIcon style={{ fontSize: 17 }} />
             </button>
           )}
-        </span>
+          {!frozen && !listing.reward_credited_at && (
+            <button onClick={() => onDelete(listing.id)} disabled={busy} title="Remove"
+              style={tap(isMobile, { color: C.gray300 })}>
+              <DeleteOutlineIcon style={{ fontSize: 18 }} />
+            </button>
+          )}
+        </div>
       </div>
 
-      <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginTop: 6, fontSize: 12, color: C.gray600 }}>
-        {LISTING_FIELDS.filter((f) => f.key !== "sku_id" && listing[f.key]).map((f) => (
-          <span key={f.key}>
-            <span style={{ color: C.gray400 }}>{f.platformLabel ? `${platform} price` : f.label}: </span>
-            <span style={{ fontWeight: 700, fontFamily: f.type === "money" ? "monospace" : "inherit" }}>
-              {f.type === "money" ? fmt(listing[f.key]) : listing[f.key]}{f.type === "tax" ? "%" : ""}
+      {/* Line 2 — the numbers. Always on desktop, on demand on a phone. */}
+      {details.length > 0 && (!isMobile || showDetails) && (
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 8, fontSize: 12,
+          color: C.gray600, paddingTop: isMobile ? 8 : 0,
+          borderTop: isMobile ? `1px dashed ${C.gray200}` : "none" }}>
+          {details.map((f) => (
+            <span key={f.key}>
+              <span style={{ color: C.gray400 }}>{f.platformLabel ? `${platform} price` : f.label}: </span>
+              <span style={{ fontWeight: 700, fontFamily: f.type === "money" ? "monospace" : "inherit" }}>
+                {f.type === "money" ? fmt(listing[f.key]) : listing[f.key]}{f.type === "tax" ? "%" : ""}
+              </span>
             </span>
-          </span>
-        ))}
-      </div>
+          ))}
+        </div>
+      )}
 
       {listing.review_comment && (
-        <div style={{ fontSize: 12, fontWeight: 600, marginTop: 6,
+        <div style={{ fontSize: 12.5, fontWeight: 600, marginTop: 8, lineHeight: 1.5,
           color: listing.status === "REJECTED" ? C.red : C.green }}>
           {listing.review_comment}
         </div>
       )}
 
-      {isAdmin && listing.status !== "APPROVED" && (
-        <div style={{ display: "flex", gap: 7, marginTop: 9, flexWrap: "wrap" }}>
-          <button onClick={() => onReview(listing.id, "APPROVE", "")} disabled={busy} style={btn("success", "sm")}>
-            Approve &amp; pay
+      {/* A rejected SKU is the worker's to-do: put the fix one tap away. */}
+      {!isAdmin && !frozen && listing.status === "REJECTED" && (
+        <button onClick={() => setEdit(true)} style={{ ...btn("primary", "sm"), marginTop: 9,
+          width: isMobile ? "100%" : "auto", padding: isMobile ? "10px 14px" : undefined }}>
+          Fix &amp; send again
+        </button>
+      )}
+
+      {isAdmin && listing.status !== "APPROVED" && !rejecting && (
+        <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+          <button onClick={() => onReview(listing.id, "APPROVE", "")} disabled={busy}
+            style={{ ...btn("success", "sm"), flex: isMobile ? 1 : "none", padding: "8px 15px" }}>
+            <CheckCircleIcon style={{ fontSize: 15, verticalAlign: "-3px" }} />&nbsp;Approve &amp; pay
           </button>
-          <button onClick={() => {
-            const c = window.prompt("Why is it rejected?") || "";
-            if (c) onReview(listing.id, "REJECT", c);
-          }} disabled={busy} style={btn("danger", "sm")}>Reject</button>
+          <button onClick={() => { setRejecting(true); setReason(""); }} disabled={busy}
+            style={{ ...btn("ghost", "sm"), color: C.red, borderColor: C.redBorder,
+              flex: isMobile ? 1 : "none", padding: "8px 15px" }}>
+            Reject
+          </button>
+        </div>
+      )}
+
+      {/* Rejecting asks for the reason inline — a browser prompt() loses what
+          you typed the moment you tap outside it on a phone. */}
+      {isAdmin && rejecting && (
+        <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <input autoFocus value={reason} onChange={(e) => setReason(e.target.value)}
+            placeholder="What needs fixing?"
+            onKeyDown={(e) => { if (e.key === "Enter" && reason.trim()) {
+              onReview(listing.id, "REJECT", reason.trim()); setRejecting(false); } }}
+            style={field(isMobile, { flex: "1 1 190px" })} />
+          <button disabled={busy || !reason.trim()}
+            onClick={() => { onReview(listing.id, "REJECT", reason.trim()); setRejecting(false); }}
+            style={{ ...btn("danger", "sm"), opacity: reason.trim() ? 1 : 0.5 }}>
+            Send back
+          </button>
+          <button onClick={() => setRejecting(false)} style={btn("ghost", "sm")}>Cancel</button>
         </div>
       )}
     </div>
@@ -216,10 +331,12 @@ function ListingRow({ listing, isAdmin, platform, reference, frozen, onSave, onD
 
 /** The per-SKU field set — shared by the add form and the edit row. */
 function ListingFields({ form, set, platform, reference, hideSku, excludeKeys = [] }) {
+  const isMobile = useIsMobile();
   const hsnList = reference?.hsn_codes || [];
   const slabs = reference?.gst_slabs || [];
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 9 }}>
+    <div style={{ display: "grid",
+      gridTemplateColumns: `repeat(auto-fit, minmax(${isMobile ? 132 : 140}px, 1fr))`, gap: 10 }}>
       {LISTING_FIELDS.filter((f) => !(hideSku && f.key === "sku_id") && !excludeKeys.includes(f.key)).map((f) => (
         <div key={f.key}>
           <label style={{ ...S.label, marginBottom: 3 }}>
@@ -233,7 +350,7 @@ function ListingFields({ form, set, platform, reference, hideSku, excludeKeys = 
               if (hit?.suggested_tax_percent) {
                 set("tax_percent")({ target: { value: hit.suggested_tax_percent } });
               }
-            }} style={{ ...S.inp, fontSize: 12.5 }}>
+            }} style={field(isMobile)}>
               <option value="">—</option>
               {hsnList.map((h) => (
                 <option key={h.hsn} value={h.hsn}>
@@ -242,14 +359,15 @@ function ListingFields({ form, set, platform, reference, hideSku, excludeKeys = 
               ))}
             </select>
           ) : f.type === "tax" ? (
-            <select value={form[f.key] ?? ""} onChange={set(f.key)} style={{ ...S.inp, fontSize: 12.5 }}>
+            <select value={form[f.key] ?? ""} onChange={set(f.key)} style={field(isMobile)}>
               <option value="">—</option>
               {slabs.map((s) => <option key={s} value={s}>{s}%</option>)}
             </select>
           ) : (
             <input value={form[f.key] ?? ""} onChange={set(f.key)}
               type={f.type === "money" ? "number" : "text"} step="0.01"
-              style={{ ...S.inp, fontSize: 12.5, fontFamily: f.mono ? "monospace" : "inherit" }} />
+              inputMode={f.type === "money" ? "decimal" : undefined}
+              style={field(isMobile, { fontFamily: f.mono ? "monospace" : "inherit" })} />
           )}
         </div>
       ))}
@@ -263,12 +381,13 @@ function ListingFields({ form, set, platform, reference, hideSku, excludeKeys = 
  * optional and only meaningful for LISTING tasks.
  */
 function TaskLinkFields({ parentSkus, templates, parentSkuId, setParentSkuId, templateId, setTemplateId, datalistId }) {
+  const isMobile = useIsMobile();
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 9 }}>
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 10 }}>
       <div>
         <label style={{ ...S.label, marginBottom: 3 }}>Link to parent SKU</label>
         <input list={datalistId} value={parentSkuId} onChange={(e) => setParentSkuId(e.target.value)}
-          placeholder="Search parent item id…" style={{ ...S.inp, fontSize: 12.5 }} />
+          placeholder="Search parent item id…" style={field(isMobile)} />
         <datalist id={datalistId}>
           {parentSkus.map((p) => <option key={p.item_id} value={p.item_id} />)}
         </datalist>
@@ -278,7 +397,7 @@ function TaskLinkFields({ parentSkus, templates, parentSkuId, setParentSkuId, te
       </div>
       <div>
         <label style={{ ...S.label, marginBottom: 3 }}>Use listing template</label>
-        <select value={templateId} onChange={(e) => setTemplateId(e.target.value)} style={{ ...S.inp, fontSize: 12.5 }}>
+        <select value={templateId} onChange={(e) => setTemplateId(e.target.value)} style={field(isMobile)}>
           <option value="">—</option>
           {templates.map((t) => (
             <option key={t.id} value={t.id}>{t.name} ({t.field_count} fields)</option>
@@ -299,6 +418,7 @@ function TaskLinkFields({ parentSkus, templates, parentSkuId, setParentSkuId, te
  * can be added or changed on a task that already exists, not just at creation.
  */
 function TaskSettingsPanel({ task, parentSkus, templates, onSave, onCancel, busy }) {
+  const isMobile = useIsMobile();
   const [prefix, setPrefix] = useState(task.listing_defaults?.sku_prefix || "");
   const [parentSkuId, setParentSkuId] = useState(task.parent_sku_item_id || "");
   const [templateId, setTemplateId] = useState(task.listing_template ? String(task.listing_template) : "");
@@ -317,37 +437,50 @@ function TaskSettingsPanel({ task, parentSkus, templates, onSave, onCancel, busy
   };
 
   return (
-    <div style={{ border: `1px solid ${C.blue}44`, borderRadius: 10, padding: 12, background: C.blueLight }}>
-      <div style={{ fontSize: 12.5, fontWeight: 700, color: C.gray700, marginBottom: 8 }}>
+    <div style={{ border: `1px solid ${C.blue}44`, borderRadius: 12, padding: 13, background: C.blueLight }}>
+      <div style={{ fontSize: 11, fontWeight: 800, color: C.blue, letterSpacing: "0.06em",
+        textTransform: "uppercase", marginBottom: 10 }}>
         Task settings
       </div>
-      <div style={{ marginBottom: 10, maxWidth: 320 }}>
+      <div style={{ marginBottom: 12, maxWidth: 340 }}>
         <label style={{ ...S.label, marginBottom: 3 }}>Starting SKU name (prefix)</label>
         <input value={prefix} onChange={(e) => setPrefix(e.target.value)}
-          placeholder="e.g. BRS-" style={{ ...S.inp, fontFamily: "monospace" }} />
+          placeholder="e.g. BRS-" style={field(isMobile, { fontFamily: "monospace" })} />
         <div style={{ fontSize: 10.5, color: C.gray400, marginTop: 3 }}>
-          Powers "Generate SKU id" below — e.g. BRS- generates BRS-001, BRS-002…
+          Powers "Generate" on the SKU box — e.g. BRS- generates BRS-001, BRS-002…
         </div>
       </div>
       <TaskLinkFields parentSkus={parentSkus} templates={templates}
         parentSkuId={parentSkuId} setParentSkuId={setParentSkuId}
         templateId={templateId} setTemplateId={setTemplateId}
         datalistId={`parent-sku-options-task-${task.id}`} />
-      {err && <div style={{ fontSize: 12, color: C.red, fontWeight: 600, marginTop: 8 }}>{err}</div>}
-      <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
-        <button onClick={save} disabled={busy} style={btn("primary", "sm")}>Save</button>
-        <button onClick={onCancel} style={btn("ghost", "sm")}>Cancel</button>
+      {err && <div style={{ fontSize: 12.5, color: C.red, fontWeight: 700, marginTop: 9 }}>{err}</div>}
+      <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+        <button onClick={save} disabled={busy}
+          style={{ ...btn("primary", "sm"), flex: isMobile ? 1 : "none", padding: isMobile ? "10px 14px" : undefined }}>
+          Save
+        </button>
+        <button onClick={onCancel}
+          style={{ ...btn("ghost", "sm"), flex: isMobile ? 1 : "none", padding: isMobile ? "10px 14px" : undefined }}>
+          Cancel
+        </button>
       </div>
     </div>
   );
 }
 
+/**
+ * The one thing a worker comes to this screen to do: get the next SKU id and
+ * send it for approval. Deliberately a single row — id field + Generate — with
+ * everything else (the admin's prices, the optional overrides) tucked behind a
+ * disclosure, so the whole job is "tap Generate, tap Send".
+ */
 function AddListing({ task, reference, onAdd, busy, isAdmin }) {
+  const isMobile = useIsMobile();
   // Second and later SKUs of the same product share almost everything with the
   // first, so the form opens pre-filled from the last one added — only the SKU
-  // itself is cleared.
-  // Prefer the last SKU added (variants of one product are nearly identical),
-  // and fall back to whatever the admin set on the task.
+  // itself is cleared. Prefer the last SKU added (variants of one product are
+  // nearly identical), and fall back to whatever the admin set on the task.
   const last = (task.listings || [])[0];
   const defaults = task.listing_defaults || {};
   const seed = () => {
@@ -360,17 +493,19 @@ function AddListing({ task, reference, onAdd, busy, isAdmin }) {
   };
   const [form, setForm] = useState(seed);
   const [err, setErr] = useState("");
+  const [hint, setHint] = useState("");
   const [generating, setGenerating] = useState(false);
+  const [showMore, setShowMore] = useState(false);
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
 
   const add = async () => {
-    if (!form.sku_id.trim()) return setErr("Enter the SKU id.");
+    if (!form.sku_id.trim()) return setErr("Generate or type the SKU id first.");
     // A worker sends only the id; everything else is inherited server-side.
     const body = isAdmin ? form : { sku_id: form.sku_id };
     const e = await onAdd(task.id, body);
-    if (e) { setErr(e); return; }
+    if (e) { setErr(e); setHint(""); return; }
     setForm({ ...seed(), sku_id: "" });
-    setErr("");
+    setErr(""); setHint("");
   };
 
   // The prefix an admin can type into the SKU-starts-with field, or the one
@@ -378,7 +513,7 @@ function AddListing({ task, reference, onAdd, busy, isAdmin }) {
   const prefix = (isAdmin ? form.sku_prefix : defaults.sku_prefix) || "";
 
   const generateSku = async () => {
-    if (!prefix.trim()) return setErr("Set a SKU prefix first, then generate.");
+    if (!prefix.trim()) return setErr("Set a starting SKU name first, then generate.");
     setGenerating(true);
     try {
       const res = await fetch(`${API}/worker-tasks/${task.id}/generate-sku/?prefix=${encodeURIComponent(prefix.trim())}`);
@@ -386,120 +521,152 @@ function AddListing({ task, reference, onAdd, busy, isAdmin }) {
       if (!res.ok) { setErr(d.error || "Could not generate a SKU id."); return; }
       setForm((f) => ({ ...f, sku_id: d.sku_id }));
       setErr("");
+      setHint(isAdmin ? "Check it, then add it." : "Check it, then send it for approval.");
     } catch { setErr("Network error."); }
     finally { setGenerating(false); }
   };
 
-  return (
-    <div style={{ border: `1px dashed ${C.gray200}`, borderRadius: 10, padding: 12, background: C.gray50 }}>
-      <div style={{ fontSize: 12.5, fontWeight: 700, color: C.gray700, marginBottom: 10 }}>
-        Add a SKU — 3 steps
-      </div>
+  const shownDefaults = LISTING_FIELDS.filter((f) => f.key !== "sku_id" && defaults[f.key]);
+  const ready = !!form.sku_id.trim();
 
-      {/* Step 1 — the prefix. Admin sets/edits it right here; a worker just
-          sees what it currently is, since they can't change it. */}
-      <div style={{ marginBottom: 12 }}>
-        <div style={{ display: "flex", alignItems: "center", marginBottom: 4 }}>
-          <StepBadge n={1} />
-          <span style={{ fontSize: 12, fontWeight: 700, color: C.gray700 }}>Starting SKU name</span>
-        </div>
-        {isAdmin ? (
-          <>
-            <input value={form.sku_prefix ?? ""} onChange={set("sku_prefix")}
-              placeholder="e.g. BRS-" style={{ ...S.inp, maxWidth: 240, fontFamily: "monospace" }} />
-            <div style={{ fontSize: 10.5, color: C.gray400, marginTop: 3, marginLeft: 23 }}>
-              Powers Generate below — e.g. BRS- generates BRS-001, BRS-002…
-            </div>
-          </>
-        ) : prefix.trim() ? (
-          <div style={{ marginLeft: 23, fontSize: 13, fontFamily: "monospace", fontWeight: 700, color: C.gray800 }}>
-            {prefix}
-          </div>
-        ) : (
-          <div style={{ marginLeft: 23, fontSize: 12, color: C.amber, fontWeight: 600 }}>
-            Not set yet — ask your admin to set one in this task's settings.
-          </div>
+  return (
+    <div style={{ border: `1.5px solid ${C.orangeBorder}`, borderRadius: 14,
+      padding: isMobile ? 13 : 16, background: C.orangeLight }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 11 }}>
+        <AddIcon style={{ fontSize: 17, color: C.orange }} />
+        <span style={{ fontSize: 13, fontWeight: 800, color: C.gray800 }}>Add a SKU</span>
+        {prefix.trim() && !isAdmin && (
+          <span style={{ marginLeft: "auto", fontSize: 11.5, color: C.gray500 }}>
+            starts with <b style={{ fontFamily: "monospace", color: C.gray700 }}>{prefix}</b>
+          </span>
         )}
       </div>
 
-      {/* Step 2 — generate. Always visible so it's never a mystery why the
-          button isn't there; disabled with the reason instead of hiding. */}
-      <div style={{ marginBottom: 12 }}>
-        <div style={{ display: "flex", alignItems: "center", marginBottom: 6 }}>
-          <StepBadge n={2} />
-          <span style={{ fontSize: 12, fontWeight: 700, color: C.gray700 }}>Generate the next SKU id</span>
-        </div>
+      {/* Step 1 — the id. Generate sits inside the same row as the field it
+          fills, so there's no hunting for what "step 2" was. */}
+      <label style={{ ...S.label, marginBottom: 5 }}>SKU id</label>
+      <div style={{ display: "flex", gap: 8, flexDirection: isMobile ? "column" : "row" }}>
+        <input value={form.sku_id} onChange={set("sku_id")}
+          placeholder={prefix ? `${prefix}…` : "the SKU you created"}
+          style={field(isMobile, { flex: 1, fontFamily: "monospace", fontWeight: 700,
+            background: C.white, borderColor: form.sku_id ? C.orangeBorder : C.gray200 })} />
         <button onClick={generateSku} disabled={generating || !prefix.trim()}
-          title={!prefix.trim() ? "Set a starting SKU name in step 1 first" : ""}
-          style={{ ...btn("secondary", "sm"), marginLeft: 23 }}>
-          {generating ? "Generating…" : prefix.trim() ? `Generate SKU id (${prefix}…)` : "Generate SKU id"}
+          title={!prefix.trim() ? "No starting SKU name set on this task yet" : `Generate the next ${prefix} id`}
+          style={{ ...btn("secondary", "sm"), padding: "10px 16px", whiteSpace: "nowrap",
+            opacity: prefix.trim() ? 1 : 0.5, cursor: prefix.trim() ? "pointer" : "not-allowed" }}>
+          <AutoAwesomeIcon style={{ fontSize: 15, verticalAlign: "-3px" }} />
+          &nbsp;{generating ? "Generating…" : "Generate"}
         </button>
       </div>
 
-      {/* Step 3 — review/edit and send it. */}
-      <div style={{ marginBottom: 4 }}>
-        <div style={{ display: "flex", alignItems: "center", marginBottom: 6 }}>
-          <StepBadge n={3} />
-          <span style={{ fontSize: 12, fontWeight: 700, color: C.gray700 }}>
-            {isAdmin ? "Check it, then add it" : "Check it, then add it — sent to your admin for approval"}
-          </span>
+      {!prefix.trim() && (
+        <div style={{ fontSize: 11.5, color: C.amber, fontWeight: 600, marginTop: 6 }}>
+          {isAdmin
+            ? "Set a starting SKU name under “More details” to auto-generate ids."
+            : "No starting SKU name yet — ask your admin to set one in this task's settings."}
         </div>
-        <div style={{ marginLeft: 23 }}>
-          {isAdmin ? (
-            <ListingFields form={form} set={set} platform={task.platform} reference={reference}
-              excludeKeys={["sku_prefix"]} />
-          ) : (
-            <>
-              <div style={{ maxWidth: 320 }}>
-                <label style={{ ...S.label, marginBottom: 3 }}>SKU id *</label>
-                <input value={form.sku_id} onChange={set("sku_id")}
-                  placeholder={defaults.sku_prefix ? `${defaults.sku_prefix}…` : "the SKU you created"}
-                  style={{ ...S.inp, fontFamily: "monospace", fontWeight: 700 }} />
-              </div>
-              {/* The commercial values are the admin's; shown so the worker lists
-                  against the right numbers, but not editable. */}
-              {Object.keys(defaults).length > 0 && (
-                <div style={{ marginTop: 10, padding: "9px 12px", borderRadius: 8,
-                  background: C.white, border: `1px solid ${C.border}` }}>
-                  <div style={{ fontSize: 10.5, fontWeight: 700, color: C.gray400,
-                    letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: 5 }}>
-                    Use these values — set by the admin
-                  </div>
-                  <div style={{ display: "flex", gap: 14, flexWrap: "wrap", fontSize: 12.5, color: C.gray700 }}>
-                    {LISTING_FIELDS.filter((f) => f.key !== "sku_id" && defaults[f.key]).map((f) => (
-                      <span key={f.key}>
-                        <span style={{ color: C.gray400 }}>
-                          {f.platformLabel ? `${task.platform} price` : f.label}:{" "}
-                        </span>
-                        <b style={{ fontFamily: f.type === "money" ? "monospace" : "inherit" }}>
-                          {f.type === "money" ? fmt(defaults[f.key]) : defaults[f.key]}{f.type === "tax" ? "%" : ""}
-                        </b>
-                      </span>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </>
+      )}
+      {hint && !err && (
+        <div style={{ fontSize: 11.5, color: C.green, fontWeight: 700, marginTop: 6 }}>{hint}</div>
+      )}
+
+      {/* Step 2 — everything optional, folded away. */}
+      {isAdmin ? (
+        <div>
+          <button onClick={() => setShowMore((s) => !s)} style={{
+            background: "none", border: "none", padding: 0, marginTop: 11, cursor: "pointer",
+            fontFamily: "inherit", fontSize: 12, fontWeight: 700, color: C.blue,
+            display: "inline-flex", alignItems: "center", gap: 3 }}>
+            More details (price, HSN, tax)<Chevron open={showMore} size={16} color={C.blue} />
+          </button>
+          {showMore && (
+            <div style={{ marginTop: 10, padding: 12, borderRadius: 10, background: C.white,
+              border: `1px solid ${C.border}` }}>
+              <ListingFields form={form} set={set} platform={task.platform} reference={reference}
+                excludeKeys={["sku_id"]} />
+            </div>
           )}
         </div>
-      </div>
+      ) : shownDefaults.length > 0 && (
+        <div>
+          <button onClick={() => setShowMore((s) => !s)} style={{
+            background: "none", border: "none", padding: 0, marginTop: 11, cursor: "pointer",
+            fontFamily: "inherit", fontSize: 12, fontWeight: 700, color: C.blue,
+            display: "inline-flex", alignItems: "center", gap: 3 }}>
+            Values to list with ({shownDefaults.length})<Chevron open={showMore} size={16} color={C.blue} />
+          </button>
+          {showMore && (
+            <div style={{ marginTop: 8, padding: "10px 12px", borderRadius: 10,
+              background: C.white, border: `1px solid ${C.border}` }}>
+              <div style={{ fontSize: 10.5, fontWeight: 800, color: C.gray400,
+                letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: 6 }}>
+                Set by the admin — use exactly these
+              </div>
+              <div style={{ display: "flex", gap: 14, flexWrap: "wrap", fontSize: 12.5, color: C.gray700 }}>
+                {shownDefaults.map((f) => (
+                  <span key={f.key}>
+                    <span style={{ color: C.gray400 }}>
+                      {f.platformLabel ? `${task.platform} price` : f.label}:{" "}
+                    </span>
+                    <b style={{ fontFamily: f.type === "money" ? "monospace" : "inherit" }}>
+                      {f.type === "money" ? fmt(defaults[f.key]) : defaults[f.key]}{f.type === "tax" ? "%" : ""}
+                    </b>
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {err && (
-        <div style={{ marginTop: 8, marginLeft: 23, padding: "8px 11px", borderRadius: 8, background: C.redLight,
+        <div style={{ marginTop: 10, padding: "9px 12px", borderRadius: 10, background: C.redLight,
           border: `1px solid ${C.redBorder}`, color: C.red, fontSize: 12.5, fontWeight: 700 }}>
           {err}
         </div>
       )}
-      <button onClick={add} disabled={busy} style={{ ...btn("primary", "sm"), marginTop: 10, marginLeft: 23 }}>
-        <AddIcon style={{ fontSize: 15, verticalAlign: "-3px" }} />&nbsp;Add SKU
+
+      {/* Step 3 — one button, and it says exactly what happens next. */}
+      <button onClick={add} disabled={busy || !ready}
+        style={{ ...btn("primary", "md"), marginTop: 12, width: isMobile ? "100%" : "auto",
+          opacity: ready ? 1 : 0.55, cursor: ready ? "pointer" : "not-allowed" }}>
+        <SendIcon style={{ fontSize: 15, verticalAlign: "-3px" }} />
+        &nbsp;{isAdmin ? "Add SKU" : "Send for approval"}
       </button>
+      {!isAdmin && (
+        <div style={{ fontSize: 11, color: C.gray500, marginTop: 6 }}>
+          Your admin reviews it and the reward lands in your wallet on approval.
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** A labelled band of SKU rows — the ones needing attention open by default. */
+function ListingGroup({ title, accent, count, defaultOpen, right, children }) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div>
+      <div onClick={() => setOpen((o) => !o)} style={{ display: "flex", alignItems: "center",
+        gap: 7, cursor: "pointer", padding: "3px 2px", userSelect: "none" }}>
+        <span style={{ width: 7, height: 7, borderRadius: "50%", background: accent, flexShrink: 0 }} />
+        <span style={{ fontSize: 11.5, fontWeight: 800, color: C.gray600,
+          letterSpacing: "0.04em", textTransform: "uppercase" }}>
+          {title} · {count}
+        </span>
+        <span style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}
+          onClick={(e) => e.stopPropagation()}>{right}</span>
+        <Chevron open={open} size={17} />
+      </div>
+      {open && <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 7 }}>{children}</div>}
     </div>
   );
 }
 
 function TaskCard({ task, isAdmin, reference, parentSkus, templates, collapsed, onToggleCollapse,
                     onSubmit, onReview, onPause, onDelete, onSaveSettings,
-                    onListingAdd, onListingSave, onListingDelete, onListingReview, busy }) {
+                    onListingAdd, onListingSave, onListingDelete, onListingReview,
+                    onListingApproveAll, busy }) {
   const isMobile = useIsMobile();
   const meta = STATUS_META[task.status] || STATUS_META.ASSIGNED;
   const type = TYPE_META[task.task_type] || TYPE_META.LISTING;
@@ -507,63 +674,127 @@ function TaskCard({ task, isAdmin, reference, parentSkus, templates, collapsed, 
   const [reference_, setRef] = useState(task.submitted_reference || "");
   const [note, setNote] = useState(task.submitted_note || "");
   const [showSettings, setShowSettings] = useState(false);
+  const [rejecting, setRejecting] = useState(false);
+  const [reason, setReason] = useState("");
   const prefix = task.listing_defaults?.sku_prefix || "";
 
   const listings = task.listings || [];
-  const approved = listings.filter((l) => l.status === "APPROVED").length;
+  const approved = listings.filter((l) => l.status === "APPROVED");
+  const pendingSkus = listings.filter((l) => l.status === "PENDING");
+  const rejected = listings.filter((l) => l.status === "REJECTED");
+
+  // The stripe down the left says, at a glance, whose move it is.
+  const accent = task.is_paused ? C.gray400
+    : listing ? (rejected.length ? C.red
+      : pendingSkus.length ? C.amber
+      : listings.length ? C.green : C.gray400)
+    : meta.accent;
+
+  // The one line the collapsed card has to earn its space with.
+  const summary = listing
+    ? (listings.length === 0 ? "No SKUs yet"
+      : `${approved.length}/${listings.length} approved`
+        + (pendingSkus.length ? ` · ${pendingSkus.length} waiting` : "")
+        + (rejected.length ? ` · ${rejected.length} to fix` : ""))
+    : meta.label;
+
+  const pad = isMobile ? 13 : 18;
+
+  const adminActions = isAdmin && (
+    <div style={{ display: "flex", gap: 7, flexWrap: "wrap", marginTop: 11 }}>
+      {listing && (
+        <button onClick={() => setShowSettings((s) => !s)} disabled={busy}
+          style={btn(showSettings ? "secondary" : "ghost", "sm")}>
+          <SettingsIcon style={{ fontSize: 15, verticalAlign: "-3px" }} />&nbsp;Settings
+        </button>
+      )}
+      <button onClick={() => onPause(task.id, !task.is_paused)} disabled={busy} style={btn("ghost", "sm")}>
+        {task.is_paused
+          ? <><PlayCircleIcon style={{ fontSize: 15, verticalAlign: "-3px" }} />&nbsp;Resume</>
+          : <><PauseCircleIcon style={{ fontSize: 15, verticalAlign: "-3px" }} />&nbsp;Pause</>}
+      </button>
+      <button onClick={() => onDelete(task.id, task.title)} disabled={busy} title="Delete this task"
+        style={{ ...btn("ghost", "sm"), color: C.red, borderColor: C.redBorder }}>
+        <DeleteOutlineIcon style={{ fontSize: 15, verticalAlign: "-3px" }} />&nbsp;Delete
+      </button>
+    </div>
+  );
 
   return (
     <div style={{ ...S.card, padding: 0, overflow: "hidden",
-      borderLeft: `4px solid ${task.is_paused ? C.gray400 : meta.accent}`,
-      opacity: task.is_paused ? 0.92 : 1 }}>
-      <div style={{ padding: isMobile ? "13px" : "15px 18px", borderBottom: `1px solid ${C.border}` }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", marginBottom: 7 }}>
-          <Tag variant={PLATFORM_TAG[task.platform] || "gray"} fontSize={11.5}>{task.platform}</Tag>
-          <Tag variant={type.tag} fontSize={11.5}>{type.label}</Tag>
-          {task.is_paused && <Tag variant="gray" fontSize={11.5}>⏸ paused</Tag>}
-          {!listing && <Tag variant={meta.tag} fontSize={11.5}>{meta.label}</Tag>}
-          {task.awaiting_bonus && <Tag variant="amber" fontSize={11.5}>bonus pending</Tag>}
-          {(task.assignee_names || []).length > 0 && (
-            <span style={{ fontSize: 11.5, color: C.gray400 }}>
-              {task.assignee_names.join(", ")}
-            </span>
-          )}
-          <span style={{ marginLeft: "auto", display: "flex", alignItems: "baseline", gap: 6 }}>
-            <span style={{ fontSize: 11, color: C.gray400 }}>{fmt(task.reward_amount)}/SKU</span>
-            {Number(task.earned) > 0 && <Money value={task.earned} />}
-          </span>
-          <button onClick={onToggleCollapse} title={collapsed ? "Expand" : "Collapse"}
-            style={{ background: "none", border: "none", cursor: "pointer", color: C.gray400,
-              fontSize: 13, padding: "0 0 0 4px", lineHeight: 1 }}>
-            {collapsed ? "▸" : "▾"}
-          </button>
-        </div>
+      borderLeft: `4px solid ${accent}`,
+      opacity: task.is_paused ? 0.94 : 1 }}>
 
-        <div style={{ fontSize: 15, fontWeight: 700, color: C.gray800, cursor: "pointer" }} onClick={onToggleCollapse}>
-          {task.title || (listing ? "Listing task" : "Return claim task")}
-        </div>
-        {task.suborder_no && (
-          <div style={{ fontSize: 12, color: C.gray500, fontFamily: "monospace", marginTop: 2 }}>{task.suborder_no}</div>
-        )}
-        {listing && (prefix || task.parent_sku_item_id || task.listing_template_name) && (
-          <div style={{ display: "flex", gap: 7, flexWrap: "wrap", marginTop: 6 }}>
-            {prefix && (
-              <Tag variant="amber" fontSize={11}>SKU prefix: {prefix}</Tag>
-            )}
-            {task.parent_sku_item_id && (
-              <Tag variant="blue" fontSize={11}>
-                Parent: {task.parent_sku_item_id}{task.parent_sku_price ? ` (${fmt(task.parent_sku_price)})` : ""}
-              </Tag>
-            )}
-            {task.listing_template_name && (
-              <Tag variant="gray" fontSize={11}>Template: {task.listing_template_name}</Tag>
+      {/* ── Header: the whole thing is the collapse control ────────────────── */}
+      <div onClick={onToggleCollapse} style={{
+        display: "flex", alignItems: "flex-start", gap: 10, padding: pad,
+        cursor: "pointer", userSelect: "none",
+      }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: isMobile ? 14.5 : 15.5, fontWeight: 800, color: C.gray900,
+            lineHeight: 1.35, wordBreak: "break-word" }}>
+            {task.title || (listing ? "Listing task" : "Return claim task")}
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginTop: 6 }}>
+            <Tag variant={PLATFORM_TAG[task.platform] || "gray"} fontSize={10.5}>{task.platform}</Tag>
+            <Tag variant={type.tag} fontSize={10.5}>{type.label}</Tag>
+            {task.is_paused && <Tag variant="gray" fontSize={10.5}>⏸ paused</Tag>}
+            {!listing && <Tag variant={meta.tag} fontSize={10.5}>{meta.label}</Tag>}
+            {task.awaiting_bonus && <Tag variant="amber" fontSize={10.5}>bonus pending</Tag>}
+            {(task.assignee_names || []).length > 0 && (
+              <span style={{ fontSize: 11.5, color: C.gray400, minWidth: 0,
+                overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {task.assignee_names.join(", ")}
+              </span>
             )}
           </div>
-        )}
-        {task.instructions && !collapsed && (
-          <div style={{ fontSize: 13, color: C.gray600, marginTop: 7, lineHeight: 1.6 }}>{task.instructions}</div>
-        )}
-        <div style={{ display: "flex", gap: 12, alignItems: "center", marginTop: 9, flexWrap: "wrap" }}>
+          <div style={{ fontSize: 12, color: C.gray500, marginTop: 6, fontWeight: 600 }}>
+            {summary}
+            <span style={{ color: C.gray300 }}> · </span>
+            <span style={{ fontWeight: 500 }}>{fmt(task.reward_amount)}/{listing ? "SKU" : "claim"}</span>
+          </div>
+          {listing && listings.length > 0 && (
+            <div style={{ marginTop: 7, maxWidth: 260 }}>
+              <ProgressBar approved={approved.length} pending={pendingSkus.length} rejected={rejected.length} />
+            </div>
+          )}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
+          {Number(task.earned) > 0 && (
+            <span style={{ fontSize: 13 }}><Money value={task.earned} /></span>
+          )}
+          <span style={tap(isMobile, { width: isMobile ? 36 : 28, height: isMobile ? 36 : 28 })}>
+            <Chevron open={!collapsed} />
+          </span>
+        </div>
+      </div>
+
+      {/* ── Detail, only when open ─────────────────────────────────────────── */}
+      {!collapsed && (
+        <div style={{ padding: `0 ${pad}px ${pad}px`, borderBottom: `1px solid ${C.border}` }}>
+          {task.suborder_no && (
+            <div style={{ fontSize: 12, color: C.gray500, fontFamily: "monospace", marginBottom: 6 }}>
+              {task.suborder_no}
+            </div>
+          )}
+          {listing && (prefix || task.parent_sku_item_id || task.listing_template_name) && (
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
+              {prefix && <Tag variant="amber" fontSize={10.5}>SKU prefix: {prefix}</Tag>}
+              {task.parent_sku_item_id && (
+                <Tag variant="blue" fontSize={10.5}>
+                  Parent: {task.parent_sku_item_id}{task.parent_sku_price ? ` (${fmt(task.parent_sku_price)})` : ""}
+                </Tag>
+              )}
+              {task.listing_template_name && (
+                <Tag variant="gray" fontSize={10.5}>Template: {task.listing_template_name}</Tag>
+              )}
+            </div>
+          )}
+          {task.instructions && (
+            <div style={{ fontSize: 13, color: C.gray600, lineHeight: 1.6, marginBottom: 8 }}>
+              {task.instructions}
+            </div>
+          )}
           {task.source_link && (
             <a href={task.source_link} target="_blank" rel="noreferrer"
               style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 13, fontWeight: 700,
@@ -572,82 +803,93 @@ function TaskCard({ task, isAdmin, reference, parentSkus, templates, collapsed, 
             </a>
           )}
           {!listing && (
-            <span style={{ fontSize: 11.5, color: C.gray400 }}>
+            <div style={{ fontSize: 11.5, color: C.gray400, marginTop: 6 }}>
               Compress under {CLAIM_VIDEO_MAX_MB}MB before uploading the claim.
-            </span>
+            </div>
           )}
-          {isAdmin && listing && (
-            <button onClick={() => setShowSettings((s) => !s)} disabled={busy}
-              style={{ ...btn(showSettings ? "secondary" : "ghost", "sm"), marginLeft: "auto" }}>
-              <SettingsIcon style={{ fontSize: 15, verticalAlign: "-3px" }} />&nbsp;Task settings
-            </button>
-          )}
-          {isAdmin && (
-            <button onClick={() => onDelete(task.id, task.title)} disabled={busy}
-              title="Delete this task"
-              style={{ ...btn("ghost", "sm"), marginLeft: listing ? 0 : "auto", color: C.red, borderColor: C.redBorder }}>
-              <DeleteOutlineIcon style={{ fontSize: 15, verticalAlign: "-3px" }} />&nbsp;Delete
-            </button>
-          )}
-          {isAdmin && (
-            <button onClick={() => onPause(task.id, !task.is_paused)} disabled={busy}
-              style={btn("ghost", "sm")}>
-              {task.is_paused
-                ? <><PlayCircleIcon style={{ fontSize: 15, verticalAlign: "-3px" }} />&nbsp;Resume</>
-                : <><PauseCircleIcon style={{ fontSize: 15, verticalAlign: "-3px" }} />&nbsp;Pause</>}
-            </button>
+          {adminActions}
+          {isAdmin && listing && showSettings && (
+            <div style={{ marginTop: 11 }}>
+              <TaskSettingsPanel task={task} parentSkus={parentSkus} templates={templates} busy={busy}
+                onSave={onSaveSettings} onCancel={() => setShowSettings(false)} />
+            </div>
           )}
         </div>
+      )}
 
-        {isAdmin && listing && showSettings && (
-          <div style={{ marginTop: 10 }}>
-            <TaskSettingsPanel task={task} parentSkus={parentSkus} templates={templates} busy={busy}
-              onSave={onSaveSettings} onCancel={() => setShowSettings(false)} />
-          </div>
-        )}
-      </div>
-
-      {/* Listing tasks: many SKUs */}
+      {/* ── Listing tasks: add first, then the SKUs grouped by what's needed ── */}
       {listing && !collapsed && (
-        <div style={{ padding: isMobile ? "13px" : "14px 18px", background: C.gray50,
-          display: "flex", flexDirection: "column", gap: 9 }}>
-          <div style={{ fontSize: 12.5, fontWeight: 700, color: C.gray600 }}>
-            SKUs · {listings.length} added, {approved} approved
-          </div>
-          {listings.map((l) => (
-            <ListingRow key={l.id} listing={l} isAdmin={isAdmin} platform={task.platform}
-              reference={reference} frozen={task.is_paused && !isAdmin} busy={busy}
-              onSave={onListingSave} onDelete={onListingDelete} onReview={onListingReview} />
-          ))}
+        <div style={{ padding: pad, background: C.gray50,
+          display: "flex", flexDirection: "column", gap: 14 }}>
           {task.is_paused ? (
-            <div style={{ fontSize: 12.5, color: C.gray500, fontStyle: "italic", padding: "8px 0" }}>
+            <div style={{ fontSize: 12.5, color: C.gray500, fontStyle: "italic" }}>
               Paused — existing SKUs stay visible, but no new ones can be added.
             </div>
           ) : (
             <AddListing task={task} reference={reference} onAdd={onListingAdd} busy={busy} isAdmin={isAdmin} />
           )}
+
+          {rejected.length > 0 && (
+            <ListingGroup title="Needs a fix" accent={C.red} count={rejected.length} defaultOpen>
+              {rejected.map((l) => (
+                <ListingRow key={l.id} listing={l} isAdmin={isAdmin} platform={task.platform}
+                  reference={reference} frozen={task.is_paused && !isAdmin} busy={busy}
+                  onSave={onListingSave} onDelete={onListingDelete} onReview={onListingReview} />
+              ))}
+            </ListingGroup>
+          )}
+
+          {pendingSkus.length > 0 && (
+            <ListingGroup title={isAdmin ? "Waiting for your approval" : "Waiting for approval"}
+              accent={C.amber} count={pendingSkus.length} defaultOpen
+              right={isAdmin && pendingSkus.length > 1 && (
+                <button onClick={() => onListingApproveAll(pendingSkus.map((l) => l.id))} disabled={busy}
+                  style={btn("success", "sm")}>
+                  <TaskAltIcon style={{ fontSize: 14, verticalAlign: "-2px" }} />
+                  &nbsp;Approve all {pendingSkus.length}
+                </button>
+              )}>
+              {pendingSkus.map((l) => (
+                <ListingRow key={l.id} listing={l} isAdmin={isAdmin} platform={task.platform}
+                  reference={reference} frozen={task.is_paused && !isAdmin} busy={busy}
+                  onSave={onListingSave} onDelete={onListingDelete} onReview={onListingReview} />
+              ))}
+            </ListingGroup>
+          )}
+
+          {approved.length > 0 && (
+            <ListingGroup title="Approved" accent={C.green} count={approved.length} defaultOpen={false}>
+              {approved.map((l) => (
+                <ListingRow key={l.id} listing={l} isAdmin={isAdmin} platform={task.platform}
+                  reference={reference} frozen={task.is_paused && !isAdmin} busy={busy}
+                  onSave={onListingSave} onDelete={onListingDelete} onReview={onListingReview} />
+              ))}
+            </ListingGroup>
+          )}
         </div>
       )}
 
-      {/* Claim tasks: one submission */}
+      {/* ── Claim tasks: one submission ────────────────────────────────────── */}
       {!listing && !collapsed && (
-        <div style={{ padding: isMobile ? "13px" : "14px 18px", background: C.gray50 }}>
+        <div style={{ padding: pad, background: C.gray50 }}>
           {!isAdmin && task.status !== "APPROVED" ? (
             <>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10 }}>
                 <div>
                   <label style={S.label}>Claim / ticket reference</label>
                   <input value={reference_} onChange={(e) => setRef(e.target.value)}
-                    style={{ ...S.inp, fontFamily: "monospace" }} />
+                    style={field(isMobile, { fontFamily: "monospace" })} />
                 </div>
                 <div>
                   <label style={S.label}>Note</label>
-                  <input value={note} onChange={(e) => setNote(e.target.value)} style={S.inp} />
+                  <input value={note} onChange={(e) => setNote(e.target.value)} style={field(isMobile)} />
                 </div>
               </div>
               <button onClick={() => onSubmit(task.id, { submitted_reference: reference_, submitted_note: note })}
-                disabled={busy} style={{ ...btn("primary", "md"), marginTop: 11 }}>
-                {task.status === "REJECTED" ? "Send again" : "Mark done"}
+                disabled={busy} style={{ ...btn("primary", "md"), marginTop: 12,
+                  width: isMobile ? "100%" : "auto" }}>
+                <SendIcon style={{ fontSize: 15, verticalAlign: "-3px" }} />
+                &nbsp;{task.status === "REJECTED" ? "Send again" : "Send for approval"}
               </button>
             </>
           ) : (
@@ -657,22 +899,36 @@ function TaskCard({ task, isAdmin, reference, parentSkus, templates, collapsed, 
               sent {fmtDate(task.submitted_at)}
             </div>
           )}
-          {isAdmin && task.status === "SUBMITTED" && (
-            <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
-              <button onClick={() => onReview(task.id, "APPROVE", "")} disabled={busy} style={btn("success", "md")}>
+          {isAdmin && task.status === "SUBMITTED" && !rejecting && (
+            <div style={{ display: "flex", gap: 8, marginTop: 11, flexWrap: "wrap" }}>
+              <button onClick={() => onReview(task.id, "APPROVE", "")} disabled={busy}
+                style={{ ...btn("success", "md"), flex: isMobile ? 1 : "none" }}>
                 Approve &amp; pay {fmt(task.reward_amount)}
               </button>
-              <button onClick={() => {
-                const c = window.prompt("Why is it rejected?") || "";
-                if (c) onReview(task.id, "REJECT", c);
-              }} disabled={busy} style={btn("danger", "md")}>Reject</button>
+              <button onClick={() => { setRejecting(true); setReason(""); }} disabled={busy}
+                style={{ ...btn("ghost", "md"), color: C.red, borderColor: C.redBorder,
+                  flex: isMobile ? 1 : "none" }}>
+                Reject
+              </button>
+            </div>
+          )}
+          {isAdmin && rejecting && (
+            <div style={{ marginTop: 11, display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <input autoFocus value={reason} onChange={(e) => setReason(e.target.value)}
+                placeholder="What needs fixing?" style={field(isMobile, { flex: "1 1 190px" })} />
+              <button disabled={busy || !reason.trim()}
+                onClick={() => { onReview(task.id, "REJECT", reason.trim()); setRejecting(false); }}
+                style={{ ...btn("danger", "sm"), opacity: reason.trim() ? 1 : 0.5 }}>
+                Send back
+              </button>
+              <button onClick={() => setRejecting(false)} style={btn("ghost", "sm")}>Cancel</button>
             </div>
           )}
         </div>
       )}
 
       {task.review_comment && task.status !== "SUBMITTED" && !collapsed && (
-        <div style={{ padding: "11px 18px",
+        <div style={{ padding: `11px ${pad}px`,
           background: task.status === "REJECTED" ? C.redLight : C.greenLight,
           color: task.status === "REJECTED" ? C.red : C.green, fontSize: 12.5, fontWeight: 600 }}>
           {task.status === "REJECTED" ? "Rejected" : "Approved"}: {task.review_comment}
@@ -682,8 +938,24 @@ function TaskCard({ task, isAdmin, reference, parentSkus, templates, collapsed, 
   );
 }
 
+/**
+ * Which tasks open on arrival. Everything else starts collapsed, so a screen of
+ * fifteen tasks reads as a list rather than a wall — the point of the card
+ * being collapsible at all.
+ */
+function needsAttention(task, isAdmin) {
+  if (task.is_paused) return false;
+  if (task.task_type !== "LISTING") {
+    return isAdmin ? task.status === "SUBMITTED" : task.status !== "APPROVED";
+  }
+  const listings = task.listings || [];
+  if (isAdmin) return listings.some((l) => l.status === "PENDING");
+  return listings.length === 0 || listings.some((l) => l.status === "REJECTED");
+}
+
 // ── Tab ───────────────────────────────────────────────────────────────────────
 export function TeamTasksTab() {
+  const isMobile = useIsMobile();
   const [isAdmin, setIsAdmin] = useState(false);
   const [tasks, setTasks] = useState([]);
   const [stats, setStats] = useState(null);
@@ -742,25 +1014,26 @@ export function TeamTasksTab() {
       .then(d => setWorkers(d.results || [])).catch(() => {});
   }, [isAdmin]);
 
-  // New tasks default expanded (need attention); approved/rejected ones default
-  // collapsed (nothing left to do). Only fills in ids we haven't seen before, so
-  // a manual toggle survives the next refetch.
+  // Only tasks waiting on *you* open by default; everything else stays folded.
+  // Only fills in ids we haven't seen before, so a manual toggle survives the
+  // next refetch.
   useEffect(() => {
     setCollapsed((prev) => {
       let changed = false;
       const next = { ...prev };
       tasks.forEach((t) => {
         if (!(t.id in next)) {
-          next[t.id] = t.status === "APPROVED" || t.status === "REJECTED";
+          next[t.id] = !needsAttention(t, isAdmin);
           changed = true;
         }
       });
       return changed ? next : prev;
     });
-  }, [tasks]);
+  }, [tasks, isAdmin]);
   const toggleCollapse = (id) => setCollapsed((c) => ({ ...c, [id]: !c[id] }));
   const setAllCollapsed = (value) =>
     setCollapsed((c) => ({ ...c, ...Object.fromEntries(tasks.map((t) => [t.id, value])) }));
+  const allCollapsed = tasks.length > 0 && tasks.every((t) => collapsed[t.id]);
 
   /** POST helper — returns an error string, or null on success. */
   const post = async (url, body, okMsg, method = "POST") => {
@@ -795,7 +1068,9 @@ export function TeamTasksTab() {
                             : "Task deleted.", "DELETE");
     if (e) setMsg({ type: "error", text: e });
   };
-  const addListing = (taskId, form) => post(`${API}/worker-tasks/${taskId}/listings/`, form, "SKU added.");
+  const addListing = (taskId, form) =>
+    post(`${API}/worker-tasks/${taskId}/listings/`, form,
+      isAdmin ? "SKU added." : "Sent for approval.");
   const saveListing = (id, form) => post(`${API}/task-listings/${id}/`, form, "Saved.", "PATCH");
   const deleteListing = async (id) => {
     if (!window.confirm("Remove this SKU?")) return null;
@@ -807,6 +1082,32 @@ export function TeamTasksTab() {
     const e = await post(`${API}/task-listings/${id}/review/`, { decision, comment },
       (d) => d.credited ? `Approved — ${fmt(d.credited)} added.` : "Recorded.");
     if (e) setMsg({ type: "error", text: e });
+  };
+  /** Approve a whole task's worth of SKUs in one go — one refetch at the end,
+      not one per SKU, so a run of twenty doesn't thrash the list. */
+  const approveAllListings = async (ids) => {
+    if (!ids.length) return;
+    if (!window.confirm(`Approve and pay for ${ids.length} SKUs?`)) return;
+    setBusy(true);
+    let credited = 0, failed = 0;
+    try {
+      for (const id of ids) {
+        try {
+          const res = await fetch(`${API}/task-listings/${id}/review/`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ decision: "APPROVE", comment: "" }),
+          });
+          const d = await res.json().catch(() => ({}));
+          if (!res.ok) failed++; else credited += Number(d.credited || 0);
+        } catch { failed++; }
+      }
+      setMsg(failed
+        ? { type: "error", text: `${ids.length - failed} approved, ${failed} failed — open them to see why.` }
+        : { type: "success", text: `Approved ${ids.length} SKUs — ${fmt(credited)} added.` });
+    } finally {
+      setBusy(false);
+      fetchTasks(); fetchAux();
+    }
   };
   /** A manual ledger line — a correction or a bonus. Requires a reason, so the
       balance never moves without an explanation attached. */
@@ -830,27 +1131,40 @@ export function TeamTasksTab() {
   const pending = wallet?.totals?.pending ?? 0;
   const platforms = reference?.platforms || [];
 
+  // A row that scrolls sideways rather than wrapping into four ragged lines on
+  // a phone — the standard pattern for chips and stat tiles on mobile.
+  const scrollRow = {
+    display: "flex", gap: 8, overflowX: "auto", paddingBottom: 2,
+    WebkitOverflowScrolling: "touch", scrollbarWidth: "none",
+  };
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-      {/* Header */}
-      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
-        <div>
+      {/* ── Header ─────────────────────────────────────────────────────────── */}
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between",
+        gap: 12, flexWrap: "wrap" }}>
+        <div style={{ minWidth: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
             <ChecklistIcon style={{ color: C.orange, fontSize: 21 }} />
-            <h1 style={{ fontSize: 19, fontWeight: 800, color: C.gray800 }}>Team Tasks</h1>
+            <h1 style={{ fontSize: isMobile ? 17 : 19, fontWeight: 800, color: C.gray800 }}>Team Tasks</h1>
           </div>
           <p style={{ fontSize: 12, color: C.gray400, marginTop: 3 }}>
             {isAdmin ? "Assign listing and claim work, review each SKU, and pay for it"
                      : "Your tasks and what you've earned"}
           </p>
         </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-          <button onClick={() => setPanel(p => p === "wallet" ? null : "wallet")} style={btn("ghost", "sm")}>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap",
+          width: isMobile ? "100%" : "auto" }}>
+          <button onClick={() => setPanel(p => p === "wallet" ? null : "wallet")}
+            style={{ ...btn(panel === "wallet" ? "ghostOrange" : "ghost", "sm"),
+              flex: isMobile ? 1 : "none", padding: isMobile ? "10px 14px" : undefined }}>
             <AccountBalanceWalletIcon style={{ fontSize: 15, verticalAlign: "-3px" }} />
-            &nbsp;{isAdmin ? "Wallets" : "My wallet"} · {fmt(pending)}
+            &nbsp;{isAdmin ? "Wallets" : "Wallet"} · {fmt(pending)}
           </button>
           {isAdmin && (
-            <button onClick={() => setCreating(c => !c)} style={btn("primary", "sm")}>
+            <button onClick={() => setCreating(c => !c)}
+              style={{ ...btn("primary", "sm"), flex: isMobile ? 1 : "none",
+                padding: isMobile ? "10px 14px" : undefined }}>
               <AddIcon style={{ fontSize: 16, verticalAlign: "-4px" }} />&nbsp;New task
             </button>
           )}
@@ -914,7 +1228,7 @@ export function TeamTasksTab() {
                 )}
                 {isAdmin && (
                   <button onClick={() => post(`${API}/task-documents/${d.id}/`, {}, "Removed.", "DELETE")}
-                    style={{ background: "none", border: "none", cursor: "pointer", color: C.gray300 }}>
+                    style={tap(isMobile, { color: C.gray300 })}>
                     <DeleteOutlineIcon style={{ fontSize: 17 }} />
                   </button>
                 )}
@@ -942,9 +1256,9 @@ export function TeamTasksTab() {
 
       {/* Wallet */}
       {panel === "wallet" && wallet && (
-        <div style={{ ...S.card, borderTop: `4px solid ${C.green}` }}>
+        <div style={{ ...S.card, borderTop: `4px solid ${C.green}`, padding: isMobile ? 15 : 22 }}>
           <div style={{ ...S.cardTitle, marginBottom: 12 }}>{isAdmin ? "Wallets" : "My wallet"}</div>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 14 }}>
+          <div style={{ ...scrollRow, marginBottom: 14 }}>
             <Metric label="earned" value={wallet.totals.earned} accent={C.green} money />
             <Metric label="paid out" value={wallet.totals.settled} accent={C.gray500} money />
             <Metric label="still owed" value={wallet.totals.pending} accent={C.orange} money />
@@ -986,52 +1300,63 @@ export function TeamTasksTab() {
         </div>
       )}
 
-      {/* Counts */}
+      {/* Counts — tap one to filter, tap it again to clear */}
       {stats && (
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <div style={scrollRow}>
           <Metric label="to do" value={stats.assigned} accent={C.gray500}
-            onClick={() => setView("ASSIGNED")} active={view === "ASSIGNED"} />
+            onClick={() => setView(v => v === "ASSIGNED" ? "" : "ASSIGNED")} active={view === "ASSIGNED"} />
           <Metric label="to review" value={stats.submitted} accent={C.amber}
-            onClick={() => setView("SUBMITTED")} active={view === "SUBMITTED"} />
+            onClick={() => setView(v => v === "SUBMITTED" ? "" : "SUBMITTED")} active={view === "SUBMITTED"} />
           <Metric label="approved" value={stats.approved} accent={C.green}
-            onClick={() => setView("APPROVED")} active={view === "APPROVED"} />
+            onClick={() => setView(v => v === "APPROVED" ? "" : "APPROVED")} active={view === "APPROVED"} />
           {stats.awaiting_bonus > 0 && <Metric label="bonus pending" value={stats.awaiting_bonus} accent={C.orange} />}
           <Metric label="still owed" value={stats.pending} accent={C.orange} money />
         </div>
       )}
 
-      {/* Filters */}
-      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-        <div style={{ display: "inline-flex", background: C.gray100, borderRadius: 10, padding: 3, border: `1px solid ${C.border}` }}>
-          {[{ k: "", l: "All" }, { k: "SUBMITTED", l: "To review" }, { k: "ASSIGNED", l: "To do" },
-            { k: "APPROVED", l: "Approved" }, { k: "REJECTED", l: "Rejected" }].map((v) => (
-            <button key={v.k || "all"} onClick={() => setView(v.k)}
-              style={{ border: "none", cursor: "pointer", fontFamily: "inherit",
-                background: view === v.k ? C.white : "transparent",
-                color: view === v.k ? C.gray800 : C.gray500,
-                fontWeight: view === v.k ? 800 : 600, fontSize: 12.5,
-                padding: "6px 13px", borderRadius: 8,
-                boxShadow: view === v.k ? "0 1px 3px rgba(0,0,0,0.10)" : "none" }}>
-              {v.l}
-            </button>
-          ))}
+      {/* ── Filters ────────────────────────────────────────────────────────── */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
+        <div style={scrollRow}>
+          <div style={{ display: "inline-flex", background: C.gray100, borderRadius: 11, padding: 3,
+            border: `1px solid ${C.border}`, flexShrink: 0 }}>
+            {[{ k: "", l: "All" }, { k: "SUBMITTED", l: "To review" }, { k: "ASSIGNED", l: "To do" },
+              { k: "APPROVED", l: "Approved" }, { k: "REJECTED", l: "Rejected" }].map((v) => (
+              <button key={v.k || "all"} onClick={() => setView(v.k)}
+                style={{ border: "none", cursor: "pointer", fontFamily: "inherit",
+                  background: view === v.k ? C.white : "transparent",
+                  color: view === v.k ? C.gray800 : C.gray500,
+                  fontWeight: view === v.k ? 800 : 600, fontSize: 12.5,
+                  padding: isMobile ? "9px 14px" : "6px 13px", borderRadius: 9, whiteSpace: "nowrap",
+                  boxShadow: view === v.k ? "0 1px 3px rgba(0,0,0,0.10)" : "none" }}>
+                {v.l}
+              </button>
+            ))}
+          </div>
         </div>
-        <select value={platformFilter} onChange={(e) => setPlatformFilter(e.target.value)}
-          style={{ ...S.inp, maxWidth: 150 }}>
-          <option value="">Any platform</option>
-          {platforms.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
-        </select>
-        <input value={search} onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search title / SKU / sub-order…" style={{ ...S.inp, maxWidth: 260, flex: "1 1 170px" }} />
-        {tasks.length > 1 && (
-          <span style={{ display: "flex", gap: 6, marginLeft: "auto" }}>
-            <button onClick={() => setAllCollapsed(false)} style={btn("ghost", "sm")}>Expand all</button>
-            <button onClick={() => setAllCollapsed(true)} style={btn("ghost", "sm")}>Collapse all</button>
-          </span>
-        )}
+        <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
+          <div style={{ position: "relative", flex: "1 1 190px", minWidth: 0 }}>
+            <SearchIcon style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)",
+              fontSize: 17, color: C.gray400, pointerEvents: "none" }} />
+            <input value={search} onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search title / SKU / sub-order…"
+              style={field(isMobile, { paddingLeft: 34 })} />
+          </div>
+          <select value={platformFilter} onChange={(e) => setPlatformFilter(e.target.value)}
+            style={field(isMobile, { maxWidth: 160, flex: "0 1 150px" })}>
+            <option value="">Any platform</option>
+            {platforms.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
+          </select>
+          {tasks.length > 1 && (
+            <button onClick={() => setAllCollapsed(!allCollapsed)}
+              style={{ ...btn("ghost", "sm"), whiteSpace: "nowrap",
+                padding: isMobile ? "10px 14px" : undefined }}>
+              {allCollapsed ? "Expand all" : "Collapse all"}
+            </button>
+          )}
+        </div>
       </div>
 
-      {/* Tasks */}
+      {/* ── Tasks ──────────────────────────────────────────────────────────── */}
       {loading ? (
         <div style={{ display: "flex", justifyContent: "center", padding: 40 }}>
           <CircularProgress style={{ color: C.orange }} />
@@ -1050,7 +1375,8 @@ export function TeamTasksTab() {
               onSubmit={submitTask} onReview={reviewTask} onPause={pauseTask} onDelete={deleteTask}
               onSaveSettings={saveTaskSettings}
               onListingAdd={addListing} onListingSave={saveListing}
-              onListingDelete={deleteListing} onListingReview={reviewListing} />
+              onListingDelete={deleteListing} onListingReview={reviewListing}
+              onListingApproveAll={approveAllListings} />
           ))}
         </div>
       )}
@@ -1060,6 +1386,7 @@ export function TeamTasksTab() {
 
 // ── Create ────────────────────────────────────────────────────────────────────
 function NewTaskForm({ workers, platforms, rates, reference, parentSkus, templates, onCreate, onCancel }) {
+  const isMobile = useIsMobile();
   const [type, setType] = useState("LISTING");
   const [defaults, setDefaults] = useState({});
   const setDefault = (k) => (e) => setDefaults((d) => ({ ...d, [k]: e.target.value }));
@@ -1100,7 +1427,7 @@ function NewTaskForm({ workers, platforms, rates, reference, parentSkus, templat
   };
 
   return (
-    <div style={{ ...S.card, borderTop: `4px solid ${C.orange}` }}>
+    <div style={{ ...S.card, borderTop: `4px solid ${C.orange}`, padding: isMobile ? 15 : 22 }}>
       <div style={{ ...S.cardTitle, marginBottom: 14 }}>New task</div>
 
       <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
@@ -1136,8 +1463,8 @@ function NewTaskForm({ workers, platforms, rates, reference, parentSkus, templat
       </div>
 
       {type === "LISTING" && (
-        <div style={{ marginBottom: 12, border: `1px solid ${C.blue}44`, borderRadius: 10,
-          padding: 12, background: C.blueLight }}>
+        <div style={{ marginBottom: 12, border: `1px solid ${C.blue}44`, borderRadius: 12,
+          padding: 13, background: C.blueLight }}>
           <div style={{ fontSize: 12.5, fontWeight: 700, color: C.gray700, marginBottom: 8 }}>
             Link to parent SKU &amp; template (optional)
           </div>
@@ -1151,26 +1478,28 @@ function NewTaskForm({ workers, platforms, rates, reference, parentSkus, templat
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 12 }}>
         <div>
           <label style={S.label}>Title</label>
-          <input value={form.title} onChange={set("title")} style={S.inp}
+          <input value={form.title} onChange={set("title")} style={field(isMobile)}
             placeholder={type === "LISTING" ? "e.g. Brass lota photoshoot" : "e.g. Claim for damaged return"} />
         </div>
         <div style={{ gridColumn: "1 / -1" }}>
           <label style={S.label}>
             {type === "LISTING" ? "Google Drive folder with the photo" : "Link to the claim video"}
           </label>
-          <input value={form.source_link} onChange={set("source_link")} style={S.inp} placeholder="https://drive.google.com/…" />
+          <input value={form.source_link} onChange={set("source_link")} style={field(isMobile)}
+            placeholder="https://drive.google.com/…" />
         </div>
         {type === "RETURN_CLAIM" && (
           <div>
             <label style={S.label}>Sub-order number</label>
             <input value={form.suborder_no} onChange={set("suborder_no")}
-              style={{ ...S.inp, fontFamily: "monospace" }} placeholder="3078…_1" />
+              style={field(isMobile, { fontFamily: "monospace" })} placeholder="3078…_1" />
           </div>
         )}
         <div>
           <label style={S.label}>Rate {type === "LISTING" ? "per SKU" : "per claim"} (₹)</label>
           <input value={rateOverride} onChange={(e) => setRateOverride(e.target.value)} type="number"
-            style={S.inp} placeholder={standing ? `${standing.reward_amount} (standing rate)` : "set a rate below"} />
+            inputMode="decimal" style={field(isMobile)}
+            placeholder={standing ? `${standing.reward_amount} (standing rate)` : "set a rate below"} />
           <div style={{ fontSize: 11, color: C.gray400, marginTop: 4 }}>
             {standing
               ? `Leave blank to use ${standing.user ? `${standing.user_name}'s rate` : `the ${platform} rate`} of ${fmt(standing.reward_amount)}.`
@@ -1180,7 +1509,7 @@ function NewTaskForm({ workers, platforms, rates, reference, parentSkus, templat
         <div style={{ gridColumn: "1 / -1" }}>
           <label style={S.label}>Instructions</label>
           <textarea value={form.instructions} onChange={set("instructions")} rows={2}
-            style={{ ...S.inp, resize: "vertical" }}
+            style={field(isMobile, { resize: "vertical" })}
             placeholder={type === "LISTING"
               ? "Download the photo, edit it, create the listings, then add each SKU below."
               : `Download the video, compress under ${CLAIM_VIDEO_MAX_MB}MB, raise the claim.`} />
@@ -1190,13 +1519,14 @@ function NewTaskForm({ workers, platforms, rates, reference, parentSkus, templat
       {/* Listing values you decide, not the worker: every SKU on this task
           starts from these, and they can still be corrected per variant. */}
       {type === "LISTING" && (
-        <div style={{ marginTop: 16, padding: 13, borderRadius: 10,
+        <div style={{ marginTop: 16, padding: 13, borderRadius: 12,
           background: C.gray50, border: `1px solid ${C.border}` }}>
           <div style={{ fontSize: 12.5, fontWeight: 700, color: C.gray700, marginBottom: 3 }}>
             Listing details for every SKU on this task
           </div>
           <div style={{ fontSize: 11.5, color: C.gray400, marginBottom: 10 }}>
             Optional — these prefill the worker's SKU form. Leave blank to let them fill it in.
+            Set <b>SKU starts with</b> here so the team can auto-generate ids.
           </div>
           <ListingFields form={defaults} set={setDefault} platform={platform} reference={reference}
             hideSku />
@@ -1208,8 +1538,10 @@ function NewTaskForm({ workers, platforms, rates, reference, parentSkus, templat
           border: `1px solid ${C.redBorder}`, color: C.red, fontSize: 13, fontWeight: 600 }}>{err}</div>
       )}
       <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
-        <button onClick={submit} style={btn("primary", "md")}>Create &amp; assign</button>
-        <button onClick={onCancel} style={btn("ghost", "md")}>Cancel</button>
+        <button onClick={submit} style={{ ...btn("primary", "md"), flex: isMobile ? 1 : "none" }}>
+          Create &amp; assign
+        </button>
+        <button onClick={onCancel} style={{ ...btn("ghost", "md"), flex: isMobile ? 1 : "none" }}>Cancel</button>
       </div>
     </div>
   );
@@ -1220,14 +1552,14 @@ function RatesEditor({ rates, platforms, onSave, busy }) {
   // Business-wide rows only — the array may also hold per-worker overrides
   // (see WorkerRatesEditor), and those must never leak into the default table.
   const businessRates = useMemo(() => rates.filter((r) => !r.user), [rates]);
-  const value = (platform, type, field) => {
-    const k = `${platform}|${type}|${field}`;
+  const value = (platform, type, field_) => {
+    const k = `${platform}|${type}|${field_}`;
     if (k in draft) return draft[k];
     const row = businessRates.find((r) => r.platform === platform && r.task_type === type);
-    return row ? row[field] : "";
+    return row ? row[field_] : "";
   };
-  const set = (platform, type, field) => (e) =>
-    setDraft((d) => ({ ...d, [`${platform}|${type}|${field}`]: e.target.value }));
+  const set = (platform, type, field_) => (e) =>
+    setDraft((d) => ({ ...d, [`${platform}|${type}|${field_}`]: e.target.value }));
 
   const save = () => {
     const rows = [];
@@ -1256,15 +1588,15 @@ function RatesEditor({ rates, platforms, onSave, busy }) {
                 <td style={{ ...S.td, fontWeight: 700 }}>{p.label}</td>
                 <td style={S.td}>
                   <input value={value(p.value, "LISTING", "reward_amount")} onChange={set(p.value, "LISTING", "reward_amount")}
-                    type="number" style={{ ...S.inp, width: 90 }} />
+                    type="number" inputMode="decimal" style={{ ...S.inp, width: 90 }} />
                 </td>
                 <td style={S.td}>
                   <input value={value(p.value, "RETURN_CLAIM", "reward_amount")} onChange={set(p.value, "RETURN_CLAIM", "reward_amount")}
-                    type="number" style={{ ...S.inp, width: 90 }} />
+                    type="number" inputMode="decimal" style={{ ...S.inp, width: 90 }} />
                 </td>
                 <td style={S.td}>
                   <input value={value(p.value, "RETURN_CLAIM", "bonus_amount")} onChange={set(p.value, "RETURN_CLAIM", "bonus_amount")}
-                    type="number" style={{ ...S.inp, width: 90 }} />
+                    type="number" inputMode="decimal" style={{ ...S.inp, width: 90 }} />
                 </td>
               </tr>
             ))}
@@ -1286,14 +1618,14 @@ function WorkerRatesEditor({ rates, platforms, workers, onSave, busy }) {
   const personalRates = useMemo(
     () => rates.filter((r) => String(r.user) === String(workerId)),
     [rates, workerId]);
-  const value = (platform, type, field) => {
-    const k = `${platform}|${type}|${field}`;
+  const value = (platform, type, field_) => {
+    const k = `${platform}|${type}|${field_}`;
     if (k in draft) return draft[k];
     const row = personalRates.find((r) => r.platform === platform && r.task_type === type);
-    return row ? row[field] : "";
+    return row ? row[field_] : "";
   };
-  const set = (platform, type, field) => (e) =>
-    setDraft((d) => ({ ...d, [`${platform}|${type}|${field}`]: e.target.value }));
+  const set = (platform, type, field_) => (e) =>
+    setDraft((d) => ({ ...d, [`${platform}|${type}|${field_}`]: e.target.value }));
 
   const save = () => {
     if (!workerId) return;
@@ -1334,15 +1666,15 @@ function WorkerRatesEditor({ rates, platforms, workers, onSave, busy }) {
                 <td style={{ ...S.td, fontWeight: 700 }}>{p.label}</td>
                 <td style={S.td}>
                   <input value={value(p.value, "LISTING", "reward_amount")} onChange={set(p.value, "LISTING", "reward_amount")}
-                    type="number" style={{ ...S.inp, width: 90 }} />
+                    type="number" inputMode="decimal" style={{ ...S.inp, width: 90 }} />
                 </td>
                 <td style={S.td}>
                   <input value={value(p.value, "RETURN_CLAIM", "reward_amount")} onChange={set(p.value, "RETURN_CLAIM", "reward_amount")}
-                    type="number" style={{ ...S.inp, width: 90 }} />
+                    type="number" inputMode="decimal" style={{ ...S.inp, width: 90 }} />
                 </td>
                 <td style={S.td}>
                   <input value={value(p.value, "RETURN_CLAIM", "bonus_amount")} onChange={set(p.value, "RETURN_CLAIM", "bonus_amount")}
-                    type="number" style={{ ...S.inp, width: 90 }} />
+                    type="number" inputMode="decimal" style={{ ...S.inp, width: 90 }} />
                 </td>
               </tr>
             ))}
