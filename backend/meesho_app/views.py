@@ -3124,7 +3124,20 @@ def parent_price_list(request, business_id):
         search = request.GET.get("search", "")
         qs = ParentItemPrice.objects.filter(business=business)
         if search:
-            qs = qs.filter(item_id__icontains=search)
+            # Matching the children too is what makes searching useful — you
+            # usually remember the variant you sell, not the group you filed it
+            # under. Done here rather than in the browser because the list no
+            # longer ships every child to the client.
+            # Matched via a subquery rather than a join: joining on children
+            # makes the sku_count annotation below count only the *matching*
+            # children, so a search would quietly report "1 SKU" on a parent
+            # that has three.
+            matched_parents = (
+                FinalPrice.objects
+                .filter(business=business, sku_id__icontains=search, parent__isnull=False)
+                .values("parent_id")
+            )
+            qs = qs.filter(DQ(item_id__icontains=search) | DQ(pk__in=matched_parents))
 
         # The full serializer walks every parent's children and price history —
         # one query per parent per relation. On a catalogue of any size that is
@@ -3400,16 +3413,23 @@ def unlinked_skus(request, business_id):
                 "order_count": row["n"],
             }
 
-    out = [
+    tagged = [
         {**r, "opt_out": _sku_key(r["sku_id"]) in opted_out_keys}
         for r in results.values()
     ]
-    out = [r for r in out if r["opt_out"] == only_opted_out]
+    hidden_count = sum(1 for r in tagged if r["opt_out"])
+    out = [r for r in tagged if r["opt_out"] == only_opted_out]
     if q:
         out = [r for r in out if q in r["sku_id"].lower()]
     # Most-ordered first, then alphabetical — surfaces the SKUs that matter most.
     out.sort(key=lambda r: (-r["order_count"], r["sku_id"]))
-    return Response({"results": out})
+    return Response({
+        "results": out,
+        "count": len(out),
+        # Always reported, whichever list was asked for, so the panel can offer
+        # "show N hidden" without a second round trip.
+        "hidden_count": hidden_count,
+    })
 
 
 @api_view(["POST"])
@@ -12220,3 +12240,44 @@ def sku_parent_opt_out(request, business_id):
     row.parent_opt_out = opt_out
     row.save(update_fields=["parent_opt_out"])
     return Response({"sku_id": row.sku_id, "opt_out": row.parent_opt_out})
+
+
+@api_view(["GET"])
+def unpriced_skus(request, business_id):
+    """
+    SKUs that appear in orders but have no purchase price on file.
+
+    The pricing screen used to get this list out of /profit/, which runs the
+    whole P&L engine — nearly four seconds of settlement maths to produce a
+    handful of SKU names. Two queries answer the same question.
+    """
+    business = get_authorized_business(request, business_id)
+
+    # "Priced" means a FinalPrice row exists at all — the same test /profit/
+    # applies when it decides an order can't be costed. A row with a blank
+    # amount is a different problem (fix the number, not the link) and would
+    # only make this list mean two things at once.
+    priced = {
+        _sku_key(sku) for sku in
+        FinalPrice.objects.filter(business=business).values_list("sku_id", flat=True)
+    }
+
+    # Both places a SKU can appear. /profit/ resolves each order as
+    # `Order.sku or OrderPayment.supplier_sku`, so counting only the orders
+    # table would under-report every SKU that arrived on a payment sheet
+    # without a matching order row.
+    counts = {}
+    for qs, field in (
+        (Order.objects.filter(business=business), "sku"),
+        (OrderPayment.objects.filter(business=business), "supplier_sku"),
+    ):
+        for row in (qs.exclude(**{f"{field}__isnull": True}).exclude(**{field: ""})
+                      .values(field).annotate(n=Count(field))):
+            sku = row[field]
+            if _sku_key(sku) in priced:
+                continue
+            counts[sku] = counts.get(sku, 0) + row["n"]
+
+    out = [{"sku_id": sku, "order_count": n} for sku, n in counts.items()]
+    out.sort(key=lambda r: (-r["order_count"], r["sku_id"]))
+    return Response({"results": out, "count": len(out)})

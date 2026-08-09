@@ -25,6 +25,7 @@ urlpatterns = [
     path("parent-prices/<str:item_id>/price-history/", views.parent_price_history_list, name="parent_price_history_list"),
     path("parent-prices/<str:item_id>/price-history/<int:pk>/", views.parent_price_history_detail, name="parent_price_history_detail"),
     path("final-prices/unlinked/", views.unlinked_skus, name="unlinked_skus"),
+    path("final-prices/unpriced/", views.unpriced_skus, name="unpriced_skus"),
     path("parent-prices/<str:item_id>/children/", views.parent_price_children, name="parent_price_children"),
     path("parent-prices/<str:item_id>/suggestions/", views.parent_sku_suggestions, name="parent_sku_suggestions"),
     path("sku-opt-out/", views.sku_parent_opt_out, name="sku_parent_opt_out"),

@@ -247,19 +247,66 @@ function CreateChildForm({ parentId, parentPrice, onSaved, onCancel }) {
 }
 
 // ── parent card ───────────────────────────────────────────────────────────────
-function ParentCard({ parent, onRefresh, notify, onLink, dragging, unlinked = [] }) {
+function ParentCard({ parent, onRefresh, notify, onLink, dragging, unlinked = [], onOptOut }) {
   const [open, setOpen] = useState(false);
-  const [panel, setPanel] = useState(null); // null | "history" | "link" | "create" | "edit"
+  const [panel, setPanel] = useState(null); // null | "history" | "link" | "create" | "edit" | "suggest"
   const [dragOver, setDragOver] = useState(false);
   const [editForm, setEditForm] = useState({ item_price: String(parent.item_price || ""), tax_percent: String(parent.tax_percent || "0"), packaging_cost: String(parent.packaging_cost || "0") });
 
-  const histories   = parent.price_history || [];
-  const childCount  = (parent.sku_ids || []).length;
-  const hasHistory  = histories.length > 0;
-  const latestEntry = hasHistory ? histories[histories.length - 1] : null;
+  // Children and history arrive only when the card is opened. The list endpoint
+  // used to ship both for every parent, which cost 181 queries to draw a page
+  // where almost every card stays shut.
+  const [children, setChildren] = useState(null);      // null = not fetched yet
+  const [histories, setHistories] = useState(null);
+  const [detailErr, setDetailErr] = useState(false);
+  const [suggestions, setSuggestions] = useState(null);
+  const [suggestBusy, setSuggestBusy] = useState(false);
+
+  // Counts come from the list payload, so the header is right before anything
+  // is fetched; once loaded the fetched rows are the truth.
+  const childCount   = children ? children.length : (parent.sku_count ?? 0);
+  const historyCount = histories ? histories.length : (parent.history_count ?? 0);
+  const hasHistory   = historyCount > 0;
+  const latestEntry  = histories && histories.length ? histories[histories.length - 1] : null;
+
+  const loadDetail = useCallback(async () => {
+    const id = encodeURIComponent(parent.item_id);
+    setDetailErr(false);
+    try {
+      const [kr, hr] = await Promise.all([
+        fetch(`${API}/parent-prices/${id}/children/`),
+        fetch(`${API}/parent-prices/${id}/price-history/`),
+      ]);
+      if (!kr.ok) { setDetailErr(true); return; }
+      const kd = await kr.json();
+      setChildren(kd.results || []);
+      if (hr.ok) {
+        const hd = await hr.json();
+        setHistories(Array.isArray(hd) ? hd : (hd.results || []));
+      } else setHistories([]);
+    } catch { setDetailErr(true); }
+  }, [parent.item_id]);
+
+  useEffect(() => {
+    if (open && children === null && !detailErr) loadDetail();
+  }, [open, children, detailErr, loadDetail]);
+
+  // Re-pull this card only — a link or unlink here shouldn't redraw the page.
+  const reloadDetail = useCallback(() => {
+    setChildren(null); setHistories(null); setSuggestions(null);
+  }, []);
+
+  const loadSuggestions = useCallback(async () => {
+    setSuggestBusy(true);
+    try {
+      const r = await fetch(`${API}/parent-prices/${encodeURIComponent(parent.item_id)}/suggestions/`);
+      setSuggestions(r.ok ? ((await r.json()).results || []) : []);
+    } catch { setSuggestions([]); }
+    finally { setSuggestBusy(false); }
+  }, [parent.item_id]);
 
   // Price trajectory summary text: "₹40 → ₹45 → ₹50"
-  const trajectory = histories.length > 1
+  const trajectory = histories && histories.length > 1
     ? histories.map(h => fmt(h.final_price)).join(" → ")
     : null;
 
@@ -273,7 +320,21 @@ function ParentCard({ parent, onRefresh, notify, onLink, dragging, unlinked = []
 
   const linkSku = async skuId => {
     await onLink(skuId, parent.item_id);
+    reloadDetail();
     setPanel(null);
+  };
+
+  /** Link straight from a suggestion, without leaving the card. */
+  const acceptSuggestion = async skuId => {
+    await onLink(skuId, parent.item_id);
+    setSuggestions(list => (list || []).filter(x => x.sku_id !== skuId));
+    setChildren(null); setHistories(null);
+  };
+
+  /** "Not this one" — take the SKU out of the linking flows for good. */
+  const rejectSuggestion = async skuId => {
+    const ok = await onOptOut?.(skuId, true);
+    if (ok) setSuggestions(list => (list || []).filter(x => x.sku_id !== skuId));
   };
 
   // ── drop-target handlers (drag a SKU chip from the tray onto this card) ──
@@ -302,7 +363,7 @@ function ParentCard({ parent, onRefresh, notify, onLink, dragging, unlinked = []
       method: "PATCH", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ parent: null }),
     });
-    if (r.ok) { notify("ok", `${skuId} unlinked.`); onRefresh(); }
+    if (r.ok) { notify("ok", `${skuId} unlinked.`); reloadDetail(); onRefresh(); }
     else notify("err", "Unlink failed.");
   };
 
@@ -380,7 +441,7 @@ function ParentCard({ parent, onRefresh, notify, onLink, dragging, unlinked = []
           </span>
           {hasHistory
             ? <span style={{ background: C.orangeLight, color: C.orange, border: `1px solid ${C.orangeBorder}`, padding: "3px 10px", borderRadius: 20, fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" }}>
-                {histories.length} price {histories.length === 1 ? "entry" : "entries"}
+                {historyCount} price {historyCount === 1 ? "entry" : "entries"}
               </span>
             : <span style={{ background: C.gray100, color: C.gray400, border: `1px solid ${C.gray200}`, padding: "3px 10px", borderRadius: 20, fontSize: 11, whiteSpace: "nowrap" }}>
                 no history
@@ -411,6 +472,11 @@ function ParentCard({ parent, onRefresh, notify, onLink, dragging, unlinked = []
             <button onClick={() => toggle("link")} style={{ ...btn(panel === "link" ? "secondary" : "ghost", "sm"), fontSize: 11 }}>
               {panel === "link" ? "✕ Cancel" : "🔗 Link Existing SKU"}
             </button>
+            <button
+              onClick={() => { toggle("suggest"); if (suggestions === null) loadSuggestions(); }}
+              style={{ ...btn(panel === "suggest" ? "ghostOrange" : "ghost", "sm"), fontSize: 11 }}>
+              {panel === "suggest" ? "✕ Cancel" : "✨ Suggestions"}
+            </button>
             <button onClick={() => toggle("create")} style={{ ...btn(panel === "create" ? "success" : "ghost", "sm"), fontSize: 11 }}>
               {panel === "create" ? "✕ Cancel" : "+ Create New SKU"}
             </button>
@@ -426,7 +492,7 @@ function ParentCard({ parent, onRefresh, notify, onLink, dragging, unlinked = []
             <div style={{ padding: "12px 16px", borderBottom: `1px solid ${C.gray100}` }}>
               {panel === "history" && (
                 <AddHistoryForm parentId={parent.item_id}
-                  onSaved={() => { setPanel(null); onRefresh(); notify("ok", "Price entry added."); }}
+                  onSaved={() => { setPanel(null); reloadDetail(); onRefresh(); notify("ok", "Price entry added."); }}
                   onCancel={() => setPanel(null)} />
               )}
               {panel === "link" && (
@@ -435,9 +501,56 @@ function ParentCard({ parent, onRefresh, notify, onLink, dragging, unlinked = []
                   <SkuDropdown parentId={parent.item_id} onSelect={linkSku} unlinked={unlinked} />
                 </div>
               )}
+              {panel === "suggest" && (
+                <div>
+                  <p style={{ fontSize: 11.5, color: C.gray600, marginBottom: 9, lineHeight: 1.6 }}>
+                    Unlinked SKUs whose words match this group — scored against the parent
+                    name <em>and</em> the SKUs already in it. <strong>Not this one</strong> takes
+                    a SKU out of every linking list for good.
+                  </p>
+                  {suggestBusy && suggestions === null ? (
+                    <p style={{ fontSize: 12, color: C.gray400 }}>Looking for matches…</p>
+                  ) : (suggestions || []).length === 0 ? (
+                    <p style={{ fontSize: 12, color: C.gray400, fontStyle: "italic" }}>
+                      Nothing unlinked looks like it belongs here.
+                    </p>
+                  ) : (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                      {suggestions.map(sg => (
+                        <div key={sg.sku_id} style={{
+                          display: "flex", alignItems: "center", gap: 9, padding: "7px 10px",
+                          border: `1px solid ${C.border}`, borderRadius: 9, background: C.white }}>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ fontFamily: "monospace", fontSize: 12.5, fontWeight: 700,
+                              color: sg.has_price ? C.orange : C.green, wordBreak: "break-all" }}>
+                              {sg.sku_id}
+                            </div>
+                            <div style={{ display: "flex", gap: 7, flexWrap: "wrap", marginTop: 2,
+                              fontSize: 10.5, color: C.gray400 }}>
+                              <span>match {Math.round(sg.score * 100)}%</span>
+                              {sg.matched?.length > 0 && <span>· {sg.matched.join(", ")}</span>}
+                              {sg.order_count > 0 && <span>· 📦 {sg.order_count}</span>}
+                              {!sg.has_price && <span style={{ color: C.green, fontWeight: 700 }}>· new</span>}
+                            </div>
+                          </div>
+                          <button onClick={() => acceptSuggestion(sg.sku_id)}
+                            style={{ ...btn("secondary", "sm"), padding: "4px 10px", fontSize: 11 }}>
+                            Link
+                          </button>
+                          <button onClick={() => rejectSuggestion(sg.sku_id)}
+                            title="Never link this SKU to any parent"
+                            style={{ ...btn("ghost", "sm"), padding: "4px 10px", fontSize: 11, color: C.gray500 }}>
+                            Not this one
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
               {panel === "create" && (
                 <CreateChildForm parentId={parent.item_id} parentPrice={parent}
-                  onSaved={() => { setPanel(null); onRefresh(); notify("ok", "Child SKU created."); }}
+                  onSaved={() => { setPanel(null); reloadDetail(); onRefresh(); notify("ok", "Child SKU created."); }}
                   onCancel={() => setPanel(null)} />
               )}
               {panel === "edit" && (
@@ -465,7 +578,9 @@ function ParentCard({ parent, onRefresh, notify, onLink, dragging, unlinked = []
           {/* Price timeline */}
           <div style={{ padding: "14px 16px", borderBottom: `1px solid ${C.gray100}` }}>
             <p style={{ fontSize: 11, fontWeight: 700, color: C.gray500, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 12 }}>Price History</p>
-            <PriceTimeline histories={histories} onDelete={deleteHistory} onAdd={() => setPanel("history")} />
+            {histories === null
+              ? <p style={{ fontSize: 12, color: C.gray400 }}>Loading price history…</p>
+              : <PriceTimeline histories={histories} onDelete={deleteHistory} onAdd={() => setPanel("history")} />}
           </div>
 
           {/* Child SKUs — compact table */}
@@ -479,12 +594,15 @@ function ParentCard({ parent, onRefresh, notify, onLink, dragging, unlinked = []
               </p>
             </div>
 
-            {childCount > 0 ? (
+            {children === null ? (
+              <p style={{ fontSize: 12, color: C.gray400 }}>Loading child SKUs…</p>
+            ) : childCount > 0 ? (
               <div style={{ border: `1px solid ${C.border}`, borderRadius: 8, overflow: "hidden" }}>
                 <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
                   <thead>
                     <tr>
                       <th style={{ ...S.th, fontSize: 10 }}>SKU ID</th>
+                      <th style={{ ...S.th, fontSize: 10, textAlign: "right" }}>Orders</th>
                       <th style={{ ...S.th, fontSize: 10, textAlign: "right" }}>Item Price</th>
                       <th style={{ ...S.th, fontSize: 10, textAlign: "right" }}>Tax %</th>
                       <th style={{ ...S.th, fontSize: 10, textAlign: "right" }}>Final Price</th>
@@ -492,20 +610,25 @@ function ParentCard({ parent, onRefresh, notify, onLink, dragging, unlinked = []
                     </tr>
                   </thead>
                   <tbody>
-                    {(parent.sku_ids || []).map((skuId, i) => (
-                      <tr key={skuId} style={{ background: i % 2 === 0 ? C.white : C.gray50 }}>
+                    {children.map((ch, i) => (
+                      <tr key={ch.id ?? ch.sku_id} style={{ background: i % 2 === 0 ? C.white : C.gray50 }}>
                         <td style={S.td}>
                           <span style={{ fontFamily: "monospace", fontSize: 11, color: C.blue, fontWeight: 600, background: C.blueLight, padding: "2px 7px", borderRadius: 4, border: "1px solid #BFDBFE" }}>
-                            ↳ {skuId}
+                            ↳ {ch.sku_id}
                           </span>
                         </td>
-                        <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", color: C.gray600 }}>{fmt(parent.item_price)}</td>
-                        <td style={{ ...S.td, textAlign: "right", color: C.gray500 }}>{parent.tax_percent ?? 0}%</td>
+                        <td style={{ ...S.td, textAlign: "right", color: ch.order_count ? C.gray600 : C.gray300, fontFamily: "monospace" }}>
+                          {ch.order_count || 0}
+                        </td>
+                        {/* A child can carry its own price; falling back to the
+                            parent's is what happens when it has never been set. */}
+                        <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", color: C.gray600 }}>{fmt(ch.item_price ?? parent.item_price)}</td>
+                        <td style={{ ...S.td, textAlign: "right", color: C.gray500 }}>{ch.tax_percent ?? parent.tax_percent ?? 0}%</td>
                         <td style={{ ...S.td, textAlign: "right" }}>
-                          <span style={{ fontFamily: "monospace", fontWeight: 700, color: C.orange }}>{fmt(parent.final_price)}</span>
+                          <span style={{ fontFamily: "monospace", fontWeight: 700, color: C.orange }}>{fmt(ch.final_price ?? parent.final_price)}</span>
                         </td>
                         <td style={{ ...S.td, textAlign: "center" }}>
-                          <button onClick={() => unlinkSku(skuId)} style={{ background: "none", border: "none", cursor: "pointer", color: C.gray300, fontSize: 14, padding: "2px 6px", borderRadius: 4 }}
+                          <button onClick={() => unlinkSku(ch.sku_id)} style={{ background: "none", border: "none", cursor: "pointer", color: C.gray300, fontSize: 14, padding: "2px 6px", borderRadius: 4 }}
                             onMouseEnter={e => e.target.style.color = C.red}
                             onMouseLeave={e => e.target.style.color = C.gray300}
                             title="Unlink">✕</button>
@@ -778,6 +901,8 @@ export function PricingTab() {
   const [missingSkus, setMissingSkus] = useState([]);
   const [showMissing, setShowMissing] = useState(false);
   const [unlinked, setUnlinked] = useState([]);
+  const [showHidden, setShowHidden] = useState(false);
+  const [hiddenCount, setHiddenCount] = useState(0);
   const [dragging, setDragging] = useState(null);
 
   const [linkParentId, setLinkParentId] = useState("");
@@ -792,22 +917,50 @@ export function PricingTab() {
     setMsg({ type, text }); setTimeout(() => setMsg(null), 4000);
   }, []);
 
+  // "Hidden" is the same list, filtered the other way — so a SKU you removed is
+  // always one click from coming back rather than being lost.
   const loadUnlinked = useCallback(async () => {
-    const r = await fetch(`${API}/final-prices/unlinked/`).catch(() => null);
-    if (r?.ok) { const d = await r.json(); setUnlinked(d.results || []); }
-  }, []);
+    const r = await fetch(`${API}/final-prices/unlinked/${showHidden ? "?opted_out=1" : ""}`)
+      .catch(() => null);
+    if (r?.ok) {
+      const d = await r.json();
+      setUnlinked(d.results || []);
+      setHiddenCount(d.hidden_count || 0);
+    }
+  }, [showHidden]);
 
-  const load = useCallback(async () => {
-    const [pr, sr] = await Promise.all([
-      fetch(`${API}/parent-prices/`),
-      fetch(`${API}/profit/`).catch(() => null),
-    ]);
-    const pd = await pr.json(); setParents(pd.results || []);
-    if (sr?.ok) { const s = await sr.json(); setMissingSkus(s.missing_sku || []); }
+  /** Take a SKU out of the linking lists, or put it back. */
+  const setOptOut = useCallback(async (skuId, optOut) => {
+    const r = await fetch(`${API}/sku-opt-out/`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sku_id: skuId, opt_out: optOut }),
+    }).catch(() => null);
+    const d = await r?.json().catch(() => ({}));
+    if (!r?.ok) { notify("err", d?.error || `Could not update ${skuId}.`); return false; }
+    notify("ok", optOut ? `${skuId} hidden — it won't be offered for linking.`
+                        : `${skuId} is back in the list.`);
+    loadUnlinked();
+    return true;
+  }, [notify, loadUnlinked]);
+
+  // Searching is the server's job now: it matches parent ids *and* child SKUs,
+  // and the browser no longer holds every child to filter on.
+  const load = useCallback(async (term = "") => {
+    const q = term.trim() ? `?search=${encodeURIComponent(term.trim())}` : "";
+    const pr = await fetch(`${API}/parent-prices/${q}`);
+    const pd = await pr.json();
+    setParents(pd.results || []);
     setLoading(false);
   }, []);
 
-  const refresh = useCallback(() => { load(); loadUnlinked(); }, [load, loadUnlinked]);
+  // This used to come off /profit/ — nearly four seconds of settlement maths to
+  // produce a list of SKU names. Its own endpoint answers in ~70ms.
+  const loadMissing = useCallback(async () => {
+    const r = await fetch(`${API}/final-prices/unpriced/`).catch(() => null);
+    if (r?.ok) { const d = await r.json(); setMissingSkus(d.results || []); }
+  }, []);
+
+  const refresh = useCallback(() => { load(search); loadUnlinked(); }, [load, loadUnlinked, search]);
 
   // Export parents AND child SKUs together as a two-sheet Excel workbook.
   // Uses fetch + blob (not a plain navigation) so the patched fetch
@@ -860,7 +1013,14 @@ export function PricingTab() {
     }
   }, [notify, refresh]);
 
-  useEffect(() => { load(); loadUnlinked(); }, [load, loadUnlinked]);
+  useEffect(() => { loadMissing(); }, [loadMissing]);
+  useEffect(() => { loadUnlinked(); }, [loadUnlinked]);
+
+  // Debounced so typing a SKU doesn't fire a request per character.
+  useEffect(() => {
+    const t = setTimeout(() => load(search), search ? 300 : 0);
+    return () => clearTimeout(t);
+  }, [search, load]);
 
   useEffect(() => {
     setSelectedUnlinked(prev => {
@@ -883,10 +1043,8 @@ export function PricingTab() {
     else notify("err", `Could not link ${skuId}.`);
   }, [notify, refresh]);
 
-  const filtered = parents.filter(p =>
-    !search || p.item_id.toLowerCase().includes(search.toLowerCase()) ||
-    (p.sku_ids || []).some(s => s.toLowerCase().includes(search.toLowerCase()))
-  );
+  // Already narrowed by the API, including by child SKU.
+  const filtered = parents;
 
   const quickUnlinked = unlinked.filter(s =>
     !linkQuery || s.sku_id.toLowerCase().includes(linkQuery.toLowerCase())
@@ -941,8 +1099,8 @@ export function PricingTab() {
     }
   };
 
-  const totalSkus = parents.reduce((a, p) => a + (p.sku_ids || []).length, 0);
-  const withHistory = parents.filter(p => (p.price_history || []).length > 0).length;
+  const totalSkus = parents.reduce((a, p) => a + (p.sku_count || 0), 0);
+  const withHistory = parents.filter(p => (p.history_count || 0) > 0).length;
   const noHistory = parents.length - withHistory;
   const selectedCount = selectedUnlinked.size;
 
@@ -1033,7 +1191,10 @@ export function PricingTab() {
           </div>
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
             {missingSkus.map(s => (
-              <span key={s} style={{ fontFamily: "monospace", fontSize: 11, color: C.red, background: C.white, border: "1px solid #FECACA", padding: "2px 8px", borderRadius: 4, fontWeight: 600 }}>{s}</span>
+              <span key={s.sku_id ?? s} style={{ fontFamily: "monospace", fontSize: 11, color: C.red, background: C.white, border: "1px solid #FECACA", padding: "2px 8px", borderRadius: 4, fontWeight: 600 }}>
+                {s.sku_id ?? s}
+                {s.order_count > 0 && <span style={{ color: C.gray400, fontWeight: 400 }}> · {s.order_count}</span>}
+              </span>
             ))}
           </div>
         </div>
@@ -1057,13 +1218,27 @@ export function PricingTab() {
         }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
             <h3 style={{ fontSize: 14, fontWeight: 800, color: C.gray800 }}>🔗 Link Center</h3>
-            <span style={{ background: C.redLight, color: C.red, border: `1px solid ${C.redBorder}`, padding: "2px 9px", borderRadius: 20, fontSize: 11, fontWeight: 700 }}>
-              {unlinked.length} unlinked
+            <span style={{
+              background: showHidden ? C.gray100 : C.redLight,
+              color: showHidden ? C.gray600 : C.red,
+              border: `1px solid ${showHidden ? C.gray200 : C.redBorder}`,
+              padding: "2px 9px", borderRadius: 20, fontSize: 11, fontWeight: 700 }}>
+              {unlinked.length} {showHidden ? "hidden" : "unlinked"}
             </span>
           </div>
-          <p style={{ fontSize: 11, color: C.gray400, marginBottom: 12 }}>
-            Pick a target parent, then one-click link — or make any SKU its own new parent.
+          <p style={{ fontSize: 11, color: C.gray400, marginBottom: 8 }}>
+            {showHidden
+              ? "SKUs you've said will never have a parent. Restore any of them here."
+              : "Pick a target parent, then one-click link — or make any SKU its own new parent."}
           </p>
+          {(hiddenCount > 0 || showHidden) && (
+            <button onClick={() => { setShowHidden(h => !h); clearSelectedUnlinked(); }}
+              style={{ background: "none", border: "none", padding: 0, marginBottom: 10,
+                cursor: "pointer", fontFamily: "inherit", fontSize: 11.5, fontWeight: 700,
+                color: C.blue }}>
+              {showHidden ? "← Back to unlinked" : `Show ${hiddenCount} hidden SKU${hiddenCount === 1 ? "" : "s"}`}
+            </button>
+          )}
 
           {/* Step 1 — choose target parent */}
           <label style={S.label}>① Target Parent Group</label>
@@ -1071,7 +1246,7 @@ export function PricingTab() {
             style={{ ...S.inp, marginBottom: 6, borderColor: linkParentId ? C.blue : C.gray200 }}>
             <option value="">Select a parent to link into…</option>
             {parents.map(p => (
-              <option key={p.item_id} value={p.item_id}>{p.item_id} ({(p.sku_ids || []).length})</option>
+              <option key={p.item_id} value={p.item_id}>{p.item_id} ({p.sku_count || 0})</option>
             ))}
           </select>
           {!linkParentId && (
@@ -1105,7 +1280,9 @@ export function PricingTab() {
           <div style={{ border: `1px solid ${C.gray100}`, borderRadius: 10, overflow: "hidden", maxHeight: 420, overflowY: "auto" }}>
             {quickUnlinked.length === 0 ? (
               <div style={{ fontSize: 12, color: C.gray400, padding: 14, textAlign: "center" }}>
-                {unlinked.length === 0 ? "🎉 Every SKU is linked." : "No SKUs match your filter."}
+                {unlinked.length === 0
+                  ? (showHidden ? "Nothing hidden." : "🎉 Every SKU is linked.")
+                  : "No SKUs match your filter."}
               </div>
             ) : (
               quickUnlinked.slice(0, 200).map((s, i) => {
@@ -1136,17 +1313,31 @@ export function PricingTab() {
                       </div>
                     </div>
                     {/* Quick actions */}
+                    {!showHidden && (
+                      <button
+                        onClick={() => linkParentId && linkSku(s.sku_id, linkParentId)}
+                        disabled={!linkParentId}
+                        title={linkParentId ? `Link to ${linkParentId}` : "Select a target parent first"}
+                        style={{ ...btn("secondary", "sm"), padding: "3px 8px", fontSize: 11, opacity: linkParentId ? 1 : 0.4 }}
+                      >🔗</button>
+                    )}
+                    {!showHidden && (
+                      <button
+                        onClick={() => setNewParentFor(s)}
+                        title="Create a new parent from this SKU"
+                        style={{ ...btn("success", "sm"), padding: "3px 8px", fontSize: 11 }}
+                      >+ Parent</button>
+                    )}
+                    {/* Some SKUs will never belong to a group. Hiding one keeps
+                        the pile meaning "still needs attention". */}
                     <button
-                      onClick={() => linkParentId && linkSku(s.sku_id, linkParentId)}
-                      disabled={!linkParentId}
-                      title={linkParentId ? `Link to ${linkParentId}` : "Select a target parent first"}
-                      style={{ ...btn("secondary", "sm"), padding: "3px 8px", fontSize: 11, opacity: linkParentId ? 1 : 0.4 }}
-                    >🔗</button>
-                    <button
-                      onClick={() => setNewParentFor(s)}
-                      title="Create a new parent from this SKU"
-                      style={{ ...btn("success", "sm"), padding: "3px 8px", fontSize: 11 }}
-                    >+ Parent</button>
+                      onClick={() => setOptOut(s.sku_id, !showHidden)}
+                      title={showHidden
+                        ? "Put this SKU back in the unlinked list"
+                        : "This SKU will never have a parent — hide it"}
+                      style={{ ...btn("ghost", "sm"), padding: "3px 8px", fontSize: 11,
+                        color: showHidden ? C.green : C.gray400 }}
+                    >{showHidden ? "↩" : "🚫"}</button>
                   </div>
                 );
               })
@@ -1167,7 +1358,9 @@ export function PricingTab() {
               style={{ ...S.inp, maxWidth: 300, fontSize: 12 }}
             />
             {search && <button onClick={() => setSearch("")} style={btn("ghost", "sm")}>Clear</button>}
-            <span style={{ fontSize: 12, color: C.gray500 }}>{filtered.length} of {parents.length} groups shown</span>
+            <span style={{ fontSize: 12, color: C.gray500 }}>
+              {filtered.length} group{filtered.length === 1 ? "" : "s"}{search ? " matching" : ""}
+            </span>
           </div>
 
           {loading ? (
@@ -1179,7 +1372,7 @@ export function PricingTab() {
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               {filtered.map(p => (
-                <ParentCard key={p.item_id} parent={p} onRefresh={refresh} notify={notify}
+                <ParentCard key={p.item_id} parent={p} onRefresh={refresh} notify={notify} onOptOut={setOptOut}
                   onLink={linkSku} dragging={dragging} unlinked={unlinked} />
               ))}
             </div>
