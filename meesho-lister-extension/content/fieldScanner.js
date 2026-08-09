@@ -80,9 +80,18 @@
       if (t) return t;
     }
 
-    // 5. nearest preceding label-ish sibling text within the field group
-    const group = el.closest("div,section,fieldset,li") || el.parentElement;
-    if (group) {
+    // 5. label-ish text in an ancestor's subtree, widening one hop at a time.
+    // A single closest-container check (the old behaviour here) misses
+    // layouts like Meesho's, where the label and the input are cousins —
+    // both children of a shared row div several levels up, not direct
+    // neighbours — so an unnamed field (e.g. the Size dropdown, which has no
+    // `name` attribute at all) fell through to "Select" or worse a volatile
+    // auto id. Each hop searches the whole subtree of one more ancestor and
+    // stops at the first one that finds real text, so the closest genuine
+    // label still wins; capped well short of the document to avoid ever
+    // matching unrelated page content.
+    let group = el.parentElement;
+    for (let hops = 0; group && hops < 6 && group !== document.body; hops++, group = group.parentElement) {
       const candidates = group.querySelectorAll("label,span,p,div");
       for (const c of candidates) {
         if (c.contains(el)) continue;
@@ -97,11 +106,20 @@
     return "";
   }
 
+  // Ids that are runtime-generated rather than authored, so they renumber
+  // between page loads and can't be trusted as a stable key:
+  //   - bare counters like "field123" (letters + 3-or-more digits, no separator)
+  //   - MUI's own auto id scheme, "mui-17", "mui-142", etc. — this is the one
+  //     Meesho's un-named dropdowns (e.g. the Size field) actually use, and
+  //     keying on it is why such a field would stop matching a saved template
+  //     the moment something else on the page mounts in a different order.
+  const VOLATILE_ID = /^(?:[a-z]*\d{3,}|mui-\d+)$/i;
+
   /** Stable logical key used to match a saved value back to a field. */
   function deriveKey(el, label) {
     const name = el.getAttribute("name");
     if (name) return "name:" + name.toLowerCase();
-    if (el.id && !/^[a-z]*\d{3,}$/i.test(el.id)) return "id:" + el.id.toLowerCase();
+    if (el.id && !VOLATILE_ID.test(el.id)) return "id:" + el.id.toLowerCase();
     if (label) return "label:" + label.toLowerCase();
     const ph = el.getAttribute("placeholder");
     if (ph) return "ph:" + normalize(ph).toLowerCase();
