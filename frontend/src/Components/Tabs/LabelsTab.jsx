@@ -286,7 +286,7 @@ function ParentLinkInline({ sku, currentParent, onDone }) {
           <Typography sx={{ fontSize: 11, color: C.gray400 }}>Loading parents…</Typography>
         ) : (
           <TextField select value={choice} onChange={(e) => setChoice(e.target.value)}
-            size="small" SelectProps={{ native: true }}
+            size="small" slotProps={{ select: { native: true } }}
             sx={{ minWidth: 170, "& select": { fontSize: 11.5, py: "5px" } }}>
             <option value="">Pick a parent…</option>
             {parents.map((p) => <option key={p} value={p}>{p}</option>)}
@@ -905,7 +905,7 @@ function LabelsView({ onViewCustomer }) {
             placeholder="Search sub-order, AWB, SKU, customer, pincode"
             sx={{ flex: "1 1 250px", "& input": { fontSize: 13, py: "7px" } }} />
           <TextField select size="small" value={courier} onChange={(e) => setCourier(e.target.value)}
-            SelectProps={{ native: true }} sx={{ minWidth: 130, "& select": { fontSize: 13, py: "7px" } }}>
+            slotProps={{ select: { native: true } }} sx={{ minWidth: 130, "& select": { fontSize: 13, py: "7px" } }}>
             <option value="">All couriers</option>
             {allCouriers.map(c => <option key={c} value={c}>{c}</option>)}
           </TextField>

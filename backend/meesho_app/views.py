@@ -3125,10 +3125,25 @@ def parent_price_list(request, business_id):
         qs = ParentItemPrice.objects.filter(business=business)
         if search:
             qs = qs.filter(item_id__icontains=search)
-        items = qs
-        return Response({
-            "results": ParentItemPriceSerializer(items, many=True).data,
-        })
+
+        # The full serializer walks every parent's children and price history —
+        # one query per parent per relation. On a catalogue of any size that is
+        # the slowest thing on the page, and the list view only needs a count.
+        # Children arrive from /parent-prices/<id>/children/ when a parent is
+        # actually opened. ?detail=1 restores the old eager payload for any
+        # caller that still wants it.
+        if request.GET.get("detail") == "1":
+            items = qs.prefetch_related("sku_prices", "price_history")
+            return Response({"results": ParentItemPriceSerializer(items, many=True).data})
+
+        rows = (
+            qs.annotate(sku_count=Count("sku_prices", distinct=True),
+                        history_count=Count("price_history", distinct=True))
+              .values("id", "item_id", "item_price", "tax_percent", "packaging_cost",
+                      "final_price", "sku_count", "history_count")
+              .order_by("item_id")
+        )
+        return Response({"results": list(rows), "slim": True})
 
     serializer = ParentItemPriceSerializer(data=request.data)
     serializer.is_valid(raise_exception=True)
@@ -3319,6 +3334,16 @@ def unlinked_skus(request, business_id):
     """
     business = get_authorized_business(request, business_id)
     q = request.GET.get("q", "").strip().lower()
+    # A SKU the owner has said will never have a parent still has a FinalPrice
+    # row; it just stops cluttering the pile. ?opted_out=1 lists exactly those,
+    # so the decision is reviewable and reversible rather than a black hole.
+    only_opted_out = request.GET.get("opted_out") == "1"
+
+    opted_out_keys = {
+        _sku_key(sku) for sku in
+        FinalPrice.objects.filter(business=business, parent_opt_out=True)
+        .values_list("sku_id", flat=True)
+    }
 
     # Compared on the canonical key, not the raw string: a SKU stored as
     # "BRASS_WOODEN_x" is the same SKU as an order's "brass_wooden_x", and
@@ -3375,7 +3400,11 @@ def unlinked_skus(request, business_id):
                 "order_count": row["n"],
             }
 
-    out = list(results.values())
+    out = [
+        {**r, "opt_out": _sku_key(r["sku_id"]) in opted_out_keys}
+        for r in results.values()
+    ]
+    out = [r for r in out if r["opt_out"] == only_opted_out]
     if q:
         out = [r for r in out if q in r["sku_id"].lower()]
     # Most-ordered first, then alphabetical — surfaces the SKUs that matter most.
@@ -12020,3 +12049,174 @@ def cost_settings(request, business_id):
     setting.updated_by = request.user
     setting.save()
     return Response(payload())
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SKU pricing — children on demand, and suggestions for what to link next
+# ══════════════════════════════════════════════════════════════════════════════
+
+_SKU_TOKEN_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _sku_tokens(text):
+    """
+    Words worth matching on, from a SKU id or a parent name.
+
+    Pure digits are dropped because they are almost always the variant counter
+    ("...-003"), which is exactly the part that differs between siblings — the
+    one token that must never be what makes two SKUs look related. Two-letter
+    fragments go too: they collide constantly and drag unrelated SKUs into
+    every suggestion list.
+    """
+    return {
+        t for t in _SKU_TOKEN_RE.split((text or "").lower())
+        if len(t) > 2 and not t.isdigit()
+    }
+
+
+@api_view(["GET"])
+def parent_price_children(request, business_id, item_id):
+    """
+    The SKUs under one parent, fetched when that parent is opened.
+
+    Split out of the list endpoint so the catalogue can render immediately and
+    pay for children only where somebody looks.
+    """
+    business = get_authorized_business(request, business_id)
+    try:
+        parent = ParentItemPrice.objects.get(business=business, item_id=item_id)
+    except ParentItemPrice.DoesNotExist:
+        return Response({"error": "Parent not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    rows = list(
+        FinalPrice.objects.filter(business=business, parent=parent)
+        .values("id", "sku_id", "item_price", "tax_percent", "packaging_cost",
+                "final_price", "parent_opt_out")
+        .order_by("sku_id")
+    )
+
+    # How often each child actually sells — the reason to care about one child
+    # over another when a parent has twenty.
+    counts = dict(
+        Order.objects.filter(business=business, sku__in=[r["sku_id"] for r in rows])
+        .values_list("sku").annotate(n=Count("sku")).values_list("sku", "n")
+    )
+    for r in rows:
+        r["order_count"] = counts.get(r["sku_id"], 0)
+
+    return Response({"parent": parent.item_id, "results": rows})
+
+
+@api_view(["GET"])
+def parent_sku_suggestions(request, business_id, item_id):
+    """
+    Unlinked SKUs that look like they belong to this parent.
+
+    Scored against the parent's name *and* the SKUs already under it, because
+    the existing children are the best description of what the family looks
+    like: a parent called "Pragi Combo (Set of 2)" with a child
+    "combo-pragi-set-00100887" tells you far more than the name alone.
+
+    The score is the share of the candidate's own words the family explains, so
+    a short SKU that matches entirely ranks above a long one that matches on a
+    single common word. Anything the owner has opted out of never appears.
+    """
+    business = get_authorized_business(request, business_id)
+    try:
+        parent = ParentItemPrice.objects.get(business=business, item_id=item_id)
+    except ParentItemPrice.DoesNotExist:
+        return Response({"error": "Parent not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    limit = min(int(request.GET.get("limit", 12) or 12), 50)
+
+    children = list(
+        FinalPrice.objects.filter(business=business, parent=parent)
+        .values_list("sku_id", flat=True)
+    )
+    family = _sku_tokens(parent.item_id)
+    for child in children:
+        family |= _sku_tokens(child)
+    if not family:
+        return Response({"parent": parent.item_id, "results": []})
+
+    linked_keys = {
+        _sku_key(sku) for sku in
+        FinalPrice.objects.filter(business=business, parent__isnull=False)
+        .values_list("sku_id", flat=True)
+    }
+    opted_out = {
+        _sku_key(sku) for sku in
+        FinalPrice.objects.filter(business=business, parent_opt_out=True)
+        .values_list("sku_id", flat=True)
+    }
+
+    # Candidates come from both places a linkable SKU can live: priced-but-
+    # unparented rows, and SKUs that only exist in the orders table so far.
+    candidates = {}
+    for sku in FinalPrice.objects.filter(
+        business=business, parent__isnull=True, parent_opt_out=False
+    ).values_list("sku_id", flat=True):
+        candidates[_sku_key(sku)] = {"sku_id": sku, "has_price": True, "order_count": 0}
+
+    for row in (Order.objects.filter(business=business)
+                .exclude(sku__isnull=True).exclude(sku="")
+                .values("sku").annotate(n=Count("sku"))):
+        key = _sku_key(row["sku"])
+        if key in linked_keys or key in opted_out:
+            continue
+        if key in candidates:
+            candidates[key]["order_count"] += row["n"]
+        else:
+            candidates[key] = {"sku_id": row["sku"], "has_price": False,
+                               "order_count": row["n"]}
+
+    scored = []
+    for key, cand in candidates.items():
+        if key in linked_keys or key in opted_out:
+            continue
+        tokens = _sku_tokens(cand["sku_id"])
+        if not tokens:
+            continue
+        shared = tokens & family
+        if not shared:
+            continue
+        score = len(shared) / len(tokens)
+        scored.append({**cand, "score": round(score, 3),
+                       "matched": sorted(shared)})
+
+    # Best match first; among equals, the SKU that actually sells.
+    scored.sort(key=lambda r: (-r["score"], -r["order_count"], r["sku_id"]))
+    return Response({"parent": parent.item_id, "results": scored[:limit]})
+
+
+@api_view(["POST"])
+def sku_parent_opt_out(request, business_id):
+    """
+    Mark a SKU as never wanting a parent, or put it back in the pile.
+
+    Creates the FinalPrice row when the SKU has only ever been seen in orders,
+    because the decision has to outlive the order list that surfaced it.
+
+    Body: {"sku_id": "...", "opt_out": true|false}
+    """
+    business = get_authorized_business(request, business_id)
+    sku_id = str(request.data.get("sku_id") or "").strip()
+    if not sku_id:
+        return Response({"error": "sku_id is required."}, status=status.HTTP_400_BAD_REQUEST)
+    opt_out = bool(request.data.get("opt_out", True))
+
+    row = FinalPrice.objects.filter(business=business, sku_id__iexact=sku_id).first()
+    if row is None:
+        if not opt_out:
+            return Response({"sku_id": sku_id, "opt_out": False})
+        row = FinalPrice.objects.create(business=business, sku_id=sku_id)
+
+    if opt_out and row.parent_id:
+        return Response(
+            {"error": f"'{row.sku_id}' is linked to {row.parent.item_id}. Unlink it first."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    row.parent_opt_out = opt_out
+    row.save(update_fields=["parent_opt_out"])
+    return Response({"sku_id": row.sku_id, "opt_out": row.parent_opt_out})

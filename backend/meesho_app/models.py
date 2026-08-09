@@ -38,6 +38,16 @@ class FinalPrice(models.Model):
                                 )
     final_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
 
+    # Some SKUs genuinely have no parent and never will — a one-off, a sample, a
+    # discontinued line. Without a way to say so they sit in the "unlinked" pile
+    # forever, and every suggestion list keeps offering them, so the pile stops
+    # meaning "needs attention". Opting one out hides it from the linking flows
+    # without deleting the pricing behind it.
+    parent_opt_out = models.BooleanField(
+        default=False,
+        help_text="Deliberately has no parent — hide it from linking and suggestions.",
+    )
+
     business = models.ForeignKey(
         "accounts.Business", on_delete=models.PROTECT,
     )
