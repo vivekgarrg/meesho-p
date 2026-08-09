@@ -1876,3 +1876,78 @@ class TaskDocument(models.Model):
 
     def __str__(self):
         return self.title
+
+
+def _default_packaging_statuses():
+    """Callable default — a JSONField must not share one mutable list."""
+    return list(BusinessCostSetting.DEFAULT_PACKAGING_STATUSES)
+
+
+class BusinessCostSetting(models.Model):
+    """
+    How a business wants its own costs charged against profit.
+
+    Packaging is the case that needs a switch. A box is consumed the moment an
+    order is packed, so whether a *returned* or *RTO* order should still carry
+    that cost is a judgement about the business, not a fact in the data — one
+    owner writes the wasted box off against the return, another only counts
+    packaging on orders that actually sold. Rather than hard-code one opinion,
+    every outcome is selectable and the owner decides.
+
+    One row per business, created on first read so there is nothing to migrate
+    and no null to guard against at the call site.
+    """
+
+    DELIVERED = "DELIVERED"
+    RETURN    = "RETURN"
+    RTO       = "RTO"
+    EXCHANGE  = "EXCHANGE"
+    CLAIM     = "CLAIM"
+
+    PACKAGING_STATUS_CHOICES = [
+        (DELIVERED, "Delivered"),
+        (RETURN,    "Returned"),
+        (RTO,       "RTO"),
+        (EXCHANGE,  "Exchange"),
+        (CLAIM,     "Claim"),
+    ]
+    ALL_PACKAGING_STATUSES = [s for s, _ in PACKAGING_STATUS_CHOICES]
+
+    # Exactly what the app charged before this setting existed, so an existing
+    # business sees its numbers unchanged until it deliberately opts in.
+    DEFAULT_PACKAGING_STATUSES = [DELIVERED, EXCHANGE, CLAIM]
+
+    business = models.OneToOneField(
+        "accounts.Business", on_delete=models.CASCADE, related_name="cost_setting",
+    )
+
+    packaging_statuses = models.JSONField(
+        default=_default_packaging_statuses,
+        help_text="Order outcomes whose packaging cost is deducted from profit.",
+    )
+
+    # An exchange goes out twice, so it consumes two boxes. True keeps the
+    # behaviour the profit engine has always had; a business that reuses the
+    # customer's original packaging can turn it off.
+    exchange_uses_two_packets = models.BooleanField(default=True)
+
+    # Meesho's sale figures are GST-inclusive — the listing field is literally
+    # `listing_price_incl_taxes`. So the tax owed on a ₹253 sale at 5% is the
+    # slice already inside it (253 × 5/105 = ₹12.05), not ₹12.65 added on top.
+    # Getting this backwards overstates the GST bill by the rate itself, so it
+    # is a switch rather than an assumption.
+    sale_price_includes_gst = models.BooleanField(default=True)
+
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True,
+                                   blank=True, related_name="cost_settings_updated")
+
+    class Meta:
+        db_table = "business_cost_settings"
+
+    def __str__(self):
+        return f"Cost settings for {self.business_id}"
+
+    def charges_packaging_for(self, status_key):
+        """Whether an order that ended in `status_key` carries its packaging cost."""
+        return (status_key or "").upper() in set(self.packaging_statuses or [])

@@ -135,4 +135,6 @@ urlpatterns = [
     path("labels/orders/<str:order_id>/pack/", views.label_order_pack, name="label_order_pack"),
     path("labels/bulk-pack/",       views.label_bulk_pack,     name="label_bulk_pack"),
     path("labels/unpacked/",        views.label_unpacked,      name="label_unpacked"),
+    # Business cost policy (packaging deductions, GST basis)
+    path("cost-settings/", views.cost_settings, name="cost_settings"),
 ]

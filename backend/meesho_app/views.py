@@ -21,7 +21,7 @@ from accounts.models import Business, User
 from .permissions import get_authorized_business, accessible_businesses
 from .helpers.label_pdf import extract_all_pages
 
-from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, PurchaseBill, PurchaseItem, BlockedCustomer, InventoryAdjustment, ConsumableItem, ConsumablePurchase, ConsumableUsage, InventoryLog, MeeshoInventory, MeeshoPriceUpdate, ExpenseInvoice, ExpenseInvoiceItem, TransportCharge, PackedStockEvent, EstimatedProfitOrder, ReturnDelivery, GstTransaction, GstInvoiceDetail, ScannedOrder, ListingTemplate, ClaimTicket, WorkerTask, WalletEntry, WalletSettlement, TaskListing, PlatformRate, TaskDocument
+from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, PurchaseBill, PurchaseItem, BlockedCustomer, InventoryAdjustment, ConsumableItem, ConsumablePurchase, ConsumableUsage, InventoryLog, MeeshoInventory, MeeshoPriceUpdate, ExpenseInvoice, ExpenseInvoiceItem, TransportCharge, PackedStockEvent, EstimatedProfitOrder, ReturnDelivery, GstTransaction, GstInvoiceDetail, ScannedOrder, ListingTemplate, ClaimTicket, WorkerTask, WalletEntry, WalletSettlement, TaskListing, PlatformRate, TaskDocument, BusinessCostSetting
 from .serializers import (
     OrderPaymentSerializer, AdsCostSerializer,
     ReferralPaymentSerializer, CompensationRecoverySerializer,
@@ -484,45 +484,59 @@ def _classify_rows(payment_rows):
     }
 
 
-def _pick_settlement_rows(c):
+def _resolve_settlement(c):
     """
-    Settlement precedence (status-based):
-      1. Any RETURN/RTO/CANCELLED → use only return rows  (item came back)
-      2. DELIVERED/EXCHANGE/CLAIM, no return → use delivered rows  (item sold)
-      3. Fallback → all non-shipped rows
+    What one sub-order actually settled to. The single source of truth — every
+    screen must agree on this number or the same order shows two different
+    profits.
 
-    Returns (settlement_rows, is_delivered).
-    is_delivered=True means item cost must be deducted from settlement.
+    Meesho's payment sheet is not a ledger of distinct money movements. It
+    reports the sub-order's *state* on each payment date, so one payout is
+    re-listed as the order progresses: sub-order 303516752403635392_1 carries
+    the same +267.53 under two different dates. Summing the rows therefore
+    double-counts. Taking only the last row is no better — it throws away
+    credits that really were paid.
+
+    Two shapes of closing row have to be told apart, and they need opposite
+    handling:
+
+      Reversal        Shipped +290.41, Return -447.41   (= -290.41 - 157 ship)
+                      The closing row already contains the clawback, so the two
+                      are added:                    net -157.00
+
+      Charge-only     Delivered +190.75, Return -157.00 (shipping alone)
+                      Nothing was clawed back, which means the payout was never
+                      disbursed — the credit is provisional and superseded:
+                      net -157.00, not +33.75
+
+    They separate cleanly on magnitude: a row that reverses a payout is always
+    larger than the payout it reverses. The alternative reading — that Meesho
+    pays out ₹190.75 and takes back only ₹157 on an item the customer sent
+    back, letting the seller keep ₹33.75 — is not something the sheet ever
+    means.
+
+    Credit rows are collapsed to the largest single one rather than summed,
+    since SHIPPED and DELIVERED are the same advance seen at two moments.
     """
-    if c["return_rows"]:
-        return c["return_rows"], False
-    if c["delivered_rows"]:
-        return c["delivered_rows"], True
-    return c["main"], False
-    # return c["non_shipped"], False
+    # _classify_rows already keeps one row per status; this collapses the
+    # remaining SHIPPED-vs-DELIVERED duplication of a single payout.
+    credit_rows = c["delivered_rows"] + c["shipped_rows"]
+    credit = max((Decimal(r.final_settlement_amount or 0) for r in credit_rows),
+                 default=Decimal("0"))
 
+    closing_rows = c["return_rows"] + c["rto_rows"] + c["exchange_rows"]
+    closing = sum(Decimal(r.final_settlement_amount or 0) for r in closing_rows)
 
-def _sum_settlement(rows, include_shipped=False):
-    """
-    Sum final_settlement_amount across rows.
+    # Claims, affiliate fees and other blank-status lines are genuinely separate
+    # money movements, so they always add on top.
+    extra = sum(Decimal(r.final_settlement_amount or 0)
+                for r in c["adj"] + c["other_status_rows"])
 
-    SHIPPED rows represent an advance/provisional payment.  They should be
-    included only when the order has *progressed past shipping* (i.e. has a
-    DELIVERED / RETURN / RTO / EXCHANGE row), because in that case both the
-    advance credit (SHIPPED row) and the final adjustment (e.g. RETURNED row)
-    are real money movements that must both be counted.
-
-    For orders still sitting in SHIPPED state (no final row yet) the SHIPPED
-    amount is provisional and is excluded to avoid double-counting when the
-    final row arrives later.
-    """
-    return sum(
-        Decimal(r.final_settlement_amount or 0)
-        for r in rows
-        if include_shipped
-        or not r.live_order_status
-        or r.live_order_status.upper() not in _SHIPPED_STATUSES
-    )
+    if closing_rows:
+        if credit > 0 and abs(closing) <= credit:
+            return closing + extra          # charge-only: the credit never landed
+        return credit + closing + extra     # reversal: both are real
+    return credit + extra
 
 
 def _extract_claims(adj_rows):
@@ -540,6 +554,70 @@ def _extract_return_fee(main_rows):
     return total
 
 
+def _output_gst(c, includes_gst):
+    """
+    GST collected on what was actually sold, for one sub-order.
+
+    Only DELIVERED and EXCHANGE orders are a completed sale. A return or an RTO
+    never transferred the goods, so no output tax arises on it — counting those
+    would inflate the bill by every order that came back.
+
+    Returns (gst, taxable_value). `taxable_value` is the ex-GST sale, which is
+    the figure a GSTR-1 actually carries.
+    """
+    rows = c["delivered_rows"] or c["exchange_rows"]
+    gst = Decimal("0")
+    taxable = Decimal("0")
+    hundred = Decimal("100")
+    for r in rows:
+        sale = Decimal(r.total_sale_amount or 0)
+        rate = Decimal(r.product_gst_percent or 0)
+        if sale <= 0 or rate <= 0:
+            continue
+        if includes_gst:
+            component = sale * rate / (hundred + rate)
+            taxable += sale - component
+        else:
+            component = sale * rate / hundred
+            taxable += sale
+        gst += component
+    return gst, taxable
+
+
+def _packaging_charge(bucket, rate, cost_setting):
+    """
+    The packaging an order that ended in `bucket` actually carries.
+
+    The single place the business's policy is applied. Both profit engines go
+    through here — the settled one (compute_order_net) and the estimate over
+    orders Meesho hasn't paid for yet (_compute_estimated_profit_summary) — so
+    the Overview and the Estimated Profit tab cannot disagree about whether a
+    box was charged. Adding a third caller means adding it here, not copying
+    the rule.
+    """
+    rate = Decimal(str(rate or 0))
+    statuses = set(cost_setting.packaging_statuses if cost_setting
+                   else BusinessCostSetting.DEFAULT_PACKAGING_STATUSES)
+    if bucket not in statuses:
+        return Decimal("0")
+    # An exchange ships out a second time, so it consumes a second box.
+    double = cost_setting.exchange_uses_two_packets if cost_setting else True
+    if bucket == BusinessCostSetting.EXCHANGE and double:
+        return rate * Decimal("2")
+    return rate
+
+
+def _cost_setting(business):
+    """
+    This business's cost policy, created with the historical defaults the first
+    time anything asks. Every profit path goes through here so the Overview,
+    the SKU breakdown and the daily figures can't disagree about which orders
+    were charged for packaging.
+    """
+    setting, _ = BusinessCostSetting.objects.get_or_create(business=business)
+    return setting
+
+
 def _affiliate_total(adj_rows):
     raw = sum(Decimal(r.final_settlement_amount or 0)
               for r in adj_rows if r.recovery_reason == "Affiliate Fee")
@@ -548,10 +626,10 @@ def _affiliate_total(adj_rows):
 
 # ── Per-order profit formula ───────────────────────────────────────────────────
 
-def compute_order_net(payment_rows, sku_final_price, sku_packaging_price, quantity, unique_statuses, 
-                      sku_item_price=None, sku_tax_percent=None):
+def compute_order_net(payment_rows, sku_final_price, sku_packaging_price, quantity, unique_statuses,
+                      sku_item_price=None, sku_tax_percent=None, cost_setting=None):
     # list(["Cancelled", "Delivered", "Return", "RTO", "Shipped", "Exchange", "Unknown"])
-    
+
     ZERO = Decimal("0")
     TWO  = Decimal("2")
     qty  = Decimal(str(quantity))
@@ -563,6 +641,11 @@ def compute_order_net(payment_rows, sku_final_price, sku_packaging_price, quanti
     # squared the quantity and overstated cost on every multi-unit order.)
     tax_cost       = purchase_cost * Decimal(str(sku_tax_percent or 0)) / Decimal("100")
 
+    # Which outcomes consume a box is the owner's call, not a property of the
+    # data — see BusinessCostSetting and _packaging_charge.
+    def packaging_for(bucket):
+        return _packaging_charge(bucket, packaging_cost, cost_setting)
+
     c = _classify_rows(payment_rows)
 
     adj_rows      = c["adj"]
@@ -572,14 +655,7 @@ def compute_order_net(payment_rows, sku_final_price, sku_packaging_price, quanti
     return_shipping_fee = _extract_return_fee(main_rows)
     sub_order_no   = payment_rows[0].sub_order_no
 
-    # Include the SHIPPED row's settlement when the order progressed past shipping —
-    # both the advance credit (SHIPPED) and the final adjustment (RETURN/RTO/DELIVERED)
-    # are real money movements and must be summed together.
-    progressed_past_shipped = bool(
-        c["return_rows"] or c["rto_rows"] or c["delivered_rows"]
-        or c["exchange_rows"] or c["claim_rows"]
-    )
-    total_settlement = _sum_settlement(c["rows"], include_shipped=progressed_past_shipped)
+    total_settlement = _resolve_settlement(c)
     
     net = 0
     status = ""
@@ -592,43 +668,56 @@ def compute_order_net(payment_rows, sku_final_price, sku_packaging_price, quanti
     delivered_orders = c["delivered_rows"]
     
     final_purchasing = 0
-    
+    # Packaging actually charged to this order, so the totals can report what
+    # was deducted rather than what the SKU's rate happens to be.
+    packaging_applied = ZERO
+
     if unknown_rows:
         final_purchasing  = 0
         net = 0 - final_purchasing
         status = unique_statuses[-1]
-        
+
     elif claimed_orders:
-        final_purchasing = purchase_cost + packaging_cost
+        packaging_applied = packaging_for(BusinessCostSetting.CLAIM)
+        final_purchasing = purchase_cost + packaging_applied
         net = total_settlement - final_purchasing
         status = unique_statuses[0]
     elif exchange_orders:
-        final_purchasing = purchase_cost + (packaging_cost * 2 ) + tax_cost
+        packaging_applied = packaging_for(BusinessCostSetting.EXCHANGE)
+        final_purchasing = purchase_cost + packaging_applied + tax_cost
         net = total_settlement - final_purchasing
         status = unique_statuses[-2]
     elif return_orders:
-        final_purchasing = 0 
+        # The item comes back, so there is no purchase cost to carry — but the
+        # box that went out with it is gone, if the owner counts it.
+        packaging_applied = packaging_for(BusinessCostSetting.RETURN)
+        final_purchasing = packaging_applied
         net = total_settlement - final_purchasing
         status = unique_statuses[-5]
     elif rto_orders:
-        final_purchasing = 0 
+        packaging_applied = packaging_for(BusinessCostSetting.RTO)
+        final_purchasing = packaging_applied
         net = total_settlement - final_purchasing
         status = unique_statuses[-4]
     elif delivered_orders:
-        final_purchasing =  purchase_cost + packaging_cost + tax_cost
+        packaging_applied = packaging_for(BusinessCostSetting.DELIVERED)
+        final_purchasing =  purchase_cost + packaging_applied + tax_cost
         net = total_settlement - final_purchasing
         status = unique_statuses[-6]
     else:
-        final_purchasing = 0 
+        final_purchasing = 0
         net = total_settlement - final_purchasing
         status = unique_statuses[-1]
-        
+
     return {
         "net": net, 
         "status": status,
         "total_settlement": total_settlement,
         "purchase_cost": purchase_cost,
-        "packaging_cost": packaging_cost,
+        # The SKU's packaging rate, and what this order was actually charged —
+        # they differ whenever the outcome is one the owner excluded.
+        "packaging_rate": packaging_cost,
+        "packaging_cost": packaging_applied,
         "tax_cost": tax_cost,
         "quantity": qty,
         "sub_order_no": sub_order_no,
@@ -729,10 +818,26 @@ def accumulate_sku_profit(sku_id, obj, result, price_map, packaging_map, unique_
         Decimal(sku.get("exchange_loss",     0)) +
         Decimal(sku.get("claim_loss",       0))
     )
-    sku["total_purchase_cost"] = Decimal(sku.get("delivered_final_purchase_cost", 0)) +  Decimal(sku.get("exchange_final_purchase_cost", 0)) +  Decimal(sku.get("claim_final_purchase_cost", 0))
+    # Returns and RTOs carry no item cost — the goods came back — but they do
+    # carry packaging once the business opts in, and the bottom line is derived
+    # from this figure. Leaving them out would let the setting change the
+    # per-outcome buckets while net profit sat still. Both are zero under the
+    # default policy, so this is a no-op until somebody turns them on.
+    sku["total_purchase_cost"] = (
+        Decimal(sku.get("delivered_final_purchase_cost", 0))
+        + Decimal(sku.get("exchange_final_purchase_cost", 0))
+        + Decimal(sku.get("claim_final_purchase_cost", 0))
+        + Decimal(sku.get("return_final_purchase_cost", 0))
+        + Decimal(sku.get("rto_final_purchase_cost", 0))
+    )
     sku["total_tax_cost"] = Decimal(sku.get("delivered_tax_cost", 0)) +  Decimal(sku.get("exchange_tax_cost", 0)) +  Decimal(sku.get("claim_tax_cost", 0))
     sku["total_packaging_cost"] = Decimal(sku.get("delivered_packaging_cost", 0)) +  Decimal(sku.get("exchange_packaging_cost", 0)) +  Decimal(sku.get("claim_packaging_cost", 0))
     sku["total_packaging_cost_for_returns"] = Decimal(sku.get("return_packaging_cost", 0)) + Decimal(sku.get("rto_packaging_cost", 0))
+    # Every box charged to profit, whichever outcome it went out on — this is
+    # the figure the Overview card reports.
+    sku["total_packaging_cost_all"] = (
+        sku["total_packaging_cost"] + sku["total_packaging_cost_for_returns"]
+    )
     
 
 @api_view(["GET"])
@@ -1122,18 +1227,19 @@ def return_claims_detail(request, business_id):
     for sub_order_no in page_sub_orders:
         rows = groups.get(sub_order_no, [])
 
-        # Use the same status-based precedence as compute_order_net
+        # Same settlement resolution as compute_order_net — one number per
+        # sub-order, whichever screen asks for it.
         c = _classify_rows(rows)
-        settlement_rows, _ = _pick_settlement_rows(c)
-        # Total settlement = status rows + adj rows (claims are now in P&L for all types)
-        net_settlement = sum(float(r.final_settlement_amount or 0) for r in settlement_rows + c["adj"])
+        net_settlement = float(_resolve_settlement(c))
         total_claims     = sum(float(r.claims or 0) for r in rows)
         total_commission = sum(float(r.meesho_commission_incl_gst or 0) for r in rows)
         total_tcs        = sum(float(r.tcs or 0) for r in rows)
         total_tds        = sum(float(r.tds or 0) for r in rows)
         
-        latest_status = (settlement_rows[-1].live_order_status
-                         if settlement_rows else None)
+        # How the order ended: a closing row if it has one, else the payout row.
+        _closing = c["return_rows"] + c["rto_rows"] + c["exchange_rows"]
+        _latest  = (_closing or c["delivered_rows"] or c["shipped_rows"] or c["main"])
+        latest_status = _latest[0].live_order_status if _latest else None
         first = rows[0] if rows else None
 
         # Claim-first classification for display
@@ -1306,8 +1412,7 @@ def claimed_orders(request, business_id):
     for so in page_sub_orders:
         rows = groups.get(so, [])
         c = _classify_rows(rows)
-        settlement_rows, _ = _pick_settlement_rows(c)
-        net_settlement = sum(float(r.final_settlement_amount or 0) for r in settlement_rows + c["adj"])
+        net_settlement = float(_resolve_settlement(c))
         order_claims_total = sum(float(r.claims or 0) for r in rows)
         first = rows[0] if rows else None
 
@@ -1450,6 +1555,7 @@ def profit_summary(request, business_id):
     OrderPayment.order_date__date if Order table has no records for range.
     """
     business = get_authorized_business(request, business_id)
+    cost_setting = _cost_setting(business)
     date_from = request.GET.get("date_from", "")
     date_to   = request.GET.get("date_to", "")
 
@@ -1576,7 +1682,16 @@ def profit_summary(request, business_id):
     missing_sku         = []
     orders_with_price   = 0
     orders_missing_price = 0
-    
+    output_gst_total     = Decimal("0")
+    output_taxable_total = Decimal("0")
+    gst_order_count      = 0
+    # Headline revenue, resolved per sub-order rather than SUM()'d in SQL. A raw
+    # sum reports a delivered-then-returned order as its payout minus the return
+    # fee (+33.75) when the payout was never disbursed (-157.00) — the same
+    # defect this replaced everywhere else, so the top-line figure has to come
+    # from the same resolver or the Overview contradicts its own breakdown.
+    resolved_revenue = Decimal("0")
+
     for sub_no, payments in order_groups.items():
         order = (
             Order.objects
@@ -1588,15 +1703,30 @@ def profit_summary(request, business_id):
         sku = order.get("sku") or primary.supplier_sku
         qty = order.get("quantity") or primary.quantity
 
+        # Counted for every order, priced or not — revenue is money that moved,
+        # independent of whether the SKU has a purchase price on file.
+        _cls = _classify_rows(payments)
+        resolved_revenue += _resolve_settlement(_cls)
+
         if not sku or sku not in price_map:
             missing_sku.append(sku)
             orders_missing_price += 1
             continue
 
         eff_price, eff_pkg, eff_item_price, eff_tax_pct = get_eff_price(sku, primary.order_date)
-        result = compute_order_net(payments, eff_price, eff_pkg, qty, unique_statuses,eff_item_price, eff_tax_pct, )
+        result = compute_order_net(payments, eff_price, eff_pkg, qty, unique_statuses,
+                                   eff_item_price, eff_tax_pct, cost_setting=cost_setting)
         accumulate_sku_profit(canonical_sku.get(sku, sku), order_wise_profit, result, price_map, packaging_map, unique_statuses)
         orders_with_price += 1
+
+        # Output GST, accumulated here because this is the only place that has
+        # both the raw payment rows and the classification that says whether
+        # the order actually completed a sale.
+        if _cls["delivered_rows"] or _cls["exchange_rows"]:
+            _gst, _taxable = _output_gst(_cls, cost_setting.sale_price_includes_gst)
+            output_gst_total     += _gst
+            output_taxable_total += _taxable
+            gst_order_count      += 1
 
 
     missing_sku          = list(set(missing_sku))
@@ -1607,7 +1737,33 @@ def profit_summary(request, business_id):
     total_purchase_cost  = sum(Decimal(str(v.get("total_purchase_cost",  0) or 0)) for v in order_wise_profit.values())
     total_packaging_cost = sum(Decimal(str(v.get("total_packaging_cost", 0) or 0)) for v in order_wise_profit.values())
     total_packaging_cost_for_return = sum(Decimal(str(v.get("total_packaging_cost_for_returns", 0) or 0)) for v in order_wise_profit.values())
+    total_packaging_cost_all = sum(Decimal(str(v.get("total_packaging_cost_all", 0) or 0)) for v in order_wise_profit.values())
     total_tax_cost = sum(Decimal(str(v.get("total_tax_cost", 0) or 0)) for v in order_wise_profit.values())
+
+    # ── GST position ─────────────────────────────────────────────────────────
+    # What was collected on sales, less what was already paid on the stock that
+    # was sold. Both sides are restricted to orders that actually completed —
+    # otherwise a month of returns would show input credit against no output.
+    input_gst_total = sum(
+        Decimal(str(v.get("delivered_tax_cost", 0) or 0))
+        + Decimal(str(v.get("exchange_tax_cost", 0) or 0))
+        for v in order_wise_profit.values()
+    )
+    input_gst_base = sum(
+        Decimal(str(v.get("delivered_purchase_cost", 0) or 0))
+        + Decimal(str(v.get("exchange_purchase_cost", 0) or 0))
+        for v in order_wise_profit.values()
+    )
+    gst_summary = {
+        "output_gst":     round(output_gst_total, 2),
+        "output_base":    round(output_taxable_total, 2),
+        "input_gst":      round(input_gst_total, 2),
+        "input_base":     round(input_gst_base, 2),
+        # Positive = owed to the government, negative = credit carried forward.
+        "net_payable":    round(output_gst_total - input_gst_total, 2),
+        "orders_counted": gst_order_count,
+        "sale_price_includes_gst": cost_setting.sale_price_includes_gst,
+    }
 
     # Counts per outcome (for rate calculations)
     delivered_summary = status_wise_summary(order_wise_profit, "delivered")
@@ -1698,7 +1854,9 @@ def profit_summary(request, business_id):
         total_return_shipping=Sum("return_shipping_charge"),
     )
 
-    revenue                  = agg["revenue"]                  or Decimal("0")
+    # agg["revenue"] is kept as `raw_settlement` below for reference; the P&L
+    # uses the per-sub-order resolution so it agrees with every other screen.
+    revenue                  = resolved_revenue
     gross_revenue            = agg["gross_revenue"]            or Decimal("0")
     total_commission         = agg["total_commission"]         or Decimal("0")
     total_tcs                = agg["total_tcs"]                or Decimal("0")
@@ -1741,8 +1899,9 @@ def profit_summary(request, business_id):
             "total_purchase_cost": 0,
         }
 
-    # Keep raw DB aggregate as informational (includes claims adj rows) — NOT used in P&L
-    raw_settlement = revenue
+    # The unresolved SQL sum, kept for reference only. It differs from `revenue`
+    # by exactly the double-counted advances and superseded payouts.
+    raw_settlement = agg["revenue"] or Decimal("0")
 
     # Tax summary — what % of gross revenue was withheld as tax
     total_tax_withheld = total_tcs + total_tds
@@ -1758,6 +1917,10 @@ def profit_summary(request, business_id):
         "total_purchase_cost":    round(total_purchase_cost, 2),
         "total_packaging_cost":   round(total_packaging_cost, 2),
         "total_packaging_cost_for_returns": round(total_packaging_cost_for_return, 2),
+        # Every box charged to profit under the business's own policy.
+        "total_packaging_cost_all": round(total_packaging_cost_all, 2),
+        "packaging_statuses":     list(cost_setting.packaging_statuses or []),
+        "gst_summary":            gst_summary,
         "total_tax_cost":         round(total_tax_cost, 2),
         "total_transport_charges":   round(transport_total, 2),
         "transport_charges_deducted": deduct_transport,
@@ -1843,6 +2006,7 @@ def profit_daily_summary(request, business_id):
     from collections import defaultdict
 
     business = get_authorized_business(request, business_id)
+    cost_setting = _cost_setting(business)
 
     today = timezone.localdate()
     d_from = _parse_day(request.GET.get("date_from")) or (today - timedelta(days=29))
@@ -1974,7 +2138,8 @@ def profit_daily_summary(request, business_id):
             continue
 
         eff_price, eff_pkg, eff_item_price, eff_tax_pct = get_eff_price(sku, primary.order_date)
-        result = compute_order_net(group, eff_price, eff_pkg, qty, unique_statuses, eff_item_price, eff_tax_pct)
+        result = compute_order_net(group, eff_price, eff_pkg, qty, unique_statuses,
+                                   eff_item_price, eff_tax_pct, cost_setting=cost_setting)
         key = STATUS_TO_KEY.get(result["status"], "unknown")
         bucket[f"{key}_count"] += 1
         if key != "unknown":
@@ -2097,8 +2262,11 @@ def _compute_estimated_profit_summary(business, date_from=None, date_to=None):
 
     Cost formula (matches Overview / compute_order_net): Delivered and an
     approved Claim both deduct item cost×qty + tax + packaging; Exchanged
-    deducts the same but with packaging doubled. Returned, RTO, and a rejected
-    (or otherwise non-approved) Claim deduct nothing — the payout stands as-is.
+    deducts the same but with packaging doubled. Whether each of those actually
+    carries its packaging is the business's own setting — applied through
+    _packaging_charge, the same function the settled engine uses, so the two
+    tabs can't drift apart. Returned, RTO, and a rejected (or otherwise
+    non-approved) Claim deduct nothing — the payout stands as-is.
 
     Those payout-only rows (Returned / RTO / non-approved Claim) only represent
     a real loss when Meesho actually deducted money back — i.e. the settlement
@@ -2107,6 +2275,7 @@ def _compute_estimated_profit_summary(business, date_from=None, date_to=None):
     To Ship row.
     """
     get_price, known_skus, canonical_sku = _estimated_profit_pricing_lookup(business)
+    cost_setting = _cost_setting(business)
 
     qs = EstimatedProfitOrder.objects.filter(business=business)
     if date_from:
@@ -2202,13 +2371,16 @@ def _compute_estimated_profit_summary(business, date_from=None, date_to=None):
 
         if claim_approved:
             bucket = "claim"
-            final_cost = purchase_cost + tax_cost + packaging_cost
+            final_cost = purchase_cost + tax_cost + _packaging_charge(
+                BusinessCostSetting.CLAIM, packaging_cost, cost_setting)
         elif order_status == "exchanged":
             bucket = "exchange"
-            final_cost = purchase_cost + tax_cost + (packaging_cost * Decimal("2"))
+            final_cost = purchase_cost + tax_cost + _packaging_charge(
+                BusinessCostSetting.EXCHANGE, packaging_cost, cost_setting)
         elif order_status == "delivered":
             bucket = "delivered"
-            final_cost = purchase_cost + tax_cost + packaging_cost
+            final_cost = purchase_cost + tax_cost + _packaging_charge(
+                BusinessCostSetting.DELIVERED, packaging_cost, cost_setting)
         else:
             bucket = "other"  # cancelled / anything else
             final_cost = Decimal("0")
@@ -2391,6 +2563,7 @@ def ads_sku_analysis(request, business_id):
     attributed to individual SKUs.
     """
     business = get_authorized_business(request, business_id)
+    cost_setting = _cost_setting(business)
     date_from = request.GET.get("date_from", "")
     date_to   = request.GET.get("date_to", "")
 
@@ -2526,7 +2699,8 @@ def ads_sku_analysis(request, business_id):
             continue
 
         eff_price, eff_pkg, eff_item_price, eff_tax_pct = get_eff_price(sku, primary.order_date)
-        result = compute_order_net(payments, eff_price, eff_pkg, qty, unique_statuses, eff_item_price, eff_tax_pct)
+        result = compute_order_net(payments, eff_price, eff_pkg, qty, unique_statuses,
+                                   eff_item_price, eff_tax_pct, cost_setting=cost_setting)
 
         is_ad = sub_no in ad_sub_orders
         bucket = ad_profit if is_ad else org_profit
@@ -2717,11 +2891,9 @@ def orders_grouped(request, business_id):
         return "UNKNOWN"
 
     def _group_settlement(row_list):
-        statuses = {(r.live_order_status or "").upper() for r in row_list}
-        progressed = bool(
-            statuses & (_RETURN_STATUSES | _RTO_STATUSES | _DELIVERED_STATUSES | _EXCHANGE_STATUSES)
-        )
-        return float(_sum_settlement(row_list, include_shipped=progressed))
+        # Was summing every row, which reported +33.75 on a delivered-then-
+        # returned order whose payout was never actually disbursed.
+        return float(_resolve_settlement(_classify_rows(row_list)))
 
     # ── Classify every group ──────────────────────────────────────────────────
     classified = []
@@ -11784,3 +11956,67 @@ def label_customers(request, business_id):
             "blocked": sum(1 for c in customers if c["is_blocked"]),
         },
     })
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Cost settings — the business owner's own accounting choices
+# ══════════════════════════════════════════════════════════════════════════════
+
+@api_view(["GET", "PATCH"])
+def cost_settings(request, business_id):
+    """
+    Read or change how this business charges its own costs.
+
+    Only the owner decides whether a returned or RTO'd order still eats its
+    packaging — the data can't answer that. Changing it re-prices every figure
+    on the Overview immediately, because profit is computed on read rather than
+    stored.
+    """
+    business = get_authorized_business(request, business_id)
+    setting = _cost_setting(business)
+
+    def payload():
+        return {
+            "packaging_statuses":        list(setting.packaging_statuses or []),
+            "exchange_uses_two_packets": setting.exchange_uses_two_packets,
+            "sale_price_includes_gst":   setting.sale_price_includes_gst,
+            "available_statuses": [
+                {"value": v, "label": l}
+                for v, l in BusinessCostSetting.PACKAGING_STATUS_CHOICES
+            ],
+            "updated_at": setting.updated_at,
+        }
+
+    if request.method == "GET":
+        return Response(payload())
+
+    if not _is_admin(request.user):
+        return Response({"error": "Only an admin can change cost settings."},
+                        status=status.HTTP_403_FORBIDDEN)
+
+    data = request.data if isinstance(request.data, dict) else {}
+
+    if "packaging_statuses" in data:
+        raw = data["packaging_statuses"]
+        if not isinstance(raw, list):
+            return Response({"error": "packaging_statuses must be a list."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        allowed = set(BusinessCostSetting.ALL_PACKAGING_STATUSES)
+        picked = [str(s).upper() for s in raw]
+        unknown = [s for s in picked if s not in allowed]
+        if unknown:
+            return Response({"error": f"Not an order outcome: {', '.join(unknown)}."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        # Deduplicate but keep the canonical order, so the stored value reads
+        # the same however the checkboxes were clicked.
+        setting.packaging_statuses = [
+            s for s in BusinessCostSetting.ALL_PACKAGING_STATUSES if s in set(picked)
+        ]
+
+    for flag in ("exchange_uses_two_packets", "sale_price_includes_gst"):
+        if flag in data:
+            setattr(setting, flag, bool(data[flag]))
+
+    setting.updated_by = request.user
+    setting.save()
+    return Response(payload())

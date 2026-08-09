@@ -5,7 +5,7 @@ import Alert from "@mui/material/Alert";
 import { BarChart } from "@mui/x-charts/BarChart";
 import { LineChart } from "@mui/x-charts/LineChart";
 import { PieChart } from "@mui/x-charts/PieChart";
-import { API, C, CHART_COLORS, fmt } from "../../App";
+import { API, C, CHART_COLORS, fmt, btn, Tag } from "../../App";
 import { useDateFilter } from "../../contexts/DateFilterContext";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -259,11 +259,157 @@ function DeductionRow({ label, value, pct, color }) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Main tab
 // ─────────────────────────────────────────────────────────────────────────────
+/**
+ * Packaging actually charged to profit, and the switch that decides it.
+ *
+ * A box is consumed the moment an order is packed, so whether a return or an
+ * RTO should still carry that cost is the owner's call rather than something
+ * the data can answer — which is why the policy is edited right next to the
+ * number it moves.
+ */
+function PackagingCard({ profit, settings, onSave, saving }) {
+  const [open, setOpen] = useState(false);
+  const [picked, setPicked] = useState(null);
+
+  const charged = settings?.packaging_statuses || profit?.packaging_statuses || [];
+  const current = picked ?? charged;
+  const sold    = Number(profit?.total_packaging_cost ?? 0);
+  const back    = Number(profit?.total_packaging_cost_for_returns ?? 0);
+  const all     = Number(profit?.total_packaging_cost_all ?? sold + back);
+
+  const toggle = (v) =>
+    setPicked((p) => {
+      const base = p ?? charged;
+      return base.includes(v) ? base.filter((x) => x !== v) : [...base, v];
+    });
+
+  const dirty = picked && (picked.length !== charged.length
+    || picked.some((v) => !charged.includes(v)));
+
+  return (
+    <SectionCard title="Packaging Cost" accent={C.orange}>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
+        <span style={{ fontSize: 26, fontWeight: 800, fontFamily: "monospace",
+          color: C.gray800, letterSpacing: "-0.02em" }}>{fmt(all)}</span>
+        <span style={{ fontSize: 11, color: C.gray400 }}>deducted from profit this period</span>
+      </div>
+
+      <div style={{ marginTop: 12 }}>
+        <StatRow label="📦 On orders that sold" value={fmt(sold)} color={C.gray600}
+          sub="delivered · exchange · claim" />
+        <StatRow label="↩ On orders that came back" value={fmt(back)}
+          color={back > 0 ? C.red : C.gray400}
+          sub={back > 0 ? "returns · RTO — the box went out and was lost"
+                        : "not charged — turn on Returned / RTO below to include"} borderless />
+      </div>
+
+      <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px dashed ${C.gray200}` }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <span style={{ fontSize: 10, fontWeight: 700, color: C.gray400,
+            textTransform: "uppercase", letterSpacing: "0.07em" }}>Charged on</span>
+          {(settings?.available_statuses || []).map((s) => (
+            <Tag key={s.value} variant={current.includes(s.value) ? "green" : "gray"} fontSize={10.5}>
+              {current.includes(s.value) ? "✓ " : ""}{s.label}
+            </Tag>
+          ))}
+          <button onClick={() => { setOpen((o) => !o); setPicked(null); }}
+            style={{ ...btn("ghost", "sm"), marginLeft: "auto" }}>
+            {open ? "Close" : "Change"}
+          </button>
+        </div>
+
+        {open && (
+          <div style={{ marginTop: 10, padding: 12, borderRadius: 10,
+            background: C.orangeLight, border: `1px solid ${C.orangeBorder}` }}>
+            <div style={{ fontSize: 11.5, color: C.gray600, marginBottom: 9, lineHeight: 1.6 }}>
+              Pick the outcomes whose packaging you want subtracted. This is a judgement
+              about your business — the numbers can't decide it for you.
+            </div>
+            <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>
+              {(settings?.available_statuses || []).map((s) => (
+                <button key={s.value} onClick={() => toggle(s.value)}
+                  style={btn(current.includes(s.value) ? "primary" : "ghost", "sm")}>
+                  {current.includes(s.value) ? "✓ " : ""}{s.label}
+                </button>
+              ))}
+            </div>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 11,
+              fontSize: 12.5, color: C.gray700, cursor: "pointer" }}>
+              <input type="checkbox" checked={!!settings?.exchange_uses_two_packets}
+                onChange={(e) => onSave({ exchange_uses_two_packets: e.target.checked })} />
+              An exchange uses two boxes (it ships out twice)
+            </label>
+            <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+              <button disabled={saving || !dirty}
+                onClick={() => onSave({ packaging_statuses: current }).then(() => setPicked(null))}
+                style={{ ...btn("primary", "sm"), opacity: dirty ? 1 : 0.5 }}>
+                {saving ? "Saving…" : "Save"}
+              </button>
+              <button onClick={() => setPicked(null)} style={btn("ghost", "sm")}>Reset</button>
+            </div>
+          </div>
+        )}
+      </div>
+    </SectionCard>
+  );
+}
+
+/**
+ * The GST position: tax collected on what sold, less tax already paid on the
+ * stock that sold. The difference is what actually has to be handed over.
+ */
+function TaxCard({ profit, settings, onSave, saving }) {
+  const g = profit?.gst_summary;
+  if (!g) return null;
+  const out = Number(g.output_gst || 0);
+  const inp = Number(g.input_gst || 0);
+  const due = Number(g.net_payable || 0);
+  const owing = due >= 0;
+
+  return (
+    <SectionCard title="GST Position" accent={owing ? C.red : C.green}>
+      <p style={{ fontSize: 11, color: C.gray400, marginBottom: 12, lineHeight: 1.7 }}>
+        Counted on the {g.orders_counted?.toLocaleString("en-IN")} orders that actually
+        sold — delivered and exchange. A return never transferred goods, so no output
+        tax arises on it.
+      </p>
+
+      <FormulaStep sign="+" label="GST collected on sales" value={out} color={C.red}
+        note={`on ${fmt(g.output_base)} of taxable sales`} />
+      <FormulaStep sign="−" label="GST already paid on purchases" value={inp} color={C.green}
+        note={`on ${fmt(g.input_base)} of stock that sold`} />
+      <FormulaStep sign="=" label={owing ? "To pay the government" : "Input credit carried forward"}
+        value={Math.abs(due)} color={owing ? C.red : C.green} bold divider />
+
+      <div style={{ marginTop: 12, padding: "10px 12px", borderRadius: 8,
+        background: "#F8FAFC", border: "1px dashed #E2E8F0" }}>
+        <label style={{ display: "flex", alignItems: "flex-start", gap: 8,
+          fontSize: 11.5, color: C.gray600, cursor: "pointer", lineHeight: 1.6 }}>
+          <input type="checkbox" style={{ marginTop: 2 }} disabled={saving}
+            checked={!!settings?.sale_price_includes_gst}
+            onChange={(e) => onSave({ sale_price_includes_gst: e.target.checked })} />
+          <span>
+            My Meesho sale prices already include GST.
+            <span style={{ display: "block", color: C.gray400, marginTop: 2 }}>
+              On: a ₹340 sale at 5% carries ₹16.19 of tax inside it. Off: ₹17.00 is added
+              on top. Meesho's own field is <i>listing price incl. taxes</i>, so leaving
+              this on is almost always right.
+            </span>
+          </span>
+        </label>
+      </div>
+    </SectionCard>
+  );
+}
+
 export function OverviewTab() {
   const navigate = useNavigate();
   const { range: activeRange, label: filterLabel } = useDateFilter();
   const [profit, setProfit] = useState(null);
   const [dash, setDash] = useState(null);
+  const [settings, setSettings] = useState(null);
+  const [savingSettings, setSavingSettings] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -273,10 +419,28 @@ export function OverviewTab() {
     Promise.all([
       fetch(`${API}/profit/${qs}`,    { signal: ctrl.signal }).then(r => r.json()),
       fetch(`${API}/dashboard/${qs}`, { signal: ctrl.signal }).then(r => r.json()),
-    ]).then(([p, d]) => { setProfit(p); setDash(d); setLoading(false); })
+      fetch(`${API}/cost-settings/`,  { signal: ctrl.signal }).then(r => r.ok ? r.json() : null)
+        .catch(() => null),
+    ]).then(([p, d, s]) => { setProfit(p); setDash(d); if (s) setSettings(s); setLoading(false); })
       .catch(e => { if (e.name !== "AbortError") setLoading(false); });
     return () => ctrl.abort();
-  }, [JSON.stringify(activeRange)]); // eslint-disable-line
+  }, [JSON.stringify(activeRange), reloadKey]); // eslint-disable-line
+
+  // Profit is computed on read, so a policy change has to re-pull it — the
+  // packaging and GST figures move the moment the setting does.
+  const saveSettings = async (patch) => {
+    setSavingSettings(true);
+    try {
+      const res = await fetch(`${API}/cost-settings/`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      if (res.ok) {
+        setSettings(await res.json());
+        setReloadKey((k) => k + 1);
+      }
+    } finally { setSavingSettings(false); }
+  };
 
   // ── Derived values ────────────────────────────────────────────────────────
   const netProfit = Number(profit?.net_revenue ?? 0);
@@ -364,6 +528,14 @@ export function OverviewTab() {
 
 
 
+  // The sub-labels below used to assert "settlement − packaging" whatever the
+  // policy said. They now read it, so the wording can't promise a deduction the
+  // business has switched off.
+  const pkgOn = (key) =>
+    (settings?.packaging_statuses || profit?.packaging_statuses || []).includes(key);
+  const pkgNote = (key, base) =>
+    pkgOn(key) ? `${base} − packaging` : `${base} · packaging not charged`;
+
   // Derived amounts for settlement table
   const delGross = Number(deliveredSummary?.total_settlement || 0)
   const delCost = -Number(deliveredSummary?.final_item_cost || 0);
@@ -371,9 +543,11 @@ export function OverviewTab() {
   const rtoNet = Number(rtoSummary?.total_settlement || 0);
   const otherNet = Number(otherSummary?.total_settlement || 0);
 
-  // RETURN/RTO: net = settlement − packaging; gross = settlement = net + packaging
-  const retPkgCost = Number(returnSummary?.packaging_cost || 0);
-  const rtoPkgCost = Number(rtoSummary?.packaging_cost || 0);
+  // RETURN/RTO carry no item cost — the goods came back — but they do carry
+  // packaging once the business turns it on, so the cost column has to read the
+  // charge that was actually applied rather than assume zero.
+  const retPkgCost = -Number(returnSummary?.final_item_cost || 0);
+  const rtoPkgCost = -Number(rtoSummary?.final_item_cost || 0);
   const retGross = retNet;   // = Meesho return settlement before deduction
   const rtoGross = rtoNet;   // = Meesho RTO settlement before deduction
   // EXCHANGE: net = settlement − 2×packaging; gross = settlement = net + 2×pkg
@@ -384,12 +558,12 @@ export function OverviewTab() {
   const claimGross = claimNet;  // = settlement
 
   const totalGross = delGross + retGross + rtoGross + exchGross + claimGross + otherNet;
-  const totalCost = delCost + exchPkgCost + claimCost;
+  const totalCost = delCost + exchPkgCost + claimCost + retPkgCost + rtoPkgCost;
 
   const settlementRows = [
     { icon: "✅", label: "Delivered", count: nDel, gross: delGross, cost: delCost, rate: delRate, net: deliveredSummary?.net_profit_loss, netColor: C.green },
-    { icon: "↩", label: "Return", count: nRet, gross: retGross, cost: 0, net: returnSummary?.net_profit_loss, rate: retRate, netColor: returnSummary?.net_profit_loss >= 0 ? C.gray600 : C.red },
-    { icon: "🔄", label: "RTO", count: nRTO, gross: rtoGross, cost: 0, net: rtoNet, rate: rtoRate, netColor: rtoNet >= 0 ? C.gray600 : C.amber },
+    { icon: "↩", label: "Return", count: nRet, gross: retGross, cost: retPkgCost, net: returnSummary?.net_profit_loss, rate: retRate, netColor: returnSummary?.net_profit_loss >= 0 ? C.gray600 : C.red },
+    { icon: "🔄", label: "RTO", count: nRTO, gross: rtoGross, cost: rtoPkgCost, net: rtoNet, rate: rtoRate, netColor: rtoNet >= 0 ? C.gray600 : C.amber },
     { icon: "🔁", label: "Exchanged", count: nExchange, gross: exchGross, cost: exchPkgCost, rate: exchangeRate, net: nExchangeProfitLoss, netColor: nExchangeProfitLoss >= 0 ? C.gray600 : C.blue },
     { icon: "⚠", label: "Claim", count: nClaim, gross: claimGross, cost: claimCost, net: nClaimProfitLoss, rate: claimRate, netColor: nClaimProfitLoss >= 0 ? C.gray600 : "#7C3AED" },
     { icon: "⊘", label: "Unknown", count: nOther, gross: otherNet, cost: 0, net: otherNet, rate: otherRate, netColor: otherNet >= 0 ? C.gray600 : C.red },
@@ -564,7 +738,7 @@ export function OverviewTab() {
               <div style={{ display: "flex", gap: 16 }}>
                 <div>
                   <p style={{ fontSize: 10, color: C.gray400, marginBottom: 2 }}>📦 Packaging</p>
-                  <p style={{ fontSize: 13, fontFamily: "monospace", fontWeight: 700, color: C.gray600 }}>{fmt(profit.total_packaging_cost ?? 0)}</p>
+                  <p style={{ fontSize: 13, fontFamily: "monospace", fontWeight: 700, color: C.gray600 }}>{fmt(profit.total_packaging_cost_all ?? profit.total_packaging_cost ?? 0)}</p>
                 </div>
                 <div>
                   <p style={{ fontSize: 10, color: C.gray400, marginBottom: 2 }}>🏷️ GST on Items</p>
@@ -572,7 +746,7 @@ export function OverviewTab() {
                 </div>
                 <div>
                   <p style={{ fontSize: 10, color: C.gray400, marginBottom: 2 }}>📦+🏷️ Combined</p>
-                  <p style={{ fontSize: 13, fontFamily: "monospace", fontWeight: 700, color: C.gray600 }}>{fmt((profit.total_packaging_cost ?? 0) + (profit.total_tax_cost ?? 0))}</p>
+                  <p style={{ fontSize: 13, fontFamily: "monospace", fontWeight: 700, color: C.gray600 }}>{fmt((profit.total_packaging_cost_all ?? profit.total_packaging_cost ?? 0) + (profit.total_tax_cost ?? 0))}</p>
                 </div>
               </div>
             </div>
@@ -584,12 +758,24 @@ export function OverviewTab() {
             {/* Order P&L Breakdown */}
             <SectionCard title="Order P&L Breakdown">
               <StatRow label={`✅ Delivered (${nDel})`} value={fmt(nDelProfitLoss)} color={C.green} sub="settlement − item_cost×qty" />
-              <StatRow label={`↩ Return pure (${nRet}) · ${retRate}%`} value={fmt(nRetProfitLoss)} color={retNet >= 0 ? C.gray600 : C.red} sub="settlement − packaging (item back, no claim)" />
-              <StatRow label={`🔄 RTO pure (${nRTO}) · ${rtoRate}%`} value={fmt(nRTOProfitLoss)} color={rtoNet >= 0 ? C.gray600 : C.amber} sub="settlement − packaging (item back, no claim)" />
-              {nExchange > 0 && <StatRow label={`🔁 Exchange (${nExchange}) · ${exchangeRate}%`} value={fmt(nExchangeProfitLoss)} color={exchangeNet >= 0 ? C.gray600 : C.blue} sub="settlement − 2×packaging" />}
+              <StatRow label={`↩ Return pure (${nRet}) · ${retRate}%`} value={fmt(nRetProfitLoss)} color={retNet >= 0 ? C.gray600 : C.red} sub={pkgNote("RETURN", "item back, no claim")} />
+              <StatRow label={`🔄 RTO pure (${nRTO}) · ${rtoRate}%`} value={fmt(nRTOProfitLoss)} color={rtoNet >= 0 ? C.gray600 : C.amber} sub={pkgNote("RTO", "item back, no claim")} />
+              {nExchange > 0 && <StatRow label={`🔁 Exchange (${nExchange}) · ${exchangeRate}%`} value={fmt(nExchangeProfitLoss)} color={exchangeNet >= 0 ? C.gray600 : C.blue} sub={pkgOn("EXCHANGE") ? (settings?.exchange_uses_two_packets ? "settlement − item cost − 2×packaging" : "settlement − item cost − packaging") : "settlement − item cost · packaging not charged"} />}
               <StatRow label={`⚠ Claim (${nClaim}) · ${claimRate}%`} value={fmt(nClaimProfitLoss)} color={nClaimProfitLoss >= 0 ? C.gray600 : "#7C3AED"} sub="settlement − item_cost (claim-first)" />
               <StatRow label={`⊘ Other · ${nOther} orders`} value={fmt(profit.nOtherProfitLoss || 0)} color={nOtherProfitLoss >= 0 ? C.gray600 : C.red} sub="cancelled / affiliate fee / manual pickup" />
             </SectionCard>
+          </div>
+        </div>
+
+        {/* ── 5b. What the business itself costs and owes ─────────────────── */}
+        <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
+          <div style={{ flex: "1 1 340px", minWidth: 0 }}>
+            <PackagingCard profit={profit} settings={settings}
+              onSave={saveSettings} saving={savingSettings} />
+          </div>
+          <div style={{ flex: "1 1 380px", minWidth: 0 }}>
+            <TaxCard profit={profit} settings={settings}
+              onSave={saveSettings} saving={savingSettings} />
           </div>
         </div>
 
