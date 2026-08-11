@@ -11,8 +11,9 @@ and derives the field list itself — see the module docstring on
 code serve any Meesho category, not just the one example we started from.
 """
 
+import random
 import re
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 import openpyxl
@@ -33,7 +34,28 @@ ROWS_PER_SHEET = 4
 # Which detected roles are per-row (varying) rather than shared across all 4
 # rows. Everything else on the sheet — including fields we still recognise by
 # role, like Country of Origin — is shared.
-PER_ROW_ROLES = {"title", "sku", "style", "image_1", "image_2", "image_3", "image_4"}
+_FIXED_PER_ROW_ROLES = {"title", "sku", "style"}
+_IMAGE_ROLE = re.compile(r"^image_(\d+)$")
+
+
+class _PerRowRoles:
+    """
+    The roles that differ from one listing to the next.
+
+    A plain set no longer works: categories carry however many image columns
+    they carry — some have four, some fifteen — so image roles are matched by
+    shape rather than listed. Kept callable as `role in PER_ROW_ROLES` because
+    that is how every caller already reads.
+    """
+
+    def __contains__(self, role):
+        return role in _FIXED_PER_ROW_ROLES or bool(role and _IMAGE_ROLE.match(role))
+
+    def __iter__(self):
+        return iter(_FIXED_PER_ROW_ROLES)
+
+
+PER_ROW_ROLES = _PerRowRoles()
 
 _RANGE_RE = re.compile(r"^(?:'([^']+)'|([A-Za-z0-9_]+))!\$?([A-Z]+)\$(\d+):\$?([A-Z]+)\$(\d+)$")
 _SQREF_START_RE = re.compile(r"^([A-Z]+)(\d+)")
@@ -152,9 +174,12 @@ def _detect_role(label):
         return "sku"
     if "style id" in l or "product id" in l:
         return "style"
-    m = re.match(r"image\s*([1-4])", l)
+    # Any image column, however many the category has — "Image 1 (Front)",
+    # "Image 2" … "Image 17". Capped at 1-4 before, which silently ignored
+    # every slot past the fourth.
+    m = re.match(r"image\s*(\d+)", l)
     if m:
-        return f"image_{m.group(1)}"
+        return f"image_{int(m.group(1))}"
     if "wrong" in l and "defective" in l:
         return "wrong_defective_price"
     if l.startswith("country of origin"):
@@ -263,16 +288,41 @@ def find_field(spec, role=None, key=None):
     return None
 
 
-def rotate_images(urls):
+def image_slots(spec):
+    """The template's image columns, in slot order (Image 1, 2, 3 … N)."""
+    slots = []
+    for f in spec["fields"]:
+        m = _IMAGE_ROLE.match(f["role"] or "")
+        if m:
+            slots.append((int(m.group(1)), f["role"]))
+    return [role for _, role in sorted(slots)]
+
+
+def plan_images(urls, slot_count, row_count, rng=None):
     """
-    4 URLs in -> 4 (front, [other, other, other]) tuples out. Row i uses
-    urls[i] as the front image; the other 3 keep their original relative
-    order — row 1 front=img1 others=2,3,4; row 2 front=img2 others=1,3,4; etc.
+    Decide which link goes in which image slot, for each listing.
+
+    The front image is the product's hero shot, so it is the same on every
+    listing — swapping it around would change what a shopper sees first. The
+    remaining photos are shuffled independently per row, so the listings are
+    not four identical galleries while every one of them still leads with the
+    right picture.
+
+    Fewer links than slots simply leaves the spare slots empty; more links than
+    slots means each row shows a different subset, which is the useful
+    behaviour when a seller pastes fifteen photos into a four-image category.
     """
-    return [
-        (urls[i], [u for j, u in enumerate(urls) if j != i])
-        for i in range(len(urls))
-    ]
+    rng = rng or random.Random()
+    if not urls:
+        return [[] for _ in range(row_count)]
+
+    front, rest = urls[0], list(urls[1:])
+    plans = []
+    for _ in range(row_count):
+        shuffled = rest[:]
+        rng.shuffle(shuffled)
+        plans.append([front, *shuffled][:slot_count])
+    return plans
 
 
 def resolve_wrong_defective_price(meesho_price, override):
@@ -293,10 +343,40 @@ def resolve_importer_fields(country, name, address, pincode):
     return name, address, pincode
 
 
+_LEADING_ZERO = re.compile(r"^0\d")
+
+
+def coerce_cell(field, value):
+    """
+    Turn a submitted value into what the cell should actually hold.
+
+    Everything arrives from JSON as a string, and writing "499" into a price
+    cell puts *text* there: Excel left-aligns it, flags "number stored as
+    text", and the validation formulas Meesho ships inside the template do not
+    read it as a value at all. That is why prices looked like they were not
+    filling in — they were being written, just not as numbers.
+
+    Leading zeros stay text on purpose. A code that happens to be numeric — an
+    HSN, a pincode — stops meaning anything the moment 003924 becomes 3924.
+    """
+    if field.get("type") != "number":
+        return value
+    text = str(value).strip()
+    if not text or _LEADING_ZERO.match(text):
+        return value
+    try:
+        number = Decimal(text)
+    except (InvalidOperation, ValueError):
+        return value                      # let the sheet keep whatever was typed
+    # Whole numbers as int so the cell reads "499", not "499.0".
+    return int(number) if number == number.to_integral_value() else float(number)
+
+
 def build_workbook(spec, wb, shared, rows):
     """
     Writes `rows` (ROWS_PER_SHEET dicts: `product_name`, `sku_id`,
-    `style_id`, `images` = (front, [o, o, o])) into the parsed sheet starting
+    `style_id`, `images` = an ordered list, one URL per image slot) into the
+    parsed sheet starting
     at `spec["data_start_row"]`, and every key in `shared` onto every row via
     the matching field's column. Everything else in the workbook — every
     other sheet, every other cell — is untouched.
@@ -315,14 +395,13 @@ def build_workbook(spec, wb, shared, rows):
         if "style" in per_row_fields:
             ws[f'{per_row_fields["style"]["column"]}{r}'] = row["style_id"]
 
-        front, others = row["images"]
-        for slot, url in zip(("image_1", "image_2", "image_3", "image_4"), (front, *others)):
-            if slot in per_row_fields:
+        for slot, url in zip(image_slots(spec), row["images"]):
+            if slot in per_row_fields and url:
                 ws[f'{per_row_fields[slot]["column"]}{r}'] = url
 
         for f in shared_fields:
             value = shared.get(f["key"])
             if value not in (None, ""):
-                ws[f'{f["column"]}{r}'] = value
+                ws[f'{f["column"]}{r}'] = coerce_cell(f, value)
 
     return wb

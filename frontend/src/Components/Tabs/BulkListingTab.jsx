@@ -11,9 +11,11 @@ import { CircularProgress } from "@mui/material";
 
 /**
  * Turns any Meesho category bulk-listing template (uploaded fresh, or one of
- * the bundled quick-starts) + 4 photo links into a ready-to-upload `.xlsx` —
- * 4 rows, unique title/SKU each, sharing every other detail, front image
- * rotated per row. The server parses whatever template it's given and
+ * the bundled quick-starts) + your photo links into a ready-to-upload `.xlsx`
+ * — 4 rows, unique title/SKU each, sharing every other detail. The front image
+ * is the same on all four; the remaining photos are shuffled into a different
+ * order per row, so the listings aren't four identical galleries. The server
+ * parses whatever template it's given and
  * derives the form's fields from it — nothing about a category is
  * hardcoded here. See backend/meesho_app/bulk_listing.py.
  *
@@ -23,11 +25,10 @@ import { CircularProgress } from "@mui/material";
  */
 
 const ROWS = 4;
-const PER_ROW_ROLES = new Set(["title", "sku", "style", "image_1", "image_2", "image_3", "image_4"]);
-
-function rotateImages(urls) {
-  return urls.map((_, i) => ({ front: urls[i], others: urls.filter((_, j) => j !== i) }));
-}
+// Categories carry however many image columns they carry — four in some, well
+// over a dozen in others — so image roles are matched by shape, not listed.
+const FIXED_PER_ROW_ROLES = new Set(["title", "sku", "style"]);
+const isPerRowRole = (role) => FIXED_PER_ROW_ROLES.has(role) || /^image_\d+$/.test(role || "");
 
 function parseImageUrls(text) {
   return (text || "").split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
@@ -151,7 +152,11 @@ export function BulkListingTab() {
   const setField = (key) => (value) => setShared((s) => ({ ...s, [key]: value }));
 
   const imageUrls = useMemo(() => parseImageUrls(imageText), [imageText]);
-  const rotated = useMemo(() => (imageUrls.length === 4 ? rotateImages(imageUrls) : []), [imageUrls]);
+  // How many photo columns this category actually has.
+  const imageSlotCount = useMemo(
+    () => (spec ? spec.fields.filter((f) => /^image_\d+$/.test(f.role || "")).length : 0),
+    [spec]
+  );
 
   const applyPrefix = () => {
     const p = prefix.trim();
@@ -166,7 +171,7 @@ export function BulkListingTab() {
     setRows((rs) => rs.map((r, j) => (j === i ? { ...r, [key]: value } : r)));
 
   const sharedFields = useMemo(
-    () => (spec ? spec.fields.filter((f) => !PER_ROW_ROLES.has(f.role)) : []),
+    () => (spec ? spec.fields.filter((f) => !isPerRowRole(f.role)) : []),
     [spec]
   );
   const importerFields = useMemo(
@@ -255,8 +260,8 @@ export function BulkListingTab() {
       setMsg({ type: "error", text: "Pick a template first." });
       return;
     }
-    if (imageUrls.length !== 4) {
-      setMsg({ type: "error", text: `Paste exactly 4 image links — found ${imageUrls.length}.` });
+    if (imageUrls.length === 0) {
+      setMsg({ type: "error", text: "Paste at least one image link — the first one is the front image." });
       return;
     }
     const payload = {
@@ -360,12 +365,18 @@ export function BulkListingTab() {
       {spec && (
         <>
           <Section title="Photos">
-            <label style={S.label}>Paste all 4 image links (one per line)</label>
-            <textarea value={imageText} onChange={(e) => setImageText(e.target.value)} rows={4}
-              placeholder={"https://…/photo1.jpg\nhttps://…/photo2.jpg\nhttps://…/photo3.jpg\nhttps://…/photo4.jpg"}
+            <label style={S.label}>Paste your image links (one per line)</label>
+            <textarea value={imageText} onChange={(e) => setImageText(e.target.value)} rows={5}
+              placeholder={"https://…/front.jpg\nhttps://…/photo2.jpg\nhttps://…/photo3.jpg\n…"}
               style={{ ...S.inp, resize: "vertical", fontFamily: "monospace", fontSize: 12.5 }} />
-            <div style={{ fontSize: 11, color: imageUrls.length === 4 ? C.green : C.gray400, marginTop: 6, fontWeight: 600 }}>
-              {imageUrls.length} of 4 links pasted{imageUrls.length === 4 ? " ✓" : ""}
+            <div style={{ fontSize: 11.5, color: C.gray500, marginTop: 6, lineHeight: 1.6 }}>
+              <b style={{ color: imageUrls.length ? C.green : C.gray400 }}>
+                {imageUrls.length} link{imageUrls.length === 1 ? "" : "s"} pasted
+              </b>
+              {imageSlotCount > 0 && <> · this category has {imageSlotCount} photo slot{imageSlotCount === 1 ? "" : "s"}</>}
+              <br />
+              The first link is the <b>front image</b> and goes on all {ROWS} listings unchanged.
+              {imageUrls.length > 1 && " The rest are shuffled into a different order for each listing."}
             </div>
             {imageUrls.length > 0 && (
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
@@ -373,9 +384,12 @@ export function BulkListingTab() {
                   <div key={i} style={{ position: "relative", width: 64, height: 64 }}>
                     <img src={u} alt={`photo ${i + 1}`} onError={(e) => { e.target.style.opacity = 0.15; }}
                       style={{ width: 64, height: 64, objectFit: "cover", borderRadius: 8, border: `1px solid ${C.border}` }} />
-                    <span style={{ position: "absolute", top: -6, left: -6, width: 18, height: 18, borderRadius: "50%",
-                      background: C.orange, color: C.white, fontSize: 10.5, fontWeight: 800,
-                      display: "flex", alignItems: "center", justifyContent: "center" }}>{i + 1}</span>
+                    <span style={{ position: "absolute", top: -6, left: -6, height: 18, borderRadius: 9,
+                      padding: i === 0 ? "0 6px" : 0, width: i === 0 ? "auto" : 18,
+                      background: i === 0 ? C.green : C.orange, color: C.white, fontSize: 10.5, fontWeight: 800,
+                      display: "flex", alignItems: "center", justifyContent: "center" }}>
+                      {i === 0 ? "front" : i + 1}
+                    </span>
                   </div>
                 ))}
               </div>
@@ -479,14 +493,20 @@ export function BulkListingTab() {
                     <input value={row.style} onChange={(e) => setRow(i, "style")(e.target.value)}
                       style={{ ...S.inp, fontFamily: "monospace" }} placeholder="defaults to SKU id" />
                   </div>
-                  {rotated[i] && (
-                    <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
-                      {[rotated[i].front, ...rotated[i].others].map((u, k) => (
-                        <img key={k} src={u} alt="" style={{
-                          width: 30, height: 30, objectFit: "cover", borderRadius: 6,
-                          border: k === 0 ? `2px solid ${C.orange}` : `1px solid ${C.border}`,
-                        }} title={k === 0 ? "Front image" : `Image ${k + 1}`} />
-                      ))}
+                  {/* The order of the other photos is decided per listing when
+                      the sheet is built, so there is nothing truthful to preview
+                      beyond the front image. */}
+                  {imageUrls.length > 0 && (
+                    <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                      <img src={imageUrls[0]} alt="" style={{
+                        width: 30, height: 30, objectFit: "cover", borderRadius: 6,
+                        border: `2px solid ${C.green}`,
+                      }} title="Front image — same on every listing" />
+                      {imageUrls.length > 1 && (
+                        <span style={{ fontSize: 10.5, color: C.gray400, whiteSpace: "nowrap" }}>
+                          +{Math.min(imageUrls.length, Math.max(imageSlotCount, 1)) - 1} shuffled
+                        </span>
+                      )}
                     </div>
                   )}
                 </div>

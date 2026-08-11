@@ -127,9 +127,13 @@ def bulk_listing_generate(request, business_id):
     rows_in = payload.get("rows")
     image_urls = payload.get("image_urls")
 
-    if (not isinstance(image_urls, list) or len(image_urls) != 4
+    # However many photos the seller has. The first is the front image and is
+    # used on every listing; the rest are shuffled per listing, so there is no
+    # longer any reason to demand exactly one per row.
+    if (not isinstance(image_urls, list) or not image_urls
             or not all(str(u or "").strip() for u in image_urls)):
-        return Response({"error": "Paste exactly 4 image links."}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({"error": "Paste at least one image link — the first is the front image."},
+                        status=status.HTTP_400_BAD_REQUEST)
     image_urls = [str(u).strip() for u in image_urls]
     for u in image_urls:
         if not u.lower().startswith(("http://", "https://")):
@@ -241,9 +245,10 @@ def bulk_listing_generate(request, business_id):
             return Response({"error": f"'{f['label']}' must be a number."},
                             status=status.HTTP_400_BAD_REQUEST)
 
-    rotated = bl.rotate_images(image_urls)
+    slots = bl.image_slots(spec)
+    planned = bl.plan_images(image_urls, len(slots), bl.ROWS_PER_SHEET)
     rows = [
-        {"product_name": titles[i], "sku_id": skus[i], "style_id": styles[i], "images": rotated[i]}
+        {"product_name": titles[i], "sku_id": skus[i], "style_id": styles[i], "images": planned[i]}
         for i in range(bl.ROWS_PER_SHEET)
     ]
 
