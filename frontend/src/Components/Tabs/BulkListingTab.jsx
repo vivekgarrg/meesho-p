@@ -180,7 +180,14 @@ export function BulkListingTab() {
     [sharedFields]
   );
 
-  const country = (countryField && (shared[countryField.key] || "")).toString().trim().toLowerCase();
+  // The guard has to wrap the whole expression, not just the lookup: with no
+  // template parsed yet `spec` is null, so sharedFields is empty and
+  // countryField is undefined — and `(countryField && …)` is then `undefined`
+  // itself, which threw on .toString() and took the tab down before a template
+  // could even be chosen.
+  const country = String(countryField ? shared[countryField.key] ?? "" : "")
+    .trim()
+    .toLowerCase();
   const needsImporter = importerFields.length > 0 && country && country !== "india";
 
   const wdrpPlaceholder = useMemo(() => {
