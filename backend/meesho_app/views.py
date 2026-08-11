@@ -7315,44 +7315,9 @@ def meesho_price_update_download(request, business_id):
         .order_by("inventory__serial_no")
     )
 
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "MSP Update"
-
-    headers = [
-        "Catalog ID",
-        "Product ID",
-        "Variation Name",
-        "Variation ID",
-        "New Meesho Selling Price (MSP)",
-        "Wrong/Defective Return Price (WDRP) (if catalog is part of WDRP)",
-        "New Maximum Retail Price (MRP) (Optional)",
-    ]
-    ws.append(headers)
-
-    from openpyxl.styles import Font, PatternFill, Alignment
-    header_fill = PatternFill("solid", fgColor="4F46E5")
-    header_font = Font(bold=True, color="FFFFFF")
-    for cell in ws[1]:
-        cell.font      = header_font
-        cell.fill      = header_fill
-        cell.alignment = Alignment(horizontal="center", vertical="center")
-
+    wb, ws = _new_msp_workbook()
     for pu in rows:
-        inv = pu.inventory
-        ws.append([
-            inv.catalog_id,
-            inv.product_id,
-            inv.variation or "Free Size",
-            inv.variation_id,
-            float(pu.new_msp),
-            float(pu.new_wdrp) if pu.new_wdrp is not None else "",
-            float(pu.new_mrp)  if pu.new_mrp  is not None else "",
-        ])
-
-    col_widths = [14, 14, 20, 14, 32, 50, 35]
-    for i, w in enumerate(col_widths, 1):
-        ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
+        _append_msp_row(ws, pu.inventory, pu.new_msp, pu.new_wdrp, pu.new_mrp)
 
     buf = BytesIO()
     wb.save(buf)
@@ -12121,10 +12086,31 @@ def parent_price_children(request, business_id, item_id):
         Order.objects.filter(business=business, sku__in=[r["sku_id"] for r in rows])
         .values_list("sku").annotate(n=Count("sku")).values_list("sku", "n")
     )
+
+    # The Meesho identifiers a price sheet needs. Carried here so the UI can
+    # show, before anything is generated, which SKUs can actually be repriced
+    # and which are missing from the inventory upload. One SKU can appear under
+    # several variations, and each is its own line in Meesho's template.
+    catalog = {}
+    for inv in (MeeshoInventory.objects
+                .filter(business=business).exclude(style_id="")
+                .values("style_id", "catalog_id", "product_id", "variation", "variation_id")):
+        catalog.setdefault(_sku_key(inv["style_id"]), []).append({
+            "catalog_id":   inv["catalog_id"],
+            "product_id":   inv["product_id"],
+            "variation":    inv["variation"] or "Free Size",
+            "variation_id": inv["variation_id"],
+        })
+
     for r in rows:
         r["order_count"] = counts.get(r["sku_id"], 0)
+        r["meesho"] = catalog.get(_sku_key(r["sku_id"]), [])
 
-    return Response({"parent": parent.item_id, "results": rows})
+    return Response({
+        "parent": parent.item_id,
+        "results": rows,
+        "sheet_ready": sum(1 for r in rows if r["meesho"]),
+    })
 
 
 @api_view(["GET"])
@@ -12281,3 +12267,140 @@ def unpriced_skus(request, business_id):
     out = [{"sku_id": sku, "order_count": n} for sku, n in counts.items()]
     out.sort(key=lambda r: (-r["order_count"], r["sku_id"]))
     return Response({"results": out, "count": len(out)})
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Meesho MSP sheet — one format, shared by everything that emits one
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Meesho rejects the upload if the header row differs, so this lives in exactly
+# one place. Anything that writes an MSP sheet goes through the two helpers
+# below rather than repeating the column list.
+_MSP_HEADERS = [
+    "Catalog ID",
+    "Product ID",
+    "Variation Name",
+    "Variation ID",
+    "New Meesho Selling Price (MSP)",
+    "Wrong/Defective Return Price (WDRP) (if catalog is part of WDRP)",
+    "New Maximum Retail Price (MRP) (Optional)",
+]
+_MSP_WIDTHS = [14, 14, 20, 14, 32, 50, 35]
+
+
+def _new_msp_workbook():
+    """An empty workbook with Meesho's bulk-price header row already written."""
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "MSP Update"
+    ws.append(_MSP_HEADERS)
+
+    fill = PatternFill("solid", fgColor="4F46E5")
+    font = Font(bold=True, color="FFFFFF")
+    for cell in ws[1]:
+        cell.font = font
+        cell.fill = fill
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    for i, w in enumerate(_MSP_WIDTHS, 1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
+    return wb, ws
+
+
+def _append_msp_row(ws, inv, msp, wdrp=None, mrp=None):
+    """One line of the sheet: the ids come from us, the prices from the seller."""
+    ws.append([
+        inv.catalog_id,
+        inv.product_id,
+        inv.variation or "Free Size",
+        inv.variation_id,
+        float(msp) if msp is not None else "",
+        float(wdrp) if wdrp is not None else "",
+        float(mrp) if mrp is not None else "",
+    ])
+
+
+@api_view(["POST"])
+def parent_price_sheet(request, business_id, item_id):
+    """
+    Build a ready-to-upload Meesho price sheet for chosen SKUs under one parent.
+
+    The seller picks the SKUs and types the new prices; every identifier Meesho
+    needs — catalog id, product id, variation and variation id — is looked up
+    here from the inventory already in the system, because those are the fields
+    nobody can be expected to retype without error.
+
+    A SKU that Meesho lists under two variations produces two lines, since the
+    template is keyed by variation rather than by SKU.
+
+    Body: {"rows": [{"sku_id": "...", "msp": 499, "wdrp": 150, "mrp": 999}, ...]}
+    """
+    from io import BytesIO
+    from django.http import HttpResponse
+
+    business = get_authorized_business(request, business_id)
+    try:
+        parent = ParentItemPrice.objects.get(business=business, item_id=item_id)
+    except ParentItemPrice.DoesNotExist:
+        return Response({"error": "Parent not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    payload = request.data if isinstance(request.data, dict) else {}
+    rows = payload.get("rows")
+    if not isinstance(rows, list) or not rows:
+        return Response({"error": "Pick at least one SKU."}, status=status.HTTP_400_BAD_REQUEST)
+
+    # Only SKUs actually under this parent — the sheet is per parent, and a
+    # typo'd SKU silently repricing something else would be the worst outcome.
+    own = {
+        _sku_key(sku): sku for sku in
+        FinalPrice.objects.filter(business=business, parent=parent)
+        .values_list("sku_id", flat=True)
+    }
+
+    inventory = {}
+    for inv in MeeshoInventory.objects.filter(business=business).exclude(style_id=""):
+        inventory.setdefault(_sku_key(inv.style_id), []).append(inv)
+
+    wb, ws = _new_msp_workbook()
+    written, skipped = 0, []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        key = _sku_key(str(row.get("sku_id") or ""))
+        if key not in own:
+            skipped.append({"sku_id": row.get("sku_id"), "why": "not under this parent"})
+            continue
+        matches = inventory.get(key) or []
+        if not matches:
+            skipped.append({"sku_id": own[key], "why": "no Meesho catalog row — upload the inventory sheet"})
+            continue
+        msp = safe_decimal(row.get("msp"))
+        if msp is None:
+            skipped.append({"sku_id": own[key], "why": "no price given"})
+            continue
+        for inv in matches:
+            _append_msp_row(ws, inv, msp, safe_decimal(row.get("wdrp")), safe_decimal(row.get("mrp")))
+            written += 1
+
+    if not written:
+        return Response(
+            {"error": "Nothing to write.", "skipped": skipped},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", parent.item_id)[:60] or "parent"
+    resp = HttpResponse(
+        buf.read(),
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    resp["Content-Disposition"] = f'attachment; filename="msp_{safe_name}.xlsx"'
+    # The UI reads these to report what didn't make it into the file.
+    resp["X-Rows-Written"] = str(written)
+    resp["X-Rows-Skipped"] = str(len(skipped))
+    return resp
