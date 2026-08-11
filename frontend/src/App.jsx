@@ -37,6 +37,7 @@ import { MeeshoPricingTab } from "./Components/Tabs/MeeshoPricingTab";
 import { ReturnScanTab } from "./Components/Tabs/ReturnScanTab";
 import { OrderScanTab } from "./Components/Tabs/OrderScanTab";
 import { ExtensionTab } from "./Components/Tabs/ExtensionTab";
+import { BulkListingTab } from "./Components/Tabs/BulkListingTab";
 import { ClaimSheetTab } from "./Components/Tabs/ClaimSheetTab";
 import { TeamTasksTab } from "./Components/Tabs/TeamTasksTab";
 import { GstTab } from "./Components/Tabs/GstTab";
@@ -756,6 +757,7 @@ function AppShell() {
             <Route path="/fraud" element={<FraudCustomersTab />} />
             <Route path="/product-photos" element={<ProductPhotosTab />} />
             <Route path="/extension" element={<ExtensionTab />} />
+            <Route path="/bulk-listing" element={<BulkListingTab />} />
             <Route path="/business-profile" element={<BusinessProfilePage />} />
             <Route path="/admin" element={<AdminPanel />} />
             <Route path="*" element={<Navigate to="/" replace />} />

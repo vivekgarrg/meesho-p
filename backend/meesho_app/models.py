@@ -1341,6 +1341,52 @@ class ListingTemplate(models.Model):
         return len(self.fields or {})
 
 
+class BulkListingFieldPreset(models.Model):
+    """
+    A named set of Bulk Listing form values, saved so a future product in the
+    same (or a similar) category doesn't need everything retyped.
+
+    Kept separate from ListingTemplate even though the shape is similar: that
+    table holds DOM-derived keys the browser extension fills a live Meesho
+    page with, and mixing Bulk Listing presets into it would surface
+    unrelated entries in the extension's own Templates tab. `fields` here is
+    keyed by the *parsed template's* field key (see bulk_listing.py), which
+    only ever means something against a template's own field list — applying
+    a preset just prefills whichever keys happen to match the template in use
+    and leaves the rest alone, so it degrades gracefully across categories.
+    """
+
+    business = models.ForeignKey(
+        "accounts.Business", on_delete=models.PROTECT, related_name="bulk_listing_presets",
+    )
+    name = models.CharField(max_length=200, db_index=True)
+    # The template's own category label at save time — display only, so the
+    # preset picker can hint "this was saved from Puja Articles".
+    source_label = models.CharField(max_length=255, blank=True)
+    fields = models.JSONField(default=dict, help_text="field key -> value to prefill")
+    labels = models.JSONField(default=dict, blank=True,
+                              help_text="field key -> the human label shown at save time")
+
+    created_by = models.ForeignKey(
+        "accounts.User", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="bulk_listing_presets_created",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "bulk_listing_field_presets"
+        ordering = ["name"]
+        unique_together = [("business", "name")]
+
+    def __str__(self):
+        return f"{self.name} ({len(self.fields or {})} fields)"
+
+    @property
+    def field_count(self):
+        return len(self.fields or {})
+
+
 class ClaimTicket(models.Model):
     """
     One claim ticket from the Meesho supplier panel's ticket export

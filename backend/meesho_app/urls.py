@@ -1,5 +1,6 @@
 from django.urls import path
 from . import views
+from . import bulk_listing_views
 
 urlpatterns = [
     path("upload/", views.upload_excel, name="upload_excel"),
@@ -131,6 +132,18 @@ urlpatterns = [
     path("listing-templates/import/",  views.listing_templates_import, name="listing_templates_import"),
     path("listing-templates/export/",  views.listing_templates_export, name="listing_templates_export"),
     path("listing-templates/<int:pk>/", views.listing_template_detail, name="listing_template_detail"),
+    # Bulk listing sheet generator — parses whatever Meesho category template
+    # it's given (upload or a bundled built-in) and fills it in
+    path("bulk-listing/built-ins/",
+         bulk_listing_views.bulk_listing_built_ins, name="bulk_listing_built_ins"),
+    path("bulk-listing/parse/",
+         bulk_listing_views.bulk_listing_parse, name="bulk_listing_parse"),
+    path("bulk-listing/generate/",
+         bulk_listing_views.bulk_listing_generate, name="bulk_listing_generate"),
+    path("bulk-listing/presets/",
+         bulk_listing_views.bulk_listing_presets, name="bulk_listing_presets"),
+    path("bulk-listing/presets/<int:pk>/",
+         bulk_listing_views.bulk_listing_preset_detail, name="bulk_listing_preset_detail"),
     # GST — monthly liability from Meesho TCS exports
     path("gst/upload/",      views.gst_upload,      name="gst_upload"),
     path("gst/periods/",     views.gst_periods,     name="gst_periods"),

@@ -56,6 +56,9 @@ backend/uploads/
 *.xlsx
 *.xls
 *.csv
+# Bundled bulk-listing category templates are real Meesho export files the app
+# ships with (not user-generated), so they're the one exception to the rule above.
+!backend/meesho_app/bulk_listing_templates/*.xlsx
 
 # Build artifacts (regenerated on deploy)
 backend/staticfiles/

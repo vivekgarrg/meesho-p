@@ -44,6 +44,7 @@ NAV_CATALOG = [
     {"path": "/upload",            "label": "Upload Data",       "group": "Tools"},
     {"path": "/product-photos",    "label": "AI Photos",         "group": "Tools"},
     {"path": "/extension",         "label": "Browser Extension", "group": "Tools"},
+    {"path": "/bulk-listing",      "label": "Bulk Listing",      "group": "Tools"},
     {"path": "/fraud",             "label": "Fraud Watch",       "group": "Tools"},
     {"path": "/business-profile",  "label": "Business Profile",  "group": "Tools"},
 
@@ -92,6 +93,7 @@ API_OWNERSHIP = {
     # The extension is the main consumer of these, and it authenticates as a real
     # user — so whoever may see the Extension page may sync templates.
     "listing-templates/":    ["/extension"],
+    "bulk-listing/":         ["/bulk-listing"],
     "gst/":                  ["/gst"],
     "expenses/":             ["/expenses"],
     "tax-check/":            ["/tax-check"],

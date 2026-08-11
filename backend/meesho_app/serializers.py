@@ -1,7 +1,7 @@
 from rest_framework import serializers
 
 from .helpers.helper import strip_html
-from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, ParentItemPrice, ParentPriceHistory, Order, LabelOrder, ReturnDelivery, ScannedOrder, ListingTemplate, ClaimTicket, WorkerTask, WalletEntry, WalletSettlement, TaskListing, PlatformRate, TaskDocument
+from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, ParentItemPrice, ParentPriceHistory, Order, LabelOrder, ReturnDelivery, ScannedOrder, ListingTemplate, ClaimTicket, WorkerTask, WalletEntry, WalletSettlement, TaskListing, PlatformRate, TaskDocument, BulkListingFieldPreset
 
 
 class OrderPaymentSerializer(serializers.ModelSerializer):
@@ -176,6 +176,27 @@ class ListingTemplateSerializer(serializers.ModelSerializer):
             return {}
         if not isinstance(value, dict):
             raise serializers.ValidationError("labels must be an object of key → label.")
+        return value
+
+
+class BulkListingFieldPresetSerializer(serializers.ModelSerializer):
+    created_by_name = serializers.CharField(source="created_by.username", read_only=True, default=None)
+    field_count     = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = BulkListingFieldPreset
+        fields = "__all__"
+        read_only_fields = ["business", "created_by", "created_at", "updated_at"]
+
+    def validate_name(self, value):
+        name = (value or "").strip()
+        if not name:
+            raise serializers.ValidationError("A preset needs a name.")
+        return name
+
+    def validate_fields(self, value):
+        if not isinstance(value, dict):
+            raise serializers.ValidationError("fields must be an object of key → value.")
         return value
 
 

@@ -58,6 +58,7 @@ export const NAV_GROUPS = [
       { path: "/upload", label: "Upload Data", icon: "⇧" },
       { path: "/product-photos", label: "AI Photos", icon: "✦" },
       { path: "/extension", label: "Browser Extension", icon: "⧉" },
+      { path: "/bulk-listing", label: "Bulk Listing", icon: "🧾" },
       { path: "/fraud", label: "Fraud Watch", icon: "⊘" },
       { path: "/business-profile", label: "Business Profile", icon: "⌂" },
     ],
