@@ -26,6 +26,13 @@ media/
 # ── Node / Frontend ───────────────────────────────────────────────────────────
 node_modules/
 frontend/node_modules/
+# Without this a *symlink* named node_modules slips past the patterns
+# above — one pointing at a local temp dir was committed once already.
+node_modules
+# Scratch left by docs/verify.mjs while checking a recorded video.
+docs/verify-player.html
+docs/frame-*.png
+
 
 
 # Build output

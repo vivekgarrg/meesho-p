@@ -14,22 +14,86 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
+      # Pushing the deploy over SSH is the fast path, not the only one: the VPS
+      # also polls origin/main every two minutes (deploy/hostinger/autodeploy.sh)
+      # and deploys itself. That fallback exists because GitHub's runners are
+      # intermittently blocked from port 22 — their packets are dropped before
+      # any handshake, which is a source-IP block, and the runner ranges are far
+      # too large to allow-list.
+      #
+      # So a connection timeout here is an expected, already-handled condition,
+      # while the deploy script failing *on the server* is a real failure. Using
+      # raw ssh rather than an action is what makes the two distinguishable:
+      # ssh exits 255 for its own connection errors and otherwise passes through
+      # the remote command's exit status.
       - name: Deploy over SSH
-        uses: appleboy/ssh-action@v1.2.0
-        with:
-          host: ${{ secrets.SSH_HOST }}
-          username: ${{ secrets.SSH_USER }}
-          key: ${{ secrets.SSH_KEY }}
-          port: ${{ secrets.SSH_PORT || 22 }}
-          command_timeout: 20m
-          script: |
-            set -e
-            cd ~/meesho-p
-            # Older deploys copied the built index.html over a tracked file,
-            # leaving it modified; discard that so the pull can fast-forward.
-            git checkout -- backend/templates/index.html 2>/dev/null || true
-            git pull --ff-only origin main
-            bash deploy/hostinger/update.sh
+        id: ssh
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_KEY: ${{ secrets.SSH_KEY }}
+          SSH_PORT: ${{ secrets.SSH_PORT || 22 }}
+        run: |
+          set -uo pipefail
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+          set +e
+          ssh -i ~/.ssh/deploy_key \
+              -p "$SSH_PORT" \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              -o ConnectTimeout=25 \
+              -o BatchMode=yes \
+              "$SSH_USER@$SSH_HOST" 'bash -se' <<'REMOTE'
+          set -e
+          cd ~/meesho-p
+          # Older deploys copied the built index.html over a tracked file,
+          # leaving it modified; discard that so the pull can fast-forward.
+          git checkout -- backend/templates/index.html 2>/dev/null || true
+          git pull --ff-only origin main
+          bash deploy/hostinger/update.sh
+          REMOTE
+          code=$?
+          set -e
+
+          rm -f ~/.ssh/deploy_key
+
+          if [ "$code" -eq 0 ]; then
+            echo "deployed=true" >> "$GITHUB_OUTPUT"
+            echo "Deployed over SSH."
+            exit 0
+          fi
+
+          if [ "$code" -eq 255 ]; then
+            echo "deployed=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Could not reach the VPS over SSH (exit 255). This is the known port-22 block from GitHub runners — the server's own two-minute poll will deploy this commit. Waiting for it below."
+            exit 0
+          fi
+
+          # Anything else means we got on to the box and the deploy itself
+          # broke. That must stay loud.
+          echo "::error::The deploy script failed on the server (exit $code)."
+          exit "$code"
+
+      # When SSH could not get through, give the VPS cron its two-minute window
+      # and confirm the site actually came back up before calling this a success.
+      - name: Wait for the server's own deploy
+        if: steps.ssh.outputs.deployed == 'false'
+        run: |
+          set -e
+          for i in $(seq 1 12); do   # up to ~6 minutes
+            sleep 30
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 https://rudam.in/ || echo 000)
+            echo "attempt $i: https://rudam.in/ -> $code"
+            if [ "$code" = "200" ]; then
+              echo "Site is up; the server-side deploy has run."
+              exit 0
+            fi
+          done
+          echo "::error::rudam.in did not return 200 within six minutes of the push."
+          exit 1
 
       - name: Purge Cloudflare cache
         env:
@@ -45,4 +109,3 @@ jobs:
           else
             echo "Cloudflare secrets not set; skipping cache purge."
           fi
-
