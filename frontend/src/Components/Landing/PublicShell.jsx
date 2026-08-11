@@ -32,6 +32,33 @@ export const OFFER = "First year free — for sellers joining now";
 export const wrap = { maxWidth: 1120, margin: "0 auto", padding: "0 22px" };
 
 /**
+ * True on a phone.
+ *
+ * The public pages are styled entirely inline, and an inline style cannot be
+ * overridden by a CSS media query — so "is this a small screen" has to be a
+ * value in JS. Written here rather than imported from the app's shared tokens
+ * because these pages deliberately depend on nothing an authenticated screen
+ * can break.
+ */
+export function useIsNarrow(px = 640) {
+  const q = `(max-width: ${px}px)`;
+  const [narrow, setNarrow] = React.useState(
+    () => typeof window !== "undefined" && window.matchMedia(q).matches
+  );
+  React.useEffect(() => {
+    const mql = window.matchMedia(q);
+    const on = (e) => setNarrow(e.matches);
+    setNarrow(mql.matches);            // re-sync if it changed before mount
+    mql.addEventListener("change", on);
+    return () => mql.removeEventListener("change", on);
+  }, [q]);
+  return narrow;
+}
+
+/** Page gutter — tighter on a phone, where 22px each side is real estate. */
+export const gutter = (narrow) => ({ ...wrap, padding: narrow ? "0 16px" : "0 22px" });
+
+/**
  * Jump to the signup form, from anywhere in the public site.
  *
  * A plain <Link to="/#signup"> does not work: React Router owns navigation and
@@ -54,50 +81,70 @@ export function useGoToSignup() {
 }
 
 export function OfferRibbon() {
+  const narrow = useIsNarrow();
   return (
     <div style={{
       background: `linear-gradient(90deg, ${BRAND}, ${BRAND_2})`,
-      color: "#fff", textAlign: "center", padding: "8px 16px",
-      fontSize: 13.5, fontWeight: 700, letterSpacing: "0.01em",
+      color: "#fff", textAlign: "center", padding: narrow ? "7px 12px" : "8px 16px",
+      fontSize: narrow ? 12 : 13.5, fontWeight: 700, letterSpacing: "0.01em",
+      lineHeight: 1.45,
     }}>
-      🎉 {OFFER} · <span style={{ opacity: 0.9, fontWeight: 600 }}>no card, cancel anytime</span>
+      🎉 {OFFER}
+      {/* The reassurance is worth the line on desktop; on a phone it pushes the
+          headline below the fold, which costs more than it earns. */}
+      {!narrow && <> · <span style={{ opacity: 0.9, fontWeight: 600 }}>no card, cancel anytime</span></>}
     </div>
   );
 }
 
 export function PublicNav() {
   const goToSignup = useGoToSignup();
+  const narrow = useIsNarrow();
   return (
     <header style={{
       position: "sticky", top: 0, zIndex: 50, background: "rgba(255,255,255,0.92)",
       backdropFilter: "blur(10px)", borderBottom: `1px solid ${LINE}`,
     }}>
-      <div style={{ ...wrap, display: "flex", alignItems: "center", gap: 12, height: 64 }}>
-        <Link to="/" style={{ display: "flex", alignItems: "center", gap: 11, textDecoration: "none" }}>
+      <div style={{ ...gutter(narrow), display: "flex", alignItems: "center",
+        gap: narrow ? 8 : 12, height: narrow ? 56 : 64 }}>
+        <Link to="/" style={{ display: "flex", alignItems: "center", gap: narrow ? 8 : 11,
+          textDecoration: "none", minWidth: 0 }}>
           <div style={{
-            width: 34, height: 34, borderRadius: 10,
-            background: `linear-gradient(135deg, ${BRAND}, #4F46E5)`,
-            display: "grid", placeItems: "center", color: "#fff", fontWeight: 900, fontSize: 16,
+            width: narrow ? 30 : 34, height: narrow ? 30 : 34, borderRadius: 10,
+            background: `linear-gradient(135deg, ${BRAND}, #4F46E5)`, flexShrink: 0,
+            display: "grid", placeItems: "center", color: "#fff", fontWeight: 900,
+            fontSize: narrow ? 14 : 16,
           }}>R</div>
-          <div style={{ fontWeight: 800, fontSize: 16, color: INK }}>
-            Rudam <span style={{ color: BRAND }}>Commerce OS</span>
+          <div style={{ fontWeight: 800, fontSize: narrow ? 15 : 16, color: INK, whiteSpace: "nowrap" }}>
+            {/* Four words of wordmark plus three controls does not fit 390px.
+                The mark and the name carry it; the tagline is the part to drop. */}
+            Rudam{!narrow && <span style={{ color: BRAND }}> Commerce OS</span>}
           </div>
         </Link>
-        <nav style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
-          <a href={WA_LINK} target="_blank" rel="noreferrer" style={{
-            display: "flex", alignItems: "center", gap: 6, color: "#16A34A", textDecoration: "none",
-            fontWeight: 700, fontSize: 13.5, padding: "8px 12px", borderRadius: 9,
-            border: "1.5px solid #BBF7D0", background: "#F0FDF4", whiteSpace: "nowrap",
-          }}>
-            <span aria-hidden>💬</span> {WHATSAPP_DISPLAY}
+        <nav style={{ marginLeft: "auto", display: "flex", alignItems: "center",
+          gap: narrow ? 4 : 8, flexShrink: 0 }}>
+          <a href={WA_LINK} target="_blank" rel="noreferrer"
+            aria-label={`WhatsApp ${WHATSAPP_DISPLAY}`}
+            style={{
+              display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6,
+              color: "#16A34A", textDecoration: "none", fontWeight: 700, fontSize: 13.5,
+              padding: narrow ? 0 : "8px 12px", borderRadius: narrow ? "50%" : 9,
+              width: narrow ? 40 : "auto", height: narrow ? 40 : "auto",
+              border: "1.5px solid #BBF7D0", background: "#F0FDF4", whiteSpace: "nowrap",
+            }}>
+            <span aria-hidden style={{ fontSize: narrow ? 17 : 14 }}>💬</span>
+            {!narrow && WHATSAPP_DISPLAY}
           </a>
           <Link to="/login" style={{
-            color: INK, textDecoration: "none", fontWeight: 700, fontSize: 13.5, padding: "8px 12px",
+            color: INK, textDecoration: "none", fontWeight: 700,
+            fontSize: narrow ? 13 : 13.5,
+            padding: narrow ? "10px 8px" : "8px 12px",
           }}>Sign in</Link>
           <a href="/#signup" onClick={goToSignup} style={{
             background: INK, color: "#fff", textDecoration: "none", fontWeight: 700,
-            fontSize: 13.5, padding: "9px 16px", borderRadius: 9, whiteSpace: "nowrap",
-            cursor: "pointer",
+            fontSize: narrow ? 13 : 13.5,
+            padding: narrow ? "10px 13px" : "9px 16px",
+            borderRadius: 9, whiteSpace: "nowrap", cursor: "pointer",
           }}>Get started</a>
         </nav>
       </div>
@@ -108,7 +155,7 @@ export function PublicNav() {
 export function PublicFooter() {
   return (
     <footer style={{ background: INK, color: "rgba(255,255,255,0.72)", marginTop: "auto" }}>
-      <div style={{ ...wrap, padding: "34px 22px", display: "flex", gap: 16, flexWrap: "wrap", alignItems: "center" }}>
+      <div style={{ ...wrap, padding: "30px 18px", display: "flex", gap: 16, flexWrap: "wrap", alignItems: "center" }}>
         <div>
           <div style={{ color: "#fff", fontWeight: 800, fontSize: 15 }}>Rudam Commerce OS</div>
           <div style={{ fontSize: 13, marginTop: 4 }}>

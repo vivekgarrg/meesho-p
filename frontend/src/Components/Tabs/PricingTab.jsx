@@ -261,6 +261,10 @@ function ParentCard({ parent, onRefresh, notify, onLink, dragging, unlinked = []
   const [detailErr, setDetailErr] = useState(false);
   const [suggestions, setSuggestions] = useState(null);
   const [suggestBusy, setSuggestBusy] = useState(false);
+  // The price-sheet builder: which children are ticked, and the prices to write.
+  const [sheetPick, setSheetPick] = useState({});   // sku_id -> true
+  const [sheetPrice, setSheetPrice] = useState({ msp: "", wdrp: "", mrp: "" });
+  const [sheetBusy, setSheetBusy] = useState(false);
 
   // Counts come from the list payload, so the header is right before anything
   // is fetched; once loaded the fetched rows are the truth.
@@ -329,6 +333,49 @@ function ParentCard({ parent, onRefresh, notify, onLink, dragging, unlinked = []
     await onLink(skuId, parent.item_id);
     setSuggestions(list => (list || []).filter(x => x.sku_id !== skuId));
     setChildren(null); setHistories(null);
+  };
+
+  /**
+   * Build the Meesho price sheet for the ticked SKUs and download it.
+   *
+   * Sent as a POST because the prices are per SKU; the response is the xlsx
+   * itself, so it is read as a blob rather than JSON.
+   */
+  const downloadSheet = async () => {
+    const rows = (children || [])
+      .filter((ch) => sheetPick[ch.sku_id] && ch.meesho?.length)
+      .map((ch) => ({
+        sku_id: ch.sku_id,
+        msp: sheetPrice.msp,
+        wdrp: sheetPrice.wdrp || undefined,
+        mrp: sheetPrice.mrp || undefined,
+      }));
+    if (!rows.length) { notify("err", "Tick at least one SKU that has a Meesho catalog row."); return; }
+    if (!String(sheetPrice.msp).trim()) { notify("err", "Enter the new selling price."); return; }
+
+    setSheetBusy(true);
+    try {
+      const res = await fetch(`${API}/parent-prices/${encodeURIComponent(parent.item_id)}/price-sheet/`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rows }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        notify("err", d.error || "Could not build the sheet.");
+        return;
+      }
+      const written = res.headers.get("X-Rows-Written");
+      const skipped = Number(res.headers.get("X-Rows-Skipped") || 0);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `msp_${parent.item_id.replace(/[^A-Za-z0-9._-]+/g, "_")}.xlsx`;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+      notify("ok", `Sheet ready — ${written} row(s)` + (skipped ? `, ${skipped} skipped.` : "."));
+    } catch { notify("err", "Could not build the sheet."); }
+    finally { setSheetBusy(false); }
   };
 
   /** "Not this one" — take the SKU out of the linking flows for good. */
@@ -477,6 +524,18 @@ function ParentCard({ parent, onRefresh, notify, onLink, dragging, unlinked = []
               style={{ ...btn(panel === "suggest" ? "ghostOrange" : "ghost", "sm"), fontSize: 11 }}>
               {panel === "suggest" ? "✕ Cancel" : "✨ Suggestions"}
             </button>
+            <button
+              onClick={() => {
+                toggle("sheet");
+                // Default to everything that can actually go in the sheet.
+                if (panel !== "sheet" && children) {
+                  setSheetPick(Object.fromEntries(
+                    children.filter((ch) => ch.meesho?.length).map((ch) => [ch.sku_id, true])));
+                }
+              }}
+              style={{ ...btn(panel === "sheet" ? "secondary" : "ghost", "sm"), fontSize: 11 }}>
+              {panel === "sheet" ? "✕ Cancel" : "📄 Price Sheet"}
+            </button>
             <button onClick={() => toggle("create")} style={{ ...btn(panel === "create" ? "success" : "ghost", "sm"), fontSize: 11 }}>
               {panel === "create" ? "✕ Cancel" : "+ Create New SKU"}
             </button>
@@ -546,6 +605,70 @@ function ParentCard({ parent, onRefresh, notify, onLink, dragging, unlinked = []
                       ))}
                     </div>
                   )}
+                </div>
+              )}
+              {panel === "sheet" && (
+                <div>
+                  <p style={{ fontSize: 11.5, color: C.gray600, marginBottom: 10, lineHeight: 1.6 }}>
+                    Tick the SKUs, set the new price, and download a sheet you can upload
+                    straight to Meesho. Catalog id, product id and variation are filled in
+                    from your inventory — you only type the price.
+                  </p>
+
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 8, marginBottom: 10 }}>
+                    {[["New selling price (MSP) *", "msp"], ["Wrong/defective (WDRP)", "wdrp"], ["MRP (optional)", "mrp"]].map(([label, key]) => (
+                      <div key={key}>
+                        <label style={{ ...S.label, fontSize: 10 }}>{label}</label>
+                        <input type="number" step="0.01" value={sheetPrice[key]}
+                          onChange={(e) => setSheetPrice((f) => ({ ...f, [key]: e.target.value }))}
+                          style={{ ...S.inp, fontSize: 12 }} />
+                      </div>
+                    ))}
+                  </div>
+
+                  {children === null ? (
+                    <p style={{ fontSize: 12, color: C.gray400 }}>Loading SKUs…</p>
+                  ) : (
+                    <div style={{ border: `1px solid ${C.border}`, borderRadius: 8, overflow: "hidden", marginBottom: 10 }}>
+                      {children.map((ch, i) => {
+                        const ready = !!ch.meesho?.length;
+                        return (
+                          <label key={ch.sku_id} style={{
+                            display: "flex", alignItems: "center", gap: 8, padding: "7px 10px",
+                            background: i % 2 ? C.gray50 : C.white, borderBottom: `1px solid ${C.gray100}`,
+                            cursor: ready ? "pointer" : "not-allowed", opacity: ready ? 1 : 0.55 }}>
+                            <input type="checkbox" disabled={!ready}
+                              checked={!!sheetPick[ch.sku_id]}
+                              onChange={() => setSheetPick((p) => ({ ...p, [ch.sku_id]: !p[ch.sku_id] }))} />
+                            <span style={{ flex: 1, minWidth: 0, fontFamily: "monospace", fontSize: 11.5,
+                              fontWeight: 700, color: C.gray800, wordBreak: "break-all" }}>
+                              {ch.sku_id}
+                            </span>
+                            {ready ? (
+                              <span style={{ fontSize: 10.5, color: C.gray400, whiteSpace: "nowrap" }}>
+                                catalog {ch.meesho[0].catalog_id}
+                                {ch.meesho.length > 1 ? ` · ${ch.meesho.length} variations` : ""}
+                              </span>
+                            ) : (
+                              <span style={{ fontSize: 10.5, color: C.amber, fontWeight: 700, whiteSpace: "nowrap" }}>
+                                not in Meesho inventory
+                              </span>
+                            )}
+                          </label>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                    <button onClick={downloadSheet} disabled={sheetBusy} style={btn("primary", "sm")}>
+                      {sheetBusy ? "Building…" : "⬇ Download price sheet"}
+                    </button>
+                    <button onClick={() => setSheetPick({})} style={btn("ghost", "sm")}>Clear</button>
+                    <span style={{ fontSize: 11, color: C.gray400 }}>
+                      {Object.values(sheetPick).filter(Boolean).length} selected
+                    </span>
+                  </div>
                 </div>
               )}
               {panel === "create" && (

@@ -1,0 +1,538 @@
+<!DOCTYPE html>
+<!--
+  The printed seller handbook.
+
+  Source for docs/Rudam-Seller-Guide.pdf — edit this, then run
+  `node docs/build-guide.mjs` (or the Chrome command inside it) to regenerate.
+
+  Written for paper, not for screens: A4 pages, explicit page breaks, no dark
+  fills that drink ink, and nothing that depends on colour to be understood.
+  Everything in here is checked against what the app actually does — if a
+  screen changes, this file is the thing to change with it.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Rudam Commerce OS — Seller Guide</title>
+<style>
+  @page { size: A4; margin: 16mm 15mm 14mm; }
+
+  :root {
+    --ink:    #13111C;
+    --brand:  #6D28D9;
+    --brand2: #F43397;
+    --muted:  #5C5668;
+    --line:   #DCD6E4;
+    --soft:   #F7F4FB;
+    --green:  #047857;
+    --red:    #BE123C;
+    --amber:  #B45309;
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  body {
+    margin: 0;
+    font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    color: var(--ink);
+    /* 10pt/1.5 keeps every chapter on its own sheet with room to spare and is
+       still comfortable in print; 10.5/1.55 tipped chapter 6 onto an 8th page. */
+    font-size: 10pt;
+    line-height: 1.5;
+  }
+
+  /* Each <section class="page"> is one printed sheet. */
+  .page { page-break-after: always; }
+  .page:last-child { page-break-after: auto; }
+  h1, h2, h3 { margin: 0; letter-spacing: -0.01em; }
+  p { margin: 0 0 8pt; }
+
+  /* ── Cover ─────────────────────────────────────────────────────────────── */
+  .cover { text-align: center; padding-top: 30mm; }
+  .logo {
+    width: 62pt; height: 62pt; border-radius: 16pt; margin: 0 auto 16pt;
+    background: linear-gradient(135deg, var(--brand), #4F46E5);
+    color: #fff; font-weight: 900; font-size: 32pt; line-height: 62pt;
+  }
+  .cover h1 { font-size: 30pt; font-weight: 900; line-height: 1.12; }
+  .cover .sub { font-size: 13pt; color: var(--muted); margin-top: 10pt; }
+  .ribbon {
+    display: inline-block; margin-top: 20pt; padding: 7pt 16pt; border-radius: 999pt;
+    background: linear-gradient(90deg, var(--brand), var(--brand2));
+    color: #fff; font-weight: 800; font-size: 11pt;
+  }
+  .cover-foot {
+    margin-top: 34mm; padding-top: 10pt; border-top: 1pt solid var(--line);
+    font-size: 10pt; color: var(--muted);
+  }
+
+  /* ── Section headings ──────────────────────────────────────────────────── */
+  .kicker {
+    font-size: 8.5pt; font-weight: 800; letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--brand); margin-bottom: 4pt;
+  }
+  h2.title {
+    font-size: 19pt; font-weight: 900; margin-bottom: 4pt;
+    padding-bottom: 6pt; border-bottom: 2pt solid var(--brand);
+  }
+  .lede { font-size: 11pt; color: var(--muted); margin: 8pt 0 14pt; }
+  h3 { font-size: 12pt; font-weight: 800; margin: 14pt 0 5pt; }
+
+  /* ── Building blocks ───────────────────────────────────────────────────── */
+  .card {
+    border: 1pt solid var(--line); border-radius: 8pt;
+    padding: 9pt 11pt; margin-bottom: 8pt; background: #fff;
+  }
+  .card.soft { background: var(--soft); }
+  .card h4 { margin: 0 0 3pt; font-size: 10.5pt; font-weight: 800; }
+  .card p  { margin: 0; font-size: 10pt; color: var(--muted); }
+
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8pt; }
+
+  .step { display: flex; gap: 9pt; margin-bottom: 10pt; page-break-inside: avoid; }
+  .step .n {
+    flex: 0 0 auto; width: 19pt; height: 19pt; border-radius: 50%;
+    background: var(--brand); color: #fff; font-weight: 800; font-size: 10pt;
+    text-align: center; line-height: 19pt;
+  }
+  .step .body { flex: 1; }
+  .step h4 { margin: 1pt 0 2pt; font-size: 11pt; font-weight: 800; }
+  .step p  { margin: 0; font-size: 10pt; color: var(--muted); }
+
+  table { width: 100%; border-collapse: collapse; font-size: 9.8pt; }
+  th {
+    text-align: left; font-size: 8.5pt; letter-spacing: 0.06em; text-transform: uppercase;
+    color: var(--muted); border-bottom: 1pt solid var(--line); padding: 5pt 6pt;
+  }
+  td { padding: 5pt 6pt; border-bottom: 1pt solid #EFEBF4; vertical-align: top; }
+  td.mod { font-weight: 700; white-space: nowrap; }
+  tr { page-break-inside: avoid; }
+
+  .note {
+    border-left: 3pt solid var(--amber); background: #FFFBEB;
+    padding: 8pt 11pt; border-radius: 0 6pt 6pt 0; margin: 10pt 0;
+    font-size: 10pt;
+  }
+  .note strong { color: var(--amber); }
+  .good { border-left-color: var(--green); background: #ECFDF5; }
+  .good strong { color: var(--green); }
+
+  code {
+    font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 9.2pt;
+    background: var(--soft); border: 1pt solid var(--line);
+    padding: 0.5pt 3pt; border-radius: 3pt;
+  }
+  ul { margin: 0 0 8pt; padding-left: 14pt; }
+  li { margin-bottom: 3pt; }
+
+  .foot {
+    position: running(footer); font-size: 8.5pt; color: var(--muted);
+  }
+  .pagemark {
+    margin-top: 12pt; padding-top: 6pt; border-top: 1pt solid var(--line);
+    font-size: 8.5pt; color: var(--muted); display: flex; justify-content: space-between;
+  }
+</style>
+</head>
+<body>
+
+<!-- ════════════════════════ 1 · COVER ════════════════════════ -->
+<section class="page cover">
+  <div class="logo">R</div>
+  <h1>Rudam Commerce&nbsp;OS</h1>
+  <div class="sub">Run the whole shop from one screen.</div>
+  <div class="ribbon">🎉 First year free — for sellers joining now</div>
+
+  <div style="margin-top:26mm; text-align:left; max-width:120mm; margin-left:auto; margin-right:auto;">
+    <div class="card soft">
+      <h4>What this book is</h4>
+      <p>A short handbook for running your Meesho, Amazon and Flipkart business
+      inside Rudam — what to upload, what to check each day, and where the
+      numbers come from. Keep it by the packing desk.</p>
+    </div>
+  </div>
+
+  <div class="cover-foot">
+    <strong>Questions?</strong> WhatsApp <strong>+91&nbsp;82733&nbsp;43222</strong> — a person answers, not a ticket queue.<br />
+    rudam.in
+  </div>
+</section>
+
+<!-- ════════════════════════ 2 · START HERE ════════════════════════ -->
+<section class="page">
+  <div class="kicker">Chapter 1</div>
+  <h2 class="title">Start here</h2>
+  <p class="lede">Fifteen minutes, once. After this the app runs on the exports
+  you already download from the marketplace.</p>
+
+  <div class="step">
+    <div class="n">1</div>
+    <div class="body">
+      <h4>Sign in</h4>
+      <p>Open the site and press <strong>Sign in</strong>. Your username and
+      password come from whoever set up the account. Change the password from
+      the menu under your name.</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="n">2</div>
+    <div class="body">
+      <h4>Pick the right business</h4>
+      <p>If you run more than one shop, the selector at the top left switches
+      between them. <strong>Every number on every screen belongs to the business
+      shown there.</strong> Check it before you read anything.</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="n">3</div>
+    <div class="body">
+      <h4>Upload your first two files</h4>
+      <p>Go to <strong>Upload Data</strong>. Two exports do most of the work:</p>
+      <ul>
+        <li>The Meesho payment file — <code>SP_ORDER_ADS_REFERRAL_PAYMENT_FILE_*.xlsx</code>,
+            or the <code>.zip</code> Meesho gives you, unopened. Don't rename it.</li>
+        <li>Your orders export — <code>Orders*.csv</code>.</li>
+      </ul>
+      <p>Re-uploading the same file is safe. Rows are matched, not duplicated.</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="n">4</div>
+    <div class="body">
+      <h4>Tell it what your stock costs</h4>
+      <p>Open <strong>SKU Pricing</strong> and enter your purchase price for each
+      product. Until you do, the app can show what the marketplace paid you, but
+      not what you <em>made</em>. This is the single most valuable thing you will
+      enter.</p>
+    </div>
+  </div>
+
+  <div class="note">
+    <strong>Nothing is guessed.</strong> Every figure traces back to a file you
+    uploaded or a price you typed. If a number looks wrong, the cause is almost
+    always a missing purchase price or a sheet that hasn't been uploaded yet.
+  </div>
+
+  <div class="pagemark"><span>Rudam Commerce OS — Seller Guide</span><span>1</span></div>
+</section>
+
+<!-- ════════════════════════ 3 · PARENT & CHILD SKUs ════════════════════════ -->
+<section class="page">
+  <div class="kicker">Chapter 2</div>
+  <h2 class="title">Parent SKUs and variants</h2>
+  <p class="lede">The one idea worth understanding properly. Get this right and
+  pricing, profit and stock all fall into place on their own.</p>
+
+  <p>A <strong>parent</strong> is the product. A <strong>child SKU</strong> is a
+  version of it you actually list — a size, a colour, a combo pack. You buy the
+  product once at one cost, but you may sell it under six different SKU codes.</p>
+
+  <div class="card soft">
+    <h4>Example</h4>
+    <p><strong>Parent:</strong> Brass Pooja Thali 7 inch — costs you ₹185<br />
+    <strong>Children:</strong> <code>thali-7-plain-001</code>,
+    <code>thali-7-engraved-002</code>, <code>combo-thali-diya-003</code></p>
+  </div>
+
+  <p>Link a child to its parent and it <strong>inherits the parent's purchase
+  price, tax rate and packaging cost automatically</strong>. Change the parent's
+  price once and every variant follows. You never type the same cost six times,
+  and the six can never drift apart.</p>
+
+  <h3>Linking, three ways</h3>
+  <table>
+    <tr>
+      <td class="mod">Suggestions</td>
+      <td>Open a parent in <strong>SKU Pricing</strong> and press
+      <strong>✨&nbsp;Suggestions</strong>. It reads the parent's name and the
+      variants already under it, then proposes unlinked SKUs that look like they
+      belong — with a match score. One click to link.</td>
+    </tr>
+    <tr>
+      <td class="mod">Link Center</td>
+      <td>The panel on the left of SKU Pricing lists everything unlinked. Pick a
+      target parent, tick several SKUs, link them in one go — or drag a SKU onto
+      any parent card.</td>
+    </tr>
+    <tr>
+      <td class="mod">From Labels</td>
+      <td>While looking at shipped labels, any SKU without a parent shows
+      <strong>link to parent</strong> right there. Useful for catching new
+      variants the day they first ship.</td>
+    </tr>
+  </table>
+
+  <h3>SKUs that will never have a parent</h3>
+  <p>Some SKUs genuinely stand alone — a one-off, a sample, a line you have
+  discontinued. Press the <strong>🚫</strong> button beside it in the Link
+  Center. It disappears from the unlinked pile and stops being suggested, so
+  that pile keeps meaning <em>“still needs attention”</em> instead of slowly
+  filling with things you have already decided about.</p>
+
+  <div class="note good">
+    <strong>It is not deletion.</strong> Hidden SKUs keep their pricing and their
+    history. <strong>Show N hidden SKUs</strong> in the Link Center brings them
+    back at any time.
+  </div>
+
+  <div class="pagemark"><span>Rudam Commerce OS — Seller Guide</span><span>2</span></div>
+</section>
+
+<!-- ════════════════════════ 4 · THE DAILY ROUTINE ════════════════════════ -->
+<section class="page">
+  <div class="kicker">Chapter 3</div>
+  <h2 class="title">The daily routine</h2>
+  <p class="lede">Four habits. None of them takes long, and each one catches
+  money that otherwise leaks quietly.</p>
+
+  <div class="step">
+    <div class="n">1</div>
+    <div class="body">
+      <h4>Before dispatch — scan the parcels</h4>
+      <p><strong>Order Scan.</strong> Point the camera at each parcel as it is
+      packed. The app checks it against the marketplace's own status and stops
+      anything cancelled, already shipped, or scanned twice. A parcel that
+      shouldn't have left the building is the most expensive mistake on this
+      list.</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="n">2</div>
+    <div class="body">
+      <h4>When returns arrive — open the claim window</h4>
+      <p><strong>Returns &amp; Claims.</strong> Every return that comes back
+      starts a <strong>7-day</strong> window in which you can claim for a wrong
+      or damaged item. Scan the packet as evidence and the countdown is on
+      screen. Miss the window and the money is simply gone.</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="n">3</div>
+    <div class="body">
+      <h4>Weekly — upload the new payment sheet</h4>
+      <p><strong>Upload Data.</strong> Each new payment file fills in what
+      actually settled. Profit, GST and the wallet all firm up as sheets
+      arrive; a recent day legitimately starts out looking incomplete.</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="n">4</div>
+    <div class="body">
+      <h4>Weekly — read the Overview</h4>
+      <p>Net profit, what returns cost you, what you owe in GST, and which SKUs
+      are losing money. Ten minutes here is worth more than a day of
+      spreadsheets.</p>
+    </div>
+  </div>
+
+  <h3>What each screen is for</h3>
+  <table>
+    <thead><tr><th style="width:34%">Screen</th><th>Use it when</th></tr></thead>
+    <tbody>
+      <tr><td class="mod">Overview</td><td>You want the whole picture — profit, costs, GST, outcome rates.</td></tr>
+      <tr><td class="mod">SKU Analysis</td><td>You want to know which products make money and which quietly don't.</td></tr>
+      <tr><td class="mod">Daily Profit</td><td>You want profit by the day you shipped, not the day you were paid.</td></tr>
+      <tr><td class="mod">Estimated Profit</td><td>Orders have shipped but the payment sheet hasn't arrived yet.</td></tr>
+      <tr><td class="mod">Unsettled</td><td>You suspect the marketplace still owes you for something.</td></tr>
+      <tr><td class="mod">Pay Mismatch</td><td>What they paid doesn't match what you expected.</td></tr>
+      <tr><td class="mod">Labels</td><td>You've printed the labels PDF and want to see what's in the batch.</td></tr>
+      <tr><td class="mod">Claim Sheet</td><td>Reconciling the claim tickets Meesho approved, rejected or paid.</td></tr>
+      <tr><td class="mod">GST / Tax Check</td><td>Filing time, or checking a tax rate is right on a product.</td></tr>
+      <tr><td class="mod">Inventory / Purchases</td><td>Recording stock bought and what you still hold.</td></tr>
+      <tr><td class="mod">Fraud Watch</td><td>A customer keeps returning things. Block the repeat offenders.</td></tr>
+    </tbody>
+  </table>
+
+  <div class="pagemark"><span>Rudam Commerce OS — Seller Guide</span><span>3</span></div>
+</section>
+
+<!-- ════════════════════════ 5 · READING THE MONEY ════════════════════════ -->
+<section class="page">
+  <div class="kicker">Chapter 4</div>
+  <h2 class="title">Reading the money</h2>
+  <p class="lede">Where the profit figure comes from, and the two settings that
+  are yours to decide rather than ours to assume.</p>
+
+  <h3>How profit is worked out</h3>
+  <p>The marketplace has already taken its commission, shipping, TCS and TDS out
+  before it pays you. So the settlement figure is <em>already net of all
+  that</em> — the app does not subtract those a second time. From it, we take
+  off what the goods cost you:</p>
+
+  <div class="card soft">
+    <h4 style="font-family:monospace; font-weight:700;">
+      Settlement received − (purchase cost + GST on purchase + packaging) = your profit
+    </h4>
+  </div>
+
+  <p>Then ad spend, referral income, compensation and — if you switch it on —
+  transport are applied to the bottom line.</p>
+
+  <h3>Setting 1 · Which orders carry a packaging cost</h3>
+  <p>A box is used the moment an order is packed. Whether a <em>returned</em> or
+  <em>RTO</em> order should still carry that cost is a judgement about your
+  business, not a fact in the data — some sellers write the wasted box off
+  against the return, others only count packaging on orders that actually sold.</p>
+  <p>On <strong>Overview → Packaging Cost</strong>, press <strong>Change</strong>
+  and tick the outcomes you want charged: Delivered, Returned, RTO, Exchange,
+  Claim. Profit updates immediately, everywhere.</p>
+
+  <h3>Setting 2 · Whether your prices include GST</h3>
+  <p>On <strong>Overview → GST Position</strong> you'll see what you collected on
+  sales, less what you already paid on the stock that sold. The difference is
+  what you actually hand over.</p>
+  <div class="note">
+    <strong>Get this one right.</strong> Marketplace prices normally
+    <em>include</em> GST. On a ₹340 sale at 5%, the tax inside it is
+    <strong>₹16.19</strong> — not ₹17.00 added on top. The checkbox
+    <em>“My sale prices already include GST”</em> should stay ticked unless you
+    genuinely price exclusive of tax. Unticking it overstates your GST bill.
+  </div>
+
+  <h3>Words you'll see</h3>
+  <table>
+    <tr><td class="mod">Settlement</td><td>What the marketplace actually paid into your account for an order.</td></tr>
+    <tr><td class="mod">RTO</td><td>Return to origin — the parcel came back without ever reaching the customer.</td></tr>
+    <tr><td class="mod">Claim</td><td>Money you ask the marketplace for when a return comes back wrong or damaged.</td></tr>
+    <tr><td class="mod">Unsettled</td><td>Shipped, but no payment has appeared for it yet.</td></tr>
+    <tr><td class="mod">Parent / child</td><td>The product, and the variants of it you list. See Chapter 2.</td></tr>
+  </table>
+
+  <div class="pagemark"><span>Rudam Commerce OS — Seller Guide</span><span>4</span></div>
+</section>
+
+<!-- ════════════════════════ 6 · TEAM ════════════════════════ -->
+<section class="page">
+  <div class="kicker">Chapter 5</div>
+  <h2 class="title">Paying your team for what they finished</h2>
+  <p class="lede">Hand out piecework, review it, and let the wallet keep the
+  ledger. Nobody has to remember who did what.</p>
+
+  <h3>Setting up, once</h3>
+  <ul>
+    <li>Open <strong>Team Tasks → Rates per platform</strong> and set what a
+        listing is worth and what a claim is worth, per marketplace.</li>
+    <li>Pay one person differently if you want — per-worker rates override the
+        standard one.</li>
+    <li>A rate applies to work created from then on. Work already done keeps the
+        rate it had, so nothing is ever silently re-priced.</li>
+  </ul>
+
+  <h3>The listing loop</h3>
+  <div class="step">
+    <div class="n">1</div>
+    <div class="body"><h4>You create the task</h4>
+    <p>Pick the people, paste the photo folder link, and set the starting SKU
+    name (for example <code>BRS-</code>). Add the prices every SKU on the job
+    should use.</p></div>
+  </div>
+  <div class="step">
+    <div class="n">2</div>
+    <div class="body"><h4>They generate and send</h4>
+    <p>Your worker presses <strong>Generate</strong> — the next id in the series
+    appears (<code>BRS-001</code>, <code>BRS-002</code>…) — then
+    <strong>Send for approval</strong>. Duplicates are refused on the spot.</p></div>
+  </div>
+  <div class="step">
+    <div class="n">3</div>
+    <div class="body"><h4>You approve</h4>
+    <p><strong>Approve &amp; pay</strong> on each SKU, or <strong>Approve all</strong>
+    for the batch. Rejecting asks for a reason, which the worker sees so they can
+    fix and resend.</p></div>
+  </div>
+  <div class="step">
+    <div class="n">4</div>
+    <div class="body"><h4>The money records itself</h4>
+    <p>Approving credits the worker's wallet and puts the SKU into your
+    catalogue. <strong>Mark paid</strong> settles the balance; every adjustment
+    needs a reason, so the balance never moves without an explanation.</p></div>
+  </div>
+
+  <div class="note good">
+    <strong>Approving is what makes a SKU real.</strong> A SKU joins your pricing
+    catalogue only when you sign it off — nothing reaches your books without your
+    approval.
+  </div>
+
+  <h3>Return claim tasks</h3>
+  <p>The same idea for claims: share the video link and the sub-order number, the
+  worker compresses the video under <strong>22&nbsp;MB</strong> and raises the
+  claim, then sends the ticket reference for approval. A bonus can follow
+  automatically if the marketplace approves the claim.</p>
+
+  <div class="pagemark"><span>Rudam Commerce OS — Seller Guide</span><span>5</span></div>
+</section>
+
+<!-- ════════════════════════ 7 · TROUBLESHOOTING ════════════════════════ -->
+<section class="page">
+  <div class="kicker">Chapter 6</div>
+  <h2 class="title">When something looks wrong</h2>
+  <p class="lede">In order of how often it turns out to be the answer.</p>
+
+  <div class="card">
+    <h4>“Profit looks far too high.”</h4>
+    <p>Purchase prices are missing. Open <strong>SKU Pricing</strong> and press
+    <strong>Show Unpriced</strong> — those SKUs are being counted as pure income
+    because nothing tells the app what they cost you.</p>
+  </div>
+
+  <div class="card">
+    <h4>“A recent day shows almost nothing.”</h4>
+    <p>Correct, and it will fill in. An order only counts once a payment sheet
+    covering it has been uploaded. Recent days firm up over the following weeks.</p>
+  </div>
+
+  <div class="card">
+    <h4>“The numbers changed since yesterday and I changed nothing.”</h4>
+    <p>A newer payment sheet arrived, or someone edited a purchase price. Both
+    re-work history on purpose, so today's view is always the best available
+    truth rather than a stale snapshot.</p>
+  </div>
+
+  <div class="card">
+    <h4>“This screen is empty.”</h4>
+    <p>Check the <strong>period</strong> selector at the top and the
+    <strong>business</strong> selector at the top left. An empty screen is nearly
+    always the right screen pointed at the wrong month or the wrong shop.</p>
+  </div>
+
+  <div class="card">
+    <h4>“A SKU keeps appearing as unlinked.”</h4>
+    <p>Either link it to a parent, or press <strong>🚫</strong> to say it will
+    never have one. See Chapter 2.</p>
+  </div>
+
+  <div class="card">
+    <h4>“My GST bill looks larger than I expected.”</h4>
+    <p>Check the <em>“My sale prices already include GST”</em> box on Overview.
+    Unticked, it adds tax on top of a price that already contained it. See
+    Chapter 4.</p>
+  </div>
+
+  <div class="card soft" style="margin-top:12pt;">
+    <h4>Before you call — three answers usually solve it</h4>
+    <p>Which business and period is on screen · which screen and which number
+    looks wrong · what you expected it to say, and why.</p>
+  </div>
+
+  <div style="margin-top:8mm; padding:12pt; border:1.5pt solid var(--brand); border-radius:9pt; text-align:center;">
+    <div style="font-size:13pt; font-weight:900;">We'd rather you asked.</div>
+    <div style="font-size:11pt; color:var(--muted); margin-top:5pt;">
+      WhatsApp <strong style="color:var(--ink)">+91&nbsp;82733&nbsp;43222</strong> — a person answers.
+    </div>
+    <div style="font-size:10pt; color:var(--muted); margin-top:8pt;">
+      🎉 First year free for sellers joining now · no card, cancel anytime · rudam.in
+    </div>
+  </div>
+
+  <div class="pagemark"><span>Rudam Commerce OS — Seller Guide</span><span>6</span></div>
+</section>
+
+</body>
+</html>

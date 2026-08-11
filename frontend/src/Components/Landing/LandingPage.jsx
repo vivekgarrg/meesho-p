@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from "react";
 import { Link, useLocation } from "react-router-dom";
 import PublicShell, {
-  useGoToSignup,
+  useGoToSignup, useIsNarrow, gutter,
   WA_LINK, WHATSAPP_DISPLAY, OFFER,
   INK, BRAND, BRAND_2, MUTED, LINE, SOFT, wrap,
 } from "./PublicShell";
@@ -306,6 +306,7 @@ function SignupForm({ innerRef }) {
 export default function LandingPage() {
   const signupRef = useRef(null);
   const toSignup = useGoToSignup();
+  const narrow = useIsNarrow();
   const location = useLocation();
 
   // Arriving from another public page (or a shared /#signup link) should land
@@ -322,35 +323,49 @@ export default function LandingPage() {
     <PublicShell>
       {/* Hero */}
       <section style={{ background: `linear-gradient(180deg, ${SOFT}, #fff)`, borderBottom: `1px solid ${LINE}` }}>
-        <div style={{ ...wrap, padding: "62px 22px 56px", display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 44, alignItems: "center" }}>
+        <div style={{ ...gutter(narrow), padding: narrow ? "30px 16px 34px" : "62px 22px 56px",
+          display: "grid",
+          // 320px minimum columns still try to sit side by side on a 390px
+          // phone; below the breakpoint the hero is explicitly one column.
+          gridTemplateColumns: narrow ? "minmax(0, 1fr)" : "repeat(auto-fit, minmax(320px, 1fr))",
+          gap: narrow ? 26 : 44, alignItems: "center" }}>
           <div>
             <div style={{
               display: "inline-block", background: "#F3E8FF", color: BRAND, fontSize: 12.5,
               fontWeight: 800, padding: "6px 12px", borderRadius: 999, marginBottom: 18,
             }}>For Meesho, Amazon &amp; Flipkart sellers</div>
             <div style={{
-              display: "inline-flex", alignItems: "center", gap: 7, marginLeft: 9,
+              display: "inline-flex", alignItems: "center", gap: 7,
+              // The offset reads as a gap between two pills on one line; once
+              // they wrap onto separate lines it just looks like a stray indent.
+              marginLeft: narrow ? 0 : 9,
               background: "#ECFDF5", color: "#047857", fontSize: 12.5, fontWeight: 800,
               padding: "6px 12px", borderRadius: 999, marginBottom: 18,
               border: "1.5px solid #A7F3D0",
             }}>🎉 First year free</div>
-            <h1 style={{ fontSize: 42, lineHeight: 1.12, fontWeight: 900, margin: "0 0 18px", letterSpacing: "-0.02em" }}>
-              Run the whole shop from<br />one screen.
+            <h1 style={{ fontSize: narrow ? 29 : 42, lineHeight: narrow ? 1.2 : 1.12,
+              fontWeight: 900, margin: narrow ? "0 0 12px" : "0 0 18px", letterSpacing: "-0.02em" }}>
+              {/* The hard break is a desktop line-length decision; on a phone it
+                  strands "one screen." on a line of its own. */}
+              Run the whole shop from{narrow ? " " : <br />}one screen.
             </h1>
-            <p style={{ fontSize: 17, lineHeight: 1.65, color: MUTED, margin: "0 0 26px", maxWidth: 520 }}>
+            <p style={{ fontSize: narrow ? 15 : 17, lineHeight: 1.6, color: MUTED,
+              margin: narrow ? "0 0 20px" : "0 0 26px", maxWidth: 520 }}>
               Rudam Commerce OS turns your marketplace exports into real numbers — true profit per SKU,
               claims you'd otherwise miss, parcels that shouldn't ship, GST that reconciles, and a team
               you can pay for exactly what they finished.
             </p>
-            <div style={{ display: "flex", gap: 11, flexWrap: "wrap" }}>
+            <div style={{ display: "flex", gap: narrow ? 9 : 11, flexWrap: "wrap" }}>
               <a href="#signup" onClick={toSignup} style={{
                 background: `linear-gradient(135deg, ${BRAND}, ${BRAND_2})`, color: "#fff",
-                textDecoration: "none", fontWeight: 800, fontSize: 15.5, padding: "14px 26px", borderRadius: 11,
+                textDecoration: "none", fontWeight: 800, fontSize: 15.5,
+                padding: "14px 26px", borderRadius: 11,
+                flex: narrow ? "1 1 100%" : "0 0 auto", textAlign: "center",
               }}>Start free for a year</a>
               <a href={WA_LINK} target="_blank" rel="noreferrer" style={{
                 background: "#25D366", color: "#fff", textDecoration: "none", fontWeight: 800,
                 fontSize: 15.5, padding: "14px 24px", borderRadius: 11,
+                flex: narrow ? "1 1 100%" : "0 0 auto", textAlign: "center",
               }}>💬 Chat on WhatsApp</a>
             </div>
             <div style={{ display: "flex", gap: 22, marginTop: 26, flexWrap: "wrap" }}>
@@ -367,8 +382,8 @@ export default function LandingPage() {
       </section>
 
       {/* Features */}
-      <section style={{ ...wrap, padding: "64px 22px 20px" }}>
-        <h2 style={{ fontSize: 31, fontWeight: 900, textAlign: "center", margin: "0 0 10px", letterSpacing: "-0.02em" }}>
+      <section style={{ ...gutter(narrow), padding: narrow ? "38px 16px 14px" : "64px 22px 20px" }}>
+        <h2 style={{ fontSize: narrow ? 24 : 31, fontWeight: 900, textAlign: "center", margin: "0 0 10px", letterSpacing: "-0.02em" }}>
           Everything a marketplace seller has to do
         </h2>
         <p style={{ fontSize: 16, color: MUTED, textAlign: "center", margin: "0 auto 50px", maxWidth: 620, lineHeight: 1.6 }}>
@@ -406,7 +421,7 @@ export default function LandingPage() {
 
       {/* Modules */}
       <section style={{ background: SOFT, borderTop: `1px solid ${LINE}`, borderBottom: `1px solid ${LINE}` }}>
-        <div style={{ ...wrap, padding: "50px 22px" }}>
+        <div style={{ ...gutter(narrow), padding: narrow ? "34px 16px" : "50px 22px" }}>
           <h2 style={{ fontSize: 23, fontWeight: 800, textAlign: "center", margin: "0 0 8px" }}>
             And everything else you'd otherwise keep in spreadsheets
           </h2>
@@ -425,10 +440,10 @@ export default function LandingPage() {
       </section>
 
       {/* Signup */}
-      <section style={{ ...wrap, padding: "62px 22px" }}>
+      <section style={{ ...gutter(narrow), padding: narrow ? "38px 16px" : "62px 22px" }}>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 42, alignItems: "center" }}>
           <div>
-            <h2 style={{ fontSize: 30, fontWeight: 900, margin: "0 0 14px", letterSpacing: "-0.02em" }}>
+            <h2 style={{ fontSize: narrow ? 24 : 30, fontWeight: 900, margin: "0 0 14px", letterSpacing: "-0.02em" }}>
               Start with your own numbers — free for a year
             </h2>
             <p style={{ fontSize: 16, color: MUTED, lineHeight: 1.68, margin: "0 0 20px" }}>

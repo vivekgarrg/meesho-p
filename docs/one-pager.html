@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<!--
+  The single-sheet leaflet — what Rudam is, in one page, for a seller who has
+  never seen it.
+
+  Source for docs/Rudam-One-Pager.pdf. Rebuild with:
+      node docs/build-guide.mjs one-pager
+
+  The screenshots in docs/img/ are real captures of the running app. They carry
+  the numbers of whichever business was open when they were taken — replace the
+  files and rebuild if you would rather show different figures.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Rudam Commerce OS — one page</title>
+<style>
+  @page { size: A4; margin: 10mm 11mm; }
+
+  :root {
+    --ink:   #13111C;
+    --brand: #6D28D9;
+    --brand2:#F43397;
+    --muted: #5C5668;
+    --line:  #DCD6E4;
+    --soft:  #F7F4FB;
+    --green: #047857;
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  body {
+    margin: 0; color: var(--ink);
+    font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-size: 9pt; line-height: 1.42;
+  }
+
+  /* ── Masthead ──────────────────────────────────────────────────────────── */
+  .top { display: flex; align-items: center; gap: 9pt; }
+  .logo {
+    width: 30pt; height: 30pt; border-radius: 9pt; flex: 0 0 auto;
+    background: linear-gradient(135deg, var(--brand), #4F46E5);
+    color: #fff; font-weight: 900; font-size: 17pt; text-align: center; line-height: 30pt;
+  }
+  .brandname { font-size: 15pt; font-weight: 900; letter-spacing: -0.02em; }
+  .brandname span { color: var(--brand); }
+  .pill {
+    margin-left: auto; padding: 5pt 12pt; border-radius: 999pt;
+    background: linear-gradient(90deg, var(--brand), var(--brand2));
+    color: #fff; font-weight: 800; font-size: 9pt; white-space: nowrap;
+  }
+
+  h1 {
+    margin: 11pt 0 3pt; font-size: 23pt; font-weight: 900;
+    letter-spacing: -0.03em; line-height: 1.08;
+  }
+  .lede { font-size: 10.5pt; color: var(--muted); margin: 0 0 9pt; max-width: 155mm; }
+
+  /* ── Screenshots ───────────────────────────────────────────────────────── */
+  .shot {
+    border: 1pt solid var(--line); border-radius: 7pt; overflow: hidden;
+    background: #fff; box-shadow: 0 3pt 10pt rgba(19,17,28,0.09);
+  }
+  /* Cropped from the top: the part of each screen that carries the message,
+     without shrinking the whole window until nothing can be read. */
+  .shot img { display: block; width: 100%; object-fit: cover; object-position: top center; }
+  .hero img { height: 66mm; }   /* 72mm tipped the sheet onto a second page */
+  /* Captured already cropped to the working area (see docs/img), so they need
+     no zoom here — panning a full window shot clipped labels mid-word. */
+  .mini img { height: 40mm; }
+  .cap { font-size: 8pt; color: var(--muted); margin-top: 3pt; }
+  .cap b { color: var(--ink); }
+
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 7pt; margin-top: 8pt; }
+
+  /* ── Value points ──────────────────────────────────────────────────────── */
+  .points { display: grid; grid-template-columns: 1fr 1fr; gap: 5pt 12pt; margin: 9pt 0 0; }
+  .pt { display: flex; gap: 6pt; }
+  .pt .ic { flex: 0 0 auto; font-size: 11pt; line-height: 1.1; }
+  .pt b { font-size: 9.5pt; }
+  .pt p { margin: 0; font-size: 8.6pt; color: var(--muted); line-height: 1.35; }
+
+  /* ── Modules ───────────────────────────────────────────────────────────── */
+  .chips { display: flex; flex-wrap: wrap; gap: 3pt; margin-top: 5pt; }
+  .chip {
+    border: 1pt solid var(--line); background: var(--soft); border-radius: 999pt;
+    padding: 1.5pt 6pt; font-size: 7.6pt; color: var(--muted); font-weight: 600;
+  }
+
+  h2 {
+    font-size: 10pt; font-weight: 900; margin: 10pt 0 0;
+    text-transform: uppercase; letter-spacing: 0.09em; color: var(--brand);
+  }
+
+  /* ── Footer ────────────────────────────────────────────────────────────── */
+  .foot {
+    margin-top: 9pt; border: 1.5pt solid var(--brand); border-radius: 8pt;
+    padding: 8pt 11pt; display: flex; align-items: center; gap: 11pt;
+  }
+  .steps { display: flex; gap: 11pt; flex: 1; }
+  .stp { display: flex; gap: 5pt; align-items: flex-start; }
+  .stp .n {
+    flex: 0 0 auto; width: 13pt; height: 13pt; border-radius: 50%;
+    background: var(--brand); color: #fff; font-size: 7.5pt; font-weight: 800;
+    text-align: center; line-height: 13pt;
+  }
+  .stp div { font-size: 8.4pt; line-height: 1.3; }
+  .stp b { display: block; font-size: 8.8pt; }
+  .contact { text-align: right; white-space: nowrap; border-left: 1pt solid var(--line); padding-left: 11pt; }
+  .contact .wa { font-size: 12pt; font-weight: 900; color: var(--green); }
+  .contact .site { font-size: 9.5pt; font-weight: 800; }
+  .contact .sub { font-size: 7.8pt; color: var(--muted); }
+</style>
+</head>
+<body>
+
+  <div class="top">
+    <div class="logo">R</div>
+    <div>
+      <div class="brandname">Rudam <span>Commerce OS</span></div>
+      <div style="font-size:8.6pt; color:var(--muted);">For Meesho, Amazon &amp; Flipkart sellers</div>
+    </div>
+    <div class="pill">🎉 First year free</div>
+  </div>
+
+  <h1>Run the whole shop from one screen.</h1>
+  <p class="lede">
+    Upload the exports you already download from the marketplace. Rudam turns them into
+    <b>true profit per SKU</b> — after commission, shipping, returns, ads and GST, against
+    what the stock actually cost you. Not an estimate you typed into a spreadsheet.
+  </p>
+
+  <div class="shot hero"><img src="img/overview.png" alt="Rudam Overview screen" /></div>
+  <div class="cap"><b>Overview</b> — profit, settlement and every order outcome for the period, in one glance.</div>
+
+  <div class="row2">
+    <div>
+      <div class="shot mini"><img src="img/pricing.png" alt="SKU Pricing screen" /></div>
+      <div class="cap"><b>SKU Pricing</b> — group variants under one product; price once, applies to all.</div>
+    </div>
+    <div>
+      <div class="shot mini"><img src="img/tasks.png" alt="Team Tasks screen" /></div>
+      <div class="cap"><b>Team Tasks</b> — hand out work, approve each SKU, pay from an auditable wallet.</div>
+    </div>
+  </div>
+
+  <h2>What it does for you</h2>
+  <div class="points">
+    <div class="pt">
+      <span class="ic">📈</span>
+      <div><b>Know what you actually made</b>
+        <p>Profit per SKU, per order, per month — with ads cost attributed to the SKUs that sold. Loss-makers surface before they eat the month.</p></div>
+    </div>
+    <div class="pt">
+      <span class="ic">⏱️</span>
+      <div><b>Stop losing claim money to the clock</b>
+        <p>Every return opens a 7-day claim window. Scan the packet as evidence, watch the countdown, and reconcile what the marketplace actually paid.</p></div>
+    </div>
+    <div class="pt">
+      <span class="ic">📦</span>
+      <div><b>Nothing unshipped leaves the building</b>
+        <p>Scan each parcel at the packing desk. Anything cancelled, already shipped or scanned twice is stopped before it goes in the courier bag.</p></div>
+    </div>
+    <div class="pt">
+      <span class="ic">🧾</span>
+      <div><b>GST that reconciles</b>
+        <p>Tax collected on sales, less tax already paid on the stock that sold — so you know what you owe before filing, not after.</p></div>
+    </div>
+  </div>
+
+  <h2>21 modules, one login</h2>
+  <div class="chips">
+    <span class="chip">Overview</span><span class="chip">SKU Analysis</span><span class="chip">Ads Analysis</span>
+    <span class="chip">Estimated Profit</span><span class="chip">Daily Profit</span><span class="chip">Orders</span>
+    <span class="chip">Order Scan</span><span class="chip">Payments</span><span class="chip">Unsettled</span>
+    <span class="chip">Pay Mismatch</span><span class="chip">Labels</span><span class="chip">Returns &amp; Claims</span>
+    <span class="chip">Claim Sheet</span><span class="chip">Team Tasks</span><span class="chip">SKU Pricing</span>
+    <span class="chip">Tax Check</span><span class="chip">GST</span><span class="chip">Inventory</span>
+    <span class="chip">Purchases</span><span class="chip">Expenses</span><span class="chip">Fraud Watch</span>
+  </div>
+
+  <div class="foot">
+    <div class="steps">
+      <div class="stp"><span class="n">1</span><div><b>Send us your exports</b>The payment file and orders CSV you already download.</div></div>
+      <div class="stp"><span class="n">2</span><div><b>We set you up</b>Usually the same day. Nothing to re-enter.</div></div>
+      <div class="stp"><span class="n">3</span><div><b>See your real numbers</b>Profit, claims, GST — from day one.</div></div>
+    </div>
+    <div class="contact">
+      <div class="sub">Talk to a person, not a ticket queue</div>
+      <div class="wa">💬 +91 82733 43222</div>
+      <div class="site">rudam.in</div>
+      <div class="sub">First year free · no card, cancel anytime</div>
+    </div>
+  </div>
+
+</body>
+</html>

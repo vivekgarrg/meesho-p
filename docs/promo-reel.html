@@ -1,0 +1,507 @@
+<!DOCTYPE html>
+<!--
+  The Instagram reel — 1080x1920, ~18 seconds, no audio.
+
+  Source for docs/Rudam-Reel.mp4. Rebuild with:
+      node docs/build-reel.mjs
+
+  Drawn on a canvas rather than in HTML because a canvas can be handed straight
+  to MediaRecorder, which on macOS Chrome encodes H.264/MP4 — the format
+  Instagram accepts — so the whole thing builds with no ffmpeg and no npm
+  dependency. Open this file in a browser to preview it; the recorder only runs
+  when the page is opened with ?record=1.
+
+  The screenshots come from docs/img/ and carry the numbers of whichever
+  business was open when they were captured. Set REDACT_FIGURES below to blur
+  the money row before posting publicly.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Rudam — reel</title>
+<style>
+  html, body { margin: 0; background: #0B0912; height: 100%; }
+  /* Shown at a readable size while previewing; the canvas itself is always
+     1080x1920 regardless of how it is displayed. */
+  canvas { display: block; margin: 0 auto; height: 100vh; width: auto; }
+</style>
+</head>
+<body>
+<canvas id="c" width="1080" height="1920"></canvas>
+<script>
+// ── Knobs ────────────────────────────────────────────────────────────────────
+const REDACT_FIGURES = false;   // true = blur the revenue/profit row in the hero
+const FPS = 30;
+const DURATION = 18;            // seconds
+
+// ── Palette ──────────────────────────────────────────────────────────────────
+const INK = "#0B0912", BRAND = "#7C3AED", BRAND2 = "#F43397";
+const GREEN = "#22C55E", WHITE = "#FFFFFF", MUTED = "#A9A2BC";
+
+// The reel is composed at 1080x1920 but exported smaller: at full size the
+// encoder could only swallow about 12 of every 30 frames on this machine, and
+// the muxer timed the file at the declared 30fps regardless — so 18 seconds of
+// animation kept coming out as a 7-second clip running at 2.5x. 720x1280 is
+// well within what Instagram accepts and the encoder keeps up with it.
+const DESIGN_W = 1080, DESIGN_H = 1920;
+const EXPORT_W = 720;
+const SCALE = EXPORT_W / DESIGN_W;
+
+const c = document.getElementById("c");
+c.width = DESIGN_W * SCALE;
+c.height = DESIGN_H * SCALE;
+const g = c.getContext("2d");
+// Everything below is written in 1080x1920 coordinates; this is the only place
+// the export size appears.
+const W = DESIGN_W, H = DESIGN_H;
+
+const F = (w, s) => `${w} ${s}px -apple-system, "Helvetica Neue", Arial, sans-serif`;
+
+// ── Small helpers ────────────────────────────────────────────────────────────
+const clamp01 = (v) => v < 0 ? 0 : v > 1 ? 1 : v;
+/** Progress through [a,b], eased — the only timing primitive the scenes need. */
+const seg = (t, a, b) => clamp01((t - a) / (b - a));
+const easeOut = (p) => 1 - Math.pow(1 - p, 3);
+const easeInOut = (p) => p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2;
+
+function roundRect(x, y, w, h, r) {
+  g.beginPath();
+  g.moveTo(x + r, y);
+  g.arcTo(x + w, y, x + w, y + h, r);
+  g.arcTo(x + w, y + h, x, y + h, r);
+  g.arcTo(x, y + h, x, y, r);
+  g.arcTo(x, y, x + w, y, r);
+  g.closePath();
+}
+
+/** Word-wrapped centred text. Returns the height it used. */
+function wrapText(text, cx, y, maxW, lineH) {
+  const words = text.split(" ");
+  const lines = [];
+  let line = "";
+  for (const w of words) {
+    const test = line ? line + " " + w : w;
+    if (g.measureText(test).width > maxW && line) { lines.push(line); line = w; }
+    else line = test;
+  }
+  if (line) lines.push(line);
+  lines.forEach((l, i) => g.fillText(l, cx, y + i * lineH));
+  return lines.length * lineH;
+}
+
+function gradient(x0, y0, x1, y1, from, to) {
+  const grd = g.createLinearGradient(x0, y0, x1, y1);
+  grd.addColorStop(0, from);
+  grd.addColorStop(1, to);
+  return grd;
+}
+
+/** A screenshot drawn as a device-ish card, cropped to fill, with a slow zoom. */
+function shot(img, x, y, w, h, radius, zoom = 1, alpha = 1) {
+  if (!img || !img.width) return;
+  g.save();
+  g.globalAlpha = alpha;
+  g.shadowColor = "rgba(0,0,0,0.55)";
+  g.shadowBlur = 60;
+  g.shadowOffsetY = 24;
+  roundRect(x, y, w, h, radius);
+  g.fill();                       // the shadow needs something opaque behind it
+  g.restore();
+
+  g.save();
+  g.globalAlpha = alpha;
+  roundRect(x, y, w, h, radius);
+  g.clip();
+  // Cover-fit: fill the frame, crop the overflow, anchored top-centre.
+  const sw = img.width, sh = img.height;
+  const scale = Math.max(w / sw, h / sh) * zoom;
+  const dw = sw * scale, dh = sh * scale;
+  g.drawImage(img, x + (w - dw) / 2, y, dw, dh);
+  g.restore();
+
+  // A hairline keeps the card from bleeding into a dark background.
+  g.save();
+  g.globalAlpha = alpha * 0.5;
+  g.strokeStyle = "rgba(255,255,255,0.28)";
+  g.lineWidth = 2;
+  roundRect(x, y, w, h, radius);
+  g.stroke();
+  g.restore();
+}
+
+/** Blur a rectangle of what has already been drawn. */
+function blurRegion(x, y, w, h) {
+  // The source read is in device pixels; the draw back is in design coords,
+  // because the context carries the export scale.
+  const tmp = document.createElement("canvas");
+  tmp.width = w * SCALE; tmp.height = h * SCALE;
+  tmp.getContext("2d").drawImage(
+    c, x * SCALE, y * SCALE, w * SCALE, h * SCALE, 0, 0, w * SCALE, h * SCALE);
+  g.save();
+  g.filter = "blur(18px)";
+  g.drawImage(tmp, x, y, w, h);
+  g.restore();
+}
+
+// ── Assets ───────────────────────────────────────────────────────────────────
+const IMAGES = { overview: "img/overview.png", pricing: "img/pricing.png", tasks: "img/tasks.png" };
+const img = {};
+async function loadAll() {
+  await Promise.all(Object.entries(IMAGES).map(async ([k, src]) => {
+    const i = new Image();
+    i.src = src;
+    try { await i.decode(); } catch { /* a missing file just leaves a gap */ }
+    img[k] = i;
+  }));
+}
+
+// ── Scenes ───────────────────────────────────────────────────────────────────
+// Each takes the global time in seconds and paints the whole frame.
+
+/**
+ * A glow, drawn once into its own canvas and then blitted.
+ *
+ * Painting two full-frame radial gradients per frame at 1080x1920 left the
+ * encoder without enough CPU to keep up, and MediaRecorder timestamps frames as
+ * they arrive — so the 18-second reel came out as a 7-second one playing at
+ * 2.5x. Pre-rendering makes the per-frame cost two drawImage calls.
+ */
+function makeGlow(radius, color, alpha) {
+  const cv = document.createElement("canvas");
+  cv.width = cv.height = radius * 2;
+  const cx = cv.getContext("2d");
+  const grd = cx.createRadialGradient(radius, radius, 0, radius, radius, radius);
+  grd.addColorStop(0, `rgba(${color},${alpha})`);
+  grd.addColorStop(1, `rgba(${color},0)`);
+  cx.fillStyle = grd;
+  cx.fillRect(0, 0, radius * 2, radius * 2);
+  return cv;
+}
+const GLOW_A = makeGlow(760, "124,58,237", 0.42);
+const GLOW_B = makeGlow(720, "244,51,151", 0.34);
+
+function bgDark(t) {
+  g.fillStyle = INK;
+  g.fillRect(0, 0, W, H);
+  const drift = Math.sin(t * 0.5) * 60;
+  g.drawImage(GLOW_A, 300 + drift - 760, 420 - 760);
+  g.drawImage(GLOW_B, 820 - drift - 720, 1500 - 720);
+}
+
+/** 0–3.6s · the hook */
+function sceneHook(t) {
+  bgDark(t);
+  g.textAlign = "center";
+
+  const p1 = easeOut(seg(t, 0.15, 1.0));
+  g.globalAlpha = p1;
+  g.fillStyle = MUTED;
+  g.font = F(700, 46);
+  g.fillText("SELLING ON MEESHO, AMAZON OR FLIPKART?", W / 2, 620 - (1 - p1) * 30);
+
+  const p2 = easeOut(seg(t, 0.85, 1.9));
+  g.globalAlpha = p2;
+  g.fillStyle = WHITE;
+  g.font = F(900, 104);
+  wrapText("Do you actually know", W / 2, 790 - (1 - p2) * 40, 900, 118);
+
+  const p3 = easeOut(seg(t, 1.35, 2.4));
+  g.globalAlpha = p3;
+  g.fillStyle = gradient(200, 900, 880, 1030, "#A78BFA", BRAND2);
+  g.font = F(900, 128);
+  g.fillText("what you MADE?", W / 2, 1030 - (1 - p3) * 40);
+
+  const p4 = easeOut(seg(t, 2.2, 3.1));
+  g.globalAlpha = p4;
+  g.fillStyle = MUTED;
+  g.font = F(600, 44);
+  wrapText("Not what they paid you. What you kept.", W / 2, 1180, 860, 58);
+  g.globalAlpha = 1;
+}
+
+/** 3.6–7.4s · what eats the money */
+function sceneProblem(t) {
+  bgDark(t);
+  g.textAlign = "center";
+  const local = t - 3.6;
+
+  g.globalAlpha = easeOut(seg(local, 0, 0.5));
+  g.fillStyle = MUTED;
+  g.font = F(700, 44);
+  g.fillText("EVERY SALE LOSES A LITTLE ON THE WAY", W / 2, 560);
+
+  // The deductions land one after another, like the money going out.
+  const items = ["Commission", "Shipping", "Returns", "RTO", "Ads spend", "GST"];
+  items.forEach((label, i) => {
+    const p = easeOut(seg(local, 0.45 + i * 0.22, 1.05 + i * 0.22));
+    if (p <= 0) return;
+    const y = 700 + i * 118;
+    g.globalAlpha = p;
+    g.save();
+    g.translate(0, (1 - p) * 34);
+    g.fillStyle = "rgba(255,255,255,0.07)";
+    roundRect(150, y - 62, 780, 92, 46); g.fill();
+    g.strokeStyle = "rgba(255,255,255,0.16)"; g.lineWidth = 2;
+    roundRect(150, y - 62, 780, 92, 46); g.stroke();
+    g.fillStyle = WHITE; g.font = F(800, 50);
+    g.textAlign = "left"; g.fillText(label, 210, y);
+    g.fillStyle = "#FCA5A5"; g.font = F(800, 50);
+    g.textAlign = "right"; g.fillText("−", 870, y);
+    g.restore();
+    g.textAlign = "center";
+  });
+
+  const p = easeOut(seg(local, 2.5, 3.3));
+  g.globalAlpha = p;
+  g.fillStyle = WHITE;
+  g.font = F(900, 62);
+  wrapText("Your spreadsheet doesn't know.", W / 2, 1560, 900, 76);
+  g.globalAlpha = 1;
+}
+
+/** 7.4–12.4s · the product */
+function sceneProduct(t) {
+  bgDark(t);
+  g.textAlign = "center";
+  const local = t - 7.4;
+
+  const p0 = easeOut(seg(local, 0, 0.7));
+  g.globalAlpha = p0;
+  g.fillStyle = WHITE;
+  g.font = F(900, 84);
+  g.fillText("Rudam does.", W / 2, 400 - (1 - p0) * 30);
+
+  g.globalAlpha = easeOut(seg(local, 0.3, 1.0));
+  g.fillStyle = MUTED;
+  g.font = F(600, 42);
+  wrapText("Upload the exports you already download.", W / 2, 480, 900, 54);
+
+  // The screen rises into place and keeps drifting, so the frame never dies.
+  const rise = easeOut(seg(local, 0.5, 1.6));
+  const zoom = 1 + seg(local, 0.5, 5) * 0.06;
+  const y = 620 + (1 - rise) * 160;
+  shot(img.overview, 60, y, 960, 700, 34, zoom, rise);
+
+  if (REDACT_FIGURES && rise > 0.9) blurRegion(60, y + 150, 960, 190);
+
+  const p2 = easeOut(seg(local, 1.9, 2.7));
+  g.globalAlpha = p2;
+  g.fillStyle = GREEN;
+  g.font = F(900, 92);
+  g.fillText("True profit per SKU", W / 2, 1500 + (1 - p2) * 26);
+
+  const p3 = easeOut(seg(local, 2.4, 3.2));
+  g.globalAlpha = p3;
+  g.fillStyle = MUTED;
+  g.font = F(600, 44);
+  wrapText("After commission, shipping, returns, ads and GST — against what your stock actually cost.", W / 2, 1580, 900, 56);
+  g.globalAlpha = 1;
+}
+
+/** 12.4–15.2s · two more things it does */
+function sceneFeatures(t) {
+  bgDark(t);
+  g.textAlign = "center";
+  const local = t - 12.4;
+
+  const a = easeOut(seg(local, 0, 0.7));
+  g.globalAlpha = a;
+  shot(img.pricing, 70, 430, 940, 400, 26, 1 + seg(local, 0, 2.8) * 0.05, a);
+  g.fillStyle = WHITE; g.font = F(900, 60);
+  g.fillText("Price once. Every variant follows.", W / 2, 920);
+
+  const b = easeOut(seg(local, 0.8, 1.5));
+  g.globalAlpha = b;
+  shot(img.tasks, 70, 1030, 940, 400, 26, 1 + seg(local, 0.8, 2.8) * 0.05, b);
+  g.fillStyle = WHITE; g.font = F(900, 60);
+  g.fillText("Pay your team for what they finished.", W / 2, 1520);
+
+  const cc = easeOut(seg(local, 1.6, 2.3));
+  g.globalAlpha = cc;
+  g.fillStyle = MUTED; g.font = F(700, 42);
+  g.fillText("21 modules · one login · 3 marketplaces", W / 2, 1620);
+  g.globalAlpha = 1;
+}
+
+/** 15.2–18s · the ask */
+function sceneCTA(t) {
+  bgDark(t);
+  g.textAlign = "center";
+  const local = t - 15.2;
+
+  const p0 = easeOut(seg(local, 0, 0.6));
+  g.save();
+  g.globalAlpha = p0;
+  const s = 0.9 + p0 * 0.1;
+  g.translate(W / 2, 620);
+  g.scale(s, s);
+  g.fillStyle = gradient(-110, -110, 110, 110, BRAND, "#4F46E5");
+  roundRect(-110, -110, 220, 220, 62); g.fill();
+  g.fillStyle = WHITE; g.font = F(900, 124);
+  g.textBaseline = "middle";
+  g.fillText("R", 0, 6);
+  g.textBaseline = "alphabetic";
+  g.restore();
+
+  g.globalAlpha = easeOut(seg(local, 0.3, 0.9));
+  g.fillStyle = WHITE; g.font = F(900, 82);
+  g.fillText("Rudam Commerce OS", W / 2, 900);
+
+  g.globalAlpha = easeOut(seg(local, 0.5, 1.1));
+  g.fillStyle = MUTED; g.font = F(600, 46);
+  g.fillText("Run the whole shop from one screen.", W / 2, 980);
+
+  // The offer pill — the reason to act now.
+  const p2 = easeOut(seg(local, 0.8, 1.5));
+  g.globalAlpha = p2;
+  g.save();
+  g.translate(W / 2, 1150);
+  g.scale(0.94 + p2 * 0.06, 0.94 + p2 * 0.06);
+  g.fillStyle = gradient(-390, 0, 390, 0, BRAND, BRAND2);
+  roundRect(-390, -64, 780, 128, 64); g.fill();
+  g.fillStyle = WHITE; g.font = F(900, 62);
+  g.textBaseline = "middle";
+  g.fillText("FIRST YEAR FREE", 0, 2);
+  g.textBaseline = "alphabetic";
+  g.restore();
+
+  const p3 = easeOut(seg(local, 1.2, 1.9));
+  g.globalAlpha = p3;
+  g.fillStyle = MUTED; g.font = F(600, 40);
+  g.fillText("no card · cancel anytime", W / 2, 1290);
+
+  const p4 = easeOut(seg(local, 1.5, 2.2));
+  g.globalAlpha = p4;
+  g.fillStyle = GREEN; g.font = F(900, 66);
+  g.fillText("WhatsApp +91 82733 43222", W / 2, 1470);
+  g.fillStyle = WHITE; g.font = F(900, 74);
+  g.fillText("rudam.in", W / 2, 1580);
+
+  // A soft pulse on the last beat, so the end card doesn't sit still.
+  const pulse = 0.5 + 0.5 * Math.sin(local * 4);
+  g.globalAlpha = p4 * (0.35 + pulse * 0.3);
+  g.fillStyle = MUTED; g.font = F(700, 38);
+  g.fillText("DM us your exports — we set you up the same day", W / 2, 1690);
+  g.globalAlpha = 1;
+}
+
+function drawFrame(t) {
+  g.setTransform(SCALE, 0, 0, SCALE, 0, 0);
+  if (t < 3.6)       sceneHook(t);
+  else if (t < 7.4)  sceneProblem(t);
+  else if (t < 12.4) sceneProduct(t);
+  else if (t < 15.2) sceneFeatures(t);
+  else               sceneCTA(t);
+
+  // A 3-frame dip to black across each cut reads as an edit rather than a jump.
+  for (const cut of [3.6, 7.4, 12.4, 15.2]) {
+    const d = Math.abs(t - cut);
+    if (d < 0.12) {
+      g.globalAlpha = (1 - d / 0.12) * 0.85;
+      g.fillStyle = "#000"; g.fillRect(0, 0, W, H);
+      g.globalAlpha = 1;
+    }
+  }
+}
+
+// ── Preview + record ─────────────────────────────────────────────────────────
+window.__ready = false;
+window.__done = false;
+window.__frames = 0;
+
+(async function main() {
+  await loadAll();
+  window.__ready = true;
+
+  const params = new URLSearchParams(location.search);
+
+  if (params.get("record") !== "1") {
+    // Loop forever so the reel can be eyeballed in a browser.
+    const t0 = performance.now();
+    (function loop() {
+      drawFrame(((performance.now() - t0) / 1000) % DURATION);
+      requestAnimationFrame(loop);
+    })();
+    return;
+  }
+
+  const mime = (params.get("fmt") === "webm"
+    ? ["video/webm;codecs=vp9", "video/webm"]
+    : ["video/mp4;codecs=avc1.42E01E", "video/mp4", "video/webm;codecs=vp9"]
+  ).find((m) => MediaRecorder.isTypeSupported(m));
+
+  const nextFrame = () => new Promise((r) => requestAnimationFrame(r));
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  /**
+   * Record for `realSeconds` of wall clock, mapping elapsed time onto animation
+   * time through `k`, and report how long the finished file turned out.
+   *
+   * The whole reason `k` exists: Chrome's recorder writes timestamps at roughly
+   * 2.4x the rate frames actually arrive, so a clip recorded in real time plays
+   * back that much too fast. The factor held steady across resolutions, frame
+   * rates, containers and both capture modes, so rather than fight it the
+   * animation is stretched by exactly the amount the muxer compresses it.
+   */
+  async function record(realSeconds, k) {
+    const stream = c.captureStream(0);          // 0 = only the frames we push
+    const track = stream.getVideoTracks()[0];
+    const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 8_000_000 });
+    const chunks = [];
+    rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+    const stopped = new Promise((res) => { rec.onstop = res; });
+
+    const STEP = 1 / FPS;
+    let next = 0;
+    const t0 = performance.now();
+    rec.start();
+    for (;;) {
+      const elapsed = (performance.now() - t0) / 1000;
+      if (elapsed >= realSeconds) break;
+      if (elapsed >= next) {
+        drawFrame(elapsed / k);                 // k > 1 slows the animation down
+        track.requestFrame();
+        window.__frames++;
+        next = Math.max(elapsed, next + STEP);
+      }
+      await nextFrame();
+    }
+    rec.stop();
+    await stopped;
+    await sleep(60);
+
+    const blob = new Blob(chunks, { type: mime });
+    const url = URL.createObjectURL(blob);
+    const measured = await new Promise((res) => {
+      const v = document.createElement("video");
+      v.preload = "metadata";
+      v.onloadedmetadata = () => res(v.duration);
+      v.onerror = () => res(NaN);
+      v.src = url;
+    });
+    URL.revokeObjectURL(url);
+    return { blob, measured, real: (performance.now() - t0) / 1000 };
+  }
+
+  // Pass 1 — three seconds of throwaway recording, only to learn how far this
+  // machine's recorder compresses time.
+  const probe = await record(3, 1);
+  const k = probe.real / probe.measured;
+  console.log(`recorder compresses time ${k.toFixed(2)}x`);
+
+  // Pass 2 — run for however long it takes to come out at DURATION.
+  window.__frames = 0;
+  const final = await record(DURATION * k, k);
+  console.log(`recorded ${final.real.toFixed(1)}s of wall clock -> ${final.measured.toFixed(2)}s of video`);
+  window.__measured = final.measured;
+
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(final.blob);
+  a.download = mime.startsWith("video/mp4") ? "Rudam-Reel.mp4" : "Rudam-Reel.webm";
+  document.body.appendChild(a);
+  a.click();
+  window.__done = true;
+})();
+</script>
+</body>
+</html>
