@@ -77,22 +77,29 @@ jobs:
           echo "::error::The deploy script failed on the server (exit $code)."
           exit "$code"
 
-      # When SSH could not get through, give the VPS cron its two-minute window
-      # and confirm the site actually came back up before calling this a success.
-      - name: Wait for the server's own deploy
-        if: steps.ssh.outputs.deployed == 'false'
+      # Confirm the commit that was pushed is the one actually serving.
+      #
+      # Checking for HTTP 200 is not enough and gave a false green once already:
+      # when the server-side deploy fails part-way (a migration conflict, a pull
+      # that will not fast-forward) the previous build keeps answering 200
+      # perfectly happily. /api/version/ reports the commit that update.sh
+      # stamped after a *complete* deploy, so this compares like for like.
+      - name: Verify the deployed commit
         run: |
           set -e
-          for i in $(seq 1 12); do   # up to ~6 minutes
-            sleep 30
-            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 https://rudam.in/ || echo 000)
-            echo "attempt $i: https://rudam.in/ -> $code"
-            if [ "$code" = "200" ]; then
-              echo "Site is up; the server-side deploy has run."
+          want="${GITHUB_SHA}"
+          echo "expecting ${want:0:7}"
+          for i in $(seq 1 16); do   # up to ~8 minutes, covering the 2-min poll
+            got=$(curl -s --max-time 20 https://rudam.in/api/version/ \
+                  | sed -n 's/.*"sha"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+            if [ -n "$got" ]; then echo "attempt $i: serving ${got:0:7}"; else echo "attempt $i: /api/version/ gave nothing (old build has no such route)"; fi
+            if [ "$got" = "$want" ]; then
+              echo "Deployed: ${want:0:7} is live."
               exit 0
             fi
+            sleep 30
           done
-          echo "::error::rudam.in did not return 200 within six minutes of the push."
+          echo "::error::${want:0:7} is not serving eight minutes after the push. The server-side deploy did not complete — check the autodeploy log on the VPS (/home/deploy/autodeploy.log)."
           exit 1
 
       - name: Purge Cloudflare cache

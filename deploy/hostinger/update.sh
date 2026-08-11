@@ -41,7 +41,13 @@ echo "==> Ensuring static files are readable by nginx"
 chmod o+x "$HOME" 2>/dev/null || true
 chmod -R o+rX "$REPO_ROOT/backend/staticfiles" 2>/dev/null || true
 
+# Written only once everything above has succeeded, so /api/version/ reports
+# the commit that is genuinely serving rather than whatever the working tree
+# happens to be sitting at after a half-finished deploy.
+echo "==> Stamping the deployed commit"
+git -C "$REPO_ROOT" rev-parse HEAD > "$REPO_ROOT/.deployed_sha"
+
 echo "==> Restarting gunicorn service"
 sudo systemctl restart meesho
 
-echo "==> Done. $(sudo systemctl is-active meesho)"
+echo "==> Done. $(sudo systemctl is-active meesho) at $(cat "$REPO_ROOT/.deployed_sha")"

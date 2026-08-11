@@ -66,3 +66,6 @@ backend/frontend_build/
 
 # Local dev HTTPS certs (self-signed, for phone camera testing)
 .certs/
+
+# Written by deploy/hostinger/update.sh; per-machine, never committed.
+.deployed_sha
