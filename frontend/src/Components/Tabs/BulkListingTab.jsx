@@ -11,20 +11,28 @@ import { CircularProgress } from "@mui/material";
 
 /**
  * Turns any Meesho category bulk-listing template (uploaded fresh, or one of
- * the bundled quick-starts) + your photo links into a ready-to-upload `.xlsx`
- * — 4 rows, unique title/SKU each, sharing every other detail. The front image
- * is the same on all four; the remaining photos are shuffled into a different
- * order per row, so the listings aren't four identical galleries. The server
- * parses whatever template it's given and
- * derives the form's fields from it — nothing about a category is
- * hardcoded here. See backend/meesho_app/bulk_listing.py.
+ * the bundled quick-starts) + a set of photos into a ready-to-upload `.xlsx`
+ * — one listing per photo given, unique title/SKU each, sharing every other
+ * detail. Each listing's own photo stays its front image; the rest of its
+ * gallery is a random pick of every *other* listing's photo, so the listings
+ * aren't identical copies of one gallery. The server parses whatever
+ * template it's given and derives the form's fields from it — nothing about
+ * a category is hardcoded here. See backend/meesho_app/bulk_listing.py.
+ *
+ * Two ways to supply the photos (see MODES below) — both end up going
+ * through the exact same generation pipeline, they only differ in where the
+ * photo list comes from.
  *
  * Fully stateless re: the template: the File the user picked (or the
  * built-in key) is kept in this component's state and resent on Generate,
  * same as it was sent for Parse — nothing about it is stored server-side.
  */
 
-const ROWS = 4;
+const MODES = [
+  { id: "new", label: "New Sheet", hint: "Paste your own photo links" },
+  { id: "prefilled", label: "Prefilled Sheet", hint: "Upload a sheet that already has one photo per row" },
+];
+
 // Categories carry however many image columns they carry — four in some, well
 // over a dozen in others — so image roles are matched by shape, not listed.
 const FIXED_PER_ROW_ROLES = new Set(["title", "sku", "style"]);
@@ -32,6 +40,10 @@ const isPerRowRole = (role) => FIXED_PER_ROW_ROLES.has(role) || /^image_\d+$/.te
 
 function parseImageUrls(text) {
   return (text || "").split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
+}
+
+function emptyRow() {
+  return { title: "", sku: "", style: "" };
 }
 
 function Section({ title, right, children }) {
@@ -76,12 +88,28 @@ function Field({ def, value, onChange }) {
   );
 }
 
+function ImageThumb({ url, index, isOwn }) {
+  return (
+    <div style={{ position: "relative", width: 64, height: 64 }}>
+      <img src={url} alt={`photo ${index + 1}`} onError={(e) => { e.target.style.opacity = 0.15; }}
+        style={{ width: 64, height: 64, objectFit: "cover", borderRadius: 8, border: `1px solid ${C.border}` }} />
+      <span style={{ position: "absolute", top: -6, left: -6, height: 18, borderRadius: 9,
+        padding: isOwn ? "0 6px" : 0, width: isOwn ? "auto" : 18,
+        background: isOwn ? C.green : C.orange, color: C.white, fontSize: 10.5, fontWeight: 800,
+        display: "flex", alignItems: "center", justifyContent: "center" }}>
+        {isOwn ? `row ${index + 1}` : index + 1}
+      </span>
+    </div>
+  );
+}
+
 export function BulkListingTab() {
   const isMobile = useIsMobile();
   const fileInputRef = useRef(null);
 
+  const [mode, setMode] = useState("new");
   const [builtIns, setBuiltIns] = useState([]);
-  const [spec, setSpec] = useState(null);           // { category_label, fields, rows_per_sheet }
+  const [spec, setSpec] = useState(null);           // { category_label, fields }
   const [source, setSource] = useState(null);        // { type: "file", file } | { type: "built_in", key }
   const [parsing, setParsing] = useState(false);
 
@@ -91,11 +119,10 @@ export function BulkListingTab() {
   const [savingPreset, setSavingPreset] = useState(false);
 
   const [shared, setShared] = useState({});
-  const [imageText, setImageText] = useState("");
+  const [imageText, setImageText] = useState("");     // "New Sheet" mode input
+  const [prefilledImages, setPrefilledImages] = useState([]); // "Prefilled Sheet" mode input
   const [prefix, setPrefix] = useState("");
-  const [rows, setRows] = useState(
-    Array.from({ length: ROWS }, () => ({ title: "", sku: "", style: "" }))
-  );
+  const [rows, setRows] = useState([]);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
 
@@ -110,6 +137,24 @@ export function BulkListingTab() {
       .then((d) => setPresets(d.results || [])).catch(() => {});
   };
 
+  const resetFlow = () => {
+    setSpec(null);
+    setSource(null);
+    setShared({});
+    setPresetId("");
+    setCoveredKeys(new Set());
+    setImageText("");
+    setPrefilledImages([]);
+    setRows([]);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  };
+
+  const switchMode = (id) => {
+    if (id === mode) return;
+    setMode(id);
+    resetFlow();
+  };
+
   const parseSource = async (src) => {
     setParsing(true);
     setMsg(null);
@@ -122,6 +167,19 @@ export function BulkListingTab() {
       if (!res.ok) {
         setMsg({ type: "error", text: d.error || "Could not read that template." });
         return;
+      }
+      if (mode === "prefilled") {
+        const found = d.prefilled_images || [];
+        if (!found.length) {
+          setMsg({
+            type: "error",
+            text: "No photos found in this sheet's own Image 1 (Front) column — make sure "
+              + "you're uploading a sheet where photos are already dropped in row by row "
+              + "(e.g. via Meesho's Image Link Generator), or switch to New Sheet.",
+          });
+          return;
+        }
+        setPrefilledImages(found);
       }
       setSpec(d);
       setSource(src);
@@ -140,18 +198,26 @@ export function BulkListingTab() {
     if (file) parseSource({ type: "file", file });
   };
 
-  const changeTemplate = () => {
-    setSpec(null);
-    setSource(null);
-    setShared({});
-    setPresetId("");
-    setCoveredKeys(new Set());
-    if (fileInputRef.current) fileInputRef.current.value = "";
-  };
+  const changeTemplate = () => resetFlow();
 
   const setField = (key) => (value) => setShared((s) => ({ ...s, [key]: value }));
 
-  const imageUrls = useMemo(() => parseImageUrls(imageText), [imageText]);
+  const imageUrls = useMemo(
+    () => (mode === "prefilled" ? prefilledImages : parseImageUrls(imageText)),
+    [mode, prefilledImages, imageText]
+  );
+
+  // The row inputs always track however many photos are in play — the
+  // photos given *are* the rows (see bulk_listing.plan_images).
+  useEffect(() => {
+    setRows((rs) => {
+      const n = imageUrls.length;
+      if (n === rs.length) return rs;
+      if (n < rs.length) return rs.slice(0, n);
+      return [...rs, ...Array.from({ length: n - rs.length }, emptyRow)];
+    });
+  }, [imageUrls.length]);
+
   // How many photo columns this category actually has.
   const imageSlotCount = useMemo(
     () => (spec ? spec.fields.filter((f) => /^image_\d+$/.test(f.role || "")).length : 0),
@@ -185,11 +251,6 @@ export function BulkListingTab() {
     [sharedFields]
   );
 
-  // The guard has to wrap the whole expression, not just the lookup: with no
-  // template parsed yet `spec` is null, so sharedFields is empty and
-  // countryField is undefined — and `(countryField && …)` is then `undefined`
-  // itself, which threw on .toString() and took the tab down before a template
-  // could even be chosen.
   const country = String(countryField ? shared[countryField.key] ?? "" : "")
     .trim()
     .toLowerCase();
@@ -203,10 +264,7 @@ export function BulkListingTab() {
 
   // Ordinary fields shown in the main grid: not per-row, not importer (its
   // own conditional block below), and not tucked away by a loaded preset.
-  const excludedFromGrid = useMemo(() => {
-    const s = new Set(importerFields.map((f) => f.key));
-    return s;
-  }, [importerFields]);
+  const excludedFromGrid = useMemo(() => new Set(importerFields.map((f) => f.key)), [importerFields]);
 
   const visibleFields = sharedFields.filter((f) => !excludedFromGrid.has(f.key) && !coveredKeys.has(f.key));
   const hiddenByPreset = sharedFields.filter((f) => coveredKeys.has(f.key));
@@ -261,7 +319,10 @@ export function BulkListingTab() {
       return;
     }
     if (imageUrls.length === 0) {
-      setMsg({ type: "error", text: "Paste at least one image link — the first one is the front image." });
+      setMsg({
+        type: "error",
+        text: mode === "prefilled" ? "No photos found to build listings from." : "Paste at least one image link.",
+      });
       return;
     }
     const payload = {
@@ -299,6 +360,8 @@ export function BulkListingTab() {
     }
   };
 
+  const rowCount = rows.length;
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       <div>
@@ -307,9 +370,24 @@ export function BulkListingTab() {
           <h1 style={{ fontSize: 19, fontWeight: 800, color: C.gray800 }}>Bulk Listing</h1>
         </div>
         <p style={{ fontSize: 12, color: C.gray400, marginTop: 3 }}>
-          Give a Meesho category template, fill one product's details once, paste
-          4 photo links, and get back a ready-to-upload sheet with 4 unique listings.
+          Fill one product's details once, give a set of photos, and get back a
+          ready-to-upload sheet with one unique listing per photo.
         </p>
+      </div>
+
+      <div style={{ display: "inline-flex", background: C.gray100, borderRadius: 10, padding: 3,
+        border: `1px solid ${C.border}`, width: "fit-content" }}>
+        {MODES.map((m) => (
+          <button key={m.id} onClick={() => switchMode(m.id)} title={m.hint}
+            style={{ border: "none", cursor: "pointer", fontFamily: "inherit",
+              background: mode === m.id ? C.white : "transparent",
+              color: mode === m.id ? C.gray800 : C.gray500,
+              fontWeight: mode === m.id ? 800 : 600, fontSize: 12.5,
+              padding: "7px 16px", borderRadius: 8,
+              boxShadow: mode === m.id ? "0 1px 3px rgba(0,0,0,0.10)" : "none" }}>
+            {m.label}
+          </button>
+        ))}
       </div>
 
       {msg && (
@@ -330,6 +408,7 @@ export function BulkListingTab() {
             <Tag variant="green" fontSize={12}>{spec.category_label}</Tag>
             <span style={{ fontSize: 11.5, color: C.gray400 }}>
               {source?.type === "file" ? `from ${source.file.name}` : "bundled quick-start"} · {spec.fields.length} fields detected
+              {mode === "prefilled" && ` · ${prefilledImages.length} photo(s) found`}
             </span>
             <button onClick={changeTemplate} style={{ ...btn("ghost", "sm"), marginLeft: "auto" }}>
               <ChangeCircleIcon style={{ fontSize: 15, verticalAlign: "-3px" }} />&nbsp;Change template
@@ -340,7 +419,7 @@ export function BulkListingTab() {
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
               <input ref={fileInputRef} type="file" accept=".xlsx" onChange={onFilePicked}
                 disabled={parsing} style={{ fontSize: 12.5 }} />
-              {builtIns.length > 0 && (
+              {mode === "new" && builtIns.length > 0 && (
                 <>
                   <span style={{ fontSize: 11.5, color: C.gray400 }}>or</span>
                   {builtIns.map((b) => (
@@ -354,9 +433,9 @@ export function BulkListingTab() {
               {parsing && <CircularProgress size={18} style={{ color: C.orange }} />}
             </div>
             <div style={{ fontSize: 11, color: C.gray400, marginTop: 8 }}>
-              Upload the category template you download from Meesho's supplier panel
-              (Bulk Upload → download template). Its own fields, dropdowns, and required
-              markers drive everything below — nothing here is hardcoded to one category.
+              {mode === "new"
+                ? 'Upload the category template you download from Meesho’s supplier panel (Bulk Upload → download template), or start from a bundled one. Its own fields, dropdowns, and required markers drive everything below — nothing here is hardcoded to one category.'
+                : "Upload a sheet where you've already dropped one photo per row into its Image 1 (Front) column — e.g. straight after using Meesho's Image Link Generator. We'll read those photos out and build fresh listings from them, keeping each row's own photo as that listing's front image."}
             </div>
           </>
         )}
@@ -364,37 +443,41 @@ export function BulkListingTab() {
 
       {spec && (
         <>
-          <Section title="Photos">
-            <label style={S.label}>Paste your image links (one per line)</label>
-            <textarea value={imageText} onChange={(e) => setImageText(e.target.value)} rows={5}
-              placeholder={"https://…/front.jpg\nhttps://…/photo2.jpg\nhttps://…/photo3.jpg\n…"}
-              style={{ ...S.inp, resize: "vertical", fontFamily: "monospace", fontSize: 12.5 }} />
-            <div style={{ fontSize: 11.5, color: C.gray500, marginTop: 6, lineHeight: 1.6 }}>
-              <b style={{ color: imageUrls.length ? C.green : C.gray400 }}>
-                {imageUrls.length} link{imageUrls.length === 1 ? "" : "s"} pasted
-              </b>
-              {imageSlotCount > 0 && <> · this category has {imageSlotCount} photo slot{imageSlotCount === 1 ? "" : "s"}</>}
-              <br />
-              The first link is the <b>front image</b> and goes on all {ROWS} listings unchanged.
-              {imageUrls.length > 1 && " The rest are shuffled into a different order for each listing."}
-            </div>
-            {imageUrls.length > 0 && (
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
-                {imageUrls.map((u, i) => (
-                  <div key={i} style={{ position: "relative", width: 64, height: 64 }}>
-                    <img src={u} alt={`photo ${i + 1}`} onError={(e) => { e.target.style.opacity = 0.15; }}
-                      style={{ width: 64, height: 64, objectFit: "cover", borderRadius: 8, border: `1px solid ${C.border}` }} />
-                    <span style={{ position: "absolute", top: -6, left: -6, height: 18, borderRadius: 9,
-                      padding: i === 0 ? "0 6px" : 0, width: i === 0 ? "auto" : 18,
-                      background: i === 0 ? C.green : C.orange, color: C.white, fontSize: 10.5, fontWeight: 800,
-                      display: "flex", alignItems: "center", justifyContent: "center" }}>
-                      {i === 0 ? "front" : i + 1}
-                    </span>
-                  </div>
-                ))}
+          {mode === "new" ? (
+            <Section title="Photos">
+              <label style={S.label}>Paste your image links (one per line)</label>
+              <textarea value={imageText} onChange={(e) => setImageText(e.target.value)} rows={5}
+                placeholder={"https://…/photo1.jpg\nhttps://…/photo2.jpg\nhttps://…/photo3.jpg\n…"}
+                style={{ ...S.inp, resize: "vertical", fontFamily: "monospace", fontSize: 12.5 }} />
+              <div style={{ fontSize: 11.5, color: C.gray500, marginTop: 6, lineHeight: 1.6 }}>
+                <b style={{ color: imageUrls.length ? C.green : C.gray400 }}>
+                  {imageUrls.length} link{imageUrls.length === 1 ? "" : "s"} pasted
+                </b>
+                {imageSlotCount > 0 && <> · this category has {imageSlotCount} photo slot{imageSlotCount === 1 ? "" : "s"}</>}
+                <br />
+                One listing per link — each link is that listing's own front image; the rest
+                of its gallery is a random pick from every other link.
               </div>
-            )}
-          </Section>
+              {imageUrls.length > 0 && (
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
+                  {imageUrls.map((u, i) => <ImageThumb key={i} url={u} index={i} isOwn />)}
+                </div>
+              )}
+            </Section>
+          ) : (
+            <Section title="Photos found in this sheet">
+              <div style={{ fontSize: 11.5, color: C.gray500, lineHeight: 1.6 }}>
+                <b style={{ color: C.green }}>{imageUrls.length} photo{imageUrls.length === 1 ? "" : "s"} found</b>,
+                {" "}one per row from the uploaded sheet. Each stays that row's own front
+                image; the rest of its gallery is a random pick from the others.
+              </div>
+              {imageUrls.length > 0 && (
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
+                  {imageUrls.map((u, i) => <ImageThumb key={i} url={u} index={i} isOwn />)}
+                </div>
+              )}
+            </Section>
+          )}
 
           <Section title="Saved presets" right={
             <button onClick={savePreset} disabled={savingPreset} style={btn("ghost", "sm")}>
@@ -461,61 +544,69 @@ export function BulkListingTab() {
             </Section>
           )}
 
-          <Section title="The 4 listings">
-            <div style={{ display: "flex", alignItems: "flex-end", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
-              <div style={{ maxWidth: 260 }}>
-                <label style={S.label}>SKU / Style prefix</label>
-                <input value={prefix} onChange={(e) => setPrefix(e.target.value)}
-                  placeholder="e.g. BRS" style={{ ...S.inp, fontFamily: "monospace" }} />
+          <Section title={`The ${rowCount || ""} listing${rowCount === 1 ? "" : "s"}`.trim()}>
+            {rowCount === 0 ? (
+              <div style={{ fontSize: 12.5, color: C.gray400 }}>
+                {mode === "new" ? "Paste some photo links above to create listings." : "No photos to build listings from."}
               </div>
-              <button onClick={applyPrefix} disabled={!prefix.trim()} style={btn("secondary", "sm")}>
-                <AutoAwesomeIcon style={{ fontSize: 15, verticalAlign: "-3px" }} />&nbsp;Suggest SKU ids for all 4
-              </button>
-            </div>
+            ) : (
+              <>
+                <div style={{ display: "flex", alignItems: "flex-end", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
+                  <div style={{ maxWidth: 260 }}>
+                    <label style={S.label}>SKU / Style prefix</label>
+                    <input value={prefix} onChange={(e) => setPrefix(e.target.value)}
+                      placeholder="e.g. BRS" style={{ ...S.inp, fontFamily: "monospace" }} />
+                  </div>
+                  <button onClick={applyPrefix} disabled={!prefix.trim()} style={btn("secondary", "sm")}>
+                    <AutoAwesomeIcon style={{ fontSize: 15, verticalAlign: "-3px" }} />&nbsp;Suggest SKU ids for all {rowCount}
+                  </button>
+                </div>
 
-            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-              {rows.map((row, i) => (
-                <div key={i} style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 12,
-                  display: "flex", flexDirection: isMobile ? "column" : "row", gap: 10, alignItems: isMobile ? "stretch" : "flex-end" }}>
-                  <Tag variant="blue" fontSize={11}>Row {i + 1}</Tag>
-                  <div style={{ flex: 2, minWidth: 160 }}>
-                    <label style={S.label}>Title *</label>
-                    <input value={row.title} onChange={(e) => setRow(i, "title")(e.target.value)}
-                      style={S.inp} placeholder={`Unique product name for listing ${i + 1}`} />
-                  </div>
-                  <div style={{ flex: 1, minWidth: 120 }}>
-                    <label style={S.label}>SKU id *</label>
-                    <input value={row.sku} onChange={(e) => setRow(i, "sku")(e.target.value)}
-                      style={{ ...S.inp, fontFamily: "monospace" }} />
-                  </div>
-                  <div style={{ flex: 1, minWidth: 120 }}>
-                    <label style={S.label}>Style ID</label>
-                    <input value={row.style} onChange={(e) => setRow(i, "style")(e.target.value)}
-                      style={{ ...S.inp, fontFamily: "monospace" }} placeholder="defaults to SKU id" />
-                  </div>
-                  {/* The order of the other photos is decided per listing when
-                      the sheet is built, so there is nothing truthful to preview
-                      beyond the front image. */}
-                  {imageUrls.length > 0 && (
-                    <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                      <img src={imageUrls[0]} alt="" style={{
-                        width: 30, height: 30, objectFit: "cover", borderRadius: 6,
-                        border: `2px solid ${C.green}`,
-                      }} title="Front image — same on every listing" />
-                      {imageUrls.length > 1 && (
-                        <span style={{ fontSize: 10.5, color: C.gray400, whiteSpace: "nowrap" }}>
-                          +{Math.min(imageUrls.length, Math.max(imageSlotCount, 1)) - 1} shuffled
-                        </span>
+                <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                  {rows.map((row, i) => (
+                    <div key={i} style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 12,
+                      display: "flex", flexDirection: isMobile ? "column" : "row", gap: 10, alignItems: isMobile ? "stretch" : "flex-end" }}>
+                      <Tag variant="blue" fontSize={11}>Row {i + 1}</Tag>
+                      <div style={{ flex: 2, minWidth: 160 }}>
+                        <label style={S.label}>Title *</label>
+                        <input value={row.title} onChange={(e) => setRow(i, "title")(e.target.value)}
+                          style={S.inp} placeholder={`Unique product name for listing ${i + 1}`} />
+                      </div>
+                      <div style={{ flex: 1, minWidth: 120 }}>
+                        <label style={S.label}>SKU id *</label>
+                        <input value={row.sku} onChange={(e) => setRow(i, "sku")(e.target.value)}
+                          style={{ ...S.inp, fontFamily: "monospace" }} />
+                      </div>
+                      <div style={{ flex: 1, minWidth: 120 }}>
+                        <label style={S.label}>Style ID</label>
+                        <input value={row.style} onChange={(e) => setRow(i, "style")(e.target.value)}
+                          style={{ ...S.inp, fontFamily: "monospace" }} placeholder="defaults to SKU id" />
+                      </div>
+                      {/* The order of the other photos is decided per listing when
+                          the sheet is built, so there is nothing truthful to preview
+                          beyond this row's own front image. */}
+                      {imageUrls[i] && (
+                        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                          <img src={imageUrls[i]} alt="" style={{
+                            width: 30, height: 30, objectFit: "cover", borderRadius: 6,
+                            border: `2px solid ${C.green}`,
+                          }} title="This row's own front image" />
+                          {imageUrls.length > 1 && (
+                            <span style={{ fontSize: 10.5, color: C.gray400, whiteSpace: "nowrap" }}>
+                              +{Math.min(imageUrls.length - 1, Math.max(imageSlotCount - 1, 0))} shuffled
+                            </span>
+                          )}
+                        </div>
                       )}
                     </div>
-                  )}
+                  ))}
                 </div>
-              ))}
-            </div>
+              </>
+            )}
           </Section>
 
           <div style={{ display: "flex", justifyContent: "flex-end" }}>
-            <button onClick={generate} disabled={busy} style={btn("primary", "lg")}>
+            <button onClick={generate} disabled={busy || rowCount === 0} style={btn("primary", "lg")}>
               {busy
                 ? "Generating…"
                 : <><DownloadIcon style={{ fontSize: 17, verticalAlign: "-3px" }} />&nbsp;Generate &amp; download sheet</>}

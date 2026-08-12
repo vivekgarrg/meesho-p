@@ -75,7 +75,10 @@ def bulk_listing_parse(request, business_id):
             {k: v for k, v in f.items() if k != "column"}
             for f in spec["fields"]
         ],
-        "rows_per_sheet": bl.ROWS_PER_SHEET,
+        # Photos already sitting in this sheet's own data rows, one per row —
+        # empty for a genuinely blank template. This is what the "Prefilled
+        # Sheet" flow in the UI builds its listings from; "New Sheet" ignores it.
+        "prefilled_images": bl.extract_front_images(spec, wb),
     })
 
 
@@ -127,20 +130,25 @@ def bulk_listing_generate(request, business_id):
     rows_in = payload.get("rows")
     image_urls = payload.get("image_urls")
 
-    # However many photos the seller has. The first is the front image and is
-    # used on every listing; the rest are shuffled per listing, so there is no
-    # longer any reason to demand exactly one per row.
+    # One listing per photo given — "New Sheet" pastes them fresh, "Prefilled
+    # Sheet" pulls them from the uploaded sheet's own rows, but either way the
+    # photo list *is* the row count from here on.
     if (not isinstance(image_urls, list) or not image_urls
             or not all(str(u or "").strip() for u in image_urls)):
-        return Response({"error": "Paste at least one image link — the first is the front image."},
-                        status=status.HTTP_400_BAD_REQUEST)
+        return Response({"error": "Give at least one image link."}, status=status.HTTP_400_BAD_REQUEST)
     image_urls = [str(u).strip() for u in image_urls]
     for u in image_urls:
         if not u.lower().startswith(("http://", "https://")):
             return Response({"error": f"'{u}' doesn't look like a link."}, status=status.HTTP_400_BAD_REQUEST)
+    if len(image_urls) > bl.MAX_ROWS:
+        return Response({"error": f"That's {len(image_urls)} photos — {bl.MAX_ROWS} is the most one sheet can hold."},
+                        status=status.HTTP_400_BAD_REQUEST)
 
-    if not isinstance(rows_in, list) or len(rows_in) != bl.ROWS_PER_SHEET:
-        return Response({"error": f"Send exactly {bl.ROWS_PER_SHEET} rows."}, status=status.HTTP_400_BAD_REQUEST)
+    if not isinstance(rows_in, list) or len(rows_in) != len(image_urls):
+        return Response(
+            {"error": f"Send one row per photo — {len(image_urls)} photo(s), {len(rows_in) if isinstance(rows_in, list) else 0} row(s)."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
     titles, skus, styles = [], [], []
     for i, row in enumerate(rows_in):
@@ -158,13 +166,13 @@ def bulk_listing_generate(request, business_id):
         styles.append(style)
 
     if len({t.strip().lower() for t in titles}) != len(titles):
-        return Response({"error": "Titles must be different for each of the 4 rows."},
+        return Response({"error": "Titles must be different for every row."},
                         status=status.HTTP_400_BAD_REQUEST)
     if len({_sku_key(s) for s in skus}) != len(skus):
-        return Response({"error": "SKU ids must be different for each of the 4 rows."},
+        return Response({"error": "SKU ids must be different for every row."},
                         status=status.HTTP_400_BAD_REQUEST)
     if len({_sku_key(s) for s in styles}) != len(styles):
-        return Response({"error": "Style ids must be different for each of the 4 rows."},
+        return Response({"error": "Style ids must be different for every row."},
                         status=status.HTTP_400_BAD_REQUEST)
 
     clash = _existing_sku_clash(business, skus)
@@ -246,10 +254,10 @@ def bulk_listing_generate(request, business_id):
                             status=status.HTTP_400_BAD_REQUEST)
 
     slots = bl.image_slots(spec)
-    planned = bl.plan_images(image_urls, len(slots), bl.ROWS_PER_SHEET)
+    planned = bl.plan_images(image_urls, len(slots))
     rows = [
         {"product_name": titles[i], "sku_id": skus[i], "style_id": styles[i], "images": planned[i]}
-        for i in range(bl.ROWS_PER_SHEET)
+        for i in range(len(image_urls))
     ]
 
     bl.build_workbook(spec, wb, shared, rows)
