@@ -57,6 +57,21 @@ function planGroupIds(rowCount, listingType, base) {
   return Array.from({ length: rowCount }, (_, i) => (listingType === "variation" ? `${b} 1` : `${b} ${i + 1}`));
 }
 
+/**
+ * Mirrors bulk_listing.validate_money server-side: a positive number, at
+ * most 2 decimal places, strictly under moneyMax. Checked here too so a
+ * value Meesho would reject (and that the server would also reject) gets
+ * flagged the moment it's typed, not after a round trip.
+ */
+function validateMoney(value, moneyMax) {
+  const text = String(value ?? "").trim();
+  if (!text) return true; // blank is a "required" concern, not a money-format one
+  const n = Number(text);
+  if (!Number.isFinite(n) || n <= 0 || n >= moneyMax) return false;
+  const cents = Math.round(n * 100);
+  return Math.abs(n * 100 - cents) < 1e-6;
+}
+
 function Section({ title, right, children }) {
   return (
     <div style={S.card}>
@@ -81,7 +96,9 @@ function Field({ def, value, onChange }) {
   const options = def.options || [];
   const wide = def.type === "textarea";
   const empty = def.required && !String(value ?? "").trim();
-  const inpStyle = empty ? { ...S.inp, borderColor: C.red } : S.inp;
+  const moneyInvalid = def.money_max != null && !validateMoney(value, def.money_max);
+  const invalid = empty || moneyInvalid;
+  const inpStyle = invalid ? { ...S.inp, borderColor: C.red } : S.inp;
   return (
     <div style={wide ? { gridColumn: "1 / -1" } : undefined}>
       <label style={S.label}>{def.label}{def.required ? " *" : ""}</label>
@@ -106,6 +123,11 @@ function Field({ def, value, onChange }) {
       ) : (
         <input value={value ?? ""} onChange={(e) => onChange(e.target.value)}
           type="text" style={inpStyle} />
+      )}
+      {moneyInvalid && (
+        <div style={{ fontSize: 10.5, color: C.red, marginTop: 3, fontWeight: 600 }}>
+          Must be a positive number under {def.money_max.toLocaleString("en-IN")}, with at most 2 decimal places.
+        </div>
       )}
     </div>
   );
@@ -314,6 +336,18 @@ export function BulkListingTab() {
     [sharedFields, importerFields, needsImporter, shared]
   );
 
+  // Money-shaped fields (Meesho Price, MRP, …) get checked whenever they
+  // have a value, required or not — same rule the server enforces, just
+  // surfaced before the round trip.
+  const invalidMoney = useMemo(
+    () => sharedFields.filter((f) => {
+      if (f.money_max == null) return false;
+      const v = String(shared[f.key] ?? "").trim();
+      return v !== "" && !validateMoney(v, f.money_max);
+    }),
+    [sharedFields, shared]
+  );
+
   const loadPreset = (id) => {
     setPresetId(id);
     if (!id) { setCoveredKeys(new Set()); return; }
@@ -372,6 +406,10 @@ export function BulkListingTab() {
     }
     if (missingRequired.length) {
       setMsg({ type: "error", text: `Fill in: ${missingRequired.map((f) => f.label).join(", ")}.` });
+      return;
+    }
+    if (invalidMoney.length) {
+      setMsg({ type: "error", text: `Fix: ${invalidMoney.map((f) => f.label).join(", ")} — positive number, at most 2 decimal places.` });
       return;
     }
     const payload = {

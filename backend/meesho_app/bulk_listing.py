@@ -112,21 +112,26 @@ def _sqref_start(dv):
 
 def _column_validations(wb, ws):
     """
-    {column_letter: {"options": [...] or None, "start_row": int or None}} —
-    `start_row` is the first row that column's own validation applies to
-    (used to find where real data starts without hardcoding a row number),
-    `options` is the resolved dropdown list for list-type validations, read
-    from wherever the validation's own formula actually points (not
-    hand-transcribed, so it can't drift from what the file really allows).
+    {column_letter: {"options": [...] or None, "start_row": int or None,
+    "custom_formula": str or None}} — `start_row` is the first row that
+    column's own validation applies to (used to find where real data starts
+    without hardcoding a row number), `options` is the resolved dropdown
+    list for list-type validations, read from wherever the validation's own
+    formula actually points (not hand-transcribed, so it can't drift from
+    what the file really allows), `custom_formula` is a "custom"-type
+    validation's raw Excel formula (e.g. the price-shaped constraint that
+    guards Meesho Price — see `_money_constraint`).
     """
     out = {}
     for dv in ws.data_validations.dataValidation:
         col, row = _sqref_start(dv)
         if not col:
             continue
-        entry = out.setdefault(col, {"options": None, "start_row": None})
+        entry = out.setdefault(col, {"options": None, "start_row": None, "custom_formula": None})
         if row is not None and (entry["start_row"] is None or row < entry["start_row"]):
             entry["start_row"] = row
+        if dv.type == "custom" and entry["custom_formula"] is None and dv.formula1:
+            entry["custom_formula"] = dv.formula1.strip()
         if dv.type == "list" and entry["options"] is None and dv.formula1:
             raw = dv.formula1.strip()
             m = _RANGE_RE.match(raw)
@@ -170,6 +175,44 @@ _NUMBER_HINT = re.compile(
     r"price|mrp|weight|quantity|breadth|height|length|inventory|gst|%", re.I
 )
 _TEXTAREA_HINT = re.compile(r"description|address", re.I)
+
+# Meesho guards its money-shaped columns (Meesho Price, MRP, and — in the
+# newer templates — the unlabelled shadow input beside them) with a custom
+# Excel validation shaped like `AND(MOD(F5*100,1)=0,F5>0,F5<10000000)`:
+# positive, at most 2 decimal places (the *100 test is the "no more than
+# paise" check), under some ceiling. Recognising this formula shape — instead
+# of hardcoding it to "Meesho Price" — means any column Meesho guards the
+# same way gets the same real validation, not just the one we've seen fail.
+_MONEY_CONSTRAINT_RE = re.compile(
+    r"MOD\([A-Z]+\d+\*100,\s*1\)\s*=\s*0.*?<\s*(\d+(?:\.\d+)?)", re.I
+)
+
+
+def _money_constraint(formula):
+    """The ceiling from a price-shaped custom validation formula, or None if
+    `formula` isn't shaped like one."""
+    if not formula:
+        return None
+    m = _MONEY_CONSTRAINT_RE.search(formula)
+    return float(m.group(1)) if m else None
+
+
+def validate_money(value, money_max):
+    """
+    True if `value` satisfies Meesho's own price-shaped constraint: a
+    positive number, at most 2 decimal places, strictly under `money_max`.
+    Mirrors the exact rule in the template's own validation formula (see
+    `_money_constraint`) so a value that would pass Meesho's own check is
+    never rejected here, and — the point of this function — a value that
+    would *fail* Meesho's check never reaches the sheet in the first place.
+    """
+    try:
+        number = Decimal(str(value).strip())
+    except (InvalidOperation, ValueError):
+        return False
+    if number <= 0 or number >= Decimal(str(money_max)):
+        return False
+    return (number * 100) == (number * 100).to_integral_value()
 
 
 def _detect_role(label):
@@ -315,9 +358,23 @@ def parse_template(source):
             "options": options,
             "role": _detect_role(label),
             "mirror_columns": [],
+            "money_max": None,
         })
 
     _attach_mirror_columns(ws, fields, col_validations)
+
+    # A field's real constraint may live on its own column, its mirror
+    # column, or both (Meesho Price carries it on the unlabelled shadow
+    # column in newer templates, on the labelled one in older ones) — check
+    # every column this field could be written to, not just its own.
+    for f in fields:
+        for col in [f["column"], *f["mirror_columns"]]:
+            constraint = _money_constraint(col_validations.get(col, {}).get("custom_formula"))
+            if constraint is not None:
+                f["money_max"] = constraint
+                if f["type"] != "number":
+                    f["type"] = "number"
+                break
 
     return {
         "category_label": category_label,

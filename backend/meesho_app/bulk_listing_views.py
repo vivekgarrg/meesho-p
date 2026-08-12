@@ -255,6 +255,16 @@ def bulk_listing_generate(request, business_id):
         if safe_decimal(value) is None:
             return Response({"error": f"'{f['label']}' must be a number."},
                             status=status.HTTP_400_BAD_REQUEST)
+        # Money-shaped fields (Meesho Price, MRP, …) carry a real constraint
+        # in the template's own validation — positive, at most 2 decimal
+        # places, under some ceiling — enforced here so a value Meesho would
+        # itself reject never makes it into the generated sheet.
+        if f["money_max"] is not None and not bl.validate_money(value, f["money_max"]):
+            return Response(
+                {"error": f"'{f['label']}' must be a positive number under {f['money_max']:,.0f}, "
+                          f"with at most 2 decimal places."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
     slots = bl.image_slots(spec)
     planned = bl.plan_images(image_urls, len(slots))
