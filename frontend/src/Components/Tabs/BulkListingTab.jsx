@@ -35,15 +35,26 @@ const MODES = [
 
 // Categories carry however many image columns they carry — four in some, well
 // over a dozen in others — so image roles are matched by shape, not listed.
-const FIXED_PER_ROW_ROLES = new Set(["title", "sku", "style"]);
+const FIXED_PER_ROW_ROLES = new Set(["title", "sku", "style", "group_id"]);
 const isPerRowRole = (role) => FIXED_PER_ROW_ROLES.has(role) || /^image_\d+$/.test(role || "");
+
+const LISTING_TYPES = [
+  { id: "unique", label: "Unique Listing", hint: "Every row is its own catalog — a different Group ID per row" },
+  { id: "variation", label: "Variation Listing", hint: "Every row is a variant of the same product — one Group ID for all" },
+];
 
 function parseImageUrls(text) {
   return (text || "").split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
 }
 
 function emptyRow() {
-  return { title: "", sku: "", style: "" };
+  return { title: "", sku: "", style: "", groupId: "" };
+}
+
+/** Mirrors bulk_listing.plan_group_ids server-side, for the live preview. */
+function planGroupIds(rowCount, listingType, base) {
+  const b = (base || "Group").trim() || "Group";
+  return Array.from({ length: rowCount }, (_, i) => (listingType === "variation" ? `${b} 1` : `${b} ${i + 1}`));
 }
 
 function Section({ title, right, children }) {
@@ -69,20 +80,32 @@ function FieldGrid({ children }) {
 function Field({ def, value, onChange }) {
   const options = def.options || [];
   const wide = def.type === "textarea";
+  const empty = def.required && !String(value ?? "").trim();
+  const inpStyle = empty ? { ...S.inp, borderColor: C.red } : S.inp;
   return (
     <div style={wide ? { gridColumn: "1 / -1" } : undefined}>
       <label style={S.label}>{def.label}{def.required ? " *" : ""}</label>
       {def.type === "select" ? (
-        <select value={value ?? ""} onChange={(e) => onChange(e.target.value)} style={S.inp}>
+        <select value={value ?? ""} onChange={(e) => onChange(e.target.value)} style={inpStyle}>
           <option value="">—</option>
           {options.map((o) => <option key={o} value={o}>{o}</option>)}
         </select>
       ) : def.type === "textarea" ? (
         <textarea value={value ?? ""} onChange={(e) => onChange(e.target.value)} rows={2}
-          style={{ ...S.inp, resize: "vertical" }} />
+          style={{ ...inpStyle, resize: "vertical" }} />
+      ) : def.type === "number" ? (
+        // A native <input type="number"> silently reports an empty .value for
+        // perfectly normal in-progress text — a bare "-", a trailing ".", a
+        // comma typed as a decimal separator — so a real number the user
+        // typed can vanish from state without any error ever firing. Plain
+        // text with a numeric keyboard hint avoids that whole class of bug;
+        // the actual numeric coercion happens server-side (see
+        // bulk_listing.coerce_cell) regardless of what's typed here.
+        <input value={value ?? ""} onChange={(e) => onChange(e.target.value)}
+          type="text" inputMode="decimal" style={inpStyle} />
       ) : (
         <input value={value ?? ""} onChange={(e) => onChange(e.target.value)}
-          type={def.type === "number" ? "number" : "text"} step="0.01" style={S.inp} />
+          type="text" style={inpStyle} />
       )}
     </div>
   );
@@ -122,6 +145,8 @@ export function BulkListingTab() {
   const [imageText, setImageText] = useState("");     // "New Sheet" mode input
   const [prefilledImages, setPrefilledImages] = useState([]); // "Prefilled Sheet" mode input
   const [prefix, setPrefix] = useState("");
+  const [listingType, setListingType] = useState("unique");
+  const [groupIdBase, setGroupIdBase] = useState("Group");
   const [rows, setRows] = useState([]);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
@@ -233,6 +258,11 @@ export function BulkListingTab() {
     }));
   };
 
+  const applyGroupIds = () => {
+    const planned = planGroupIds(rows.length, listingType, groupIdBase);
+    setRows((rs) => rs.map((r, i) => ({ ...r, groupId: planned[i] })));
+  };
+
   const setRow = (i, key) => (value) =>
     setRows((rs) => rs.map((r, j) => (j === i ? { ...r, [key]: value } : r)));
 
@@ -240,6 +270,7 @@ export function BulkListingTab() {
     () => (spec ? spec.fields.filter((f) => !isPerRowRole(f.role)) : []),
     [spec]
   );
+  const groupIdField = useMemo(() => spec?.fields.find((f) => f.role === "group_id") || null, [spec]);
   const importerFields = useMemo(
     () => sharedFields.filter((f) => f.role && f.role.startsWith("importer_")),
     [sharedFields]
@@ -268,6 +299,20 @@ export function BulkListingTab() {
 
   const visibleFields = sharedFields.filter((f) => !excludedFromGrid.has(f.key) && !coveredKeys.has(f.key));
   const hiddenByPreset = sharedFields.filter((f) => coveredKeys.has(f.key));
+
+  // Caught here, before the network call, so a required field that's empty
+  // (Meesho Price included) can never silently produce a blank cell — the
+  // server would reject it too, but a clear message beats a round trip.
+  // Importer fields are exempt exactly when the template itself would mark
+  // them "Not Required" (country of origin is India).
+  const missingRequired = useMemo(
+    () => sharedFields.filter((f) => {
+      if (!f.required) return false;
+      if (importerFields.some((imp) => imp.key === f.key) && !needsImporter) return false;
+      return !String(shared[f.key] ?? "").trim();
+    }),
+    [sharedFields, importerFields, needsImporter, shared]
+  );
 
   const loadPreset = (id) => {
     setPresetId(id);
@@ -325,9 +370,13 @@ export function BulkListingTab() {
       });
       return;
     }
+    if (missingRequired.length) {
+      setMsg({ type: "error", text: `Fill in: ${missingRequired.map((f) => f.label).join(", ")}.` });
+      return;
+    }
     const payload = {
       shared,
-      rows: rows.map((r) => ({ product_name: r.title, sku_id: r.sku, style_id: r.style })),
+      rows: rows.map((r) => ({ product_name: r.title, sku_id: r.sku, style_id: r.style, group_id: r.groupId })),
       image_urls: imageUrls,
     };
     const fd = new FormData();
@@ -562,6 +611,41 @@ export function BulkListingTab() {
                   </button>
                 </div>
 
+                {groupIdField && (
+                  <div style={{ marginBottom: 14, padding: 12, borderRadius: 10,
+                    background: C.gray50, border: `1px solid ${C.border}` }}>
+                    <label style={S.label}>Listing type</label>
+                    <div style={{ display: "flex", alignItems: "flex-end", gap: 8, flexWrap: "wrap" }}>
+                      <div style={{ display: "inline-flex", background: C.white, borderRadius: 10, padding: 3,
+                        border: `1px solid ${C.border}` }}>
+                        {LISTING_TYPES.map((t) => (
+                          <button key={t.id} onClick={() => setListingType(t.id)} title={t.hint}
+                            style={{ border: "none", cursor: "pointer", fontFamily: "inherit",
+                              background: listingType === t.id ? C.orange : "transparent",
+                              color: listingType === t.id ? C.white : C.gray600,
+                              fontWeight: listingType === t.id ? 800 : 600, fontSize: 12.5,
+                              padding: "6px 13px", borderRadius: 8 }}>
+                            {t.label}
+                          </button>
+                        ))}
+                      </div>
+                      <div style={{ maxWidth: 180 }}>
+                        <label style={S.label}>Group ID base</label>
+                        <input value={groupIdBase} onChange={(e) => setGroupIdBase(e.target.value)}
+                          placeholder="Group" style={S.inp} />
+                      </div>
+                      <button onClick={applyGroupIds} style={btn("secondary", "sm")}>
+                        <AutoAwesomeIcon style={{ fontSize: 15, verticalAlign: "-3px" }} />&nbsp;Apply group ids
+                      </button>
+                    </div>
+                    <div style={{ fontSize: 11, color: C.gray400, marginTop: 8 }}>
+                      {listingType === "unique"
+                        ? `Unique Listing — every row gets its own group (${planGroupIds(Math.min(rowCount, 3), "unique", groupIdBase).join(", ")}${rowCount > 3 ? ", …" : ""}), so each becomes its own catalog.`
+                        : `Variation Listing — every row shares one group (${planGroupIds(1, "variation", groupIdBase)[0]}), so Meesho treats them as variants of the same product.`}
+                    </div>
+                  </div>
+                )}
+
                 <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                   {rows.map((row, i) => (
                     <div key={i} style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 12,
@@ -582,6 +666,13 @@ export function BulkListingTab() {
                         <input value={row.style} onChange={(e) => setRow(i, "style")(e.target.value)}
                           style={{ ...S.inp, fontFamily: "monospace" }} placeholder="defaults to SKU id" />
                       </div>
+                      {groupIdField && (
+                        <div style={{ flex: 1, minWidth: 120 }}>
+                          <label style={S.label}>Group ID</label>
+                          <input value={row.groupId} onChange={(e) => setRow(i, "groupId")(e.target.value)}
+                            style={{ ...S.inp, fontFamily: "monospace" }} placeholder="e.g. Group 1" />
+                        </div>
+                      )}
                       {/* The order of the other photos is decided per listing when
                           the sheet is built, so there is nothing truthful to preview
                           beyond this row's own front image. */}

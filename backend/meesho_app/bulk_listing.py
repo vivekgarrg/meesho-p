@@ -36,8 +36,11 @@ MAX_ROWS = 300
 
 # Which detected roles are per-row (varying) rather than shared across all 4
 # rows. Everything else on the sheet — including fields we still recognise by
-# role, like Country of Origin — is shared.
-_FIXED_PER_ROW_ROLES = {"title", "sku", "style"}
+# role, like Country of Origin — is shared. Group ID is per-row (not simply
+# shared like Country of Origin) because its whole point is to sometimes
+# *not* be the same on every row — see plan_group_ids: "unique listing" wants
+# a different group per row, "variation listing" wants one group for all.
+_FIXED_PER_ROW_ROLES = {"title", "sku", "style", "group_id"}
 _IMAGE_ROLE = re.compile(r"^image_(\d+)$")
 
 
@@ -193,6 +196,8 @@ def _detect_role(label):
         return "importer_address"
     if l.startswith("importer pincode"):
         return "importer_pincode"
+    if l.startswith("group id"):
+        return "group_id"
     return None
 
 
@@ -354,6 +359,27 @@ def extract_front_images(spec, wb):
     return urls
 
 
+LISTING_TYPE_UNIQUE = "unique"
+LISTING_TYPE_VARIATION = "variation"
+
+
+def plan_group_ids(row_count, listing_type, base="Group"):
+    """
+    Group ID per row — Meesho's own mechanism for tying several rows together
+    into one catalog ("Enter same group ID for the products which should be
+    grouped in a single catalog").
+
+    "unique listing": every row is its own catalog, so every row gets a
+    different group — "Group 1", "Group 2", "Group 3" …
+    "variation listing": every row is a variant of the *same* product, so
+    every row gets the same group — "Group 1" for all.
+    """
+    base = (base or "Group").strip() or "Group"
+    if listing_type == LISTING_TYPE_VARIATION:
+        return [f"{base} 1"] * row_count
+    return [f"{base} {i + 1}" for i in range(row_count)]
+
+
 def resolve_wrong_defective_price(meesho_price, override):
     if override not in (None, ""):
         return override
@@ -403,12 +429,12 @@ def coerce_cell(field, value):
 
 def build_workbook(spec, wb, shared, rows):
     """
-    Writes `rows` (dicts of `product_name`, `sku_id`, `style_id`, `images` =
-    an ordered list, one URL per image slot — as many rows as the caller
-    gives) into the parsed sheet starting at `spec["data_start_row"]`, and
-    every key in `shared` onto every row via the matching field's column.
-    Everything else in the workbook — every other sheet, every other cell —
-    is untouched.
+    Writes `rows` (dicts of `product_name`, `sku_id`, `style_id`,
+    `group_id` (optional — see plan_group_ids), `images` = an ordered list,
+    one URL per image slot — as many rows as the caller gives) into the
+    parsed sheet starting at `spec["data_start_row"]`, and every key in
+    `shared` onto every row via the matching field's column. Everything else
+    in the workbook — every other sheet, every other cell — is untouched.
     """
     ws = wb[spec["sheet_name"]]
     per_row_fields = {f["role"]: f for f in spec["fields"] if f["role"] in PER_ROW_ROLES}
@@ -423,6 +449,8 @@ def build_workbook(spec, wb, shared, rows):
             ws[f'{per_row_fields["sku"]["column"]}{r}'] = row["sku_id"]
         if "style" in per_row_fields:
             ws[f'{per_row_fields["style"]["column"]}{r}'] = row["style_id"]
+        if "group_id" in per_row_fields and row.get("group_id"):
+            ws[f'{per_row_fields["group_id"]["column"]}{r}'] = row["group_id"]
 
         for slot, url in zip(image_slots(spec), row["images"]):
             if slot in per_row_fields and url:

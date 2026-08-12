@@ -150,7 +150,7 @@ def bulk_listing_generate(request, business_id):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    titles, skus, styles = [], [], []
+    titles, skus, styles, group_ids = [], [], [], []
     for i, row in enumerate(rows_in):
         if not isinstance(row, dict):
             return Response({"error": "Malformed row data."}, status=status.HTTP_400_BAD_REQUEST)
@@ -164,6 +164,9 @@ def bulk_listing_generate(request, business_id):
         titles.append(title)
         skus.append(sku)
         styles.append(style)
+        # Unlike title/SKU/style, group id is deliberately allowed to repeat —
+        # that's what "variation listing" (same group on every row) means.
+        group_ids.append(str(row.get("group_id") or "").strip())
 
     if len({t.strip().lower() for t in titles}) != len(titles):
         return Response({"error": "Titles must be different for every row."},
@@ -256,7 +259,10 @@ def bulk_listing_generate(request, business_id):
     slots = bl.image_slots(spec)
     planned = bl.plan_images(image_urls, len(slots))
     rows = [
-        {"product_name": titles[i], "sku_id": skus[i], "style_id": styles[i], "images": planned[i]}
+        {
+            "product_name": titles[i], "sku_id": skus[i], "style_id": styles[i],
+            "group_id": group_ids[i], "images": planned[i],
+        }
         for i in range(len(image_urls))
     ]
 
