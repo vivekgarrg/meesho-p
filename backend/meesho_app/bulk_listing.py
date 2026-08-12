@@ -221,6 +221,43 @@ def load_workbook(source):
         raise ValueError(f"Could not read that as an Excel file: {exc}") from exc
 
 
+def _attach_mirror_columns(ws, fields, col_validations):
+    """
+    Meesho's newer category templates insert extra "system" columns right
+    after some fields — e.g. next to the labelled, Compulsory "Meesho Price"
+    column, a plain "Enter Meesho Price" column with its own per-row numeric
+    validation but *no* row2/row3 header of its own, so the normal scan above
+    never sees it as a field. Meesho's importer reads that unlabelled cell,
+    not the labelled one — so a value that's clearly filled in the labelled
+    column can still come back "Meesho Price is empty" from Meesho's side,
+    because the cell it actually checks was never written.
+
+    This finds those columns after the fact: any column with real per-row
+    validation that wasn't already claimed as a field, whose row4 hint text
+    ("Enter Meesho Price") names an *already-detected* field ("Meesho
+    Price") — matched by checking whether that field's key is a substring of
+    the hint, slugified the same way field labels are. Matched columns are
+    recorded on `mirror_columns` so build_workbook writes the same value into
+    both places; unmatched ones are left alone rather than guessed at, since
+    a wrongly-invented required field is worse than not handling a new one.
+    """
+    claimed = {f["column"] for f in fields}
+    for col, info in col_validations.items():
+        if col in claimed or not info.get("start_row"):
+            continue
+        ci = openpyxl.utils.column_index_from_string(col)
+        hint = ws.cell(row=4, column=ci).value
+        if not hint or "system generated" in str(hint).lower():
+            continue
+        hint_slug = re.sub(r"[^a-z0-9]+", "_", str(hint).lower()).strip("_")
+        for f in fields:
+            # The length floor keeps a short, generic key (e.g. "type") from
+            # matching hint text that happens to contain it by coincidence.
+            if len(f["key"]) >= 4 and f["key"] in hint_slug:
+                f["mirror_columns"].append(col)
+                break
+
+
 def parse_template(source):
     """
     `source`: an already-loaded `openpyxl.Workbook` (see `load_workbook`
@@ -277,7 +314,10 @@ def parse_template(source):
             "type": _field_type(label, bool(options)),
             "options": options,
             "role": _detect_role(label),
+            "mirror_columns": [],
         })
+
+    _attach_mirror_columns(ws, fields, col_validations)
 
     return {
         "category_label": category_label,
@@ -459,6 +499,12 @@ def build_workbook(spec, wb, shared, rows):
         for f in shared_fields:
             value = shared.get(f["key"])
             if value not in (None, ""):
-                ws[f'{f["column"]}{r}'] = coerce_cell(f, value)
+                cell_value = coerce_cell(f, value)
+                ws[f'{f["column"]}{r}'] = cell_value
+                # Some templates carry an unlabelled "shadow" copy of a field
+                # that Meesho's importer reads instead of (or as well as) the
+                # labelled cell — see _attach_mirror_columns. Keep them in sync.
+                for mirror_col in f.get("mirror_columns", []):
+                    ws[f'{mirror_col}{r}'] = cell_value
 
     return wb

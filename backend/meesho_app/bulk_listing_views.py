@@ -72,7 +72,7 @@ def bulk_listing_parse(request, business_id):
     return Response({
         "category_label": spec["category_label"],
         "fields": [
-            {k: v for k, v in f.items() if k != "column"}
+            {k: v for k, v in f.items() if k not in ("column", "mirror_columns")}
             for f in spec["fields"]
         ],
         # Photos already sitting in this sheet's own data rows, one per row —
