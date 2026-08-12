@@ -1,5 +1,6 @@
 {
   "permissions": {
+    "defaultMode": "bypassPermissions",
     "allow": [
       "Bash(python3 manage.py makemigrations meesho_app --name=\"ads_cost_unique_constraint\")",
       "Bash(python3 manage.py dbshell)",

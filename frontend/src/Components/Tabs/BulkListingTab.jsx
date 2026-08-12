@@ -29,9 +29,11 @@ import { CircularProgress } from "@mui/material";
  */
 
 const MODES = [
-  { id: "new", label: "New Sheet", hint: "Paste your own photo links" },
-  { id: "prefilled", label: "Prefilled Sheet", hint: "Upload a sheet that already has one photo per row" },
+  { id: "new", label: "New Sheet", hint: "Paste your own photo links (Meesho)", platform: "meesho" },
+  { id: "prefilled", label: "Prefilled Sheet", hint: "Upload a Meesho sheet that already has one photo per row", platform: "meesho" },
+  { id: "flipkart", label: "Flipkart Listing", hint: "Upload your Flipkart category template", platform: "flipkart" },
 ];
+const MODE_PLATFORM = Object.fromEntries(MODES.map((m) => [m.id, m.platform]));
 
 // Categories carry however many image columns they carry — four in some, well
 // over a dozen in others — so image roles are matched by shape, not listed.
@@ -209,6 +211,7 @@ export function BulkListingTab() {
       const fd = new FormData();
       if (src.type === "file") fd.append("file", src.file);
       else fd.append("built_in", src.key);
+      fd.append("platform", MODE_PLATFORM[mode] || "meesho");
       const res = await fetch(`${API}/bulk-listing/parse/`, { method: "POST", body: fd });
       const d = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -293,6 +296,7 @@ export function BulkListingTab() {
     [spec]
   );
   const groupIdField = useMemo(() => spec?.fields.find((f) => f.role === "group_id") || null, [spec]);
+  const titleField = useMemo(() => spec?.fields.find((f) => f.role === "title") || null, [spec]);
   const importerFields = useMemo(
     () => sharedFields.filter((f) => f.role && f.role.startsWith("importer_")),
     [sharedFields]
@@ -420,6 +424,7 @@ export function BulkListingTab() {
     const fd = new FormData();
     if (source.type === "file") fd.append("file", source.file);
     else fd.append("built_in", source.key);
+    fd.append("platform", MODE_PLATFORM[mode] || "meesho");
     fd.append("payload", JSON.stringify(payload));
 
     setBusy(true);
@@ -434,12 +439,12 @@ export function BulkListingTab() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = "bulk-listing.xlsx";
+      a.download = mode === "flipkart" ? "bulk-listing.xls" : "bulk-listing.xlsx";
       document.body.appendChild(a);
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
-      setMsg({ type: "success", text: "Sheet downloaded — ready to upload on Meesho." });
+      setMsg({ type: "success", text: `Sheet downloaded — ready to upload on ${mode === "flipkart" ? "Flipkart" : "Meesho"}.` });
     } catch {
       setMsg({ type: "error", text: "Network error." });
     } finally {
@@ -504,7 +509,7 @@ export function BulkListingTab() {
         ) : (
           <>
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-              <input ref={fileInputRef} type="file" accept=".xlsx" onChange={onFilePicked}
+              <input ref={fileInputRef} type="file" accept={mode === "flipkart" ? ".xls,.xlsx" : ".xlsx"} onChange={onFilePicked}
                 disabled={parsing} style={{ fontSize: 12.5 }} />
               {mode === "new" && builtIns.length > 0 && (
                 <>
@@ -522,6 +527,8 @@ export function BulkListingTab() {
             <div style={{ fontSize: 11, color: C.gray400, marginTop: 8 }}>
               {mode === "new"
                 ? 'Upload the category template you download from Meesho’s supplier panel (Bulk Upload → download template), or start from a bundled one. Its own fields, dropdowns, and required markers drive everything below — nothing here is hardcoded to one category.'
+                : mode === "flipkart"
+                ? "Upload the category template you download from Flipkart's seller panel (the .xls listing template for that category). Its own fields, dropdowns, and required markers drive everything below — nothing here is hardcoded to one category."
                 : "Upload a sheet where you've already dropped one photo per row into its Image 1 (Front) column — e.g. straight after using Meesho's Image Link Generator. We'll read those photos out and build fresh listings from them, keeping each row's own photo as that listing's front image."}
             </div>
           </>
@@ -530,7 +537,7 @@ export function BulkListingTab() {
 
       {spec && (
         <>
-          {mode === "new" ? (
+          {mode !== "prefilled" ? (
             <Section title="Photos">
               <label style={S.label}>Paste your image links (one per line)</label>
               <textarea value={imageText} onChange={(e) => setImageText(e.target.value)} rows={5}
@@ -634,7 +641,7 @@ export function BulkListingTab() {
           <Section title={`The ${rowCount || ""} listing${rowCount === 1 ? "" : "s"}`.trim()}>
             {rowCount === 0 ? (
               <div style={{ fontSize: 12.5, color: C.gray400 }}>
-                {mode === "new" ? "Paste some photo links above to create listings." : "No photos to build listings from."}
+                {mode !== "prefilled" ? "Paste some photo links above to create listings." : "No photos to build listings from."}
               </div>
             ) : (
               <>
@@ -689,11 +696,13 @@ export function BulkListingTab() {
                     <div key={i} style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 12,
                       display: "flex", flexDirection: isMobile ? "column" : "row", gap: 10, alignItems: isMobile ? "stretch" : "flex-end" }}>
                       <Tag variant="blue" fontSize={11}>Row {i + 1}</Tag>
-                      <div style={{ flex: 2, minWidth: 160 }}>
-                        <label style={S.label}>Title *</label>
-                        <input value={row.title} onChange={(e) => setRow(i, "title")(e.target.value)}
-                          style={S.inp} placeholder={`Unique product name for listing ${i + 1}`} />
-                      </div>
+                      {titleField && (
+                        <div style={{ flex: 2, minWidth: 160 }}>
+                          <label style={S.label}>Title *</label>
+                          <input value={row.title} onChange={(e) => setRow(i, "title")(e.target.value)}
+                            style={S.inp} placeholder={`Unique product name for listing ${i + 1}`} />
+                        </div>
+                      )}
                       <div style={{ flex: 1, minWidth: 120 }}>
                         <label style={S.label}>SKU id *</label>
                         <input value={row.sku} onChange={(e) => setRow(i, "sku")(e.target.value)}

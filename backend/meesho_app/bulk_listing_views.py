@@ -22,26 +22,48 @@ from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
 
 from . import bulk_listing as bl
+from . import bulk_listing_flipkart as blf
 from .models import BulkListingFieldPreset, FinalPrice, TaskListing
 from .permissions import get_authorized_business
 from .serializers import BulkListingFieldPresetSerializer
 from .views import _sku_key, _workbook_from_upload, safe_decimal
 
+# Each module exposes the same contract — load_workbook/parse_template/
+# build_workbook returning the same spec-dict shape — so everything below
+# this point (validation, uniqueness checks, shared-field handling) is
+# written once and works for either platform. Only *loading* a template
+# (openpyxl vs xlrd — see bulk_listing_flipkart's module docstring for why
+# Flipkart needs an entirely different pair of libraries) and *saving* the
+# result (.xlsx vs legacy .xls) differ per platform.
+_PLATFORM_MODULES = {"meesho": bl, "flipkart": blf}
 
-def _resolve_source(request):
+
+def _resolve_platform(request):
+    platform = str(request.data.get("platform") or "meesho").strip().lower()
+    module = _PLATFORM_MODULES.get(platform)
+    if not module:
+        raise ValueError(f"Unknown platform '{platform}'.")
+    return platform, module
+
+
+def _resolve_source(request, module, platform):
     """
-    The template to use for this request: whatever file was uploaded, or the
-    built-in one the caller named. Returns an openpyxl Workbook, or raises
-    ValueError (bad file) / KeyError (unknown built_in) for the view to turn
-    into a 400.
+    The template to use for this request: whatever file was uploaded, or
+    (Meesho only — Flipkart's field set is too category-specific for one
+    bundled example to generalize) the built-in one the caller named.
+    Returns a loaded workbook handle in whatever shape `module.load_workbook`
+    returns, or raises ValueError (bad file) / KeyError (unknown built_in)
+    for the view to turn into a 400.
     """
     uploaded = request.FILES.get("file")
     built_in = str(request.data.get("built_in") or "").strip()
     if uploaded:
         source, _extracted = _workbook_from_upload(uploaded)
-        return bl.load_workbook(source)
+        return module.load_workbook(source)
     if built_in:
-        return bl.load_workbook(bl.built_in_path(built_in))
+        if platform != "meesho":
+            raise ValueError("This platform has no built-in template — upload one.")
+        return module.load_workbook(module.built_in_path(built_in))
     raise ValueError("Upload a template file, or pick a built-in one.")
 
 
@@ -56,20 +78,22 @@ def bulk_listing_built_ins(request, business_id):
 def bulk_listing_parse(request, business_id):
     get_authorized_business(request, business_id)
     try:
-        wb = _resolve_source(request)
-        spec = bl.parse_template(wb)
+        platform, module = _resolve_platform(request)
+        wb = _resolve_source(request, module, platform)
+        spec = module.parse_template(wb)
     except KeyError:
         return Response({"error": "Unknown built-in template."}, status=status.HTTP_400_BAD_REQUEST)
     except ValueError as exc:
         return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
-    if not bl.find_field(spec, role="title") or not bl.find_field(spec, role="sku"):
+    if not bl.find_field(spec, role="sku"):
         return Response(
-            {"error": "Could not find a Product Name / SKU ID column in this template."},
+            {"error": "Could not find a SKU ID column in this template."},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
     return Response({
+        "platform": platform,
         "category_label": spec["category_label"],
         "fields": [
             {k: v for k, v in f.items() if k not in ("column", "mirror_columns")}
@@ -77,8 +101,10 @@ def bulk_listing_parse(request, business_id):
         ],
         # Photos already sitting in this sheet's own data rows, one per row —
         # empty for a genuinely blank template. This is what the "Prefilled
-        # Sheet" flow in the UI builds its listings from; "New Sheet" ignores it.
-        "prefilled_images": bl.extract_front_images(spec, wb),
+        # Sheet" flow in the UI builds its listings from; "New Sheet" and
+        # "Flipkart Listing" ignore it (Flipkart's .xls has no equivalent
+        # reader yet — see bulk_listing_flipkart's module docstring).
+        "prefilled_images": bl.extract_front_images(spec, wb) if platform == "meesho" else [],
     })
 
 
@@ -103,20 +129,23 @@ def bulk_listing_generate(request, business_id):
     business = get_authorized_business(request, business_id)
 
     try:
-        wb = _resolve_source(request)
-        spec = bl.parse_template(wb)
+        platform, module = _resolve_platform(request)
+        wb = _resolve_source(request, module, platform)
+        spec = module.parse_template(wb)
     except KeyError:
         return Response({"error": "Unknown built-in template."}, status=status.HTTP_400_BAD_REQUEST)
     except ValueError as exc:
         return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
-    title_field = bl.find_field(spec, role="title")
     sku_field = bl.find_field(spec, role="sku")
-    if not title_field or not sku_field:
+    if not sku_field:
         return Response(
-            {"error": "Could not find a Product Name / SKU ID column in this template."},
+            {"error": "Could not find a SKU ID column in this template."},
             status=status.HTTP_400_BAD_REQUEST,
         )
+    # Not every platform has one — Flipkart doesn't carry a product-name
+    # column at all, so title is only asked for/enforced when it exists.
+    title_field = bl.find_field(spec, role="title")
 
     raw_payload = request.data.get("payload")
     try:
@@ -157,7 +186,7 @@ def bulk_listing_generate(request, business_id):
         title = str(row.get("product_name") or "").strip()
         sku = str(row.get("sku_id") or "").strip()
         style = str(row.get("style_id") or "").strip() or sku
-        if not title:
+        if title_field and not title:
             return Response({"error": f"Row {i + 1}: enter a product title."}, status=status.HTTP_400_BAD_REQUEST)
         if not sku:
             return Response({"error": f"Row {i + 1}: enter a SKU id."}, status=status.HTTP_400_BAD_REQUEST)
@@ -168,7 +197,7 @@ def bulk_listing_generate(request, business_id):
         # that's what "variation listing" (same group on every row) means.
         group_ids.append(str(row.get("group_id") or "").strip())
 
-    if len({t.strip().lower() for t in titles}) != len(titles):
+    if title_field and len({t.strip().lower() for t in titles}) != len(titles):
         return Response({"error": "Titles must be different for every row."},
                         status=status.HTTP_400_BAD_REQUEST)
     if len({_sku_key(s) for s in skus}) != len(skus):
@@ -276,17 +305,23 @@ def bulk_listing_generate(request, business_id):
         for i in range(len(image_urls))
     ]
 
-    bl.build_workbook(spec, wb, shared, rows)
+    # Not necessarily the same object as `wb`: .xls can't be mutated in
+    # place (xlrd's Book is read-only), so bulk_listing_flipkart.build_workbook
+    # returns a fresh xlutils-copied workbook instead — always save *this*
+    # return value, never `wb` directly, so both platforms work the same way.
+    result_wb = module.build_workbook(spec, wb, shared, rows)
     buf = BytesIO()
-    wb.save(buf)
+    result_wb.save(buf)
     buf.seek(0)
 
     slug = "".join(c if c.isalnum() else "-" for c in spec["category_label"][:40]).strip("-").lower() or "bulk-listing"
-    filename = f"{slug}-{timezone.now().strftime('%Y%m%d-%H%M%S')}.xlsx"
-    resp = HttpResponse(
-        buf.read(),
-        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
+    if platform == "flipkart":
+        filename = f"{slug}-{timezone.now().strftime('%Y%m%d-%H%M%S')}.xls"
+        content_type = "application/vnd.ms-excel"
+    else:
+        filename = f"{slug}-{timezone.now().strftime('%Y%m%d-%H%M%S')}.xlsx"
+        content_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    resp = HttpResponse(buf.read(), content_type=content_type)
     resp["Content-Disposition"] = f'attachment; filename="{filename}"'
     return resp
 
