@@ -1387,6 +1387,54 @@ class BulkListingFieldPreset(models.Model):
         return len(self.fields or {})
 
 
+class FlipkartBulkTemplate(models.Model):
+    """
+    A Flipkart category template (.xls) uploaded once and kept for reuse.
+
+    Unlike Meesho — one bundled "quick start" covers a common category, and
+    a fresh template is a quick re-download away otherwise — Flipkart has no
+    bundled template at all and its field set is wildly different per
+    category, so re-uploading the same category's file on every batch is
+    real, avoidable friction. The raw bytes are kept here (BinaryField ->
+    `longblob` on MySQL, comfortably north of any real template's size)
+    rather than on disk, because this app has no configured file storage
+    backend (see settings.py — no MEDIA_ROOT/STORAGES) and a filesystem
+    path wouldn't reliably survive a redeploy anyway.
+
+    Deliberately not shared with Meesho's flow: Meesho already has its own
+    upload-or-built-in mechanism, and mixing the two would mean filtering
+    every list by platform for no real benefit — Flipkart is the only
+    platform that asked for this.
+    """
+
+    business = models.ForeignKey(
+        "accounts.Business", on_delete=models.PROTECT, related_name="flipkart_bulk_templates",
+    )
+    name = models.CharField(max_length=200, db_index=True)
+    category_label = models.CharField(max_length=255, blank=True)
+    original_filename = models.CharField(max_length=255, blank=True)
+    file_data = models.BinaryField()
+
+    created_by = models.ForeignKey(
+        "accounts.User", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="flipkart_bulk_templates_created",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "flipkart_bulk_templates"
+        ordering = ["name"]
+        unique_together = [("business", "name")]
+
+    def __str__(self):
+        return self.name
+
+    @property
+    def file_size(self):
+        return len(self.file_data or b"")
+
+
 class ClaimTicket(models.Model):
     """
     One claim ticket from the Meesho supplier panel's ticket export

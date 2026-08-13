@@ -528,10 +528,16 @@ def build_workbook(spec, wb, shared, rows):
     """
     Writes `rows` (dicts of `product_name`, `sku_id`, `style_id`,
     `group_id` (optional — see plan_group_ids), `images` = an ordered list,
-    one URL per image slot — as many rows as the caller gives) into the
-    parsed sheet starting at `spec["data_start_row"]`, and every key in
-    `shared` onto every row via the matching field's column. Everything else
-    in the workbook — every other sheet, every other cell — is untouched.
+    one URL per image slot, `overrides` (optional — field key -> value,
+    this row's own replacement for whatever `shared` says) — as many rows
+    as the caller gives) into the parsed sheet starting at
+    `spec["data_start_row"]`. Every key in `shared` goes onto every row via
+    the matching field's column, *unless* that row's own `overrides` names
+    the same key, in which case the override wins for that row only —
+    everything else about a listing still comes from the one shared form,
+    a seller only has to touch what's actually different about a specific
+    row. Everything else in the workbook — every other sheet, every other
+    cell — is untouched.
     """
     ws = wb[spec["sheet_name"]]
     per_row_fields = {f["role"]: f for f in spec["fields"] if f["role"] in PER_ROW_ROLES}
@@ -553,8 +559,9 @@ def build_workbook(spec, wb, shared, rows):
             if slot in per_row_fields and url:
                 ws[f'{per_row_fields[slot]["column"]}{r}'] = url
 
+        overrides = row.get("overrides") or {}
         for f in shared_fields:
-            value = shared.get(f["key"])
+            value = overrides.get(f["key"], shared.get(f["key"]))
             if value not in (None, ""):
                 cell_value = coerce_cell(f, value)
                 ws[f'{f["column"]}{r}'] = cell_value

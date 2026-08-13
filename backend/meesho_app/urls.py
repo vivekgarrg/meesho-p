@@ -144,6 +144,10 @@ urlpatterns = [
          bulk_listing_views.bulk_listing_presets, name="bulk_listing_presets"),
     path("bulk-listing/presets/<int:pk>/",
          bulk_listing_views.bulk_listing_preset_detail, name="bulk_listing_preset_detail"),
+    path("bulk-listing/flipkart-templates/",
+         bulk_listing_views.bulk_listing_flipkart_templates, name="bulk_listing_flipkart_templates"),
+    path("bulk-listing/flipkart-templates/<int:pk>/",
+         bulk_listing_views.bulk_listing_flipkart_template_detail, name="bulk_listing_flipkart_template_detail"),
     # GST — monthly liability from Meesho TCS exports
     path("gst/upload/",      views.gst_upload,      name="gst_upload"),
     path("gst/periods/",     views.gst_periods,     name="gst_periods"),

@@ -1,7 +1,7 @@
 from rest_framework import serializers
 
 from .helpers.helper import strip_html
-from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, ParentItemPrice, ParentPriceHistory, Order, LabelOrder, ReturnDelivery, ScannedOrder, ListingTemplate, ClaimTicket, WorkerTask, WalletEntry, WalletSettlement, TaskListing, PlatformRate, TaskDocument, BulkListingFieldPreset
+from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, ParentItemPrice, ParentPriceHistory, Order, LabelOrder, ReturnDelivery, ScannedOrder, ListingTemplate, ClaimTicket, WorkerTask, WalletEntry, WalletSettlement, TaskListing, PlatformRate, TaskDocument, BulkListingFieldPreset, FlipkartBulkTemplate
 
 
 class OrderPaymentSerializer(serializers.ModelSerializer):
@@ -198,6 +198,20 @@ class BulkListingFieldPresetSerializer(serializers.ModelSerializer):
         if not isinstance(value, dict):
             raise serializers.ValidationError("fields must be an object of key → value.")
         return value
+
+
+class FlipkartBulkTemplateSerializer(serializers.ModelSerializer):
+    """Never exposes `file_data` — a couple hundred KB of binary in every
+    list-row response would be wasteful, and the raw bytes only ever need
+    to travel back out through `bulk_listing_generate`'s own template_id
+    lookup, not through this serializer."""
+    created_by_name = serializers.CharField(source="created_by.username", read_only=True, default=None)
+    file_size        = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = FlipkartBulkTemplate
+        fields = ["id", "name", "category_label", "original_filename", "file_size",
+                  "created_by_name", "created_at", "updated_at"]
 
 
 class ClaimTicketSerializer(serializers.ModelSerializer):

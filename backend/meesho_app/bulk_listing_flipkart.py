@@ -36,6 +36,19 @@ different animal from Meesho's in three ways:
    aren't a field sellers fill in. So a Flipkart spec never has a `"title"`
    role; callers (bulk_listing_views.py) already treat that as optional.
 
+4. Rows aren't synthesised from a pasted list of photo links the way
+   Meesho's flow does. Flipkart's own bulk image-upload tool already drops
+   a generated SKU and its assigned images into each row before a seller
+   downloads this file — `extract_prefilled_rows` reads those rows straight
+   off the sheet, one dict per row, and that *is* the row list from then on.
+   Consequently there's no cross-row image shuffle here at all (contrast
+   bulk_listing.plan_images): a row's own images stay its own, in whatever
+   order the caller (the UI, via drag-reordering) settles on — see
+   `build_workbook`. And because attribute values can legitimately differ
+   row to row (unlike Meesho's one-shared-form-for-every-row model), there's
+   no `shared` dict either — every field's value comes from that row's own
+   `attributes`.
+
 Reuses bulk_listing.py's PER_ROW_ROLES / image_slots / coerce_cell — those
 only ever look at `role`/`key`/`type` on the shared spec-dict shape, so
 they're already platform-agnostic and don't need a Flipkart-specific copy.
@@ -47,7 +60,7 @@ from decimal import Decimal, InvalidOperation
 import xlrd
 from xlutils.copy import copy as _xlutils_copy
 
-from .bulk_listing import PER_ROW_ROLES, coerce_cell, image_slots  # noqa: F401  (re-exported for callers)
+from .bulk_listing import PER_ROW_ROLES, coerce_cell, find_field, image_slots  # noqa: F401  (re-exported for callers)
 
 # Universal across every Flipkart category template — Flipkart's own system
 # columns, never seller-editable no matter what colour the sheet paints them.
@@ -239,42 +252,222 @@ def parse_template(rb):
     }
 
 
-def build_workbook(spec, rb, shared, rows):
+# A field this business always fills the same way, so the seller never has
+# to type it (and never accidentally types something else): "Shipping
+# provider" only matters at all when "Fullfilment by" is "Seller" rather
+# than Flipkart-fulfilled (per the template's own Summary Sheet), and this
+# seller always ships through Flipkart's own network. "FLIPKART" matches
+# the Shipping provider column's own row-2 example casing exactly — it's
+# free text with no dropdown of its own to validate against, so getting
+# the casing right here is the only guard there is. Keyed by label
+# (lowercased) rather than by role, since this isn't a role this app
+# otherwise recognises — matched purely by the column header text. Unlike
+# DEFAULT_ATTRIBUTE_VALUES below, a forced field always wins, on every row,
+# no matter what's already on the sheet or what the seller types.
+FORCED_ATTRIBUTE_VALUES = {
+    "shipping provider": "FLIPKART",
+}
+
+# A sane starting value for a field the seller can still freely change —
+# unlike FORCED_ATTRIBUTE_VALUES, this only fills in where the sheet's own
+# cell is blank, so it's shown (and editable) in the UI rather than hidden.
+# "express" is this business's usual procurement lane.
+DEFAULT_ATTRIBUTE_VALUES = {
+    "procurement type": "express",
+}
+
+
+def forced_attributes(spec):
+    """{field_key: forced_value} for every field on this spec that
+    FORCED_ATTRIBUTE_VALUES pins down — merge this over whatever a row's
+    own attributes say (these values always win) before validating or
+    writing a row."""
+    return {
+        f["key"]: FORCED_ATTRIBUTE_VALUES[f["label"].strip().lower()]
+        for f in spec["fields"]
+        if f["label"].strip().lower() in FORCED_ATTRIBUTE_VALUES
+    }
+
+
+def default_attributes(spec):
+    """{field_key: default_value} for every field DEFAULT_ATTRIBUTE_VALUES
+    names — only meant to fill a blank, never to overwrite an existing
+    value (see extract_prefilled_rows, the only caller)."""
+    return {
+        f["key"]: DEFAULT_ATTRIBUTE_VALUES[f["label"].strip().lower()]
+        for f in spec["fields"]
+        if f["label"].strip().lower() in DEFAULT_ATTRIBUTE_VALUES
+    }
+
+
+def _cell_text(ws, row, col):
+    """xlrd hands back every numeric cell as a Python float — a whole-number
+    MRP of 199 reads back as 199.0, which would show up in the UI as
+    "199.0" if not corrected here."""
+    value = ws.cell_value(row, col)
+    if value in (None, ""):
+        return ""
+    if isinstance(value, float) and value == int(value):
+        return str(int(value))
+    return str(value).strip()
+
+
+# When a sheet already went to Flipkart and came back rejected, Flipkart
+# writes the outcome straight into these same fixed system columns (see
+# _SYSTEM_LABELS above) — never into a separate file. "Status" columns hold
+# a short state word ("Failed", "Success", "Live", "Approved", …); "reason"
+# columns hold the actual human-readable explanation. Both are excluded
+# from `spec["fields"]` (they're Flipkart-written, never seller-editable),
+# so reading them back needs the sheet's own header row again rather than
+# anything already in `spec`.
+_ERROR_STATUS_LABELS = ("catalog qc status", "product data status", "listing status")
+_ERROR_REASON_LABELS = ("qc failed reason (if any)", "disapproval reason (if any)")
+_OK_STATUS_VALUES = {"success", "active", "live", "approved", ""}
+
+
+def _header_column_map(ws):
+    """{lowercased header label: column index} for every column on row 0 —
+    including the system-only ones parse_template deliberately leaves out
+    of `spec["fields"]`, which is exactly what _row_error needs."""
+    out = {}
+    for c in range(ws.ncols):
+        label = str(ws.cell_value(0, c)).strip().lower()
+        if label:
+            out.setdefault(label, c)
+    return out
+
+
+def _row_error(ws, r, header_cols):
+    """
+    `{"status": ..., "message": ...}` if this row shows a real rejection —
+    a status column reading something other than a success-like word, or a
+    non-blank reason column — else None for an untouched or accepted row.
+    `message` may contain multiple `\\n`-separated lines: Flipkart's own
+    "QC Failed Reason" cell already numbers each individual failure that
+    way (see extract_prefilled_rows' module-level docstring for a real
+    example), so this is passed straight through rather than re-split.
+    """
+    status = None
+    for label in _ERROR_STATUS_LABELS:
+        col = header_cols.get(label)
+        if col is None:
+            continue
+        value = _cell_text(ws, r, col)
+        if value and value.strip().lower() not in _OK_STATUS_VALUES:
+            status = value
+            break
+    messages = []
+    for label in _ERROR_REASON_LABELS:
+        col = header_cols.get(label)
+        if col is None:
+            continue
+        value = _cell_text(ws, r, col)
+        if value:
+            messages.append(value)
+    if status is None and not messages:
+        return None
+    return {"status": status, "message": "\n".join(messages) if messages else None}
+
+
+def extract_prefilled_rows(spec, rb):
+    """
+    One listing per row already sitting in the uploaded sheet — Flipkart's
+    own bulk image-upload tool drops a generated SKU and its assigned
+    images (Main + Other 1-4) into a row before a seller downloads this
+    file, so unlike Meesho there is no "paste your links" step at all: the
+    rows to build listings from are already on the sheet. Reads straight
+    down from `data_start_row`, one dict per row (`sku_id`, `images` — the
+    row's own image URLs in slot order, exactly as found, no shuffling),
+    stopping at the first row with a blank SKU cell.
+
+    Also reads every other attribute field's own cell, not just SKU and
+    images — a sheet that already has some product details filled in (MRP,
+    Brand, Color, …) on some or all rows carries those straight into the
+    form as each row's starting point, so re-editing an already-filled
+    sheet only touches whatever's actually being changed, rather than
+    starting every row from a blank form. `attributes` on the returned dict
+    holds whatever came out of that: a field's own default (see
+    DEFAULT_ATTRIBUTE_VALUES) only fills a genuinely blank cell; a forced
+    field (see FORCED_ATTRIBUTE_VALUES) always wins over both.
+
+    A row also carries an `"error"` key — `{"status", "message"}` — when
+    this sheet is one Flipkart already rejected: e.g. a real rejection seen
+    while building this feature read (verbatim, in the sheet's own "QC
+    Failed Reason" cell) `"4 error(s) found\\n1. ...\\n2. Fulfilled by
+    Flipkart is not available for this product.\\n3. [procurement_type]:
+    Procurement Type is not allowed to be updated.\\n4. [shipping_days]:
+    Procurement SLA is not allowed to be updated."` — Flipkart had that
+    listing set to Flipkart-fulfilled, which locks Procurement
+    Type/SLA/Shipping Provider/Stock from being touched by a bulk upload at
+    all, regardless of what value they're set to. `"error"` is absent
+    entirely on a row with nothing to report, so callers can just check
+    `row.get("error")` rather than a magic empty value.
+    """
+    sku_field = find_field(spec, role="sku")
+    if not sku_field:
+        return []
+    ws = rb.sheet_by_name(spec["sheet_name"])
+    slot_fields = [f for role in image_slots(spec) for f in spec["fields"] if f["role"] == role]
+    attribute_fields = [f for f in spec["fields"] if f["role"] not in PER_ROW_ROLES]
+    defaults = default_attributes(spec)
+    forced = forced_attributes(spec)
+    header_cols = _header_column_map(ws)
+
+    rows = []
+    r = spec["data_start_row"]
+    while r < ws.nrows:
+        sku = _cell_text(ws, r, sku_field["column"])
+        if not sku:
+            break
+        images = [_cell_text(ws, r, f["column"]) for f in slot_fields]
+        attributes = {}
+        for f in attribute_fields:
+            text = _cell_text(ws, r, f["column"])
+            if text:
+                attributes[f["key"]] = text
+        for key, value in defaults.items():
+            attributes.setdefault(key, value)
+        attributes.update(forced)
+        row = {"sku_id": sku, "images": images, "attributes": attributes}
+        error = _row_error(ws, r, header_cols)
+        if error:
+            row["error"] = error
+        rows.append(row)
+        r += 1
+    return rows
+
+
+def build_workbook(spec, rb, rows):
     """
     `rb`: the `xlrd.Book` from `load_workbook`/`parse_template` — `.xls`
     can't be mutated in place, so this makes a fresh writable copy (via
     `xlutils.copy`) rather than mutating `rb` itself, and returns *that*.
-    Callers must save the return value, not `rb` — mirrors
-    bulk_listing.build_workbook's contract otherwise: `rows` are dicts of
-    `sku_id`, `images` (ordered list, one URL per image slot), and
-    optionally `product_name`/`style_id`/`group_id` — harmlessly ignored
-    here since Flipkart has none of those roles.
+
+    No `shared` dict, unlike bulk_listing.build_workbook: Flipkart has no
+    "same value on every row" concept in this flow — a row's attributes are
+    only ever the values entered for *that* row (optionally copied in from
+    another row client-side first, but that's the caller's business, not
+    this function's). `rows` are dicts of `sku_id`, `images` (ordered list,
+    one URL per image slot — this row's own, in whatever order the caller
+    settled on), `attributes` (field key -> value, this row's own).
     """
     wb = _xlutils_copy(rb)
     ws = wb.get_sheet(spec["sheet_name"])
-    per_row_fields = {f["role"]: f for f in spec["fields"] if f["role"] in PER_ROW_ROLES}
-    shared_fields = [f for f in spec["fields"] if f["role"] not in PER_ROW_ROLES]
-    slots = image_slots(spec)
+    sku_field = find_field(spec, role="sku")
+    slot_fields = [f for role in image_slots(spec) for f in spec["fields"] if f["role"] == role]
+    attribute_fields = {f["key"]: f for f in spec["fields"] if f["role"] not in PER_ROW_ROLES}
 
     for i, row in enumerate(rows):
         r = spec["data_start_row"] + i
-
-        if "sku" in per_row_fields:
-            ws.write(r, per_row_fields["sku"]["column"], row["sku_id"])
-        if "title" in per_row_fields and row.get("product_name"):
-            ws.write(r, per_row_fields["title"]["column"], row["product_name"])
-        if "style" in per_row_fields and row.get("style_id"):
-            ws.write(r, per_row_fields["style"]["column"], row["style_id"])
-        if "group_id" in per_row_fields and row.get("group_id"):
-            ws.write(r, per_row_fields["group_id"]["column"], row["group_id"])
-
-        for slot, url in zip(slots, row["images"]):
-            if slot in per_row_fields and url:
-                ws.write(r, per_row_fields[slot]["column"], url)
-
-        for f in shared_fields:
-            value = shared.get(f["key"])
-            if value not in (None, ""):
+        if sku_field:
+            ws.write(r, sku_field["column"], row["sku_id"])
+        for f, url in zip(slot_fields, row["images"]):
+            if url:
+                ws.write(r, f["column"], url)
+        attrs = row.get("attributes") or {}
+        for key, value in attrs.items():
+            f = attribute_fields.get(key)
+            if f and value not in (None, ""):
                 ws.write(r, f["column"], coerce_cell(f, value))
 
     return wb
