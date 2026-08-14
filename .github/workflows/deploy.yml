@@ -49,10 +49,10 @@ jobs:
               "$SSH_USER@$SSH_HOST" 'bash -se' <<'REMOTE'
           set -e
           cd ~/meesho-p
-          # Older deploys copied the built index.html over a tracked file,
-          # leaving it modified; discard that so the pull can fast-forward.
-          git checkout -- backend/templates/index.html 2>/dev/null || true
-          git pull --ff-only origin main
+          # update.sh does its own fetch + reset --hard origin/main, which
+          # both handles the older-deploys-left-index.html-modified case and
+          # is resilient to origin/main being rewritten, unlike a plain
+          # --ff-only pull.
           bash deploy/hostinger/update.sh
           REMOTE
           code=$?

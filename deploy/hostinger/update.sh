@@ -8,10 +8,13 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
 echo "==> Pulling latest code"
-# Older deploys left templates/index.html modified (see above). Discard any such
-# leftover so the fast-forward can proceed; nothing of value is in it.
-git checkout -- backend/templates/index.html 2>/dev/null || true
-git pull --ff-only origin main
+# reset --hard rather than pull --ff-only: this checkout only ever holds
+# deployed code, never unique local work, so it's safe to force it to match
+# origin exactly. That also makes it resilient to origin/main being rewritten
+# (e.g. a force-push) — a plain --ff-only pull refuses in that case with
+# "Not possible to fast-forward" even though "match origin" is unambiguous.
+git fetch origin main
+git reset --hard origin/main
 
 echo "==> Building frontend"
 npm ci --prefix frontend
