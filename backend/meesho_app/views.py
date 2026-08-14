@@ -4745,9 +4745,15 @@ def upload_labels_pdf(request, business_id):
 
         with transaction.atomic():
             for owner, owner_rows in rows_by_owner.values():
+                # order_id is the model's GLOBAL primary key (not scoped to
+                # business — see LabelOrder.order_id), so this must check
+                # across all businesses. Scoping it to business=owner missed
+                # orders already saved under a different business, and the
+                # subsequent bulk_create then tried to INSERT a duplicate
+                # primary key and raised IntegrityError 1062.
                 existing_ids = set(
                     LabelOrder.objects
-                    .filter(business=owner, order_id__in=list(owner_rows.keys()))
+                    .filter(order_id__in=list(owner_rows.keys()))
                     .values_list("order_id", flat=True)
                 )
 
