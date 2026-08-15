@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 from decimal import Decimal, InvalidOperation
 from django.db import transaction, IntegrityError
-from django.db.models import Sum, Count, Min, Max, ExpressionWrapper, F, DecimalField as DjDecimalField, Q as DQ, Prefetch
+from django.db.models import Sum, Count, Min, Max, ExpressionWrapper, F, DecimalField as DjDecimalField, Q as DQ, Prefetch, ProtectedError
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.decorators import api_view, parser_classes
@@ -21,7 +21,7 @@ from accounts.models import Business, User
 from .permissions import get_authorized_business, accessible_businesses
 from .helpers.label_pdf import extract_all_pages
 
-from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, PurchaseBill, PurchaseItem, BlockedCustomer, InventoryAdjustment, ConsumableItem, ConsumablePurchase, ConsumableUsage, InventoryLog, MeeshoInventory, MeeshoPriceUpdate, ExpenseInvoice, ExpenseInvoiceItem, TransportCharge, PackedStockEvent, EstimatedProfitOrder, ReturnDelivery, GstTransaction, GstInvoiceDetail, ScannedOrder, ListingTemplate, ClaimTicket, WorkerTask, WalletEntry, WalletSettlement, TaskListing, PlatformRate, TaskDocument, BusinessCostSetting
+from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, PurchaseBill, PurchaseItem, BlockedCustomer, InventoryAdjustment, ConsumableItem, ConsumablePurchase, ConsumableUsage, InventoryLog, MeeshoInventory, MeeshoPriceUpdate, ExpenseInvoice, ExpenseInvoiceItem, TransportCharge, PackedStockEvent, EstimatedProfitOrder, ReturnDelivery, GstTransaction, GstInvoiceDetail, ScannedOrder, ListingTemplate, ClaimTicket, WorkerTask, WalletEntry, WalletSettlement, TaskListing, PlatformRate, TaskDocument, BusinessCostSetting, Employee, EmployeePayment, BusinessOwner
 from .serializers import (
     OrderPaymentSerializer, AdsCostSerializer,
     ReferralPaymentSerializer, CompensationRecoverySerializer,
@@ -7360,15 +7360,20 @@ def _expense_invoice_to_dict(inv):
     items = []
     for it in inv.items.all():
         amt = ((it.quantity or Decimal("0")) * (it.unit_rate or Decimal("0"))).quantize(_q)
-        total += amt
-        by_category[it.category] = by_category.get(it.category, Decimal("0")) + amt
+        gst_amt = (amt * (it.gst_percent or Decimal("0")) / 100).quantize(_q)
+        line_total = amt + gst_amt
+        total += line_total
+        by_category[it.category] = by_category.get(it.category, Decimal("0")) + line_total
         items.append({
             "id": it.id,
             "description": it.description,
             "category": it.category,
             "quantity": str(it.quantity),
             "unit_rate": str(it.unit_rate),
+            "gst_percent": str(it.gst_percent or Decimal("0")),
             "amount": str(amt),
+            "gst_amount": str(gst_amt),
+            "total": str(line_total),
         })
     return {
         "id": inv.id,
@@ -7438,6 +7443,7 @@ def expense_invoices_list(request, business_id):
                 category=it.get("category", "packaging"),
                 quantity=Decimal(str(it.get("quantity") or 0)),
                 unit_rate=Decimal(str(it.get("unit_rate") or 0)),
+                gst_percent=Decimal(str(it.get("gst_percent") or 0)),
             )
     inv = ExpenseInvoice.objects.prefetch_related("items").get(pk=inv.pk, business=business)
     return Response(_expense_invoice_to_dict(inv), status=status.HTTP_201_CREATED)
@@ -7478,6 +7484,7 @@ def expense_invoice_detail(request, business_id, invoice_id):
                 category=it.get("category", "packaging"),
                 quantity=Decimal(str(it.get("quantity") or 0)),
                 unit_rate=Decimal(str(it.get("unit_rate") or 0)),
+                gst_percent=Decimal(str(it.get("gst_percent") or 0)),
             )
     inv = ExpenseInvoice.objects.prefetch_related("items").get(pk=inv.pk, business=business)
     return Response(_expense_invoice_to_dict(inv))
@@ -7562,12 +7569,14 @@ def expenses_summary(request, business_id):
 
     packaging = Decimal("0")
     other = Decimal("0")
-    for it in inv_items.only("category", "quantity", "unit_rate"):
+    for it in inv_items.only("category", "quantity", "unit_rate", "gst_percent"):
         amt = ((it.quantity or Decimal("0")) * (it.unit_rate or Decimal("0"))).quantize(Decimal("0.01"))
+        gst_amt = (amt * (it.gst_percent or Decimal("0")) / 100).quantize(Decimal("0.01"))
+        line_total = amt + gst_amt
         if it.category == "packaging":
-            packaging += amt
+            packaging += line_total
         else:
-            other += amt
+            other += line_total
     transport_total = transport.aggregate(s=Sum("amount"))["s"] or Decimal("0")
     grand = packaging + other + transport_total
     return Response({
@@ -7576,6 +7585,303 @@ def expenses_summary(request, business_id):
         "transport": str(transport_total),
         "grand_total": str(grand),
     })
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Employee directory + owner details — standalone payroll log, separate from
+# the piecework WorkerTask/WalletEntry system used on the Team Tasks tab.
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _employee_to_dict(emp):
+    """Serialize an Employee (with prefetched payments) + computed totals."""
+    total_paid = Decimal("0")
+    last_payment_date = None
+    for p in emp.payments.all():
+        total_paid += p.amount
+        if last_payment_date is None or p.paid_on > last_payment_date:
+            last_payment_date = p.paid_on
+    return {
+        "id": emp.id,
+        "full_name": emp.full_name,
+        "phone": emp.phone,
+        "email": emp.email,
+        "designation": emp.designation,
+        "department": emp.department,
+        "date_of_joining": str(emp.date_of_joining) if emp.date_of_joining else None,
+        "date_of_leaving": str(emp.date_of_leaving) if emp.date_of_leaving else None,
+        "status": emp.status,
+        "salary_type": emp.salary_type,
+        "address_line1": emp.address_line1,
+        "address_line2": emp.address_line2,
+        "city": emp.city,
+        "state": emp.state,
+        "pincode": emp.pincode,
+        "account_holder_name": emp.account_holder_name,
+        "bank_name": emp.bank_name,
+        "account_number": emp.account_number,
+        "ifsc_code": emp.ifsc_code,
+        "upi_id": emp.upi_id,
+        "emergency_contact_name": emp.emergency_contact_name,
+        "emergency_contact_phone": emp.emergency_contact_phone,
+        "notes": emp.notes,
+        "total_paid": str(total_paid),
+        "last_payment_date": str(last_payment_date) if last_payment_date else None,
+        "created_at": emp.created_at.isoformat(),
+    }
+
+
+def _employee_payment_to_dict(p):
+    return {
+        "id": p.id,
+        "employee_id": p.employee_id,
+        "amount": str(p.amount),
+        "paid_on": str(p.paid_on),
+        "payment_type": p.payment_type,
+        "method": p.method,
+        "reference": p.reference,
+        "note": p.note,
+        "created_at": p.created_at.isoformat(),
+    }
+
+
+def _owner_to_dict(o):
+    return {
+        "id": o.id,
+        "name": o.name,
+        "phone": o.phone,
+        "email": o.email,
+        "pan": o.pan,
+        "address_line1": o.address_line1,
+        "address_line2": o.address_line2,
+        "city": o.city,
+        "state": o.state,
+        "pincode": o.pincode,
+        "account_holder_name": o.account_holder_name,
+        "bank_name": o.bank_name,
+        "account_number": o.account_number,
+        "ifsc_code": o.ifsc_code,
+        "upi_id": o.upi_id,
+        "ownership_percent": str(o.ownership_percent) if o.ownership_percent is not None else None,
+        "notes": o.notes,
+        "created_at": o.created_at.isoformat(),
+    }
+
+
+_EMPLOYEE_FIELDS = [
+    "full_name", "phone", "email", "designation", "department", "status", "salary_type",
+    "address_line1", "address_line2", "city", "state", "pincode",
+    "account_holder_name", "bank_name", "account_number", "ifsc_code", "upi_id",
+    "emergency_contact_name", "emergency_contact_phone", "notes",
+]
+_OWNER_FIELDS = [
+    "name", "phone", "email", "pan",
+    "address_line1", "address_line2", "city", "state", "pincode",
+    "account_holder_name", "bank_name", "account_number", "ifsc_code", "upi_id", "notes",
+]
+
+
+@api_view(["GET", "POST"])
+def employees_list(request, business_id):
+    business = get_authorized_business(request, business_id)
+
+    if request.method == "GET":
+        qs = Employee.objects.filter(business=business).prefetch_related("payments")
+        status_filter = request.GET.get("status", "")
+        search = request.GET.get("search", "").strip()
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+        if search:
+            qs = qs.filter(
+                DQ(full_name__icontains=search) | DQ(phone__icontains=search) |
+                DQ(designation__icontains=search)
+            )
+        results = [_employee_to_dict(e) for e in qs]
+        return Response({"results": results, "total": len(results)})
+
+    if not _is_admin(request.user):
+        return Response({"error": "Only an admin can add employees."}, status=403)
+
+    data = request.data
+    if not (data.get("full_name") or "").strip():
+        return Response({"error": "full_name is required."}, status=400)
+    fields = {k: data.get(k, "") for k in _EMPLOYEE_FIELDS if k in data}
+    for k in ("date_of_joining", "date_of_leaving"):
+        if data.get(k):
+            fields[k] = data[k]
+    emp = Employee.objects.create(business=business, created_by=request.user, **fields)
+    return Response(_employee_to_dict(emp), status=status.HTTP_201_CREATED)
+
+
+@api_view(["GET", "PUT", "DELETE"])
+def employee_detail(request, business_id, employee_id):
+    business = get_authorized_business(request, business_id)
+    try:
+        emp = Employee.objects.prefetch_related("payments").get(pk=employee_id, business=business)
+    except Employee.DoesNotExist:
+        return Response({"error": "Not found"}, status=404)
+
+    if request.method == "GET":
+        return Response(_employee_to_dict(emp))
+
+    if not _is_admin(request.user):
+        return Response({"error": "Only an admin can edit employees."}, status=403)
+
+    if request.method == "DELETE":
+        try:
+            emp.delete()
+        except ProtectedError:
+            return Response(
+                {"error": "This employee has recorded payments and can't be deleted — mark them inactive instead."},
+                status=400,
+            )
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    # PUT
+    data = request.data
+    for k in _EMPLOYEE_FIELDS:
+        if k in data:
+            setattr(emp, k, data[k])
+    for k in ("date_of_joining", "date_of_leaving"):
+        if k in data:
+            setattr(emp, k, data[k] or None)
+    emp.save()
+    return Response(_employee_to_dict(emp))
+
+
+@api_view(["GET", "POST"])
+def employee_payments_list(request, business_id, employee_id):
+    business = get_authorized_business(request, business_id)
+    try:
+        emp = Employee.objects.get(pk=employee_id, business=business)
+    except Employee.DoesNotExist:
+        return Response({"error": "Not found"}, status=404)
+
+    if request.method == "GET":
+        rows = list(emp.payments.all())
+        return Response({
+            "results": [_employee_payment_to_dict(p) for p in rows],
+            "total_paid": str(sum((p.amount for p in rows), Decimal("0"))),
+        })
+
+    if not _is_admin(request.user):
+        return Response({"error": "Only an admin can record payments."}, status=403)
+
+    data = request.data
+    amount = Decimal(str(data.get("amount") or 0))
+    if amount <= 0:
+        return Response({"error": "amount must be greater than 0."}, status=400)
+    p = EmployeePayment.objects.create(
+        business=business,
+        employee=emp,
+        created_by=request.user,
+        amount=amount,
+        paid_on=data.get("paid_on") or timezone.localdate(),
+        payment_type=data.get("payment_type", "salary"),
+        method=data.get("method", "cash"),
+        reference=data.get("reference", ""),
+        note=data.get("note", ""),
+    )
+    return Response(_employee_payment_to_dict(p), status=status.HTTP_201_CREATED)
+
+
+@api_view(["PUT", "DELETE"])
+def employee_payment_detail(request, business_id, payment_id):
+    business = get_authorized_business(request, business_id)
+    try:
+        p = EmployeePayment.objects.get(pk=payment_id, business=business)
+    except EmployeePayment.DoesNotExist:
+        return Response({"error": "Not found"}, status=404)
+
+    if not _is_admin(request.user):
+        return Response({"error": "Only an admin can edit payments."}, status=403)
+
+    if request.method == "DELETE":
+        p.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    data = request.data
+    if "amount" in data:
+        amount = Decimal(str(data.get("amount") or 0))
+        if amount <= 0:
+            return Response({"error": "amount must be greater than 0."}, status=400)
+        p.amount = amount
+    for k in ("paid_on", "payment_type", "method", "reference", "note"):
+        if k in data:
+            setattr(p, k, data[k])
+    p.save()
+    return Response(_employee_payment_to_dict(p))
+
+
+@api_view(["GET"])
+def employees_summary(request, business_id):
+    business = get_authorized_business(request, business_id)
+    active_count = Employee.objects.filter(business=business, status="active").count()
+
+    payments = EmployeePayment.objects.filter(business=business)
+    all_time = payments.aggregate(s=Sum("amount"))["s"] or Decimal("0")
+
+    start, end = _month_range(timezone.localdate().strftime("%Y-%m"))
+    this_month = payments.filter(paid_on__gte=start, paid_on__lt=end).aggregate(s=Sum("amount"))["s"] or Decimal("0")
+
+    by_type = {}
+    for ptype, total in payments.values_list("payment_type").annotate(s=Sum("amount")):
+        by_type[ptype] = str(total)
+
+    return Response({
+        "active_employees": active_count,
+        "total_paid_this_month": str(this_month),
+        "total_paid_all_time": str(all_time),
+        "by_payment_type": by_type,
+    })
+
+
+@api_view(["GET", "POST"])
+def owners_list(request, business_id):
+    business = get_authorized_business(request, business_id)
+
+    if request.method == "GET":
+        rows = BusinessOwner.objects.filter(business=business)
+        return Response({"results": [_owner_to_dict(o) for o in rows], "total": rows.count()})
+
+    if not _is_admin(request.user):
+        return Response({"error": "Only an admin can add owners."}, status=403)
+
+    data = request.data
+    if not (data.get("name") or "").strip():
+        return Response({"error": "name is required."}, status=400)
+    fields = {k: data.get(k, "") for k in _OWNER_FIELDS if k in data}
+    if data.get("ownership_percent") not in (None, ""):
+        fields["ownership_percent"] = Decimal(str(data["ownership_percent"]))
+    owner = BusinessOwner.objects.create(business=business, **fields)
+    return Response(_owner_to_dict(owner), status=status.HTTP_201_CREATED)
+
+
+@api_view(["GET", "PUT", "DELETE"])
+def owner_detail(request, business_id, owner_id):
+    business = get_authorized_business(request, business_id)
+    try:
+        owner = BusinessOwner.objects.get(pk=owner_id, business=business)
+    except BusinessOwner.DoesNotExist:
+        return Response({"error": "Not found"}, status=404)
+
+    if request.method == "GET":
+        return Response(_owner_to_dict(owner))
+
+    if not _is_admin(request.user):
+        return Response({"error": "Only an admin can edit owners."}, status=403)
+
+    if request.method == "DELETE":
+        owner.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    data = request.data
+    for k in _OWNER_FIELDS:
+        if k in data:
+            setattr(owner, k, data[k])
+    if "ownership_percent" in data:
+        owner.ownership_percent = Decimal(str(data["ownership_percent"])) if data["ownership_percent"] not in (None, "") else None
+    owner.save()
+    return Response(_owner_to_dict(owner))
 
 
 @api_view(["GET"])

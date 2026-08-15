@@ -690,6 +690,7 @@ class ExpenseInvoiceItem(models.Model):
     category    = models.CharField(max_length=20, choices=CATEGORY_CHOICES, default="packaging")
     quantity    = models.DecimalField(max_digits=12, decimal_places=2, default=1)
     unit_rate   = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    gst_percent = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True, default=0)
 
     business = models.ForeignKey(
         "accounts.Business", on_delete=models.PROTECT,
@@ -701,6 +702,14 @@ class ExpenseInvoiceItem(models.Model):
     @property
     def amount(self):
         return (self.quantity or 0) * (self.unit_rate or 0)
+
+    @property
+    def gst_amount(self):
+        return self.amount * (self.gst_percent or 0) / 100
+
+    @property
+    def total_with_gst(self):
+        return self.amount + self.gst_amount
 
     def __str__(self):
         return f"{self.description} ({self.category})"
@@ -723,6 +732,145 @@ class TransportCharge(models.Model):
 
     def __str__(self):
         return f"Transport {self.date}: ₹{self.amount}"
+
+
+class Employee(models.Model):
+    """A person on the business's payroll — salaried staff, not the
+    piecework workers tracked by WorkerTask/WalletEntry (those stay on the
+    Team Tasks tab; this is a separate, standalone directory + payment log).
+    """
+    STATUS_CHOICES = [
+        ("active", "Active"),
+        ("inactive", "Inactive"),
+    ]
+    SALARY_TYPE_CHOICES = [
+        ("fixed_monthly", "Fixed Monthly"),
+        ("piecework", "Piecework"),
+        ("daily_wage", "Daily Wage"),
+        ("other", "Other"),
+    ]
+
+    full_name = models.CharField(max_length=255)
+    phone     = models.CharField(max_length=20, blank=True)
+    email     = models.EmailField(blank=True)
+
+    designation      = models.CharField(max_length=100, blank=True)
+    department       = models.CharField(max_length=100, blank=True)
+    date_of_joining  = models.DateField(null=True, blank=True)
+    date_of_leaving  = models.DateField(null=True, blank=True)
+    status           = models.CharField(max_length=10, choices=STATUS_CHOICES, default="active", db_index=True)
+    salary_type      = models.CharField(max_length=20, choices=SALARY_TYPE_CHOICES, default="fixed_monthly")
+
+    address_line1 = models.CharField(max_length=255, blank=True)
+    address_line2 = models.CharField(max_length=255, blank=True)
+    city          = models.CharField(max_length=100, blank=True)
+    state         = models.CharField(max_length=100, blank=True)
+    pincode       = models.CharField(max_length=10, blank=True)
+
+    account_holder_name = models.CharField(max_length=255, blank=True)
+    bank_name            = models.CharField(max_length=255, blank=True)
+    account_number       = models.CharField(max_length=40, blank=True)
+    ifsc_code             = models.CharField(max_length=15, blank=True)
+    upi_id                = models.CharField(max_length=100, blank=True)
+
+    emergency_contact_name  = models.CharField(max_length=255, blank=True)
+    emergency_contact_phone = models.CharField(max_length=20, blank=True)
+
+    notes = models.TextField(blank=True)
+
+    business   = models.ForeignKey("accounts.Business", on_delete=models.PROTECT, related_name="employees")
+    created_by = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True,
+                                   blank=True, related_name="employees_created")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "employees"
+        ordering = ["full_name"]
+        indexes = [models.Index(fields=["business", "status"])]
+
+    def __str__(self):
+        return self.full_name
+
+
+class EmployeePayment(models.Model):
+    """One payment actually made to an employee — an append-only ledger row,
+    the same shape/intent as WalletSettlement but for directory employees.
+    """
+    PAYMENT_TYPE_CHOICES = [
+        ("salary", "Salary"),
+        ("advance", "Advance"),
+        ("bonus", "Bonus"),
+        ("reimbursement", "Reimbursement"),
+        ("other", "Other"),
+    ]
+    METHOD_CHOICES = [
+        ("cash", "Cash"),
+        ("upi", "UPI"),
+        ("bank_transfer", "Bank Transfer"),
+        ("cheque", "Cheque"),
+        ("other", "Other"),
+    ]
+
+    employee = models.ForeignKey(Employee, on_delete=models.PROTECT, related_name="payments")
+    business = models.ForeignKey("accounts.Business", on_delete=models.PROTECT, related_name="employee_payments")
+
+    amount       = models.DecimalField(max_digits=12, decimal_places=2)
+    paid_on      = models.DateField(default=timezone.localdate)
+    payment_type = models.CharField(max_length=20, choices=PAYMENT_TYPE_CHOICES, default="salary")
+    method       = models.CharField(max_length=20, choices=METHOD_CHOICES, default="cash")
+    reference    = models.CharField(max_length=150, blank=True, help_text="UTR, cheque no., or transaction id")
+    note         = models.TextField(blank=True)
+
+    created_by = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True,
+                                   blank=True, related_name="employee_payments_created")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "employee_payments"
+        ordering = ["-paid_on", "-created_at"]
+        indexes = [models.Index(fields=["business", "employee"])]
+
+    def __str__(self):
+        return f"{self.employee_id} paid ₹{self.amount} on {self.paid_on}"
+
+
+class BusinessOwner(models.Model):
+    """A business owner or partner — contact, address and bank details kept
+    alongside the Employee directory rather than on BusinessProfile, since an
+    owner can be added/removed/listed like an employee, not edited as a single
+    settings row.
+    """
+    name  = models.CharField(max_length=255)
+    phone = models.CharField(max_length=20, blank=True)
+    email = models.EmailField(blank=True)
+    pan   = models.CharField(max_length=10, blank=True)
+
+    address_line1 = models.CharField(max_length=255, blank=True)
+    address_line2 = models.CharField(max_length=255, blank=True)
+    city          = models.CharField(max_length=100, blank=True)
+    state         = models.CharField(max_length=100, blank=True)
+    pincode       = models.CharField(max_length=10, blank=True)
+
+    account_holder_name = models.CharField(max_length=255, blank=True)
+    bank_name            = models.CharField(max_length=255, blank=True)
+    account_number       = models.CharField(max_length=40, blank=True)
+    ifsc_code             = models.CharField(max_length=15, blank=True)
+    upi_id                = models.CharField(max_length=100, blank=True)
+
+    ownership_percent = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    notes             = models.TextField(blank=True)
+
+    business   = models.ForeignKey("accounts.Business", on_delete=models.PROTECT, related_name="owners")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "business_owners"
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.name
 
 
 class PackedStockEvent(models.Model):

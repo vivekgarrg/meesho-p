@@ -8,7 +8,7 @@ import { Routes, Route, NavLink, useLocation, Navigate, useNavigate } from "reac
 // them at module scope (e.g. TaxCheckTab's STATUS_META). Importing ./shared
 // first guarantees it initializes before any tab module evaluates, avoiding a
 // "Cannot access 'C' before initialization" (TDZ) crash in the production build.
-import { API, fmt, C, CHART_COLORS, STATUS_COLORS, S, useIsMobile } from "./shared";
+import { API, fmt, C, CHART_COLORS, STATUS_COLORS, S, useIsMobile, useIsTablet } from "./shared";
 
 // ── Tab components ─────────────────────────────────────────────────────────────
 import { OverviewTab } from "./Components/Tabs/OverviewTab";
@@ -17,6 +17,7 @@ import { OrdersTab } from "./Components/Tabs/OrdersTab";
 import { PaymentsTab } from "./Components/Tabs/PaymentsTab";
 import { UnscheduledPaymentTab } from "./Components/Tabs/UnscheduledPaymentTab";
 import { ExpensesTab } from "./Components/Tabs/ExpensesTab";
+import { EmployeesTab } from "./Components/Tabs/EmployeesTab";
 import { PricingTab } from "./Components/Tabs/PricingTab";
 import { TaxCheckTab } from "./Components/Tabs/TaxCheckTab";
 import { UploadTab } from "./Components/Tabs/UploadTab";
@@ -382,7 +383,7 @@ const SIDEBAR_BG = "#13111C";
 const SIDEBAR_BG2 = "#0E0C18";
 const DIVIDER = "rgba(255,255,255,0.07)";
 
-function Sidebar({ collapsed, setCollapsed, isMobile, mobileOpen, closeMobile }) {
+function Sidebar({ collapsed, setCollapsed, compact, mobileOpen, closeMobile }) {
   const [btnHovered, setBtnHovered] = useState(false);
   const { isSuperAdmin } = useAuth();
   // Resolved server-side: this user's own rule, else their business's, else the
@@ -393,10 +394,11 @@ function Sidebar({ collapsed, setCollapsed, isMobile, mobileOpen, closeMobile })
     .filter((g) => !g.adminOnly || isSuperAdmin)
     .map((g) => ({ ...g, items: g.items.filter((item) => isPathVisible(item.path)) }))
     .filter((g) => g.items.length > 0);
-  // On mobile the sidebar is never collapsed-to-icons — it's an off-canvas
-  // drawer that slides over the content, because a 232px rail on a 390px screen
-  // leaves nothing usable behind it.
-  const onMobile = isMobile;
+  // Below desktop width (mobile + tablet) the sidebar is never collapsed-to-
+  // icons — it's an off-canvas drawer, hidden by default and fully shown or
+  // fully hidden, because a squeezed icon rail still eats space a phone or
+  // tablet can't spare. Icon-only collapse is a big-screen-only affordance.
+  const onMobile = compact;
   const iconsOnly = !onMobile && collapsed;
   const W = onMobile ? 268 : collapsed ? 60 : 232;
 
@@ -595,7 +597,7 @@ function UserMenu({ onChangePassword, compact }) {
 }
 
 // ── Top bar ───────────────────────────────────────────────────────────────────
-function TopBar({ isMobile, onOpenMenu }) {
+function TopBar({ isMobile, showMenuButton, onOpenMenu }) {
   const loc = useLocation();
   const [showChangePassword, setShowChangePassword] = useState(false);
   const current = ALL_NAV.find(item =>
@@ -614,7 +616,7 @@ function TopBar({ isMobile, onOpenMenu }) {
     }}>
       {/* Left section — hamburger (mobile) + business selector + breadcrumb */}
       <div style={{ display: "flex", alignItems: "center", gap: isMobile ? 8 : 16, minWidth: 0 }}>
-        {isMobile && (
+        {showMenuButton && (
           <button
             onClick={onOpenMenu}
             aria-label="Open menu"
@@ -660,6 +662,12 @@ function TopBar({ isMobile, onOpenMenu }) {
 function AppShell() {
   const { activeBusinessId } = useBusiness();
   const isMobile = useIsMobile();
+  // Below 1024px (phones and tablets alike) the sidebar collapses to a fully
+  // hidden off-canvas drawer instead of a big-screen icon rail — see Sidebar's
+  // `compact` prop. useIsTablet() is already true for the whole mobile range
+  // too, so this one flag covers "medium and below".
+  const isTablet = useIsTablet();
+  const sidebarCompact = isTablet;
   const loc = useLocation();
   const [collapsed, setCollapsed] = useState(() =>
     localStorage.getItem("sidebar_collapsed") === "true"
@@ -673,7 +681,7 @@ function AppShell() {
   // Close the drawer on navigation, and whenever the viewport grows back to
   // desktop — otherwise a stale open drawer overlays the restored sidebar.
   useEffect(() => { setDrawerOpen(false); }, [loc.pathname]);
-  useEffect(() => { if (!isMobile) setDrawerOpen(false); }, [isMobile]);
+  useEffect(() => { if (!sidebarCompact) setDrawerOpen(false); }, [sidebarCompact]);
 
   // Don't let the page behind the drawer scroll under your finger.
   useEffect(() => {
@@ -696,13 +704,13 @@ function AppShell() {
       <Sidebar
         collapsed={collapsed}
         setCollapsed={setCollapsed}
-        isMobile={isMobile}
+        compact={sidebarCompact}
         mobileOpen={drawerOpen}
         closeMobile={() => setDrawerOpen(false)}
       />
 
       {/* Backdrop — tap anywhere to dismiss the drawer */}
-      {isMobile && drawerOpen && (
+      {sidebarCompact && drawerOpen && (
         <div
           onClick={() => setDrawerOpen(false)}
           style={{
@@ -713,7 +721,7 @@ function AppShell() {
       )}
 
       <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
-        <TopBar isMobile={isMobile} onOpenMenu={() => setDrawerOpen(true)} />
+        <TopBar isMobile={isMobile} showMenuButton={sidebarCompact} onOpenMenu={() => setDrawerOpen(true)} />
         {/* Global period filter — stays mounted across route changes and
             business switches so it's never remounted, only its context value
             changes. Every tab reads the active range from useDateFilter(). */}
@@ -748,6 +756,7 @@ function AppShell() {
             <Route path="/returns" element={<ReturnScanTab />} />
             <Route path="/claims" element={<ClaimSheetTab />} />
             <Route path="/tasks" element={<TeamTasksTab />} />
+            <Route path="/employees" element={<EmployeesTab />} />
             <Route path="/purchases" element={<PurchasesTab />} />
             <Route path="/expenses" element={<ExpensesTab />} />
             <Route path="/inventory" element={<InventoryTab />} />

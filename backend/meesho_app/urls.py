@@ -87,6 +87,14 @@ urlpatterns = [
     path("expenses/summary/",               views.expenses_summary,       name="expenses_summary"),
     path("expenses/export/",                views.expenses_export,        name="expenses_export"),
     path("expenses/import/",                views.expenses_import,        name="expenses_import"),
+    # Employee directory + owner details
+    path("employees/",                        views.employees_list,           name="employees_list"),
+    path("employees/summary/",                views.employees_summary,        name="employees_summary"),
+    path("employees/<int:employee_id>/",      views.employee_detail,          name="employee_detail"),
+    path("employees/<int:employee_id>/payments/", views.employee_payments_list, name="employee_payments_list"),
+    path("employees/payments/<int:payment_id>/",  views.employee_payment_detail, name="employee_payment_detail"),
+    path("owners/",              views.owners_list,  name="owners_list"),
+    path("owners/<int:owner_id>/", views.owner_detail, name="owner_detail"),
     # Product Photography AI
     path("product-photos/generate/", views.generate_product_images, name="generate_product_images"),
     # Meesho Inventory

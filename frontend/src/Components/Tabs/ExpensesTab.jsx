@@ -26,14 +26,18 @@ const CATEGORIES = [
   { value: "other", label: "Other Expense" },
 ];
 
-const emptyItem = () => ({ description: "", category: "packaging", quantity: "1", unit_rate: "" });
+const emptyItem = () => ({ description: "", category: "packaging", quantity: "1", unit_rate: "", gst_percent: "" });
 const emptyInvoice = () => ({ invoice_no: "", vendor: "", title: "", date: todayStr(), notes: "", items: [emptyItem()] });
 
 function lineAmount(it) {
   return (Number(it.quantity) || 0) * (Number(it.unit_rate) || 0);
 }
+function lineTotal(it) {
+  const amt = lineAmount(it);
+  return amt + (amt * (Number(it.gst_percent) || 0)) / 100;
+}
 function invoiceTotal(items) {
-  return items.reduce((s, it) => s + lineAmount(it), 0);
+  return items.reduce((s, it) => s + lineTotal(it), 0);
 }
 
 function KpiCard({ label, value, color, bg, sub }) {
@@ -105,6 +109,7 @@ function InvoiceDialog({ open, initial, onClose, onSaved }) {
               <TableCell sx={{ fontWeight: 700, width: 160 }}>Category</TableCell>
               <TableCell sx={{ fontWeight: 700, width: 90 }} align="right">Qty</TableCell>
               <TableCell sx={{ fontWeight: 700, width: 110 }} align="right">Rate</TableCell>
+              <TableCell sx={{ fontWeight: 700, width: 90 }} align="right">GST %</TableCell>
               <TableCell sx={{ fontWeight: 700, width: 120 }} align="right">Amount</TableCell>
               <TableCell sx={{ width: 44 }} />
             </TableRow>
@@ -120,7 +125,8 @@ function InvoiceDialog({ open, initial, onClose, onSaved }) {
                 </TableCell>
                 <TableCell align="right"><TextField size="small" type="number" value={it.quantity} onChange={(e) => setItem(i, "quantity", e.target.value)} inputProps={{ style: { textAlign: "right" } }} /></TableCell>
                 <TableCell align="right"><TextField size="small" type="number" value={it.unit_rate} onChange={(e) => setItem(i, "unit_rate", e.target.value)} inputProps={{ style: { textAlign: "right" } }} /></TableCell>
-                <TableCell align="right" sx={{ fontFamily: "monospace", fontWeight: 700 }}>{fmt2(lineAmount(it))}</TableCell>
+                <TableCell align="right"><TextField size="small" type="number" value={it.gst_percent} onChange={(e) => setItem(i, "gst_percent", e.target.value)} inputProps={{ style: { textAlign: "right" } }} /></TableCell>
+                <TableCell align="right" sx={{ fontFamily: "monospace", fontWeight: 700 }}>{fmt2(lineTotal(it))}</TableCell>
                 <TableCell><IconButton size="small" onClick={() => removeItem(i)} disabled={form.items.length === 1}><DeleteIcon fontSize="small" /></IconButton></TableCell>
               </TableRow>
             ))}
@@ -391,7 +397,7 @@ export function ExpensesTab() {
                       </td>
                       <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", fontWeight: 700, color: C.gray800 }}>{fmt2(inv.total_amount)}</td>
                       <td style={{ ...S.td, whiteSpace: "nowrap" }}>
-                        <Tooltip title="Edit"><IconButton size="small" onClick={() => { setEditing({ ...inv, items: inv.items.map((it) => ({ description: it.description, category: it.category, quantity: it.quantity, unit_rate: it.unit_rate })) }); setDialogOpen(true); }}><EditIcon fontSize="small" /></IconButton></Tooltip>
+                        <Tooltip title="Edit"><IconButton size="small" onClick={() => { setEditing({ ...inv, items: inv.items.map((it) => ({ description: it.description, category: it.category, quantity: it.quantity, unit_rate: it.unit_rate, gst_percent: it.gst_percent })) }); setDialogOpen(true); }}><EditIcon fontSize="small" /></IconButton></Tooltip>
                         <Tooltip title="Delete"><IconButton size="small" onClick={() => deleteInvoice(inv.id)}><DeleteIcon fontSize="small" /></IconButton></Tooltip>
                       </td>
                     </tr>

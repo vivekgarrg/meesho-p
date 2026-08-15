@@ -34,6 +34,7 @@ export const NAV_GROUPS = [
       { path: "/returns", label: "Returns & Claims", icon: "⟲" },
       { path: "/claims", label: "Claim Sheet", icon: "₹" },
       { path: "/tasks", label: "Team Tasks", icon: "☑" },
+      { path: "/employees", label: "Employees", icon: "🧑‍💼" },
     ],
   },
   {
