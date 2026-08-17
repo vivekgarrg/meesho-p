@@ -888,6 +888,13 @@ def unsettled_orders(request, business_id):
         latest_qs
         .exclude(sub_order_no__in=settled_nos)
         .exclude(reason_for_credit_entry__iexact="cancelled")
+        # RTO orders (RTO/RTO_COMPLETE/RTO_LOCKED/RTO_OFD — see _CUST_RTO_STATUSES)
+        # settle through the return flow, not a payment record, so a missing
+        # OrderPayment row for one doesn't mean anything is actually pending —
+        # it would otherwise never leave this list. Case-sensitive on purpose,
+        # matching _CUST_RTO_STATUSES' own values, since reason_for_credit_entry
+        # comes through uppercase from Meesho's export.
+        .exclude(reason_for_credit_entry__in=_CUST_RTO_STATUSES)
         .order_by("-order_date")
     )
 
@@ -3209,7 +3216,24 @@ def parent_price_detail(request, business_id, item_id):
     partial = request.method == "PATCH"
     serializer = ParentItemPriceSerializer(obj, data=request.data, partial=partial)
     serializer.is_valid(raise_exception=True)
-    serializer.save()
+    # DRF's auto-generated UniqueTogetherValidator skips any constraint that
+    # touches a read-only field, and `business` is read-only here — so a
+    # rename (item_id) colliding with another parent in the same business
+    # was reaching the DB unchecked and surfacing as a raw IntegrityError
+    # (500) instead of a clean validation error. Belt-and-braces check here.
+    new_item_id = serializer.validated_data.get("item_id")
+    if new_item_id and new_item_id != obj.item_id:
+        if ParentItemPrice.objects.filter(business=business, item_id=new_item_id).exclude(pk=obj.pk).exists():
+            return Response(
+                {"item_id": [f"'{new_item_id}' is already used by another parent SKU."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+    try:
+        serializer.save()
+    except IntegrityError:
+        return Response(
+            {"item_id": ["That name is already in use."]}, status=status.HTTP_400_BAD_REQUEST,
+        )
     return Response(serializer.data)
 
 @api_view(["POST", "PUT"])

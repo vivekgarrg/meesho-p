@@ -252,6 +252,9 @@ function ParentCard({ parent, onRefresh, notify, onLink, dragging, unlinked = []
   const [panel, setPanel] = useState(null); // null | "history" | "link" | "create" | "edit" | "suggest"
   const [dragOver, setDragOver] = useState(false);
   const [editForm, setEditForm] = useState({ item_price: String(parent.item_price || ""), tax_percent: String(parent.tax_percent || "0"), packaging_cost: String(parent.packaging_cost || "0") });
+  const [renameValue, setRenameValue] = useState(parent.item_id);
+  const [renameErr, setRenameErr] = useState("");
+  const [renaming, setRenaming] = useState(false);
 
   // Children and history arrive only when the card is opened. The list endpoint
   // used to ship both for every parent, which cost 181 queries to draw a page
@@ -431,6 +434,33 @@ function ParentCard({ parent, onRefresh, notify, onLink, dragging, unlinked = []
     else notify("err", "Update failed.");
   };
 
+  const saveRename = async () => {
+    const next = renameValue.trim();
+    if (!next) { setRenameErr("Enter a name."); return; }
+    if (next === parent.item_id) { setPanel(null); return; }
+    setRenaming(true); setRenameErr("");
+    try {
+      const r = await fetch(`${API}/parent-prices/${encodeURIComponent(parent.item_id)}/`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ item_id: next }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (r.ok) {
+        notify("ok", `Renamed to "${next}".`);
+        setPanel(null);
+        onRefresh();
+      } else {
+        // Most likely the unique_together(business, item_id) constraint —
+        // surface whatever the server actually said rather than a generic message.
+        setRenameErr(d.item_id?.[0] || d.error || d.detail || "Could not rename — that name may already be in use.");
+      }
+    } catch {
+      setRenameErr("Network error.");
+    } finally {
+      setRenaming(false);
+    }
+  };
+
   return (
     <div
       onDragOver={handleDragOver} onDragLeave={handleDragLeave} onDrop={handleDrop}
@@ -540,6 +570,10 @@ function ParentCard({ parent, onRefresh, notify, onLink, dragging, unlinked = []
               {panel === "create" ? "✕ Cancel" : "+ Create New SKU"}
             </button>
             <div style={{ flex: 1 }} />
+            <button onClick={() => { setRenameValue(parent.item_id); setRenameErr(""); toggle("rename"); }}
+              style={{ ...btn(panel === "rename" ? "ghostOrange" : "ghost", "sm"), fontSize: 11 }}>
+              {panel === "rename" ? "✕ Cancel" : "✎ Rename"}
+            </button>
             <button onClick={() => toggle("edit")} style={{ ...btn(panel === "edit" ? "ghostOrange" : "ghost", "sm"), fontSize: 11 }}>
               {panel === "edit" ? "✕ Cancel" : "✏️ Edit Price"}
             </button>
@@ -549,6 +583,28 @@ function ParentCard({ parent, onRefresh, notify, onLink, dragging, unlinked = []
           {/* Panel area */}
           {panel && (
             <div style={{ padding: "12px 16px", borderBottom: `1px solid ${C.gray100}` }}>
+              {panel === "rename" && (
+                <div style={{ background: C.orangeLight, border: `1px solid ${C.orangeBorder}`, borderRadius: 8, padding: "12px 14px" }}>
+                  <p style={{ fontSize: 11, fontWeight: 700, color: C.orange, textTransform: "uppercase", marginBottom: 10 }}>
+                    Rename Parent SKU
+                  </p>
+                  <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+                    <div style={{ flex: 1 }}>
+                      <input value={renameValue} onChange={(e) => setRenameValue(e.target.value)}
+                        style={{ ...S.inp, fontSize: 13, fontFamily: "monospace" }}
+                        onKeyDown={(e) => { if (e.key === "Enter") saveRename(); }} />
+                      {renameErr && <p style={{ color: C.red, fontSize: 12, marginTop: 6 }}>{renameErr}</p>}
+                      <p style={{ fontSize: 11, color: C.gray500, marginTop: 6 }}>
+                        All linked child SKUs stay linked — only the parent's name changes. Anything that
+                        already recorded the old name in a past export or log keeps showing it as it was.
+                      </p>
+                    </div>
+                    <button onClick={saveRename} disabled={renaming} style={btn("success", "sm")}>
+                      {renaming ? "Saving…" : "Save"}
+                    </button>
+                  </div>
+                </div>
+              )}
               {panel === "history" && (
                 <AddHistoryForm parentId={parent.item_id}
                   onSaved={() => { setPanel(null); reloadDetail(); onRefresh(); notify("ok", "Price entry added."); }}
