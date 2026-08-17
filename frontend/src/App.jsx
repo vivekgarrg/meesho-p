@@ -25,6 +25,7 @@ import { SKUAnalysisTab } from "./Components/Tabs/SKUProfitTab";
 import { EstimatedProfitTab } from "./Components/Tabs/EstimatedProfitTab";
 import { DailyProfitTab } from "./Components/Tabs/DailyProfitTab";
 import { LabelsTab } from "./Components/Tabs/LabelsTab";
+import { BulkLabelsTab } from "./Components/Tabs/BulkLabelsTab";
 import { PurchasesTab } from "./Components/Tabs/PurchasesTab";
 import { InventoryTab } from "./Components/Tabs/InventoryTab";
 import { InventoryLabelsTab } from "./Components/Tabs/InventoryLabelsTab";
@@ -753,6 +754,7 @@ function AppShell() {
             <Route path="/gst" element={<GstTab />} />
             <Route path="/upload" element={<UploadTab />} />
             <Route path="/labels" element={<LabelsTab />} />
+            <Route path="/bulk-labels" element={<BulkLabelsTab />} />
             <Route path="/returns" element={<ReturnScanTab />} />
             <Route path="/claims" element={<ClaimSheetTab />} />
             <Route path="/tasks" element={<TeamTasksTab />} />

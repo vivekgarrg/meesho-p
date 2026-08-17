@@ -1,7 +1,7 @@
 from rest_framework import serializers
 
 from .helpers.helper import strip_html
-from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, ParentItemPrice, ParentPriceHistory, Order, LabelOrder, ReturnDelivery, ScannedOrder, ListingTemplate, ClaimTicket, WorkerTask, WalletEntry, WalletSettlement, TaskListing, PlatformRate, TaskDocument, BulkListingFieldPreset, FlipkartBulkTemplate
+from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, ParentItemPrice, ParentPriceHistory, Order, LabelOrder, ReturnDelivery, ScannedOrder, ListingTemplate, ClaimTicket, WorkerTask, WalletEntry, WalletSettlement, TaskListing, PlatformRate, TaskDocument, BulkListingFieldPreset, FlipkartBulkTemplate, BulkListingBatch
 
 
 class OrderPaymentSerializer(serializers.ModelSerializer):
@@ -214,6 +214,37 @@ class FlipkartBulkTemplateSerializer(serializers.ModelSerializer):
                   "created_by_name", "created_at", "updated_at"]
 
 
+class BulkListingBatchSerializer(serializers.ModelSerializer):
+    """Never exposes file_data/source_file_data — same reasoning as
+    FlipkartBulkTemplateSerializer. Review status is flattened on from the
+    linked WorkerTask/TaskListings so the panel can show "3/12 approved"
+    without a second request per row."""
+    created_by_name  = serializers.CharField(source="created_by.username", read_only=True, default=None)
+    worker_task_status = serializers.CharField(source="worker_task.status", read_only=True, default=None)
+    approved_count   = serializers.SerializerMethodField()
+    total_count      = serializers.IntegerField(source="row_count", read_only=True)
+
+    class Meta:
+        model = BulkListingBatch
+        fields = ["id", "platform", "category_label", "filename", "first_sku_id", "sku_ids",
+                  "row_count", "source_kind", "worker_task", "worker_task_status",
+                  "approved_count", "total_count", "created_by_name", "created_at"]
+
+    def get_approved_count(self, obj):
+        if not obj.worker_task_id:
+            return None
+        return obj.worker_task.listings.filter(status="APPROVED").count()
+
+
+class BulkListingBatchDetailSerializer(BulkListingBatchSerializer):
+    """Adds payload_snapshot (needed to hydrate the form for "load to edit"),
+    still never exposing the binary fields — used only by the single-batch
+    detail endpoint, not the list, since the snapshot can be sizeable."""
+
+    class Meta(BulkListingBatchSerializer.Meta):
+        fields = BulkListingBatchSerializer.Meta.fields + ["payload_snapshot"]
+
+
 class ClaimTicketSerializer(serializers.ModelSerializer):
     """
     A claim ticket. Everything is read-only: this table is a faithful record of
@@ -367,7 +398,7 @@ class TaskListingSerializer(serializers.ModelSerializer):
         model = TaskListing
         fields = "__all__"
         read_only_fields = [
-            "business", "task", "created_by", "status", "reviewed_by", "reviewed_at",
+            "business", "task", "batch", "created_by", "status", "reviewed_by", "reviewed_at",
             "reward_amount", "reward_credited_at", "created_at", "updated_at",
         ]
 

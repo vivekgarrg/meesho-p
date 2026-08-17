@@ -196,6 +196,7 @@
     const tab = await activeTargetTab();
     const line = $("#status-line");
     const platform = tab && platformOf(tab.url);
+    show("#labels-row", platform === "Meesho");
     if (!platform) {
       line.textContent = "Open a Meesho or Flipkart Seller Hub listing page to begin.";
       $("#btn-scan").disabled = true;
@@ -204,6 +205,49 @@
     const resp = await sendToTab(tab.id, { type: "ML_PING" });
     line.textContent = resp.ok ? `Connected to ${platform} ✓` : `Reload the ${platform} tab to connect.`;
     $("#btn-scan").disabled = false;
+    $("#btn-grab-labels").disabled = !resp.ok;
+  }
+
+  /* -------------------------------- labels ---------------------------------- */
+  /**
+   * Grabs whatever labels PDF the current Meesho tab downloads (see
+   * content.js's grabLabels / labelSniffer.js) and sends it straight to the
+   * same endpoint the Labels tab's own manual upload uses — you never see a
+   * downloaded file, just the result.
+   */
+  async function grabAndUploadLabels() {
+    const tab = await activeTargetTab();
+    if (!tab || platformOf(tab.url) !== "Meesho") {
+      return toast("Open a Meesho page first", "err");
+    }
+    const businessId = await MLApi.getActiveBusinessId();
+    if (!businessId) return toast("Pick a business first", "err");
+
+    const btn = $("#btn-grab-labels");
+    const status = $("#labels-status");
+    btn.disabled = true;
+    status.textContent = "Looking for the labels download on this page…";
+
+    const capture = await sendToTab(tab.id, { type: "ML_GRAB_LABELS" });
+    if (!capture.ok) {
+      btn.disabled = false;
+      status.textContent = "";
+      return toast(capture.error || "Couldn't grab the labels PDF", "err");
+    }
+
+    status.textContent = "Got the PDF — uploading to Rudam…";
+    const result = await guarded(
+      () => MLApi.uploadLabelsPdf(capture.dataUrl, capture.filename),
+      "Upload failed"
+    );
+    btn.disabled = false;
+    status.textContent = "";
+    if (!result) return;
+
+    const parts = [`${result.total_labels} label(s) found`];
+    if (result.db_saved) parts.push(`${result.db_saved} new`);
+    if (result.db_updated) parts.push(`${result.db_updated} updated`);
+    toast(parts.join(" · "), "ok");
   }
 
   /* ------------------------------- tabs UI --------------------------------- */
@@ -642,6 +686,9 @@
     });
     $("#btn-save-server").addEventListener("click", () => saveApiBase("#auth-api-base"));
     $("#business-select").addEventListener("change", onBusinessChange);
+
+    // labels
+    $("#btn-grab-labels").addEventListener("click", grabAndUploadLabels);
 
     // fields
     $("#btn-scan").addEventListener("click", scanPage);

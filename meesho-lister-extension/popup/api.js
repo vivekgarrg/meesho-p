@@ -172,7 +172,11 @@
     if (!auth || !auth.access) throw new Error("Not signed in.");
 
     const headers = { ...(options.headers || {}), Authorization: `Bearer ${auth.access}` };
-    if (options.body && !headers["Content-Type"]) headers["Content-Type"] = "application/json";
+    // FormData sets its own multipart boundary — stamping application/json
+    // over it would break the upload, so only default to JSON otherwise.
+    if (options.body && !headers["Content-Type"] && !(options.body instanceof FormData)) {
+      headers["Content-Type"] = "application/json";
+    }
 
     let res;
     try {
@@ -263,6 +267,27 @@
     return await authedJson(await businessPath("listing-templates/export/"));
   }
 
+  /* --------------------------------- labels --------------------------------- */
+  /**
+   * Send a captured Meesho shipping-labels PDF (as a data: URL, the shape
+   * content.js hands back — see labelSniffer.js) to the same endpoint the
+   * Labels tab's own manual upload already uses, so a captured PDF is
+   * indistinguishable from one uploaded by hand: same parsing, same
+   * per-order rows, same place to review it afterwards.
+   */
+  async function uploadLabelsPdf(dataUrl, filename) {
+    const blob = await (await fetch(dataUrl)).blob();
+    const form = new FormData();
+    form.append("file", blob, filename || "labels.pdf");
+    const res = await authedFetch(await businessPath("labels/parse/"), {
+      method: "POST",
+      body: form,
+    });
+    const body = await parseBody(res);
+    if (!res.ok) throw new Error(errorText(body, res));
+    return body;
+  }
+
   window.MLApi = {
     getApiBase,
     setApiBase,
@@ -280,5 +305,6 @@
     deleteTemplate,
     importTemplates,
     exportTemplates,
+    uploadLabelsPdf,
   };
 })();

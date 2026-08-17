@@ -8,6 +8,7 @@ import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import SaveIcon from "@mui/icons-material/Save";
 import ChangeCircleIcon from "@mui/icons-material/ChangeCircle";
 import { CircularProgress } from "@mui/material";
+import { BulkListingBatchesPanel } from "./BulkListingBatchesPanel";
 
 /**
  * Turns any Meesho category bulk-listing template (uploaded fresh, or one of
@@ -772,13 +773,14 @@ export function BulkListingTab() {
     try {
       const fd = new FormData();
       if (src.type === "file") fd.append("file", src.file);
+      else if (src.type === "batch") fd.append("batch_id", src.id);
       else fd.append("built_in", src.key);
       fd.append("platform", "meesho");
       const res = await fetch(`${API}/bulk-listing/parse/`, { method: "POST", body: fd });
       const d = await res.json().catch(() => ({}));
       if (!res.ok) {
         setMsg({ type: "error", text: d.error || "Could not read that template." });
-        return;
+        return null;
       }
       if (mode === "prefilled") {
         const found = d.prefilled_images || [];
@@ -798,8 +800,10 @@ export function BulkListingTab() {
       setShared({});
       setPresetId("");
       setCoveredKeys(new Set());
+      return d;
     } catch {
       setMsg({ type: "error", text: "Network error while reading the template." });
+      return null;
     } finally {
       setParsing(false);
     }
@@ -811,6 +815,45 @@ export function BulkListingTab() {
   };
 
   const changeTemplate = () => resetFlow();
+
+  const [batchesRefreshKey, setBatchesRefreshKey] = useState(0);
+
+  // "Load to edit" from the batches panel — rebuild the form from a
+  // previously generated batch's own template + row data (payload_snapshot),
+  // so re-generating it is a tweak rather than starting over.
+  const loadBatchToEdit = async (batch) => {
+    setMsg(null);
+    if (batch.platform === "flipkart") {
+      setMsg({ type: "error", text: "Loading a Flipkart batch back into the form isn't supported yet — download it instead." });
+      return;
+    }
+    try {
+      const res = await fetch(`${API}/bulk-listing/batches/${batch.id}/`);
+      const detail = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setMsg({ type: "error", text: detail.error || "Could not load that batch." });
+        return;
+      }
+      const snap = detail.payload_snapshot || {};
+      const snapMode = snap.mode === "prefilled" ? "prefilled" : "new";
+      setMode(snapMode);
+      const parsed = await parseSource({ type: "batch", id: batch.id });
+      if (!parsed) return;
+      setShared(snap.shared || {});
+      if (snapMode === "prefilled") {
+        setPrefilledImages((snap.rows || []).map((r) => (r.images || [])[0]).filter(Boolean));
+      } else {
+        setImageText((snap.image_urls || []).join("\n"));
+      }
+      setRows((snap.rows || []).map((r) => ({
+        title: r.product_name || "", sku: r.sku_id || "", style: r.style_id || "",
+        groupId: r.group_id || "", images: r.images || [], overrides: r.overrides || {},
+      })));
+      setMsg({ type: "success", text: `Loaded "${batch.filename}" for editing.` });
+    } catch {
+      setMsg({ type: "error", text: "Network error while loading that batch." });
+    }
+  };
 
   const setField = (key) => (value) => setShared((s) => ({ ...s, [key]: value }));
 
@@ -1074,6 +1117,7 @@ export function BulkListingTab() {
       return;
     }
     const payload = {
+      mode,
       shared,
       rows: rows.map((r) => ({
         product_name: r.title, sku_id: r.sku, style_id: r.style, group_id: r.groupId,
@@ -1083,6 +1127,7 @@ export function BulkListingTab() {
     };
     const fd = new FormData();
     if (source.type === "file") fd.append("file", source.file);
+    else if (source.type === "batch") fd.append("batch_id", source.id);
     else fd.append("built_in", source.key);
     fd.append("platform", "meesho");
     fd.append("payload", JSON.stringify(payload));
@@ -1095,16 +1140,21 @@ export function BulkListingTab() {
         setMsg({ type: "error", text: d.error || "Could not generate the sheet." });
         return;
       }
+      // The server names this after the batch's first SKU (see X-Filename /
+      // Content-Disposition) — never a hardcoded name, so re-downloads and
+      // fresh generations are named consistently with what's in the panel.
+      const filename = res.headers.get("X-Filename") || "bulk-listing.xlsx";
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = "bulk-listing.xlsx";
+      a.download = filename;
       document.body.appendChild(a);
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
-      setMsg({ type: "success", text: "Sheet downloaded — ready to upload on Meesho." });
+      setBatchesRefreshKey((k) => k + 1);
+      setMsg({ type: "success", text: "Sheet downloaded — ready to upload on Meesho. It's also saved in the panel on the right for reuse." });
     } catch {
       setMsg({ type: "error", text: "Network error." });
     } finally {
@@ -1115,7 +1165,8 @@ export function BulkListingTab() {
   const rowCount = rows.length;
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+    <div style={{ display: "flex", gap: 16, alignItems: "flex-start", flexDirection: isMobile ? "column" : "row" }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 14, flex: 1, minWidth: 0 }}>
       <div>
         <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
           <UploadFileIcon style={{ color: C.orange, fontSize: 21 }} />
@@ -1153,7 +1204,8 @@ export function BulkListingTab() {
               <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
                 <Tag variant="green" fontSize={12}>{spec.category_label}</Tag>
                 <span style={{ fontSize: 11.5, color: C.gray400 }}>
-                  {source?.type === "file" ? `from ${source.file.name}` : "bundled quick-start"} · {spec.fields.length} fields detected
+                  {source?.type === "file" ? `from ${source.file.name}`
+                    : source?.type === "batch" ? "loaded from a previous batch" : "bundled quick-start"} · {spec.fields.length} fields detected
                   {mode === "prefilled" && ` · ${prefilledImages.length} photo(s) found`}
                 </span>
                 <button onClick={changeTemplate} style={{ ...btn("ghost", "sm"), marginLeft: "auto" }}>
@@ -1502,6 +1554,12 @@ export function BulkListingTab() {
           )}
         </>
       )}
+    </div>
+    <BulkListingBatchesPanel
+      isMobile={isMobile}
+      refreshKey={batchesRefreshKey}
+      onLoadToEdit={loadBatchToEdit}
+    />
     </div>
   );
 }

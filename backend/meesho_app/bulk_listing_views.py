@@ -27,12 +27,23 @@ from rest_framework.decorators import api_view, parser_classes
 from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
 
+from decimal import Decimal
+
+from django.db import IntegrityError, transaction
+from django.db.models import Q as DQ
+
 from . import bulk_listing as bl
 from . import bulk_listing_flipkart as blf
-from .models import BulkListingFieldPreset, FinalPrice, FlipkartBulkTemplate, TaskListing
+from .models import (
+    BulkListingBatch, BulkListingFieldPreset, FinalPrice, FlipkartBulkTemplate,
+    ParentItemPrice, TaskListing, WorkerTask,
+)
 from .permissions import get_authorized_business
-from .serializers import BulkListingFieldPresetSerializer, FlipkartBulkTemplateSerializer
-from .views import _sku_key, _workbook_from_upload, safe_decimal
+from .serializers import (
+    BulkListingBatchDetailSerializer, BulkListingBatchSerializer, BulkListingFieldPresetSerializer,
+    FlipkartBulkTemplateSerializer,
+)
+from .views import _resolve_rate, _sku_key, _workbook_from_upload, safe_decimal
 
 # Each module exposes the same contract — load_workbook/parse_template/
 # build_workbook returning the same spec-dict shape — so everything below
@@ -55,23 +66,32 @@ def _resolve_platform(request):
 def _resolve_source(request, module, platform, business):
     """
     The template to use for this request: whatever file was uploaded, a
-    previously-saved Flipkart template (`template_id=`), or (Meesho only —
-    Flipkart's field set is too category-specific for one bundled example
-    to generalize) the built-in one the caller named.
+    previously-saved Flipkart template (`template_id=`), a previously
+    generated batch (`batch_id=` — "load this back into the form to edit"),
+    or (Meesho only — Flipkart's field set is too category-specific for one
+    bundled example to generalize) the built-in one the caller named.
 
-    Returns `(workbook, original_filename)` — `workbook` in whatever shape
-    `module.load_workbook` returns, `original_filename` the name to reuse
-    verbatim for the generated download (None for a built-in, which has no
-    "original" filename of its own — the caller falls back to a slug in
-    that case). Raises ValueError (bad file / unknown template) / KeyError
+    Returns `(workbook, original_filename, source_meta)` — `workbook` in
+    whatever shape `module.load_workbook` returns, `original_filename` the
+    name to reuse verbatim for the generated download (None for a built-in,
+    which has no "original" filename of its own — the caller falls back to a
+    slug in that case), and `source_meta` a dict describing what was used
+    (`kind`, `built_in_key`, `template`, `file_bytes`) for BulkListingBatch
+    persistence. Raises ValueError (bad file / unknown template) / KeyError
     (unknown built_in) for the view to turn into a 400.
     """
     uploaded = request.FILES.get("file")
     built_in = str(request.data.get("built_in") or "").strip()
     template_id = str(request.data.get("template_id") or "").strip()
+    batch_id = str(request.data.get("batch_id") or "").strip()
     if uploaded:
+        uploaded.seek(0)
+        file_bytes = uploaded.read()
+        uploaded.seek(0)
         source, _extracted = _workbook_from_upload(uploaded)
-        return module.load_workbook(source), uploaded.name
+        meta = {"kind": BulkListingBatch.SOURCE_FILE, "built_in_key": "", "template": None,
+                "file_bytes": file_bytes}
+        return module.load_workbook(source), uploaded.name, meta
     if template_id:
         if platform != "flipkart":
             raise ValueError("Saved templates are a Flipkart-only feature.")
@@ -79,11 +99,29 @@ def _resolve_source(request, module, platform, business):
             template = FlipkartBulkTemplate.objects.get(pk=template_id, business=business)
         except (FlipkartBulkTemplate.DoesNotExist, ValueError):
             raise ValueError("That saved template no longer exists.")
-        return module.load_workbook(BytesIO(bytes(template.file_data))), template.original_filename
+        meta = {"kind": BulkListingBatch.SOURCE_TEMPLATE, "built_in_key": "", "template": template,
+                "file_bytes": bytes(template.file_data)}
+        return module.load_workbook(BytesIO(bytes(template.file_data))), template.original_filename, meta
+    if batch_id:
+        try:
+            batch = BulkListingBatch.objects.get(pk=batch_id, business=business)
+        except (BulkListingBatch.DoesNotExist, ValueError):
+            raise ValueError("That generated batch no longer exists.")
+        if not batch.source_file_data:
+            raise ValueError("This batch's original template is no longer available to edit.")
+        meta = {"kind": batch.source_kind, "built_in_key": batch.source_built_in_key,
+                "template": batch.source_template, "file_bytes": bytes(batch.source_file_data)}
+        return (module.load_workbook(BytesIO(bytes(batch.source_file_data))),
+                batch.source_original_filename, meta)
     if built_in:
         if platform != "meesho":
             raise ValueError("This platform has no built-in template — upload one.")
-        return module.load_workbook(module.built_in_path(built_in)), None
+        path = module.built_in_path(built_in)
+        with open(path, "rb") as fh:
+            file_bytes = fh.read()
+        meta = {"kind": BulkListingBatch.SOURCE_BUILT_IN, "built_in_key": built_in, "template": None,
+                "file_bytes": file_bytes}
+        return module.load_workbook(path), None, meta
     raise ValueError("Upload a template file, pick a built-in one, or pick a saved template.")
 
 
@@ -99,7 +137,7 @@ def bulk_listing_parse(request, business_id):
     business = get_authorized_business(request, business_id)
     try:
         platform, module = _resolve_platform(request)
-        wb, _original_filename = _resolve_source(request, module, platform, business)
+        wb, _original_filename, _source_meta = _resolve_source(request, module, platform, business)
         spec = module.parse_template(wb)
     except KeyError:
         return Response({"error": "Unknown built-in template."}, status=status.HTTP_400_BAD_REQUEST)
@@ -142,8 +180,12 @@ def bulk_listing_parse(request, business_id):
 
 def _existing_sku_clash(business, sku_ids):
     """Which of these SKU ids (case-insensitively) are already used in this
-    business's catalogue — priced (FinalPrice) or already listed via a team
-    task (TaskListing) — so a generated sheet can't silently collide."""
+    business's catalogue — priced (FinalPrice), a parent SKU (ParentItemPrice),
+    or already listed via a team task (TaskListing) — so a generated sheet
+    can't silently collide. Every SKU a Bulk Listing generation produces is
+    registered into FinalPrice immediately (see _persist_batch_and_worker_task),
+    so this same check also catches collisions against other batches that
+    haven't been approved yet."""
     wanted = {_sku_key(s) for s in sku_ids}
     clashes = set()
     for sku in FinalPrice.objects.filter(business=business).values_list("sku_id", flat=True):
@@ -152,7 +194,72 @@ def _existing_sku_clash(business, sku_ids):
     for sku in TaskListing.objects.filter(business=business).values_list("sku_id", flat=True):
         if _sku_key(sku) in wanted:
             clashes.add(sku)
+    for sku in ParentItemPrice.objects.filter(business=business).values_list("item_id", flat=True):
+        if _sku_key(sku) in wanted:
+            clashes.add(sku)
     return clashes
+
+
+def _persist_batch_and_worker_task(*, business, request, platform, spec, source_meta,
+                                    payload_snapshot, sku_ids, filename, file_bytes):
+    """
+    Everything a successful generation triggers besides the download itself:
+
+      - a BulkListingBatch record (the file bytes, the source template bytes,
+        and the row data — so it can be re-downloaded byte-for-byte or
+        reloaded into the form to edit and regenerate)
+      - every SKU registered into FinalPrice immediately, without a price
+        (same pattern as sku_parent_opt_out) — makes the SKU visible to the
+        rest of the app right away and closes the race window against
+        another generation reusing it before this one is even reviewed
+      - one WorkerTask + one TaskListing per SKU, submitted straight into the
+        existing Team Tasks review queue — this is what "generating a bulk
+        listing now creates paid, reviewable work" (point 5) actually is:
+        reusing the pipeline Team Tasks already has, not a new one.
+
+    All in one transaction: a failure partway through must not leave a batch
+    recorded without its SKUs registered, or SKUs registered without a
+    reviewable task behind them.
+    """
+    wt_platform = WorkerTask.PLATFORM_MEESHO if platform == "meesho" else WorkerTask.PLATFORM_FLIPKART
+    batch_platform = (BulkListingBatch.PLATFORM_MEESHO if platform == "meesho"
+                      else BulkListingBatch.PLATFORM_FLIPKART)
+
+    with transaction.atomic():
+        batch = BulkListingBatch.objects.create(
+            business=business, platform=batch_platform, category_label=spec.get("category_label", ""),
+            filename=filename, file_data=file_bytes,
+            source_kind=source_meta["kind"], source_built_in_key=source_meta["built_in_key"],
+            source_template=source_meta["template"], source_file_data=source_meta["file_bytes"],
+            source_original_filename=(source_meta["template"].original_filename
+                                      if source_meta["template"] else ""),
+            payload_snapshot=payload_snapshot, first_sku_id=sku_ids[0],
+            sku_ids=list(sku_ids), row_count=len(sku_ids), created_by=request.user,
+        )
+
+        FinalPrice.objects.bulk_create([FinalPrice(business=business, sku_id=s) for s in sku_ids])
+
+        rate = _resolve_rate(business, wt_platform, WorkerTask.TYPE_LISTING, user=request.user)
+        now = timezone.now()
+        task = WorkerTask.objects.create(
+            business=business, task_type=WorkerTask.TYPE_LISTING, platform=wt_platform,
+            title=f"Bulk listing — {spec.get('category_label', '')} "
+                  f"({len(sku_ids)} SKU{'s' if len(sku_ids) != 1 else ''}) — {now:%d %b %Y}",
+            instructions="Auto-created from a Bulk Listing generation.",
+            created_by=request.user,
+            reward_amount=rate.reward_amount if rate else Decimal("0"),
+            status=WorkerTask.STATUS_SUBMITTED,
+            submitted_at=now, submitted_by=request.user,
+        )
+        task.assignees.set([request.user])
+
+        TaskListing.objects.bulk_create([
+            TaskListing(business=business, task=task, batch=batch, created_by=request.user, sku_id=s)
+            for s in sku_ids
+        ])
+        batch.worker_task = task
+        batch.save(update_fields=["worker_task"])
+    return batch
 
 
 def _category_slug(category_label):
@@ -180,22 +287,37 @@ def _field_value_error(f, value):
     return None
 
 
-def _download_filename(original_filename, spec, extension):
+def _sku_filename_slug(sku_id):
+    """A SKU id, made safe for use as a filename (and Content-Disposition
+    header value) — alphanumerics/dashes/underscores only."""
+    slug = "".join(c if (c.isalnum() or c in "-_") else "-" for c in str(sku_id)[:80]).strip("-")
+    return slug or "bulk-listing"
+
+
+def _download_filename(original_filename, spec, extension, first_sku_id=None):
     """
-    The name to hand back a generated sheet under — the exact name it was
-    uploaded (or saved) as, whenever one is known, so a seller doesn't have
-    to rename the download back to what their own tooling expects it to be
-    called. Falls back to a category slug + timestamp only when there's no
-    original name to reuse (the Meesho built-in quick-start has none).
+    The name to hand back a generated sheet under.
+
+    Meesho (first_sku_id given): always named after the batch's first SKU id
+    — "the file that starts with that SKU" — regardless of what the source
+    template was called, so re-downloading the same batch later is
+    predictable and doesn't depend on remembering an unrelated upload name.
+
+    Flipkart (first_sku_id not given) keeps the older rule unchanged: the
+    exact name it was uploaded/saved as, whenever known, so a seller doesn't
+    have to rename the download back to what their own tooling expects.
+    Falls back to a category slug + timestamp only when neither is available.
     Strips characters that would break the `Content-Disposition` header
     (quotes, newlines) rather than trusting an uploaded filename verbatim.
     """
+    if first_sku_id:
+        return f"{_sku_filename_slug(first_sku_id)}.{extension}"
     if original_filename:
         return re.sub(r'[\r\n"]', "", original_filename).strip()
     return f"{_category_slug(spec['category_label'])}-{timezone.now().strftime('%Y%m%d-%H%M%S')}.{extension}"
 
 
-def _generate_flipkart(request, business, spec, wb, original_filename):
+def _generate_flipkart(request, business, spec, wb, original_filename, source_meta):
     """
     Flipkart's own generate path — kept entirely separate from Meesho's
     below rather than threaded through the same branches, because the two
@@ -294,10 +416,26 @@ def _generate_flipkart(request, business, spec, wb, original_filename):
     buf = BytesIO()
     result_wb.save(buf)
     buf.seek(0)
+    file_bytes = buf.read()
 
     filename = _download_filename(original_filename, spec, "xls")
-    resp = HttpResponse(buf.read(), content_type="application/vnd.ms-excel")
+
+    try:
+        _persist_batch_and_worker_task(
+            business=business, request=request, platform="flipkart", spec=spec,
+            source_meta=source_meta, payload_snapshot={"mode": "flipkart", "rows": rows_in},
+            sku_ids=skus, filename=filename, file_bytes=file_bytes,
+        )
+    except IntegrityError:
+        return Response(
+            {"error": f"Already used in your catalogue: {', '.join(sorted(skus))}"},
+            status=status.HTTP_409_CONFLICT,
+        )
+
+    resp = HttpResponse(file_bytes, content_type="application/vnd.ms-excel")
     resp["Content-Disposition"] = f'attachment; filename="{filename}"'
+    resp["X-Filename"] = filename
+    resp["Access-Control-Expose-Headers"] = "X-Filename"
     return resp
 
 
@@ -308,7 +446,7 @@ def bulk_listing_generate(request, business_id):
 
     try:
         platform, module = _resolve_platform(request)
-        wb, original_filename = _resolve_source(request, module, platform, business)
+        wb, original_filename, source_meta = _resolve_source(request, module, platform, business)
         spec = module.parse_template(wb)
     except KeyError:
         return Response({"error": "Unknown built-in template."}, status=status.HTTP_400_BAD_REQUEST)
@@ -316,7 +454,7 @@ def bulk_listing_generate(request, business_id):
         return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
     if platform == "flipkart":
-        return _generate_flipkart(request, business, spec, wb, original_filename)
+        return _generate_flipkart(request, business, spec, wb, original_filename, source_meta)
 
     sku_field = bl.find_field(spec, role="sku")
     if not sku_field:
@@ -519,10 +657,30 @@ def bulk_listing_generate(request, business_id):
     buf = BytesIO()
     result_wb.save(buf)
     buf.seek(0)
+    file_bytes = buf.read()
 
-    filename = _download_filename(original_filename, spec, "xlsx")
-    resp = HttpResponse(buf.read(), content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    # Meesho files are always named after the batch's first SKU (point 1) —
+    # unlike Flipkart, which keeps the original-filename-preserving rule.
+    filename = _download_filename(original_filename, spec, "xlsx", first_sku_id=skus[0])
+
+    try:
+        _persist_batch_and_worker_task(
+            business=business, request=request, platform="meesho", spec=spec,
+            source_meta=source_meta,
+            payload_snapshot={"mode": str(payload.get("mode") or "new"), "shared": shared_in,
+                              "rows": rows_in, "image_urls": image_urls},
+            sku_ids=skus, filename=filename, file_bytes=file_bytes,
+        )
+    except IntegrityError:
+        return Response(
+            {"error": f"Already used in your catalogue: {', '.join(sorted(skus))}"},
+            status=status.HTTP_409_CONFLICT,
+        )
+
+    resp = HttpResponse(file_bytes, content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     resp["Content-Disposition"] = f'attachment; filename="{filename}"'
+    resp["X-Filename"] = filename
+    resp["Access-Control-Expose-Headers"] = "X-Filename"
     return resp
 
 
@@ -649,3 +807,47 @@ def bulk_listing_flipkart_template_detail(request, business_id, pk):
         return Response({"error": "Template not found."}, status=status.HTTP_404_NOT_FOUND)
     template.delete()
     return Response({"deleted": True})
+
+
+@api_view(["GET"])
+def bulk_listing_batches(request, business_id):
+    """
+    Every bulk listing sheet ever generated for this business — visible to
+    every business member, not just whoever generated it, so a teammate
+    picking up someone else's batch can still re-download or reuse it.
+    """
+    business = get_authorized_business(request, business_id)
+    qs = (BulkListingBatch.objects.filter(business=business)
+          .select_related("created_by", "worker_task").prefetch_related("worker_task__listings"))
+    platform = str(request.GET.get("platform") or "").strip().lower()
+    if platform:
+        qs = qs.filter(platform=platform)
+    search = str(request.GET.get("search") or "").strip()
+    if search:
+        qs = qs.filter(DQ(filename__icontains=search) | DQ(first_sku_id__icontains=search))
+    batches = list(qs[:500])
+    return Response({"results": BulkListingBatchSerializer(batches, many=True).data, "total": len(batches)})
+
+
+@api_view(["GET"])
+def bulk_listing_batch_detail(request, business_id, pk):
+    business = get_authorized_business(request, business_id)
+    try:
+        batch = BulkListingBatch.objects.select_related("worker_task").get(pk=pk, business=business)
+    except BulkListingBatch.DoesNotExist:
+        return Response({"error": "Batch not found."}, status=status.HTTP_404_NOT_FOUND)
+    return Response(BulkListingBatchDetailSerializer(batch).data)
+
+
+@api_view(["GET"])
+def bulk_listing_batch_download(request, business_id, pk):
+    business = get_authorized_business(request, business_id)
+    try:
+        batch = BulkListingBatch.objects.get(pk=pk, business=business)
+    except BulkListingBatch.DoesNotExist:
+        return Response({"error": "Batch not found."}, status=status.HTTP_404_NOT_FOUND)
+    content_type = ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    if batch.platform == BulkListingBatch.PLATFORM_MEESHO else "application/vnd.ms-excel")
+    resp = HttpResponse(bytes(batch.file_data), content_type=content_type)
+    resp["Content-Disposition"] = f'attachment; filename="{batch.filename}"'
+    return resp

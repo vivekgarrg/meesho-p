@@ -39,6 +39,12 @@
       "matches": ["https://*.meesho.com/*", "https://seller.flipkart.com/*"],
       "js": ["content/fieldScanner.js", "content/content.js"],
       "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://*.meesho.com/*"],
+      "js": ["content/labelSniffer.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
     }
   ]
 }

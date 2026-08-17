@@ -4232,6 +4232,113 @@ def full_orders_analytics(request, business_id):
     })
 
 
+# ── Breached orders — still "Ready to Ship" too long after order_date ─────────
+# No courier ever confirms pickup anywhere in this app's data, so "breached" is
+# necessarily an inference: Meesho's own export still shows the order as
+# READY_TO_SHIP (never advanced to Shipped/Delivered/RTO/Cancelled) and more
+# than BREACH_DAYS have passed since order_date. Courier is looked up
+# separately from LabelOrder (joined on order_id == sub_order_no — the two
+# models share that key, confirmed elsewhere in this file) since Order itself
+# never carries a courier — an order breached before ever getting a label
+# uploaded here will show no courier, which is itself useful signal, not a bug.
+BREACH_DAYS = 2
+
+
+def _breached_orders_qs(business):
+    cutoff = timezone.now().date() - timedelta(days=BREACH_DAYS)
+    base = Order.objects.filter(
+        business=business, order_date__lt=cutoff,
+    ).filter(reason_for_credit_entry__iregex=r"^ready[ _]?to[ _]?ship$")
+    return Order.latest_per_order(base_qs=base)
+
+
+def _attach_couriers(business, rows):
+    """rows: list of dicts with a sub_order_no key — adds 'courier_name' from
+    LabelOrder in one query rather than N+1."""
+    ids = [r["sub_order_no"] for r in rows]
+    courier_by_id = dict(
+        LabelOrder.objects.filter(business=business, order_id__in=ids)
+        .values_list("order_id", "courier_name")
+    )
+    for r in rows:
+        r["courier_name"] = courier_by_id.get(r["sub_order_no"]) or ""
+    return rows
+
+
+@api_view(["GET"])
+def breached_orders_list(request, business_id):
+    """
+    Every order still "Ready to Ship" more than BREACH_DAYS after order_date —
+    optionally narrowed to one courier — plus a per-courier breakdown so the
+    UI can show which courier is actually responsible for the backlog before
+    the seller decides who to export a report against.
+    """
+    business = get_authorized_business(request, business_id)
+    courier_filter = request.GET.get("courier", "").strip()
+
+    today = timezone.now().date()
+    qs = _breached_orders_qs(business)
+    rows = list(qs.values(
+        "sub_order_no", "order_date", "sku", "product_name", "quantity", "customer_state",
+    ).order_by("order_date"))
+    rows = _attach_couriers(business, rows)
+
+    by_courier = {}
+    for r in rows:
+        r["days_breached"] = (today - r["order_date"]).days
+        key = r["courier_name"] or "Unknown"
+        by_courier[key] = by_courier.get(key, 0) + 1
+
+    if courier_filter:
+        rows = [r for r in rows
+                if (r["courier_name"] or "Unknown").lower() == courier_filter.lower()]
+
+    return Response({
+        "results": rows,
+        "total": len(rows),
+        "by_courier": by_courier,
+        "breach_days": BREACH_DAYS,
+    })
+
+
+@api_view(["GET"])
+def breached_orders_export(request, business_id):
+    """
+    The same list as breached_orders_list, as a .xlsx matching Meesho's own
+    "orders not picked up" bulk-action template exactly (a single "Sub Order
+    Num" column, nothing else) — so the download can be re-uploaded to Meesho
+    with no editing. ?courier= narrows the export the same way the list does.
+    """
+    business = get_authorized_business(request, business_id)
+    courier_filter = request.GET.get("courier", "").strip()
+
+    qs = _breached_orders_qs(business)
+    rows = list(qs.values("sub_order_no").order_by("order_date"))
+    if courier_filter:
+        rows = _attach_couriers(business, [{**r} for r in rows])
+        rows = [r for r in rows if (r["courier_name"] or "Unknown").lower() == courier_filter.lower()]
+
+    import openpyxl
+    from io import BytesIO
+    from django.http import HttpResponse
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+    ws.append(["Sub Order Num"])
+    for r in rows:
+        ws.append([r["sub_order_no"]])
+
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    response = HttpResponse(
+        buf.read(),
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    response["Content-Disposition"] = 'attachment; filename="My-orders-are-not-picked-up-yet.xlsx"'
+    return response
+
+
 @api_view(["GET"])
 def dashboard_analytics(request, business_id):
     """
@@ -4589,8 +4696,37 @@ def upload_labels_pdf(request, business_id):
          extract SKU + Qty precisely (handles multi-word/wrapped SKUs).
       2. Locate "TAX INVOICE" text to determine crop boundary per page.
       3. Use pypdf to crop each page to the label-only region and return as base64 PDF.
+
+    The actual parsing/sorting/cropping work is in _process_labels_upload, shared
+    with upload_bulk_labels_pdf (multiple files, merged into one PDF first — see
+    that view's docstring for why merging up front means this shared logic never
+    has to know it's looking at more than one source file).
     """
     business = get_authorized_business(request, business_id)
+
+    file = request.FILES.get("file")
+    if not file:
+        return Response({"error": "No file provided."}, status=status.HTTP_400_BAD_REQUEST)
+    if not file.name.lower().endswith(".pdf"):
+        return Response({"error": "Only PDF files are accepted."}, status=status.HTTP_400_BAD_REQUEST)
+    pdf_bytes = file.read()
+
+    upload_date_str = request.data.get("upload_date", "").strip()
+    return _process_labels_upload(request, business, pdf_bytes, upload_date_str)
+
+
+def _process_labels_upload(request, business, pdf_bytes, upload_date_str, crop_labels=True):
+    """
+    Parse, business-sort, DB-write and crop a (possibly just-merged) labels
+    PDF. Lifted verbatim out of upload_labels_pdf so upload_bulk_labels_pdf
+    can reuse it unchanged — behavior for the original single-file endpoint
+    is unaffected since this is the exact same code that used to run inline,
+    called with crop_labels defaulted to True exactly as before.
+
+    crop_labels=False (used by Bulk Labels) still sorts pages the same way —
+    most-dispatched parent/SKU group first — but returns them full-page,
+    ready to print as-is, instead of cropped to the label-only region.
+    """
     import io, re, base64
 
     try:
@@ -4605,20 +4741,11 @@ def upload_labels_pdf(request, business_id):
     except ImportError:
         HAS_PYPDF = False
 
-    file = request.FILES.get("file")
-    if not file:
-        return Response({"error": "No file provided."}, status=status.HTTP_400_BAD_REQUEST)
-    if not file.name.lower().endswith(".pdf"):
-        return Response({"error": "Only PDF files are accepted."}, status=status.HTTP_400_BAD_REQUEST)
-
-    pdf_bytes = file.read()
-
     # ── Batch date: accept back-dated uploads ─────────────────────────────────
     # Caller can pass upload_date=YYYY-MM-DD in the form to record historical
     # label batches under a past date. Must be ≤ today; defaults to today.
     from datetime import date as _date_cls
     today = timezone.now().date()
-    upload_date_str = request.data.get("upload_date", "").strip()
     if upload_date_str:
         try:
             candidate = _date_cls.fromisoformat(upload_date_str)
@@ -4827,6 +4954,13 @@ def upload_labels_pdf(request, business_id):
     }
 
     cropped_pdf_b64 = None
+    # Original (0-based) page indices in the same order used to build
+    # cropped_pdf_b64 — exposed so a caller can later ask for just a subset
+    # of that same order (see extract_label_pages / Bulk Labels' per-parent
+    # and per-AWB download) without re-deriving this sort itself. Purely
+    # additive to the response — the existing single-file Labels tab doesn't
+    # read this key, so this changes nothing for it.
+    page_order_out = None
     if HAS_PYPDF:
         try:
             reader = PdfReader(io.BytesIO(pdf_bytes))
@@ -4848,21 +4982,28 @@ def upload_labels_pdf(request, business_id):
                 ),
             )
             for i in page_order:
-                pg   = reader.pages[i]
-                ph   = float(pg.mediabox.height)
-                pw   = float(pg.mediabox.width)
-                pl_h = pl_heights[i] if i < len(pl_heights) else ph
-                scale = ph / pl_h if pl_h else 1.0
-                crop  = crop_y_list[i] if i < len(crop_y_list) else ph * 0.54
-                y_bot = max(0.0, ph - crop * scale)
-                pg.cropbox.lower_left  = (0, y_bot)
-                pg.cropbox.upper_right = (pw, ph)
+                pg = reader.pages[i]
+                # crop_labels=False (Bulk Labels — see upload_bulk_labels_pdf)
+                # skips the cropbox adjustment below and keeps the full page
+                # (tax invoice half included) — sorted, not cropped, since
+                # that batch is going straight to print as-is.
+                if crop_labels:
+                    ph   = float(pg.mediabox.height)
+                    pw   = float(pg.mediabox.width)
+                    pl_h = pl_heights[i] if i < len(pl_heights) else ph
+                    scale = ph / pl_h if pl_h else 1.0
+                    crop  = crop_y_list[i] if i < len(crop_y_list) else ph * 0.54
+                    y_bot = max(0.0, ph - crop * scale)
+                    pg.cropbox.lower_left  = (0, y_bot)
+                    pg.cropbox.upper_right = (pw, ph)
                 writer.add_page(pg)
             buf = io.BytesIO()
             writer.write(buf)
             cropped_pdf_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+            page_order_out = list(page_order)
         except Exception:
             cropped_pdf_b64 = None
+            page_order_out = None
 
     # ── Build analytics response ──────────────────────────────────────────────
     sku_table = sorted(
@@ -5045,11 +5186,132 @@ def upload_labels_pdf(request, business_id):
         "sku_table":        sku_table,
         "page_details":     page_details,
         "cropped_pdf_b64":  cropped_pdf_b64,
+        "page_order":       page_order_out,
         "db_saved":         saved,
         "db_updated":       updated,
         "blocked_customers_found": blocked_in_batch,
         "repeated_customers":      repeated_customers,
     })
+
+
+_BULK_LABELS_MAX_FILES = 20
+
+
+@api_view(["POST"])
+@parser_classes([MultiPartParser])
+def upload_bulk_labels_pdf(request, business_id):
+    """
+    Upload several Meesho shipping-labels PDFs at once (e.g. one export per
+    supplier account) and get them back merged and sorted as if they were a
+    single upload — full pages, not cropped, since this batch is meant to go
+    straight to print as-is.
+
+    The merge happens here, before any parsing: every page from every file is
+    concatenated into one combined PDF first. From that point on this is
+    handled by the exact same _process_labels_upload that the single-file
+    upload_labels_pdf uses (with crop_labels=False) — business-sorting,
+    ambiguous-SKU detection, LabelOrder writes and the parent-grouped page
+    ordering all already work page-by-page on "however many pages this PDF
+    has", so merging up front means none of that logic has to be taught
+    anything about multiple source files. Existing single-file behavior is
+    untouched by this endpoint existing at all.
+    """
+    business = get_authorized_business(request, business_id)
+
+    files = request.FILES.getlist("files")
+    if not files:
+        return Response({"error": "No files provided."}, status=status.HTTP_400_BAD_REQUEST)
+    if len(files) > _BULK_LABELS_MAX_FILES:
+        return Response(
+            {"error": f"That's {len(files)} files — {_BULK_LABELS_MAX_FILES} is the most one upload can merge."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    for f in files:
+        if not f.name.lower().endswith(".pdf"):
+            return Response({"error": f"'{f.name}' isn't a PDF."}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        from pypdf import PdfReader, PdfWriter
+    except ImportError:
+        return Response({"error": "pypdf not installed. Run: pip install pypdf"},
+                        status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    import io
+    writer = PdfWriter()
+    for f in files:
+        try:
+            reader = PdfReader(io.BytesIO(f.read()))
+            for page in reader.pages:
+                writer.add_page(page)
+        except Exception as exc:
+            return Response({"error": f"Could not read '{f.name}': {exc}"},
+                            status=status.HTTP_400_BAD_REQUEST)
+    buf = io.BytesIO()
+    writer.write(buf)
+    merged_bytes = buf.getvalue()
+
+    upload_date_str = request.data.get("upload_date", "").strip()
+    response = _process_labels_upload(request, business, merged_bytes, upload_date_str, crop_labels=False)
+    if response.status_code == 200:
+        response.data["files_merged"] = len(files)
+        # Renamed from cropped_pdf_b64 (the shared helper's own field name,
+        # unchanged for upload_labels_pdf) — this one is sorted, full-page,
+        # not cropped, so the key should say what it actually is.
+        response.data["sorted_pdf_b64"] = response.data.pop("cropped_pdf_b64", None)
+    return response
+
+
+_EXTRACT_MAX_PAGES = 2000
+
+
+@api_view(["POST"])
+def extract_label_pages(request, business_id):
+    """
+    Pull a subset of pages out of a PDF the caller already has (its own
+    base64), in whatever order asked for — e.g. Bulk Labels' "download this
+    parent group" or "download this one label by AWB" buttons, both of which
+    already have the full sorted PDF and know (from `page_order` +
+    `page_details` in the original upload response) exactly which page
+    positions they want, without the server needing to know anything about
+    parents or AWBs at all. Nothing about the source PDF is stored — it's
+    read, sliced, and discarded within this one request, the same
+    stateless-per-request shape as the rest of this feature.
+    """
+    get_authorized_business(request, business_id)
+
+    try:
+        from pypdf import PdfReader, PdfWriter
+    except ImportError:
+        return Response({"error": "pypdf not installed. Run: pip install pypdf"},
+                        status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    import io, base64
+    pdf_b64 = request.data.get("pdf_b64")
+    pages = request.data.get("pages")
+    if not pdf_b64:
+        return Response({"error": "pdf_b64 is required."}, status=status.HTTP_400_BAD_REQUEST)
+    if not isinstance(pages, list) or not pages:
+        return Response({"error": "pages must be a non-empty list of page indices."},
+                        status=status.HTTP_400_BAD_REQUEST)
+    if len(pages) > _EXTRACT_MAX_PAGES:
+        return Response({"error": f"That's {len(pages)} pages — {_EXTRACT_MAX_PAGES} is the most one request can extract."},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        reader = PdfReader(io.BytesIO(base64.b64decode(pdf_b64)))
+    except Exception as exc:
+        return Response({"error": f"Could not read that PDF: {exc}"}, status=status.HTTP_400_BAD_REQUEST)
+
+    writer = PdfWriter()
+    for i in pages:
+        if not isinstance(i, int) or i < 0 or i >= len(reader.pages):
+            return Response({"error": f"Page index {i} is out of range for a {len(reader.pages)}-page PDF."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        writer.add_page(reader.pages[i])
+
+    buf = io.BytesIO()
+    writer.write(buf)
+    return Response({"pdf_b64": base64.b64encode(buf.getvalue()).decode("utf-8"), "page_count": len(pages)})
 
 
 # ── Label Orders — read endpoints ─────────────────────────────────────────────
@@ -10280,10 +10542,18 @@ def task_listing_review(request, business_id, pk):
                 # is the *purchase* cost, and the listing's price is what it sells
                 # for — copying one into the other would quietly corrupt every
                 # profit figure.
-                _, catalog_created = FinalPrice.objects.get_or_create(
+                catalog_sku, catalog_created = FinalPrice.objects.get_or_create(
                     business=business, sku_id=listing.sku_id,
                     defaults={"tax_percent": int(listing.tax_percent) if listing.tax_percent is not None else None},
                 )
+                # The row can already exist here — e.g. pre-registered unpriced by
+                # a Bulk Listing generation (see bulk_listing_views) before this
+                # SKU was ever approved — in which case get_or_create's `defaults`
+                # never ran. Backfill the tax rate now rather than leaving it
+                # permanently null just because the row predates approval.
+                if not catalog_created and catalog_sku.tax_percent is None and listing.tax_percent is not None:
+                    catalog_sku.tax_percent = int(listing.tax_percent)
+                    catalog_sku.save(update_fields=["tax_percent"])
             listing.added_to_catalog_at = now
 
         if listing.reward_credited_at is None:

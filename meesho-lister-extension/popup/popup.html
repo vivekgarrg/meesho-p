@@ -56,6 +56,14 @@
       <select id="business-select"></select>
     </div>
 
+    <!-- Meesho-only: grabs the shipping-labels PDF from the tab you're already
+         signed into and sends it straight to the same place a manual Labels-tab
+         upload would. Hidden on any page it can't apply to. -->
+    <div id="labels-row" class="labels-row hidden">
+      <button id="btn-grab-labels" class="btn primary full">Send Labels to Rudam</button>
+      <p id="labels-status" class="muted tiny"></p>
+    </div>
+
     <nav class="tabs" role="tablist">
       <button class="tab active" data-tab="fields" role="tab">Fields</button>
       <button class="tab" data-tab="templates" role="tab">Templates</button>

@@ -23,6 +23,7 @@ import { BarChart } from "@mui/x-charts/BarChart";
 
 import { API, C, fmt } from "../../App";
 import { UnsettledOrdersTab } from "./UnsettledOrdersTab";
+import { BreachedOrdersTab } from "./BreachedOrdersTab";
 import { PAGE_SIZE } from "../../lib/helper";
 import { colors } from "@mui/material";
 import SkuWiseChart from "../Charts/SkuWiseChart";
@@ -231,6 +232,9 @@ export function OrdersTab() {
       <ToggleButton value="unsettled" sx={{ color: view === "unsettled" ? "error.main" : undefined }}>
         ⚡ Unsettled
       </ToggleButton>
+      <ToggleButton value="breached" sx={{ color: view === "breached" ? "warning.main" : undefined }}>
+        ⚠ Breached
+      </ToggleButton>
     </ToggleButtonGroup>
   );
 
@@ -239,6 +243,15 @@ export function OrdersTab() {
       <Stack spacing={2.5}>
         <Box display="flex" justifyContent="flex-end">{ViewToggle}</Box>
         <UnsettledOrdersTab />
+      </Stack>
+    );
+  }
+
+  if (view === "breached") {
+    return (
+      <Stack spacing={2.5}>
+        <Box display="flex" justifyContent="flex-end">{ViewToggle}</Box>
+        <BreachedOrdersTab />
       </Stack>
     );
   }

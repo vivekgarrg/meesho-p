@@ -161,6 +161,14 @@ code { background: var(--bg-soft); padding: 1px 4px; border-radius: 4px; }
 .field-label.tight { margin: 0 0 4px; }
 .business-row select { width: 100%; }
 
+/* ── Labels button ────────────────────────────────────────────────────────── */
+.labels-row {
+  padding: 10px 14px; background: var(--bg-soft);
+  border-bottom: 1px solid var(--border);
+}
+.labels-row .btn.full { width: 100%; }
+.labels-row .muted.tiny { margin: 6px 0 0; text-align: center; }
+
 /* ── Sync status line on the Templates tab ──────────────────────────────── */
 .sync-status { margin: 8px 0 0; min-height: 14px; }
 
