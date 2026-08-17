@@ -2098,7 +2098,7 @@ def profit_daily_summary(request, business_id):
         "Exchange": "exchange", "Claim": "claim",
         "Unknown": "unknown", "Cancelled": "unknown",
     }
-    BUCKET_KEYS = ["delivered", "return", "rto", "exchange", "claim", "unknown"]
+    BUCKET_KEYS = ["delivered", "return", "rto", "exchange", "claim", "unknown", "cancelled"]
 
     payments = OrderPayment.objects.filter(
         business=business, sub_order_no__in=order_date_map.keys()
@@ -2120,6 +2120,7 @@ def profit_daily_summary(request, business_id):
                 "date": d.isoformat(), "shipped_count": shipped_by_day.get(d, 0),
                 "delivered_count": 0, "return_count": 0, "rto_count": 0,
                 "exchange_count": 0, "claim_count": 0, "unknown_count": 0,
+                "cancelled_count": 0,
                 "settled_count": 0, "no_payment_count": 0, "missing_price_count": 0,
                 "net_profit": Decimal("0"),
             }
@@ -2148,10 +2149,52 @@ def profit_daily_summary(request, business_id):
         result = compute_order_net(group, eff_price, eff_pkg, qty, unique_statuses,
                                    eff_item_price, eff_tax_pct, cost_setting=cost_setting)
         key = STATUS_TO_KEY.get(result["status"], "unknown")
+
+        # compute_order_net's own status sets are narrower than what the rest
+        # of the app already treats as RTO/Return (_CUST_RTO_STATUSES etc. —
+        # e.g. RTO_LOCKED/RTO_OFD aren't in its _RTO_STATUSES), and it has no
+        # Cancelled bucket at all, so those land in "unknown"/Unresolved.
+        # Reclassified here rather than by broadening the shared classifier,
+        # so /profit/ (which uses the same function) can't regress — this
+        # only ever overrides a row compute_order_net itself couldn't place.
+        if key == "unknown":
+            raw_statuses = {(p.live_order_status or "").strip().upper() for p in group}
+            if raw_statuses & _CUST_RTO_STATUSES:
+                key = "rto"
+            elif raw_statuses & _CUST_RETURN_STATUSES:
+                key = "return"
+            elif "CANCELLED" in raw_statuses:
+                key = "cancelled"
+
         bucket[f"{key}_count"] += 1
-        if key != "unknown":
+        if key not in ("unknown", "cancelled"):
             bucket["settled_count"] += 1
             bucket["net_profit"] += result["net"]
+
+    # Orders that shipped this day but have no OrderPayment row at all yet
+    # would otherwise all silently count as "awaiting data" — even ones whose
+    # fate is already known from the Orders sheet (RTO/Return/Cancelled),
+    # which aren't actually awaiting anything; no payment sheet is going to
+    # carry new information for them. Reclassify those into their real
+    # bucket. Genuinely in-flight statuses (Shipped/Delivered/Ready to
+    # Ship/blank) are left alone — they really are still awaiting data.
+    zero_payment_ids = set(order_date_map.keys()) - set(order_groups.keys())
+    if zero_payment_ids:
+        latest_orders = Order.latest_per_order(
+            base_qs=Order.objects.filter(business=business, sub_order_no__in=zero_payment_ids)
+        ).values("order_date", "reason_for_credit_entry")
+        for row in latest_orders:
+            d = row["order_date"]
+            if d is None:
+                continue
+            reason = (row["reason_for_credit_entry"] or "").strip().upper()
+            if reason in _CUST_RTO_STATUSES:
+                day_bucket(d)["rto_count"] += 1
+            elif reason in _CUST_RETURN_STATUSES:
+                day_bucket(d)["return_count"] += 1
+            elif reason == "CANCELLED":
+                day_bucket(d)["cancelled_count"] += 1
+            # else: still genuinely awaiting a payment sheet — no change.
 
     for d, count in shipped_by_day.items():
         bucket = day_bucket(d)
@@ -2164,8 +2207,8 @@ def profit_daily_summary(request, business_id):
 
     totals = {key: sum(r[key] for r in ordered) for key in (
         "shipped_count", "delivered_count", "return_count", "rto_count",
-        "exchange_count", "claim_count", "unknown_count", "no_payment_count",
-        "settled_count", "missing_price_count",
+        "exchange_count", "claim_count", "unknown_count", "cancelled_count",
+        "no_payment_count", "settled_count", "missing_price_count",
     )}
     totals["net_profit"] = round(sum(r["net_profit"] for r in ordered), 2)
 
