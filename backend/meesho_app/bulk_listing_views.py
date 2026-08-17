@@ -43,7 +43,7 @@ from .serializers import (
     BulkListingBatchDetailSerializer, BulkListingBatchSerializer, BulkListingFieldPresetSerializer,
     FlipkartBulkTemplateSerializer,
 )
-from .views import _resolve_rate, _sku_key, _workbook_from_upload, safe_decimal
+from .views import _sku_key, _workbook_from_upload, safe_decimal
 
 # Each module exposes the same contract — load_workbook/parse_template/
 # build_workbook returning the same spec-dict shape — so everything below
@@ -200,6 +200,14 @@ def _existing_sku_clash(business, sku_ids):
     return clashes
 
 
+# Flat per-SKU pay for a bulk-listing-generated SKU — deliberately NOT the
+# standing Team Tasks PlatformRate (_resolve_rate), which prices a single,
+# individually-briefed listing. Generating N SKUs in one bulk upload is much
+# less per-SKU effort than N separate manual listings, so it has its own,
+# lower, flat rate rather than paying the full per-listing rate N times over.
+BULK_LISTING_REWARD_PER_SKU = Decimal("6")
+
+
 def _persist_batch_and_worker_task(*, business, request, platform, spec, source_meta,
                                     payload_snapshot, sku_ids, filename, file_bytes):
     """
@@ -239,7 +247,6 @@ def _persist_batch_and_worker_task(*, business, request, platform, spec, source_
 
         FinalPrice.objects.bulk_create([FinalPrice(business=business, sku_id=s) for s in sku_ids])
 
-        rate = _resolve_rate(business, wt_platform, WorkerTask.TYPE_LISTING, user=request.user)
         now = timezone.now()
         task = WorkerTask.objects.create(
             business=business, task_type=WorkerTask.TYPE_LISTING, platform=wt_platform,
@@ -247,7 +254,7 @@ def _persist_batch_and_worker_task(*, business, request, platform, spec, source_
                   f"({len(sku_ids)} SKU{'s' if len(sku_ids) != 1 else ''}) — {now:%d %b %Y}",
             instructions="Auto-created from a Bulk Listing generation.",
             created_by=request.user,
-            reward_amount=rate.reward_amount if rate else Decimal("0"),
+            reward_amount=BULK_LISTING_REWARD_PER_SKU,
             status=WorkerTask.STATUS_SUBMITTED,
             submitted_at=now, submitted_by=request.user,
         )
@@ -822,6 +829,9 @@ def bulk_listing_batches(request, business_id):
     platform = str(request.GET.get("platform") or "").strip().lower()
     if platform:
         qs = qs.filter(platform=platform)
+    product_id = request.GET.get("product_id")
+    if product_id:
+        qs = qs.filter(product_id=product_id)
     search = str(request.GET.get("search") or "").strip()
     if search:
         qs = qs.filter(DQ(filename__icontains=search) | DQ(first_sku_id__icontains=search))
@@ -851,3 +861,14 @@ def bulk_listing_batch_download(request, business_id, pk):
     resp = HttpResponse(bytes(batch.file_data), content_type=content_type)
     resp["Content-Disposition"] = f'attachment; filename="{batch.filename}"'
     return resp
+
+
+@api_view(["GET"])
+def bulk_listing_unlinked_batches(request, business_id):
+    """Batches not yet attached to a Product — the pick-list for a Product
+    page's "Link a batch" action (see product_link_batch in views.py)."""
+    business = get_authorized_business(request, business_id)
+    qs = (BulkListingBatch.objects.filter(business=business, product__isnull=True)
+          .select_related("created_by", "worker_task"))
+    batches = list(qs)
+    return Response({"results": BulkListingBatchSerializer(batches, many=True).data, "total": len(batches)})

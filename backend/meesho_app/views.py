@@ -21,7 +21,7 @@ from accounts.models import Business, User
 from .permissions import get_authorized_business, accessible_businesses
 from .helpers.label_pdf import extract_all_pages
 
-from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, PurchaseBill, PurchaseItem, BlockedCustomer, InventoryAdjustment, ConsumableItem, ConsumablePurchase, ConsumableUsage, InventoryLog, MeeshoInventory, MeeshoPriceUpdate, ExpenseInvoice, ExpenseInvoiceItem, TransportCharge, PackedStockEvent, EstimatedProfitOrder, ReturnDelivery, GstTransaction, GstInvoiceDetail, ScannedOrder, ListingTemplate, ClaimTicket, WorkerTask, WalletEntry, WalletSettlement, TaskListing, PlatformRate, TaskDocument, BusinessCostSetting, Employee, EmployeePayment, BusinessOwner
+from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, PurchaseBill, PurchaseItem, BlockedCustomer, InventoryAdjustment, ConsumableItem, ConsumablePurchase, ConsumableUsage, InventoryLog, MeeshoInventory, MeeshoPriceUpdate, ExpenseInvoice, ExpenseInvoiceItem, TransportCharge, PackedStockEvent, EstimatedProfitOrder, ReturnDelivery, GstTransaction, GstInvoiceDetail, ScannedOrder, ListingTemplate, ClaimTicket, WorkerTask, WalletEntry, WalletSettlement, TaskListing, PlatformRate, TaskDocument, BusinessCostSetting, Employee, EmployeePayment, BusinessOwner, Product, ProductPhoto, BulkListingBatch
 from .serializers import (
     OrderPaymentSerializer, AdsCostSerializer,
     ReferralPaymentSerializer, CompensationRecoverySerializer,
@@ -40,6 +40,8 @@ from .serializers import (
     TaskListingSerializer,
     PlatformRateSerializer,
     TaskDocumentSerializer,
+    ProductSerializer,
+    ProductPhotoSerializer,
 )
 
 
@@ -3743,6 +3745,262 @@ def _bulk_link_skus_to_parent(*, business, parent, sku_ids):
         "failed": len(conflicts),
         "failed_skus": sorted(set(conflicts)),
     }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Products — the Team Tasks redesign's central object. See Product's own
+# docstring in models.py. Reuses _bulk_link_skus_to_parent above for the
+# actual "SKU joins this product's catalogue" mechanics; the only new thing
+# here is making that trigger when a batch is linked to a product, instead of
+# only from task_listing_review's existing parent_sku check.
+# ══════════════════════════════════════════════════════════════════════════════
+
+@api_view(["GET", "POST"])
+def products_list(request, business_id):
+    business = get_authorized_business(request, business_id)
+
+    if request.method == "GET":
+        search = request.GET.get("search", "").strip()
+        qs = Product.objects.filter(business=business).select_related("parent_sku", "created_by").prefetch_related("photos")
+        if search:
+            qs = qs.filter(
+                DQ(name__icontains=search) | DQ(parent_sku__item_id__icontains=search)
+            )
+        products = list(qs)
+        data = ProductSerializer(products, many=True, context={"request": request, "business_id": business_id}).data
+        return Response({"results": data, "total": len(data)})
+
+    if not _is_admin(request.user):
+        return Response({"error": "Only an admin can create products."}, status=status.HTTP_403_FORBIDDEN)
+
+    payload = request.data if isinstance(request.data, dict) else {}
+    name = str(payload.get("name") or "").strip()
+    if not name:
+        return Response({"error": "Give the product a name."}, status=status.HTTP_400_BAD_REQUEST)
+
+    parent_item_id = str(payload.get("parent_sku_item_id") or "").strip()
+    parent_name = str(payload.get("parent_sku_name") or "").strip()
+    if not parent_item_id and not parent_name:
+        return Response({"error": "Pick an existing parent SKU or name a new one."},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    if parent_item_id:
+        try:
+            parent = ParentItemPrice.objects.get(business=business, item_id=parent_item_id)
+        except ParentItemPrice.DoesNotExist:
+            return Response({"error": f"No parent SKU '{parent_item_id}' in this business."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if Product.objects.filter(parent_sku=parent).exists():
+            return Response({"error": f"'{parent_item_id}' is already linked to another product."},
+                            status=status.HTTP_400_BAD_REQUEST)
+    else:
+        if ParentItemPrice.objects.filter(business=business, item_id=parent_name).exists():
+            return Response({"error": f"'{parent_name}' already exists — pick it instead of naming a new one."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        parent = ParentItemPrice.objects.create(business=business, item_id=parent_name)
+
+    product = Product.objects.create(
+        business=business, name=name, parent_sku=parent,
+        size=str(payload.get("size") or ""), weight=str(payload.get("weight") or ""),
+        description=str(payload.get("description") or ""), created_by=request.user,
+    )
+    return Response(
+        ProductSerializer(product, context={"request": request, "business_id": business_id}).data,
+        status=status.HTTP_201_CREATED,
+    )
+
+
+@api_view(["GET", "PUT", "DELETE"])
+def product_detail(request, business_id, pk):
+    business = get_authorized_business(request, business_id)
+    try:
+        product = Product.objects.select_related("parent_sku").prefetch_related("photos").get(pk=pk, business=business)
+    except Product.DoesNotExist:
+        return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == "GET":
+        return Response(ProductSerializer(product, context={"request": request, "business_id": business_id}).data)
+
+    if not _is_admin(request.user):
+        return Response({"error": "Only an admin can edit products."}, status=status.HTTP_403_FORBIDDEN)
+
+    if request.method == "DELETE":
+        product.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    payload = request.data if isinstance(request.data, dict) else {}
+    for field in ("name", "size", "weight", "description"):
+        if field in payload:
+            setattr(product, field, payload[field])
+    product.save()
+    return Response(ProductSerializer(product, context={"request": request, "business_id": business_id}).data)
+
+
+@api_view(["POST"])
+def product_photos_add(request, business_id, pk):
+    """
+    Add photos by link, not upload. `links` is a single URL, or several
+    separated by commas — pasting a comma-separated batch is the common case
+    (several Drive/CDN links copied at once), so it's accepted in one field
+    rather than forcing one request per photo.
+    """
+    business = get_authorized_business(request, business_id)
+    if not _is_admin(request.user):
+        return Response({"error": "Only an admin can add photos."}, status=status.HTTP_403_FORBIDDEN)
+    try:
+        product = Product.objects.get(pk=pk, business=business)
+    except Product.DoesNotExist:
+        return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+
+    payload = request.data if isinstance(request.data, dict) else {}
+    raw = payload.get("links") or payload.get("url") or ""
+    links = [u.strip() for u in str(raw).split(",")]
+    links = [u for u in links if u]
+    if not links:
+        return Response({"error": "Paste at least one photo link."}, status=status.HTTP_400_BAD_REQUEST)
+    not_a_link = [u for u in links if not u.lower().startswith(("http://", "https://"))]
+    if not_a_link:
+        return Response({"error": f"Not a valid link: {not_a_link[0]}"}, status=status.HTTP_400_BAD_REQUEST)
+
+    start = (ProductPhoto.objects.filter(product=product).aggregate(m=Max("sort_order"))["m"] or 0) + 1
+    created = ProductPhoto.objects.bulk_create([
+        ProductPhoto(product=product, url=u, sort_order=start + i)
+        for i, u in enumerate(links)
+    ])
+    return Response(
+        ProductPhotoSerializer(created, many=True, context={"request": request, "business_id": business_id}).data,
+        status=status.HTTP_201_CREATED,
+    )
+
+
+@api_view(["DELETE"])
+def product_photo_delete(request, business_id, photo_id):
+    business = get_authorized_business(request, business_id)
+    if not _is_admin(request.user):
+        return Response({"error": "Only an admin can delete photos."}, status=status.HTTP_403_FORBIDDEN)
+    try:
+        photo = ProductPhoto.objects.get(pk=photo_id, product__business=business)
+    except ProductPhoto.DoesNotExist:
+        return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+    photo.delete()
+    return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+@api_view(["POST"])
+def product_link_batch(request, business_id, pk):
+    """
+    Attach an already-generated BulkListingBatch to this product. From this
+    point on, every SKU in that batch joins the product's parent SKU — already
+    approved ones immediately (via _bulk_link_skus_to_parent below), still-
+    pending ones automatically the moment they're approved, because approval
+    (task_listing_review) already checks task.parent_sku_id and does exactly
+    the same linking — this view's only new job is making sure that field
+    ends up set.
+    """
+    business = get_authorized_business(request, business_id)
+    if not _is_admin(request.user):
+        return Response({"error": "Only an admin can link a batch."}, status=status.HTTP_403_FORBIDDEN)
+
+    try:
+        product = Product.objects.select_related("parent_sku").get(pk=pk, business=business)
+    except Product.DoesNotExist:
+        return Response({"error": "Product not found"}, status=status.HTTP_404_NOT_FOUND)
+
+    payload = request.data if isinstance(request.data, dict) else {}
+    batch_id = payload.get("batch_id")
+    try:
+        batch = BulkListingBatch.objects.select_related("worker_task").get(pk=batch_id, business=business)
+    except (BulkListingBatch.DoesNotExist, ValueError, TypeError):
+        return Response({"error": "Batch not found"}, status=status.HTTP_404_NOT_FOUND)
+
+    if batch.product_id and batch.product_id != product.pk:
+        return Response({"error": "That batch is already linked to a different product."},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    task = batch.worker_task
+    if task and task.parent_sku_id and task.parent_sku_id != product.parent_sku_id:
+        return Response(
+            {"error": "This batch's task is already linked to a different parent SKU — can't relink."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    with transaction.atomic():
+        batch.product = product
+        batch.save(update_fields=["product"])
+
+        if task and not task.parent_sku_id:
+            task.parent_sku = product.parent_sku
+            task.save(update_fields=["parent_sku"])
+
+        # Retroactive: anything already approved before this link existed
+        # needs linking now — new approvals from here on link automatically.
+        already_approved_skus = list(
+            TaskListing.objects.filter(batch=batch, status=TaskListing.STATUS_APPROVED)
+            .values_list("sku_id", flat=True)
+        )
+        link_result = None
+        if already_approved_skus:
+            link_result = _bulk_link_skus_to_parent(
+                business=business, parent=product.parent_sku, sku_ids=already_approved_skus,
+            )
+
+    return Response({
+        "product": ProductSerializer(product, context={"request": request, "business_id": business_id}).data,
+        "retroactively_linked": link_result,
+    })
+
+
+@api_view(["GET"])
+def product_listings(request, business_id, pk):
+    """
+    Every SKU that belongs to this product — the review queue on the Product
+    detail page. Membership is "the listing's task is linked to this
+    product's parent SKU", the same field product_link_batch sets and
+    task_listing_review already reads, so a SKU shows up here the instant
+    it's linkable, whether or not it's been approved yet.
+    """
+    business = get_authorized_business(request, business_id)
+    admin = _is_admin(request.user)
+    try:
+        product = Product.objects.get(pk=pk, business=business)
+    except Product.DoesNotExist:
+        return Response({"error": "Product not found"}, status=status.HTTP_404_NOT_FOUND)
+
+    qs = TaskListing.objects.filter(
+        business=business, task__parent_sku_id=product.parent_sku_id,
+    ).select_related("task", "created_by", "reviewed_by").order_by("-created_at")
+    if not admin:
+        qs = qs.filter(created_by=request.user)
+
+    rows = list(qs)
+    return Response({
+        "results": TaskListingSerializer(rows, many=True, context={"request": request}).data,
+        "total": len(rows),
+    })
+
+
+@api_view(["GET"])
+def legacy_listings(request, business_id):
+    """
+    Listing SKUs not tied to any product — almost always ones added the old
+    way, before Bulk Listing became the only path in. Kept reachable here so
+    nothing already in the pipeline (pending, or long since approved) becomes
+    invisible just because the page reorganised around Product.
+    """
+    business = get_authorized_business(request, business_id)
+    admin = _is_admin(request.user)
+
+    qs = TaskListing.objects.filter(
+        business=business, task__task_type=WorkerTask.TYPE_LISTING, task__parent_sku_id__isnull=True,
+    ).select_related("task", "created_by", "reviewed_by").order_by("-created_at")
+    if not admin:
+        qs = qs.filter(created_by=request.user)
+
+    rows = list(qs[:500])
+    return Response({
+        "results": TaskListingSerializer(rows, many=True, context={"request": request}).data,
+        "total": len(rows),
+    })
 
 
 @api_view(["POST"])
@@ -10355,127 +10613,6 @@ def listing_reference(request, business_id):
         "hsn_codes": hsn_codes,
         "platforms": [{"value": v, "label": l} for v, l in WorkerTask.PLATFORM_CHOICES],
     })
-
-
-@api_view(["POST"])
-def task_listing_add(request, business_id, pk):
-    """
-    Add one SKU to a listing task.
-
-    Refuses a duplicate SKU outright — the same SKU listed twice is either a
-    slip or two workers claiming the same job, and either way the tasker needs
-    telling immediately rather than at review time. The check spans the whole
-    business, not just this task, because that is the scope in which a SKU is
-    meant to be unique.
-    """
-    business = get_authorized_business(request, business_id)
-
-    try:
-        task = WorkerTask.objects.get(pk=pk, business=business)
-    except WorkerTask.DoesNotExist:
-        return Response({"error": "Task not found."}, status=status.HTTP_404_NOT_FOUND)
-
-    admin = _is_admin(request.user)
-    if not admin and not task.assignees.filter(pk=request.user.pk).exists():
-        return Response({"error": "That task isn't yours."}, status=status.HTTP_403_FORBIDDEN)
-    if task.task_type != WorkerTask.TYPE_LISTING:
-        return Response({"error": "Only listing tasks take SKUs."},
-                        status=status.HTTP_400_BAD_REQUEST)
-    if task.is_paused:
-        return Response({"error": "This task is paused — no new SKUs can be added."},
-                        status=status.HTTP_400_BAD_REQUEST)
-
-    payload = request.data if isinstance(request.data, dict) else {}
-    sku_id = str(payload.get("sku_id") or "").strip()[:300]
-    if not sku_id:
-        return Response({"error": "Enter the SKU id."}, status=status.HTTP_400_BAD_REQUEST)
-
-    clash = TaskListing.objects.filter(business=business, sku_id__iexact=sku_id).first()
-    if clash:
-        who = clash.created_by.username if clash.created_by_id else "someone"
-        return Response({
-            "error": f"SKU '{sku_id}' is already listed"
-                     + (f" on task #{clash.task_id} by {who}." if clash.task_id else "."),
-            "duplicate_of": {"task_id": clash.task_id, "listing_id": clash.pk, "by": who},
-        }, status=status.HTTP_409_CONFLICT)
-
-    if not admin:
-        forbidden = set(payload) - _LISTING_WORKER_WRITABLE
-        if forbidden:
-            return Response(
-                {"error": "Those details are set by the admin on the task: "
-                          + ", ".join(sorted(forbidden))},
-                status=status.HTTP_403_FORBIDDEN,
-            )
-
-    # Anything the worker leaves blank falls back to what you set on the task,
-    # so the values you decided are applied even if the form is rushed.
-    defaults = task.listing_defaults or {}
-    fields = {}
-    for key in _LISTING_WRITABLE - {"sku_id"}:
-        raw = payload.get(key)
-        if raw in (None, ""):
-            raw = defaults.get(key)
-        if raw in (None, ""):
-            continue
-        if key in _LISTING_MONEY or key == "tax_percent":
-            fields[key] = safe_decimal(raw)
-        else:
-            fields[key] = str(raw).strip()
-
-    listing = TaskListing.objects.create(
-        business=business, task=task, created_by=request.user, sku_id=sku_id, **fields
-    )
-    return Response(TaskListingSerializer(listing, context={"request": request}).data, status=status.HTTP_201_CREATED)
-
-
-@api_view(["GET"])
-def worker_task_generate_sku(request, business_id, pk):
-    """
-    Suggest the next SKU id for this task: <prefix><next number>, zero-padded to
-    3 digits (widening automatically past 999). The prefix is whatever the
-    admin set on the task (listing_defaults.sku_prefix), or ?prefix= for an
-    ad-hoc one; the next number is one past the highest already used with that
-    prefix anywhere in the business, checked against both listed and catalogued
-    SKUs so it can't suggest something already taken by either.
-
-    Pure suggestion — nothing is written here, so nothing can race. The
-    duplicate check in task_listing_add is still what actually guards a save;
-    if two people generate the same number at once, the second one's Add just
-    gets a 409 and regenerates.
-    """
-    business = get_authorized_business(request, business_id)
-    try:
-        task = WorkerTask.objects.get(pk=pk, business=business)
-    except WorkerTask.DoesNotExist:
-        return Response({"error": "Task not found."}, status=status.HTTP_404_NOT_FOUND)
-
-    admin = _is_admin(request.user)
-    if not admin and not task.assignees.filter(pk=request.user.pk).exists():
-        return Response({"error": "That task isn't yours."}, status=status.HTTP_403_FORBIDDEN)
-
-    prefix = str(request.GET.get("prefix") or (task.listing_defaults or {}).get("sku_prefix") or "").strip()
-    if not prefix:
-        return Response({"error": "Set a starting SKU prefix on this task first."},
-                        status=status.HTTP_400_BAD_REQUEST)
-
-    # Prefix match is cheap at the DB (indexed LIKE); the strict "prefix + only
-    # digits" check runs in Python on that much smaller set.
-    pattern = re.compile(r"^" + re.escape(prefix) + r"(\d+)$", re.IGNORECASE)
-    candidates = (
-        set(TaskListing.objects.filter(business=business, sku_id__istartswith=prefix)
-            .values_list("sku_id", flat=True))
-        | set(FinalPrice.objects.filter(business=business, sku_id__istartswith=prefix)
-              .values_list("sku_id", flat=True))
-    )
-    highest = 0
-    for sku_id in candidates:
-        m = pattern.match((sku_id or "").strip())
-        if m:
-            highest = max(highest, int(m.group(1)))
-
-    suggested = f"{prefix}{highest + 1:03d}"
-    return Response({"sku_id": suggested, "prefix": prefix})
 
 
 @api_view(["GET", "PATCH", "DELETE"])

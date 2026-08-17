@@ -1646,6 +1646,13 @@ class BulkListingBatch(models.Model):
         "WorkerTask", on_delete=models.SET_NULL, null=True, blank=True,
         related_name="bulk_listing_batches",
     )
+    # Set after the fact from the Product page ("link a batch"), not at
+    # generation time — see Product.parent_sku for what linking actually does
+    # (sets worker_task.parent_sku so approvals auto-join FinalPrice rows).
+    product = models.ForeignKey(
+        "Product", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="batches",
+    )
 
     created_by = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True,
                                    blank=True, related_name="bulk_listing_batches_created")
@@ -1657,6 +1664,56 @@ class BulkListingBatch(models.Model):
 
     def __str__(self):
         return f"{self.filename} ({self.row_count} SKUs)"
+
+
+class Product(models.Model):
+    """
+    A physical product being listed — the thing Team Tasks is organised
+    around now instead of an admin-assigned WorkerTask. Photos/size/weight
+    live here because they describe the product, not any one listing of it.
+
+    Exactly one ParentItemPrice per product (OneToOneField): every SKU that
+    ends up under that parent (via a linked BulkListingBatch's approvals,
+    same as any other parent-linking in this app — see
+    _bulk_link_skus_to_parent) IS this product's catalogue of variants.
+    Stats (SKU count, paid, pending) are deliberately computed from
+    FinalPrice/TaskListing at read time rather than stored here, so they
+    can never drift out of sync with the ledger they're summarising.
+    """
+    business = models.ForeignKey("accounts.Business", on_delete=models.PROTECT,
+                                 related_name="products")
+    name = models.CharField(max_length=255)
+    parent_sku = models.OneToOneField(
+        ParentItemPrice, on_delete=models.PROTECT, related_name="product",
+    )
+    size = models.CharField(max_length=100, blank=True)
+    weight = models.CharField(max_length=100, blank=True, help_text="Free text, e.g. \"250g\"")
+    description = models.TextField(blank=True)
+
+    created_by = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True,
+                                   blank=True, related_name="products_created")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "products"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return self.name
+
+
+class ProductPhoto(models.Model):
+    """One photo of a Product — a link the admin pastes in (Drive, a CDN, an
+    image host), not an upload. No file storage involved at all."""
+    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name="photos")
+    url = models.URLField(max_length=2000)
+    sort_order = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "product_photos"
+        ordering = ["sort_order", "created_at"]
 
 
 class ClaimTicket(models.Model):
