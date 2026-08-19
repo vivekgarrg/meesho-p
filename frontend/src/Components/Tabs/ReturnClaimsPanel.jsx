@@ -1,23 +1,39 @@
-import React, { useState, useCallback, useEffect } from "react";
+import React, { useState, useCallback, useEffect, useMemo } from "react";
 import { API, C, S, btn, Tag, fmt, useIsMobile } from "../../App";
 import AddIcon from "@mui/icons-material/Add";
 import OpenInNewIcon from "@mui/icons-material/OpenInNew";
 import SendIcon from "@mui/icons-material/Send";
 import SearchIcon from "@mui/icons-material/Search";
+import LocalShippingOutlinedIcon from "@mui/icons-material/LocalShippingOutlined";
+import CardGiftcardIcon from "@mui/icons-material/CardGiftcard";
 import { CircularProgress } from "@mui/material";
-import { field, tap, scrollRow, Metric, STATUS_META, CLAIM_VIDEO_MAX_MB } from "./TeamTasksShared";
+import { field, STATUS_META, CLAIM_VIDEO_MAX_MB } from "./TeamTasksShared";
 
-/** Same create form as before — only the RETURN_CLAIM branch survives the redesign. */
+const COLUMNS = ["ASSIGNED", "SUBMITTED", "APPROVED", "REJECTED"];
+const COLUMN_WIDTH = 300;
+
+/** A small monospace pill for an id that identifies the physical parcel. */
+function IdChip({ label, value }) {
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11,
+      fontFamily: "monospace", fontWeight: 700, color: C.gray700, background: C.gray100,
+      border: `1px solid ${C.gray200}`, borderRadius: 7, padding: "3px 8px", whiteSpace: "nowrap" }}>
+      <span style={{ color: C.gray400, fontWeight: 600, fontFamily: "inherit" }}>{label}</span>{value}
+    </span>
+  );
+}
+
+/** Same create form as before, restyled, with a Return packet id field added. */
 function NewClaimForm({ workers, platforms, rates, onCreate, onCancel }) {
   const isMobile = useIsMobile();
   const [platform, setPlatform] = useState("MEESHO");
   const [picked, setPicked] = useState([]);
-  const [form, setForm] = useState({ title: "", source_link: "", instructions: "", suborder_no: "" });
+  const [form, setForm] = useState({ title: "", source_link: "", instructions: "", suborder_no: "", return_packet_id: "" });
   const [rateOverride, setRateOverride] = useState("");
   const [err, setErr] = useState("");
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
 
-  const standing = React.useMemo(() => {
+  const standing = useMemo(() => {
     if (picked.length === 1) {
       const personal = rates.find((r) => r.platform === platform && r.task_type === "RETURN_CLAIM" && r.user === picked[0]);
       if (personal) return personal;
@@ -80,6 +96,11 @@ function NewClaimForm({ workers, platforms, rates, onCreate, onCancel }) {
             style={field(isMobile, { fontFamily: "monospace" })} placeholder="3078…_1" />
         </div>
         <div>
+          <label style={S.label}>Return packet id</label>
+          <input value={form.return_packet_id} onChange={set("return_packet_id")}
+            style={field(isMobile, { fontFamily: "monospace" })} placeholder="if already known" />
+        </div>
+        <div>
           <label style={S.label}>Rate per claim (₹)</label>
           <input value={rateOverride} onChange={(e) => setRateOverride(e.target.value)} type="number"
             inputMode="decimal" style={field(isMobile)}
@@ -112,94 +133,110 @@ function NewClaimForm({ workers, platforms, rates, onCreate, onCancel }) {
   );
 }
 
+/** One claim, redesigned dense for a kanban column — the status is already
+    said by the column it's in, so the card doesn't repeat it. */
 function ClaimCard({ task, isAdmin, busy, onSubmit, onReview }) {
   const isMobile = useIsMobile();
   const meta = STATUS_META[task.status] || STATUS_META.ASSIGNED;
   const [reference_, setRef] = useState(task.submitted_reference || "");
+  const [packet, setPacket] = useState(task.return_packet_id || "");
   const [note, setNote] = useState(task.submitted_note || "");
   const [rejecting, setRejecting] = useState(false);
   const [reason, setReason] = useState("");
 
+  const identity = [
+    task.suborder_no && { label: "SUB ", value: task.suborder_no },
+    task.return_packet_id && { label: "PKT ", value: task.return_packet_id },
+  ].filter(Boolean);
+
   return (
     <div style={{ ...S.card, padding: 0, overflow: "hidden", borderLeft: `4px solid ${meta.accent}` }}>
-      <div style={{ padding: isMobile ? 13 : 18 }}>
-        <div style={{ fontSize: isMobile ? 14.5 : 15.5, fontWeight: 800, color: C.gray900, lineHeight: 1.35 }}>
+      <div style={{ padding: isMobile ? 12 : 14 }}>
+        <div style={{ fontSize: 13.5, fontWeight: 800, color: C.gray900, lineHeight: 1.3 }}>
           {task.title || "Return claim"}
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginTop: 6 }}>
-          <Tag variant={task.platform === "MEESHO" ? "orange" : task.platform === "AMAZON" ? "amber" : "blue"} fontSize={10.5}>
+          <Tag variant={task.platform === "MEESHO" ? "orange" : task.platform === "AMAZON" ? "amber" : "blue"} fontSize={10}>
             {task.platform}
           </Tag>
-          <Tag variant={meta.tag} fontSize={10.5}>{meta.label}</Tag>
-          {task.awaiting_bonus && <Tag variant="amber" fontSize={10.5}>bonus pending</Tag>}
-          {(task.assignee_names || []).length > 0 && (
-            <span style={{ fontSize: 11.5, color: C.gray400 }}>{task.assignee_names.join(", ")}</span>
+          {isAdmin && (task.assignee_names || []).length > 0 && (
+            <span style={{ fontSize: 11, color: C.gray400 }}>{task.assignee_names.join(", ")}</span>
           )}
         </div>
-        <div style={{ fontSize: 12, color: C.gray500, marginTop: 6, fontWeight: 600 }}>
-          {fmt(task.reward_amount)}/claim
-        </div>
-        {task.suborder_no && (
-          <div style={{ fontSize: 12, color: C.gray500, fontFamily: "monospace", marginTop: 8 }}>
-            {task.suborder_no}
+
+        {identity.length > 0 && (
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
+            {identity.map((c) => <IdChip key={c.label} label={c.label} value={c.value} />)}
           </div>
         )}
+
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 9 }}>
+          <span style={{ fontSize: 12, color: C.gray500, fontWeight: 600 }}>{fmt(task.reward_amount)}/claim</span>
+          {task.source_link && (
+            <a href={task.source_link} target="_blank" rel="noreferrer"
+              style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 12, fontWeight: 700,
+                color: C.blue, textDecoration: "none" }}>
+              Video <OpenInNewIcon style={{ fontSize: 12.5 }} />
+            </a>
+          )}
+        </div>
+
         {task.instructions && (
-          <div style={{ fontSize: 13, color: C.gray600, lineHeight: 1.6, marginTop: 8 }}>{task.instructions}</div>
-        )}
-        {task.source_link && (
-          <a href={task.source_link} target="_blank" rel="noreferrer"
-            style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 13, fontWeight: 700,
-              color: C.blue, textDecoration: "none", marginTop: 8 }}>
-            Open the video <OpenInNewIcon style={{ fontSize: 14 }} />
-          </a>
+          <div style={{ fontSize: 12, color: C.gray600, lineHeight: 1.55, marginTop: 8 }}>{task.instructions}</div>
         )}
       </div>
 
-      <div style={{ padding: isMobile ? 13 : 18, background: C.gray50, borderTop: `1px solid ${C.border}` }}>
+      <div style={{ padding: isMobile ? 12 : 14, background: C.gray50, borderTop: `1px solid ${C.border}` }}>
         {!isAdmin && task.status !== "APPROVED" ? (
           <>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: 8 }}>
               <div>
-                <label style={S.label}>Claim / ticket reference</label>
+                <label style={S.label}>Claim / ticket ref</label>
                 <input value={reference_} onChange={(e) => setRef(e.target.value)}
                   style={field(isMobile, { fontFamily: "monospace" })} />
               </div>
               <div>
+                <label style={S.label}>Return packet id</label>
+                <input value={packet} onChange={(e) => setPacket(e.target.value)}
+                  style={field(isMobile, { fontFamily: "monospace" })} placeholder="if known" />
+              </div>
+              <div style={{ gridColumn: "1 / -1" }}>
                 <label style={S.label}>Note</label>
                 <input value={note} onChange={(e) => setNote(e.target.value)} style={field(isMobile)} />
               </div>
             </div>
-            <button onClick={() => onSubmit(task.id, { submitted_reference: reference_, submitted_note: note })}
-              disabled={busy} style={{ ...btn("primary", "md"), marginTop: 12, width: isMobile ? "100%" : "auto" }}>
-              <SendIcon style={{ fontSize: 15, verticalAlign: "-3px" }} />
+            <button onClick={() => onSubmit(task.id, {
+              submitted_reference: reference_, submitted_note: note, return_packet_id: packet,
+            })}
+              disabled={busy} style={{ ...btn("primary", "md"), marginTop: 11, width: "100%" }}>
+              <SendIcon style={{ fontSize: 14, verticalAlign: "-3px" }} />
               &nbsp;{task.status === "REJECTED" ? "Send again" : "Send for approval"}
             </button>
           </>
         ) : (
-          <div style={{ fontSize: 13, color: C.gray600 }}>
-            {task.submitted_reference && <>Ref <b style={{ fontFamily: "monospace" }}>{task.submitted_reference}</b> · </>}
+          <div style={{ fontSize: 12.5, color: C.gray600, lineHeight: 1.7 }}>
+            {task.submitted_reference && <>Ref <b style={{ fontFamily: "monospace" }}>{task.submitted_reference}</b><br /></>}
             {task.submitted_by_name && <>by {task.submitted_by_name} · </>}
             sent {task.submitted_at ? new Date(task.submitted_at).toLocaleString("en-IN",
               { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }) : "—"}
           </div>
         )}
         {isAdmin && task.status === "SUBMITTED" && !rejecting && (
-          <div style={{ display: "flex", gap: 8, marginTop: 11, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", gap: 7, marginTop: 10, flexWrap: "wrap" }}>
             <button onClick={() => onReview(task.id, "APPROVE", "")} disabled={busy}
-              style={{ ...btn("success", "md"), flex: isMobile ? 1 : "none" }}>
+              style={{ ...btn("success", "sm"), flex: 1 }}>
               Approve &amp; pay {fmt(task.reward_amount)}
             </button>
             <button onClick={() => { setRejecting(true); setReason(""); }} disabled={busy}
-              style={{ ...btn("ghost", "md"), color: C.red, borderColor: C.redBorder, flex: isMobile ? 1 : "none" }}>
+              style={{ ...btn("ghost", "sm"), color: C.red, borderColor: C.redBorder }}>
               Reject
             </button>
           </div>
         )}
         {isAdmin && rejecting && (
-          <div style={{ marginTop: 11, display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <div style={{ marginTop: 10, display: "flex", gap: 7, flexWrap: "wrap" }}>
             <input autoFocus value={reason} onChange={(e) => setReason(e.target.value)}
-              placeholder="What needs fixing?" style={field(isMobile, { flex: "1 1 190px" })} />
+              placeholder="What needs fixing?" style={field(isMobile, { flex: "1 1 150px" })} />
             <button disabled={busy || !reason.trim()}
               onClick={() => { onReview(task.id, "REJECT", reason.trim()); setRejecting(false); }}
               style={{ ...btn("danger", "sm"), opacity: reason.trim() ? 1 : 0.5 }}>
@@ -211,12 +248,55 @@ function ClaimCard({ task, isAdmin, busy, onSubmit, onReview }) {
       </div>
 
       {task.review_comment && task.status !== "SUBMITTED" && (
-        <div style={{ padding: `11px ${isMobile ? 13 : 18}px`,
+        <div style={{ padding: `10px ${isMobile ? 12 : 14}px`,
           background: task.status === "REJECTED" ? C.redLight : C.greenLight,
-          color: task.status === "REJECTED" ? C.red : C.green, fontSize: 12.5, fontWeight: 600 }}>
+          color: task.status === "REJECTED" ? C.red : C.green, fontSize: 12, fontWeight: 600 }}>
           {task.status === "REJECTED" ? "Rejected" : "Approved"}: {task.review_comment}
         </div>
       )}
+
+      {task.awaiting_bonus && (
+        <div style={{ display: "flex", alignItems: "center", gap: 5, padding: "7px 14px",
+          background: C.amberLight, color: C.amber, fontSize: 11.5, fontWeight: 700 }}>
+          <CardGiftcardIcon style={{ fontSize: 13 }} /> Bonus pending Meesho's own approval
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** One lifecycle stage — a fixed-width scroll-snap column, so the whole set
+    reads left-to-right as "what stage is each claim actually at" instead of
+    a flat pile the admin has to filter to make sense of. */
+function ClaimColumn({ status, tasks, count, extra, isAdmin, busy, onSubmit, onReview }) {
+  const meta = STATUS_META[status];
+  return (
+    <div style={{ flex: `0 0 ${COLUMN_WIDTH}px`, width: COLUMN_WIDTH, scrollSnapAlign: "start",
+      display: "flex", flexDirection: "column", gap: 10 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "2px 2px" }}>
+        <span style={{ width: 8, height: 8, borderRadius: "50%", background: meta.accent, flexShrink: 0 }} />
+        <span style={{ fontSize: 12.5, fontWeight: 800, color: C.gray800 }}>{meta.label}</span>
+        <span style={{ background: C.gray100, color: C.gray500, fontSize: 10.5, fontWeight: 700,
+          padding: "1px 7px", borderRadius: 20, border: `1px solid ${C.gray200}` }}>
+          {count}
+        </span>
+      </div>
+      {extra && (
+        <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, fontWeight: 700,
+          color: C.amber }}>
+          <CardGiftcardIcon style={{ fontSize: 13 }} /> {extra}
+        </div>
+      )}
+      <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
+        {tasks.length === 0 ? (
+          <div style={{ ...S.card, textAlign: "center", padding: 20, color: C.gray400, fontSize: 12 }}>
+            Nothing here.
+          </div>
+        ) : tasks.map((t) => (
+          <ClaimCard key={t.id} task={t} isAdmin={isAdmin} busy={busy}
+            onSubmit={onSubmit} onReview={onReview} />
+        ))}
+      </div>
     </div>
   );
 }
@@ -228,7 +308,6 @@ export function ReturnClaimsPanel({ isAdmin, busy, setBusy, setMsg, post }) {
   const [workers, setWorkers] = useState([]);
   const [rates, setRates] = useState([]);
   const [reference, setReference] = useState(null);
-  const [view, setView] = useState("");
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
@@ -237,14 +316,13 @@ export function ReturnClaimsPanel({ isAdmin, busy, setBusy, setMsg, post }) {
     setLoading(true);
     try {
       const p = new URLSearchParams({ task_type: "RETURN_CLAIM" });
-      if (view) p.set("status", view);
       if (search.trim()) p.set("q", search.trim());
       const res = await fetch(`${API}/worker-tasks/?${p}`);
       const d = await res.json();
       setTasks(d.results || []);
       setStats(d.stats || null);
     } finally { setLoading(false); }
-  }, [view, search]);
+  }, [search]);
 
   useEffect(() => { fetchTasks(); }, [fetchTasks]);
   useEffect(() => {
@@ -271,12 +349,32 @@ export function ReturnClaimsPanel({ isAdmin, busy, setBusy, setMsg, post }) {
 
   const platforms = reference?.platforms || [];
 
+  const grouped = useMemo(() => {
+    const g = { ASSIGNED: [], SUBMITTED: [], APPROVED: [], REJECTED: [] };
+    tasks.forEach((t) => { if (g[t.status]) g[t.status].push(t); });
+    return g;
+  }, [tasks]);
+
+  const counts = {
+    ASSIGNED: stats?.assigned ?? grouped.ASSIGNED.length,
+    SUBMITTED: stats?.submitted ?? grouped.SUBMITTED.length,
+    APPROVED: stats?.approved ?? grouped.APPROVED.length,
+    REJECTED: stats?.rejected ?? grouped.REJECTED.length,
+  };
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-      <div style={{ display: "flex", justifyContent: "flex-end" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
+        <div style={{ position: "relative", flex: "1 1 220px", minWidth: 0 }}>
+          <SearchIcon style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)",
+            fontSize: 17, color: C.gray400, pointerEvents: "none" }} />
+          <input value={search} onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search title / sub-order / packet id…"
+            style={field(isMobile, { paddingLeft: 34, width: "100%", boxSizing: "border-box" })} />
+        </div>
         {isAdmin && (
           <button onClick={() => setCreating(c => !c)}
-            style={{ ...btn("primary", "sm"), padding: isMobile ? "10px 14px" : undefined }}>
+            style={{ ...btn("primary", "sm"), padding: isMobile ? "10px 14px" : undefined, flexShrink: 0 }}>
             <AddIcon style={{ fontSize: 16, verticalAlign: "-4px" }} />&nbsp;New claim
           </button>
         )}
@@ -294,39 +392,23 @@ export function ReturnClaimsPanel({ isAdmin, busy, setBusy, setMsg, post }) {
           }} />
       )}
 
-      {stats && (
-        <div style={scrollRow}>
-          <Metric label="to do" value={stats.assigned} accent={C.gray500}
-            onClick={() => setView(v => v === "ASSIGNED" ? "" : "ASSIGNED")} active={view === "ASSIGNED"} />
-          <Metric label="to review" value={stats.submitted} accent={C.amber}
-            onClick={() => setView(v => v === "SUBMITTED" ? "" : "SUBMITTED")} active={view === "SUBMITTED"} />
-          <Metric label="approved" value={stats.approved} accent={C.green}
-            onClick={() => setView(v => v === "APPROVED" ? "" : "APPROVED")} active={view === "APPROVED"} />
-          {stats.awaiting_bonus > 0 && <Metric label="bonus pending" value={stats.awaiting_bonus} accent={C.orange} />}
-        </div>
-      )}
-
-      <div style={{ position: "relative" }}>
-        <SearchIcon style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)",
-          fontSize: 17, color: C.gray400, pointerEvents: "none" }} />
-        <input value={search} onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search title / sub-order…"
-          style={field(isMobile, { paddingLeft: 34, width: "100%", boxSizing: "border-box" })} />
-      </div>
-
       {loading ? (
         <div style={{ display: "flex", justifyContent: "center", padding: 40 }}>
           <CircularProgress style={{ color: C.orange }} />
         </div>
-      ) : tasks.length === 0 ? (
+      ) : tasks.length === 0 && !search.trim() ? (
         <div style={{ ...S.card, textAlign: "center", padding: 40, color: C.gray400, fontSize: 13.5 }}>
-          {isAdmin ? "No return claims yet." : "Nothing assigned to you right now."}
+          <LocalShippingOutlinedIcon style={{ fontSize: 26, color: C.gray300, marginBottom: 8 }} />
+          <div>{isAdmin ? "No return claims yet." : "Nothing assigned to you right now."}</div>
         </div>
       ) : (
-        <div style={{ display: "grid", gridTemplateColumns: `repeat(auto-fill, minmax(${isMobile ? 260 : 320}px, 1fr))`, gap: 12 }}>
-          {tasks.map((t) => (
-            <ClaimCard key={t.id} task={t} isAdmin={isAdmin} busy={busy}
-              onSubmit={submitTask} onReview={reviewTask} />
+        <div style={{ display: "flex", gap: 14, overflowX: "auto", paddingBottom: 6,
+          scrollSnapType: "x proximity", WebkitOverflowScrolling: "touch" }}>
+          {COLUMNS.map((status) => (
+            <ClaimColumn key={status} status={status} tasks={grouped[status]} count={counts[status]}
+              extra={status === "APPROVED" && stats?.awaiting_bonus > 0
+                ? `${stats.awaiting_bonus} awaiting bonus` : null}
+              isAdmin={isAdmin} busy={busy} onSubmit={submitTask} onReview={reviewTask} />
           ))}
         </div>
       )}

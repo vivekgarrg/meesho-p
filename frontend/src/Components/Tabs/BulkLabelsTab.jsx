@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from "react";
+import React, { useCallback, useMemo, useRef, useState } from "react";
 import {
   Alert, Box, Button, Collapse, LinearProgress, Paper, Table, TableBody, TableCell,
   TableHead, TableRow, TextField, Tooltip, Typography, Chip, IconButton,
@@ -9,6 +9,7 @@ import DeleteIcon from "@mui/icons-material/Delete";
 import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
 import KeyboardArrowUpIcon from "@mui/icons-material/KeyboardArrowUp";
 import { C, API, useIsMobile } from "../../App";
+import { ParentSkuCell } from "./ParentLinkInline";
 
 /*
  * BULK LABELS
@@ -107,6 +108,11 @@ export function BulkLabelsTab() {
   const [extracting, setExtracting] = useState(null); // key of the group/row currently downloading
   const [extractError, setExtractError] = useState("");
   const [awbSearch, setAwbSearch] = useState("");
+  // Parents linked from inside this view, same pattern as LabelsTab — keyed
+  // by sku so a just-linked SKU regroups immediately without a re-upload.
+  const [parentOverride, setParentOverride] = useState({});
+  const onParentAdded = useCallback(
+    (sku, parentId) => setParentOverride((o) => ({ ...o, [sku]: parentId })), []);
 
   const addFiles = (fileList) => {
     const picked = Array.from(fileList || []).filter((f) => f.name.toLowerCase().endsWith(".pdf"));
@@ -135,10 +141,20 @@ export function BulkLabelsTab() {
     setLoading(false);
   };
 
-  const skuTable = result?.sku_table || [];
+  const rawSkuTable = result?.sku_table || [];
   const pageDetails = result?.page_details || [];
   const labels = result?.total_labels ?? 0;
+
+  // A SKU linked from inside this view (see onParentAdded) overrides what the
+  // upload itself found, the same way LabelsTab applies parentOverride.
+  const skuTable = useMemo(
+    () => rawSkuTable.map((r) => (parentOverride[r.sku] ? { ...r, parent_sku: parentOverride[r.sku] } : r)),
+    [rawSkuTable, parentOverride]);
+
   const units = useMemo(() => skuTable.reduce((s, r) => s + (r.total_qty || 0), 0), [skuTable]);
+  // How many SKUs had at least one order asking for more than one unit — the
+  // same "check before packing" signal LabelsTab already surfaces.
+  const multiQty = useMemo(() => skuTable.reduce((s, r) => s + (r.high_qty_orders || 0), 0), [skuTable]);
 
   // page_details is in original upload order; page_order (see backend) is the
   // print order sorted_pdf_b64 actually uses. "sortedIndex" here is a page's
@@ -154,28 +170,30 @@ export function BulkLabelsTab() {
   const canDownloadSubsets = !!(result?.sorted_pdf_b64 && orderedDetails.length);
 
   // Same grouping shape as the existing Labels tab's "Products in this
-  // batch" panel (parent SKU → its child SKUs), computed independently here
-  // rather than imported, so this file has no dependency on LabelsTab.jsx.
+  // batch" panel (parent SKU → its child SKUs) — full rows are kept per
+  // child (not just the sku string) so units/max-qty can be rolled up per
+  // group, the same numbers LabelsTab already shows.
   const skuGroups = useMemo(() => {
     const m = {};
     skuTable.forEach((r) => {
       const linked = r.parent_sku && r.parent_sku !== r.sku;
       const key = linked ? r.parent_sku : `__${r.sku}`;
-      (m[key] = m[key] || { parent: linked ? r.parent_sku : null, skus: [], count: 0 });
-      m[key].skus.push(r.sku);
+      (m[key] = m[key] || { parent: linked ? r.parent_sku : null, children: [], count: 0 });
+      m[key].children.push(r);
       m[key].count += r.count || 0;
     });
     return Object.values(m).sort((a, b) => b.count - a.count);
   }, [skuTable]);
 
   const downloadGroup = async (group) => {
-    const key = group.parent || group.skus[0];
+    const firstSku = group.children[0]?.sku;
+    const key = group.parent || firstSku;
     setExtractError(""); setExtracting(key);
     try {
-      const skuSet = new Set(group.skus);
+      const skuSet = new Set(group.children.map((c) => c.sku));
       const pages = orderedDetails.filter((pd) => skuSet.has(pd.sku)).map((pd) => pd.sortedIndex);
       if (!pages.length) throw new Error("No pages found for this group.");
-      await extractAndDownload(result.sorted_pdf_b64, pages, `${group.parent || group.skus[0]}_${batchDate}`);
+      await extractAndDownload(result.sorted_pdf_b64, pages, `${group.parent || firstSku}_${batchDate}`);
     } catch (e) {
       setExtractError(e.message || "Could not download that group.");
     } finally {
@@ -327,6 +345,7 @@ export function BulkLabelsTab() {
               <Stat label="Labels" value={labels} />
               <Stat label="Products" value={result.total_unique_skus ?? skuTable.length} />
               <Stat label="Units" value={units} />
+              {multiQty > 0 && <Stat label="Multi-qty" value={multiQty} tone={C.amber} />}
               <Stat label="Saved / Updated" value={`${result.db_saved ?? 0} / ${result.db_updated ?? 0}`} />
             </Box>
           </Paper>
@@ -340,14 +359,19 @@ export function BulkLabelsTab() {
                   <TableRow>
                     <TableCell>Parent / SKU</TableCell>
                     <TableCell align="right">Labels</TableCell>
+                    <TableCell align="right">Units</TableCell>
+                    <TableCell align="right">Max qty</TableCell>
                     <TableCell align="right">Download</TableCell>
                   </TableRow>
                 </TableHead>
                 <TableBody>
                   {skuGroups.length === 0 ? (
-                    <TableRow><TableCell colSpan={3} align="center" sx={{ color: C.gray400, py: 3 }}>No products found.</TableCell></TableRow>
+                    <TableRow><TableCell colSpan={5} align="center" sx={{ color: C.gray400, py: 3 }}>No products found.</TableCell></TableRow>
                   ) : skuGroups.map((g) => {
-                    const key = g.parent || g.skus[0];
+                    const firstSku = g.children[0]?.sku;
+                    const key = g.parent || firstSku;
+                    const nUnits = g.children.reduce((s, r) => s + (r.total_qty || 0), 0);
+                    const maxQ = g.children.reduce((s, r) => Math.max(s, r.max_qty || 0), 0);
                     return (
                       <TableRow key={key}>
                         <TableCell>
@@ -357,20 +381,23 @@ export function BulkLabelsTab() {
                                 {g.parent}
                               </Typography>
                               <Box sx={{ pl: "11px", ml: "1px", mt: "3px", borderLeft: `2px solid ${C.orangeBorder}` }}>
-                                {g.skus.map((sku) => (
-                                  <Typography key={sku} sx={{ fontSize: 13, color: C.gray600, fontFamily: "monospace", wordBreak: "break-all", lineHeight: 1.5 }}>
-                                    {sku}
+                                {g.children.map((ch) => (
+                                  <Typography key={ch.sku} sx={{ fontSize: 13, color: C.gray600, fontFamily: "monospace", wordBreak: "break-all", lineHeight: 1.5 }}>
+                                    {ch.sku} <span style={{ color: C.gray400, fontWeight: 700 }}>×{ch.count}</span>
                                   </Typography>
                                 ))}
                               </Box>
                             </>
                           ) : (
-                            <Typography sx={{ fontSize: 14, fontWeight: 700, color: C.gray800, fontFamily: "monospace", wordBreak: "break-all", lineHeight: 1.3 }}>
-                              {g.skus[0]}
-                            </Typography>
+                            <ParentSkuCell sku={firstSku} parentSku={null} onParentAdded={onParentAdded} />
                           )}
                         </TableCell>
                         <TableCell align="right">{g.count}</TableCell>
+                        <TableCell align="right" sx={{ fontFamily: "monospace" }}>{nUnits}</TableCell>
+                        <TableCell align="right" sx={{ fontFamily: "monospace",
+                          color: maxQ > 1 ? C.amber : C.gray400, fontWeight: maxQ > 1 ? 800 : 400 }}>
+                          {maxQ}
+                        </TableCell>
                         <TableCell align="right">
                           <Tooltip title={canDownloadSubsets ? "Download just this group's labels, sorted" : "Not available for this batch"}>
                             <span>
@@ -405,6 +432,7 @@ export function BulkLabelsTab() {
                   <TableRow>
                     <TableCell>Page</TableCell>
                     <TableCell>SKU</TableCell>
+                    <TableCell align="right">Qty</TableCell>
                     <TableCell>Order ID</TableCell>
                     <TableCell>AWB</TableCell>
                     <TableCell>Courier</TableCell>
@@ -414,13 +442,17 @@ export function BulkLabelsTab() {
                 </TableHead>
                 <TableBody>
                   {filteredDetails.length === 0 ? (
-                    <TableRow><TableCell colSpan={7} align="center" sx={{ color: C.gray400, py: 4 }}>No labels found.</TableCell></TableRow>
+                    <TableRow><TableCell colSpan={8} align="center" sx={{ color: C.gray400, py: 4 }}>No labels found.</TableCell></TableRow>
                   ) : filteredDetails.map((pd) => {
                     const rowKey = `awb-${pd.sortedIndex}`;
                     return (
                       <TableRow key={`${pd.page}-${pd.sortedIndex}`}>
                         <TableCell>{pd.page}</TableCell>
                         <TableCell sx={{ fontFamily: "monospace" }}>{pd.sku || "—"}</TableCell>
+                        <TableCell align="right" sx={{ fontFamily: "monospace", fontWeight: (pd.qty || 1) > 1 ? 800 : 400,
+                          color: (pd.qty || 1) > 1 ? C.amber : C.gray700 }}>
+                          {pd.qty || 1}
+                        </TableCell>
                         <TableCell>{pd.order_id || "—"}</TableCell>
                         <TableCell sx={{ fontFamily: "monospace" }}>{pd.awb || "—"}</TableCell>
                         <TableCell>{pd.courier || "—"}</TableCell>

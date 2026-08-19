@@ -1902,6 +1902,13 @@ class WorkerTask(models.Model):
     # uploaded ticket sheet find the task later and release the bonus.
     suborder_no = models.CharField(max_length=100, blank=True, db_index=True)
 
+    # RETURN_CLAIM only: the physical packet id / reverse-AWB off the returned
+    # parcel. Either the admin (at creation) or the worker (at submission) may
+    # set it — a distinct field from ReturnDelivery.packet_id, which belongs to
+    # the separate Order Scan reverse-logistics feature.
+    return_packet_id = models.CharField(max_length=150, blank=True, db_index=True,
+        help_text="The packet id / reverse-AWB off the returned parcel, if known")
+
     platform = models.CharField(max_length=20, choices=PLATFORM_CHOICES,
                                 default=PLATFORM_MEESHO, db_index=True)
 

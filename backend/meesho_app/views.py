@@ -10101,6 +10101,7 @@ def worker_tasks_list(request, business_id):
             source_link=str(payload.get("source_link") or "").strip(),
             instructions=str(payload.get("instructions") or "").strip(),
             suborder_no=str(payload.get("suborder_no") or "").strip()[:100],
+            return_packet_id=str(payload.get("return_packet_id") or "").strip()[:150],
             created_by=request.user,
             reward_amount=reward,
             bonus_amount=bonus if task_type == WorkerTask.TYPE_RETURN_CLAIM else Decimal("0"),
@@ -10140,7 +10141,8 @@ def worker_tasks_list(request, business_id):
             DQ(title__icontains=search) |
             DQ(submitted_sku__icontains=search) |
             DQ(suborder_no__icontains=search) |
-            DQ(submitted_reference__icontains=search)
+            DQ(submitted_reference__icontains=search) |
+            DQ(return_packet_id__icontains=search)
         )
 
     rows = list(qs[:500])
@@ -10208,7 +10210,7 @@ def worker_task_detail(request, business_id, pk):
         if not admin:
             return Response({"error": "Only an admin can edit a task."},
                             status=status.HTTP_403_FORBIDDEN)
-        editable = {"title", "source_link", "instructions", "suborder_no",
+        editable = {"title", "source_link", "instructions", "suborder_no", "return_packet_id",
                     "reward_amount", "bonus_amount", "assignees", "platform", "is_paused",
                     "listing_defaults", "parent_sku_item_id", "listing_template"}
         payload = request.data if isinstance(request.data, dict) else {}
@@ -10217,7 +10219,7 @@ def worker_task_detail(request, business_id, pk):
             return Response({"error": f"Not editable: {', '.join(sorted(unknown))}"},
                             status=status.HTTP_400_BAD_REQUEST)
 
-        for field in ("title", "source_link", "instructions", "suborder_no"):
+        for field in ("title", "source_link", "instructions", "suborder_no", "return_packet_id"):
             if field in payload:
                 setattr(task, field, str(payload[field] or "").strip())
         for field in ("reward_amount", "bonus_amount"):
@@ -10305,6 +10307,12 @@ def worker_task_submit(request, business_id, pk):
     task.submitted_sku = sku
     task.submitted_reference = reference
     task.submitted_note = str(payload.get("submitted_note") or "").strip()
+    # Either party may own this field, so a blank submission never clobbers a
+    # value the admin already set — unlike submitted_reference, which is
+    # always the worker's own and always overwrites.
+    packet = str(payload.get("return_packet_id") or "").strip()[:150]
+    if packet:
+        task.return_packet_id = packet
     task.submitted_at = timezone.now()
     task.submitted_by = request.user
     task.status = WorkerTask.STATUS_SUBMITTED

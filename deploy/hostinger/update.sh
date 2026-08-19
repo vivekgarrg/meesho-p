@@ -48,6 +48,16 @@ echo "==> Reconciling schema drift from migrations removed from this branch"
 # in line with the branch. Each step checks information_schema first, so
 # once the drift is gone this is a no-op — safe to leave in permanently.
 # MySQL-only (this deploy's database), not meant for local sqlite dev.
+#
+# ExpenseInvoiceItem.gst_percent came back for real shortly after as
+# meesho_app.0039_expenseinvoiceitem_gst_percent (a different migration
+# number than the reverted 0041, same column) — but this block kept
+# unconditionally dropping the column on every deploy, and since
+# django_migrations still listed the *current* 0039 as applied (its name
+# never matched the orphan-cleanup list below), `migrate` never recreated
+# it. That silently broke every Expenses API call touching invoice items
+# in production. The drop is gone; the add-back-if-missing step repairs
+# any environment the drop already hit.
 python manage.py shell -c "
 from django.db import connection
 
@@ -60,6 +70,16 @@ def drop_column_if_exists(table, column):
         if cur.fetchone()[0]:
             cur.execute(f'ALTER TABLE {table} DROP COLUMN {column}')
             print(f'  dropped {table}.{column}')
+
+def add_column_if_missing(table, column, ddl):
+    with connection.cursor() as cur:
+        cur.execute('''
+            SELECT COUNT(*) FROM information_schema.COLUMNS
+            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s AND COLUMN_NAME = %s
+        ''', [table, column])
+        if not cur.fetchone()[0]:
+            cur.execute(f'ALTER TABLE {table} ADD COLUMN {column} {ddl}')
+            print(f'  restored {table}.{column}')
 
 def drop_table_if_exists(table):
     with connection.cursor() as cur:
@@ -75,14 +95,13 @@ drop_column_if_exists('label_orders', 'cropped_pdf')
 drop_column_if_exists('label_orders', 'in_current_batch')
 drop_table_if_exists('salaries')
 drop_column_if_exists('business_profiles', 'deduct_salaries')
-drop_column_if_exists('expense_invoice_items', 'gst_percent')
+add_column_if_missing('expense_invoice_items', 'gst_percent', 'DECIMAL(5,2) NULL')
 
 with connection.cursor() as cur:
     cur.execute('''DELETE FROM django_migrations
                     WHERE (app='meesho_app' AND name IN (
                         '0039_labelorder_cropped_pdf_labelorder_in_current_batch',
-                        '0040_salary',
-                        '0041_expenseinvoiceitem_gst_percent'
+                        '0040_salary'
                     )) OR (app='accounts' AND name='0010_businessprofile_deduct_salaries')''')
     if cur.rowcount:
         print(f'  cleared {cur.rowcount} orphaned django_migrations row(s)')
