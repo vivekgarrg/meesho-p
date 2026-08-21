@@ -94,7 +94,7 @@ export function TeamTasksTab() {
             <h1 style={{ fontSize: isMobile ? 17 : 19, fontWeight: 800, color: C.gray800 }}>Team Tasks</h1>
           </div>
           <p style={{ fontSize: 12, color: C.gray400, marginTop: 3 }}>
-            {isAdmin ? "Products, photos and SKUs — review, pay, and track the wallet"
+            {isAdmin ? "Products, listings and claims — review, pay, and track the wallet"
                      : "Your products, claims and what you've earned"}
           </p>
         </div>

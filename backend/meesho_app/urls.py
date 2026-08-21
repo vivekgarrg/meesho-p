@@ -124,6 +124,10 @@ urlpatterns = [
     path("worker-tasks/<int:pk>/",     views.worker_task_detail,  name="worker_task_detail"),
     path("worker-tasks/<int:pk>/submit/", views.worker_task_submit, name="worker_task_submit"),
     path("worker-tasks/<int:pk>/review/", views.worker_task_review, name="worker_task_review"),
+    # Return video batches — self-serve claim-a-sub-order flow (see models.ReturnVideoBatch)
+    path("return-claim-batches/",               views.return_video_batches_list, name="return_video_batches_list"),
+    path("return-claim-batches/<int:pk>/",      views.return_video_batch_detail, name="return_video_batch_detail"),
+    path("return-claim-batches/<int:pk>/claim/", views.return_video_batch_claim, name="return_video_batch_claim"),
     path("task-listings/<int:pk>/",         views.task_listing_detail, name="task_listing_detail"),
     path("task-listings/<int:pk>/review/",  views.task_listing_review, name="task_listing_review"),
     path("task-reference/",   views.listing_reference,    name="listing_reference"),
@@ -166,12 +170,11 @@ urlpatterns = [
          bulk_listing_views.bulk_listing_batch_download, name="bulk_listing_batch_download"),
     path("bulk-listing/batches/unlinked/",
          bulk_listing_views.bulk_listing_unlinked_batches, name="bulk_listing_unlinked_batches"),
+    path("bulk-listing/batches/<int:pk>/approve/",
+         bulk_listing_views.bulk_listing_batch_approve, name="bulk_listing_batch_approve"),
     # Products — Team Tasks' central object (see models.Product)
     path("products/",                      views.products_list,        name="products_list"),
     path("products/<int:pk>/",             views.product_detail,       name="product_detail"),
-    path("products/<int:pk>/photos/",      views.product_photos_add,   name="product_photos_add"),
-    path("products/<int:pk>/link-batch/",  views.product_link_batch,   name="product_link_batch"),
-    path("products/photos/<int:photo_id>/",       views.product_photo_delete, name="product_photo_delete"),
     path("products/<int:pk>/listings/",    views.product_listings,     name="product_listings"),
     path("legacy-listings/",               views.legacy_listings,      name="legacy_listings"),
     # GST — monthly liability from Meesho TCS exports

@@ -6,8 +6,10 @@ import SendIcon from "@mui/icons-material/Send";
 import SearchIcon from "@mui/icons-material/Search";
 import LocalShippingOutlinedIcon from "@mui/icons-material/LocalShippingOutlined";
 import CardGiftcardIcon from "@mui/icons-material/CardGiftcard";
+import FolderOpenIcon from "@mui/icons-material/FolderOpenOutlined";
+import LockOutlinedIcon from "@mui/icons-material/LockOutlined";
 import { CircularProgress } from "@mui/material";
-import { field, STATUS_META, CLAIM_VIDEO_MAX_MB } from "./TeamTasksShared";
+import { field, STATUS_META } from "./TeamTasksShared";
 
 const COLUMNS = ["ASSIGNED", "SUBMITTED", "APPROVED", "REJECTED"];
 const COLUMN_WIDTH = 300;
@@ -23,36 +25,24 @@ function IdChip({ label, value }) {
   );
 }
 
-/** Same create form as before, restyled, with a Return packet id field added. */
-function NewClaimForm({ workers, platforms, rates, onCreate, onCancel }) {
+/** Admin-only: upload one Drive folder covering many sub-orders' unboxing
+    videos — replaces creating one task per video/assignee. */
+function NewBatchForm({ platforms, onCancel, onCreate }) {
   const isMobile = useIsMobile();
   const [platform, setPlatform] = useState("MEESHO");
-  const [picked, setPicked] = useState([]);
-  const [form, setForm] = useState({ title: "", source_link: "", instructions: "", suborder_no: "", return_packet_id: "" });
-  const [rateOverride, setRateOverride] = useState("");
+  const [driveLink, setDriveLink] = useState("");
+  const [note, setNote] = useState("");
   const [err, setErr] = useState("");
-  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
-
-  const standing = useMemo(() => {
-    if (picked.length === 1) {
-      const personal = rates.find((r) => r.platform === platform && r.task_type === "RETURN_CLAIM" && r.user === picked[0]);
-      if (personal) return personal;
-    }
-    return rates.find((r) => r.platform === platform && r.task_type === "RETURN_CLAIM" && !r.user);
-  }, [rates, platform, picked]);
 
   const submit = async () => {
-    if (!picked.length) return setErr("Pick at least one person.");
-    const body = { ...form, task_type: "RETURN_CLAIM", platform, assignees: picked };
-    if (rateOverride !== "") body.reward_amount = rateOverride;
-    const e = await onCreate(body);
+    if (!driveLink.trim()) return setErr("Paste the Drive folder link.");
+    const e = await onCreate({ platform, drive_link: driveLink.trim(), note: note.trim() });
     if (e) setErr(e);
   };
 
   return (
     <div style={{ ...S.card, borderTop: `4px solid ${C.orange}`, padding: isMobile ? 15 : 22 }}>
-      <div style={{ ...S.cardTitle, marginBottom: 14 }}>New return claim</div>
-
+      <div style={{ ...S.cardTitle, marginBottom: 14 }}>New return video batch</div>
       <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
         {platforms.map((p) => (
           <button key={p.value} onClick={() => setPlatform(p.value)}
@@ -61,74 +51,89 @@ function NewClaimForm({ workers, platforms, rates, onCreate, onCancel }) {
           </button>
         ))}
       </div>
-
-      <div style={{ marginBottom: 12 }}>
-        <label style={S.label}>Assign to — pick as many as you like</label>
-        <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>
-          {workers.map((w) => {
-            const on = picked.includes(w.id);
-            return (
-              <button key={w.id}
-                onClick={() => setPicked((p) => on ? p.filter(x => x !== w.id) : [...p, w.id])}
-                style={btn(on ? "primary" : "ghost", "sm")}>
-                {on ? "✓ " : ""}{w.username}
-              </button>
-            );
-          })}
-          {workers.length === 0 && <span style={{ fontSize: 12.5, color: C.gray400 }}>No members in this business yet.</span>}
-        </div>
-      </div>
-
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 12 }}>
-        <div>
-          <label style={S.label}>Title</label>
-          <input value={form.title} onChange={set("title")} style={field(isMobile)}
-            placeholder="e.g. Claim for damaged return" />
-        </div>
         <div style={{ gridColumn: "1 / -1" }}>
-          <label style={S.label}>Link to the claim video</label>
-          <input value={form.source_link} onChange={set("source_link")} style={field(isMobile)}
-            placeholder="https://drive.google.com/…" />
+          <label style={S.label}>Drive folder link</label>
+          <input value={driveLink} onChange={(e) => setDriveLink(e.target.value)} style={field(isMobile)}
+            placeholder="https://drive.google.com/… — every unboxing video for this batch" />
         </div>
         <div>
-          <label style={S.label}>Sub-order number</label>
-          <input value={form.suborder_no} onChange={set("suborder_no")}
-            style={field(isMobile, { fontFamily: "monospace" })} placeholder="3078…_1" />
-        </div>
-        <div>
-          <label style={S.label}>Return packet id</label>
-          <input value={form.return_packet_id} onChange={set("return_packet_id")}
-            style={field(isMobile, { fontFamily: "monospace" })} placeholder="if already known" />
-        </div>
-        <div>
-          <label style={S.label}>Rate per claim (₹)</label>
-          <input value={rateOverride} onChange={(e) => setRateOverride(e.target.value)} type="number"
-            inputMode="decimal" style={field(isMobile)}
-            placeholder={standing ? `${standing.reward_amount} (standing rate)` : "set a rate below"} />
-          <div style={{ fontSize: 11, color: C.gray400, marginTop: 4 }}>
-            {standing
-              ? `Leave blank to use ${standing.user ? `${standing.user_name}'s rate` : `the ${platform} rate`} of ${fmt(standing.reward_amount)}.`
-              : `No standing ${platform} rate yet — set one in Rates per platform.`}
-          </div>
-        </div>
-        <div style={{ gridColumn: "1 / -1" }}>
-          <label style={S.label}>Instructions</label>
-          <textarea value={form.instructions} onChange={set("instructions")} rows={2}
-            style={field(isMobile, { resize: "vertical" })}
-            placeholder={`Download the video, compress under ${CLAIM_VIDEO_MAX_MB}MB, raise the claim.`} />
+          <label style={S.label}>Note (optional)</label>
+          <input value={note} onChange={(e) => setNote(e.target.value)} style={field(isMobile)}
+            placeholder="e.g. Week 34 returns" />
         </div>
       </div>
-
       {err && (
         <div style={{ marginTop: 12, padding: "10px 14px", borderRadius: 10, background: C.redLight,
           border: `1px solid ${C.redBorder}`, color: C.red, fontSize: 13, fontWeight: 600 }}>{err}</div>
       )}
       <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
         <button onClick={submit} style={{ ...btn("primary", "md"), flex: isMobile ? 1 : "none" }}>
-          Create &amp; assign
+          Create batch
         </button>
         <button onClick={onCancel} style={{ ...btn("ghost", "md"), flex: isMobile ? 1 : "none" }}>Cancel</button>
       </div>
+    </div>
+  );
+}
+
+/** One return-video batch — the self-serve entry point. Anyone can claim a
+    sub-order off an open batch; only they can (the claim endpoint creates
+    *their own* task), so there's no assignee picker here at all. */
+function BatchRow({ batch, isAdmin, busy, onClaim, onToggleOpen }) {
+  const isMobile = useIsMobile();
+  const [suborder, setSuborder] = useState("");
+  const [claiming, setClaiming] = useState(false);
+  const [err, setErr] = useState("");
+
+  const claim = async () => {
+    if (!suborder.trim()) return;
+    setClaiming(true); setErr("");
+    const e = await onClaim(batch.id, suborder.trim());
+    if (e) setErr(e); else setSuborder("");
+    setClaiming(false);
+  };
+
+  return (
+    <div style={{ ...S.card, padding: isMobile ? 12 : 14 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <Tag variant={batch.platform === "MEESHO" ? "orange" : batch.platform === "AMAZON" ? "amber" : "blue"} fontSize={10.5}>
+          {batch.platform}
+        </Tag>
+        {batch.note && <span style={{ fontSize: 13, fontWeight: 700, color: C.gray800 }}>{batch.note}</span>}
+        <Tag variant={batch.is_open ? "green" : "gray"} fontSize={10}>{batch.is_open ? "Open" : "Closed"}</Tag>
+        <span style={{ fontSize: 11.5, color: C.gray400 }}>{batch.claimed_count} claimed</span>
+        <a href={batch.drive_link} target="_blank" rel="noreferrer"
+          style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 12.5, fontWeight: 700,
+            color: C.blue, textDecoration: "none", marginLeft: "auto" }}>
+          <FolderOpenIcon style={{ fontSize: 14 }} /> Open folder <OpenInNewIcon style={{ fontSize: 12 }} />
+        </a>
+        {isAdmin && (
+          <button onClick={() => onToggleOpen(batch.id, !batch.is_open)} disabled={busy}
+            style={btn("ghost", "sm")}>
+            {batch.is_open ? "Close" : "Reopen"}
+          </button>
+        )}
+      </div>
+
+      {batch.is_open ? (
+        <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+          <input value={suborder} onChange={(e) => setSuborder(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter" && suborder.trim()) claim(); }}
+            placeholder="Sub-order number you're raising a claim for"
+            style={field(isMobile, { flex: "1 1 220px", fontFamily: "monospace" })} />
+          <button onClick={claim} disabled={!suborder.trim() || claiming}
+            style={{ ...btn("primary", "sm"), whiteSpace: "nowrap" }}>
+            <SendIcon style={{ fontSize: 13, verticalAlign: "-2px" }} />
+            &nbsp;{claiming ? "Claiming…" : "Claim this return"}
+          </button>
+        </div>
+      ) : (
+        <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 10, fontSize: 11.5, color: C.gray400 }}>
+          <LockOutlinedIcon style={{ fontSize: 13 }} /> Closed — no new claims can be added
+        </div>
+      )}
+      {err && <div style={{ fontSize: 12, color: C.red, fontWeight: 600, marginTop: 6 }}>{err}</div>}
     </div>
   );
 }
@@ -159,6 +164,7 @@ function ClaimCard({ task, isAdmin, busy, onSubmit, onReview }) {
           <Tag variant={task.platform === "MEESHO" ? "orange" : task.platform === "AMAZON" ? "amber" : "blue"} fontSize={10}>
             {task.platform}
           </Tag>
+          {task.video_batch_note && <Tag variant="gray" fontSize={10}>{task.video_batch_note}</Tag>}
           {isAdmin && (task.assignee_names || []).length > 0 && (
             <span style={{ fontSize: 11, color: C.gray400 }}>{task.assignee_names.join(", ")}</span>
           )}
@@ -180,10 +186,6 @@ function ClaimCard({ task, isAdmin, busy, onSubmit, onReview }) {
             </a>
           )}
         </div>
-
-        {task.instructions && (
-          <div style={{ fontSize: 12, color: C.gray600, lineHeight: 1.55, marginTop: 8 }}>{task.instructions}</div>
-        )}
       </div>
 
       <div style={{ padding: isMobile ? 12 : 14, background: C.gray50, borderTop: `1px solid ${C.border}` }}>
@@ -231,6 +233,11 @@ function ClaimCard({ task, isAdmin, busy, onSubmit, onReview }) {
               style={{ ...btn("ghost", "sm"), color: C.red, borderColor: C.redBorder }}>
               Reject
             </button>
+          </div>
+        )}
+        {isAdmin && task.status === "SUBMITTED" && (
+          <div style={{ fontSize: 10.5, color: C.gray400, marginTop: 6 }}>
+            Usually resolves itself once the claim sheet is uploaded — this is only needed if it never shows up there.
           </div>
         )}
         {isAdmin && rejecting && (
@@ -305,12 +312,11 @@ export function ReturnClaimsPanel({ isAdmin, busy, setBusy, setMsg, post }) {
   const isMobile = useIsMobile();
   const [tasks, setTasks] = useState([]);
   const [stats, setStats] = useState(null);
-  const [workers, setWorkers] = useState([]);
-  const [rates, setRates] = useState([]);
+  const [batches, setBatches] = useState([]);
   const [reference, setReference] = useState(null);
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
-  const [creating, setCreating] = useState(false);
+  const [creatingBatch, setCreatingBatch] = useState(false);
 
   const fetchTasks = useCallback(async () => {
     setLoading(true);
@@ -324,17 +330,16 @@ export function ReturnClaimsPanel({ isAdmin, busy, setBusy, setMsg, post }) {
     } finally { setLoading(false); }
   }, [search]);
 
+  const fetchBatches = useCallback(async () => {
+    const res = await fetch(`${API}/return-claim-batches/`);
+    if (res.ok) setBatches((await res.json()).results || []);
+  }, []);
+
   useEffect(() => { fetchTasks(); }, [fetchTasks]);
+  useEffect(() => { fetchBatches(); }, [fetchBatches]);
   useEffect(() => {
     fetch(`${API}/task-reference/`).then(r => r.ok ? r.json() : null).then(setReference).catch(() => {});
-    fetch(`${API}/platform-rates/`).then(r => r.ok ? r.json() : null)
-      .then(d => setRates(d?.results || [])).catch(() => {});
   }, []);
-  useEffect(() => {
-    if (!isAdmin) return;
-    fetch(`${API}/worker-tasks/workers/`).then(r => r.json())
-      .then(d => setWorkers(d.results || [])).catch(() => {});
-  }, [isAdmin]);
 
   const submitTask = async (id, body) => {
     const { error } = await post(`${API}/worker-tasks/${id}/submit/`, body);
@@ -345,6 +350,18 @@ export function ReturnClaimsPanel({ isAdmin, busy, setBusy, setMsg, post }) {
     const { data, error } = await post(`${API}/worker-tasks/${id}/review/`, { decision, comment });
     if (error) setMsg({ type: "error", text: error });
     else { setMsg({ type: "success", text: data.credited ? `Approved — ${fmt(data.credited)} added.` : "Recorded." }); fetchTasks(); }
+  };
+  const claimSuborder = async (batchId, suborderNo) => {
+    const { error } = await post(`${API}/return-claim-batches/${batchId}/claim/`, { suborder_no: suborderNo });
+    if (error) return error;
+    setMsg({ type: "success", text: `Claimed ${suborderNo} — added to your To do column.` });
+    fetchBatches(); fetchTasks();
+    return null;
+  };
+  const toggleBatchOpen = async (batchId, isOpen) => {
+    const { error } = await post(`${API}/return-claim-batches/${batchId}/`, { is_open: isOpen }, "PATCH");
+    if (error) setMsg({ type: "error", text: error });
+    else fetchBatches();
   };
 
   const platforms = reference?.platforms || [];
@@ -364,33 +381,50 @@ export function ReturnClaimsPanel({ isAdmin, busy, setBusy, setMsg, post }) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
-        <div style={{ position: "relative", flex: "1 1 220px", minWidth: 0 }}>
-          <SearchIcon style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)",
-            fontSize: 17, color: C.gray400, pointerEvents: "none" }} />
-          <input value={search} onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search title / sub-order / packet id…"
-            style={field(isMobile, { paddingLeft: 34, width: "100%", boxSizing: "border-box" })} />
-        </div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 9, flexWrap: "wrap" }}>
+        <div style={{ fontSize: 13, fontWeight: 800, color: C.gray800 }}>Return video batches</div>
         {isAdmin && (
-          <button onClick={() => setCreating(c => !c)}
-            style={{ ...btn("primary", "sm"), padding: isMobile ? "10px 14px" : undefined, flexShrink: 0 }}>
-            <AddIcon style={{ fontSize: 16, verticalAlign: "-4px" }} />&nbsp;New claim
+          <button onClick={() => setCreatingBatch(c => !c)}
+            style={{ ...btn("primary", "sm"), padding: isMobile ? "10px 14px" : undefined }}>
+            <AddIcon style={{ fontSize: 16, verticalAlign: "-4px" }} />&nbsp;New batch
           </button>
         )}
       </div>
 
-      {creating && isAdmin && (
-        <NewClaimForm workers={workers} platforms={platforms} rates={rates}
-          onCancel={() => setCreating(false)}
+      {creatingBatch && isAdmin && (
+        <NewBatchForm platforms={platforms} onCancel={() => setCreatingBatch(false)}
           onCreate={async (body) => {
-            const { error } = await post(`${API}/worker-tasks/`, body);
+            const { error } = await post(`${API}/return-claim-batches/`, body);
             if (error) return error;
-            setMsg({ type: "success", text: "Claim created." });
-            setCreating(false); fetchTasks();
+            setMsg({ type: "success", text: "Batch created." });
+            setCreatingBatch(false); fetchBatches();
             return null;
           }} />
       )}
+
+      {batches.length === 0 ? (
+        <div style={{ ...S.card, textAlign: "center", padding: 24, color: C.gray400, fontSize: 13 }}>
+          {isAdmin ? "No return video batches yet — create one and share it with the team."
+                   : "No return video batches yet."}
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {batches.map((b) => (
+            <BatchRow key={b.id} batch={b} isAdmin={isAdmin} busy={busy}
+              onClaim={claimSuborder} onToggleOpen={toggleBatchOpen} />
+          ))}
+        </div>
+      )}
+
+      <div style={{ borderTop: `1px solid ${C.border}`, margin: "4px 0" }} />
+
+      <div style={{ position: "relative" }}>
+        <SearchIcon style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)",
+          fontSize: 17, color: C.gray400, pointerEvents: "none" }} />
+        <input value={search} onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search title / sub-order / packet id…"
+          style={field(isMobile, { paddingLeft: 34, width: "100%", boxSizing: "border-box" })} />
+      </div>
 
       {loading ? (
         <div style={{ display: "flex", justifyContent: "center", padding: 40 }}>
@@ -399,7 +433,8 @@ export function ReturnClaimsPanel({ isAdmin, busy, setBusy, setMsg, post }) {
       ) : tasks.length === 0 && !search.trim() ? (
         <div style={{ ...S.card, textAlign: "center", padding: 40, color: C.gray400, fontSize: 13.5 }}>
           <LocalShippingOutlinedIcon style={{ fontSize: 26, color: C.gray300, marginBottom: 8 }} />
-          <div>{isAdmin ? "No return claims yet." : "Nothing assigned to you right now."}</div>
+          <div>{isAdmin ? "No return claims yet — claim a sub-order from a batch above."
+                        : "Nothing claimed yet — claim a sub-order from a batch above."}</div>
         </div>
       ) : (
         <div style={{ display: "flex", gap: 14, overflowX: "auto", paddingBottom: 6,

@@ -92,6 +92,8 @@ API_OWNERSHIP = {
     "platform-rates/":       ["/tasks"],
     "wallet/":               ["/tasks"],
     "products/":             ["/tasks"],
+    "legacy-listings/":      ["/tasks"],
+    "return-claim-batches/": ["/tasks"],
     "order-scan/":           ["/order-scan"],
     "employees/":            ["/employees"],
     "owners/":               ["/employees"],

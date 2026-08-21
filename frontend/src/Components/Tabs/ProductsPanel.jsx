@@ -3,6 +3,7 @@ import { API, C, S, btn, Tag, fmt, useIsMobile } from "../../App";
 import AddIcon from "@mui/icons-material/Add";
 import SearchIcon from "@mui/icons-material/Search";
 import InventoryIcon from "@mui/icons-material/Inventory2Outlined";
+import FolderOpenIcon from "@mui/icons-material/FolderOpenOutlined";
 import { CircularProgress } from "@mui/material";
 import { field, scrollRow, Metric } from "./TeamTasksShared";
 import { ProductDetailDialog } from "./ProductDetailDialog";
@@ -13,6 +14,8 @@ function NewProductForm({ onCancel, onCreate }) {
   const [parentSkuId, setParentSkuId] = useState("");
   const [size, setSize] = useState("");
   const [weight, setWeight] = useState("");
+  const [hsnCode, setHsnCode] = useState("");
+  const [driveLink, setDriveLink] = useState("");
   const [description, setDescription] = useState("");
   const [parentSkus, setParentSkus] = useState([]);
   const [err, setErr] = useState("");
@@ -27,7 +30,7 @@ function NewProductForm({ onCancel, onCreate }) {
     if (!parentSkuId.trim()) return setErr("Pick or type a parent SKU.");
     const isExisting = parentSkus.some((p) => p.item_id === parentSkuId.trim());
     const body = {
-      name: name.trim(), size, weight, description,
+      name: name.trim(), size, weight, hsn_code: hsnCode, drive_link: driveLink, description,
       ...(isExisting ? { parent_sku_item_id: parentSkuId.trim() } : { parent_sku_name: parentSkuId.trim() }),
     };
     const e = await onCreate(body);
@@ -52,6 +55,16 @@ function NewProductForm({ onCancel, onCreate }) {
             {parentSkus.map((p) => <option key={p.item_id} value={p.item_id} />)}
           </datalist>
         </div>
+        <div style={{ gridColumn: "1 / -1" }}>
+          <label style={S.label}>Drive folder link</label>
+          <input value={driveLink} onChange={(e) => setDriveLink(e.target.value)} style={field(isMobile)}
+            placeholder="https://drive.google.com/… — reference photos, packaging, everything" />
+        </div>
+        <div>
+          <label style={S.label}>HSN code</label>
+          <input value={hsnCode} onChange={(e) => setHsnCode(e.target.value)}
+            style={field(isMobile, { fontFamily: "monospace" })} placeholder="e.g. 6203" />
+        </div>
         <div>
           <label style={S.label}>Size</label>
           <input value={size} onChange={(e) => setSize(e.target.value)} style={field(isMobile)}
@@ -63,7 +76,7 @@ function NewProductForm({ onCancel, onCreate }) {
             placeholder="e.g. 250g" />
         </div>
         <div style={{ gridColumn: "1 / -1" }}>
-          <label style={S.label}>Description</label>
+          <label style={S.label}>Short description</label>
           <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={2}
             style={field(isMobile, { resize: "vertical" })} />
         </div>
@@ -74,7 +87,7 @@ function NewProductForm({ onCancel, onCreate }) {
       )}
       <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
         <button onClick={submit} style={{ ...btn("primary", "md"), flex: isMobile ? 1 : "none" }}>
-          Create — add photos next
+          Create product
         </button>
         <button onClick={onCancel} style={{ ...btn("ghost", "md"), flex: isMobile ? 1 : "none" }}>Cancel</button>
       </div>
@@ -83,14 +96,18 @@ function NewProductForm({ onCancel, onCreate }) {
 }
 
 function ProductCard({ product, onOpen }) {
-  const cover = (product.photos || [])[0];
   return (
     <div onClick={onOpen} style={{ ...S.card, padding: 0, overflow: "hidden", cursor: "pointer",
       display: "flex", flexDirection: "column" }}>
-      <div style={{ width: "100%", aspectRatio: "1.4", background: C.gray100,
+      <div style={{ width: "100%", aspectRatio: "1.8", background: C.gray100,
         display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
-        {cover ? (
-          <img src={cover.url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+        {product.drive_link ? (
+          <a href={product.drive_link} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}
+            style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 5,
+              color: C.blue, textDecoration: "none" }}>
+            <FolderOpenIcon style={{ fontSize: 30 }} />
+            <span style={{ fontSize: 11, fontWeight: 700 }}>Open reference folder</span>
+          </a>
         ) : (
           <InventoryIcon style={{ fontSize: 34, color: C.gray300 }} />
         )}
@@ -102,7 +119,14 @@ function ProductCard({ product, onOpen }) {
           {(product.size || product.weight) && (
             <Tag variant="gray" fontSize={10}>{[product.size, product.weight].filter(Boolean).join(" · ")}</Tag>
           )}
+          {product.hsn_code && <Tag variant="amber" fontSize={10}>HSN {product.hsn_code}</Tag>}
         </div>
+        {product.description && (
+          <div style={{ fontSize: 11.5, color: C.gray500, lineHeight: 1.4,
+            display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
+            {product.description}
+          </div>
+        )}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center",
           marginTop: 4, fontSize: 12 }}>
           <span style={{ color: C.gray500 }}>{product.sku_count} SKU{product.sku_count === 1 ? "" : "s"}</span>
@@ -191,7 +215,7 @@ export function ProductsPanel({ isAdmin, busy, setBusy, setMsg, post }) {
         </div>
       ) : products.length === 0 ? (
         <div style={{ ...S.card, textAlign: "center", padding: 40, color: C.gray400, fontSize: 13.5 }}>
-          {isAdmin ? "No products yet — create one and link a bulk listing batch to it."
+          {isAdmin ? "No products yet — create one, then approve a bulk listing batch into it."
                    : "No products yet."}
         </div>
       ) : (

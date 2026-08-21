@@ -1,12 +1,18 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { API, C, S, btn, Tag, fmt, useIsMobile } from "../../App";
 import CloseIcon from "@mui/icons-material/Close";
-import AddAPhotoIcon from "@mui/icons-material/AddAPhoto";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutlineOutlined";
-import LinkIcon from "@mui/icons-material/Link";
+import OpenInNewIcon from "@mui/icons-material/OpenInNew";
+import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import InventoryIcon from "@mui/icons-material/Inventory2Outlined";
 import { CircularProgress } from "@mui/material";
-import { field, tap, ListingReviewRow } from "./TeamTasksShared";
+import { field, tap } from "./TeamTasksShared";
+
+const LISTING_STATUS_META = {
+  PENDING:  { label: "Waiting", tag: "amber" },
+  APPROVED: { label: "Approved", tag: "green" },
+  REJECTED: { label: "Rejected", tag: "red" },
+};
 
 export function ProductDetailDialog({ productId, isAdmin, busy, setBusy, setMsg, post, onClose, onChanged }) {
   const isMobile = useIsMobile();
@@ -16,17 +22,15 @@ export function ProductDetailDialog({ productId, isAdmin, busy, setBusy, setMsg,
   const [listings, setListings] = useState([]);
   const [loading, setLoading] = useState(true);
   const [form, setForm] = useState(null);
-  const [addingPhotos, setAddingPhotos] = useState(false);
-  const [photoLinks, setPhotoLinks] = useState("");
-  const [linking, setLinking] = useState(false);
   const [pickedBatch, setPickedBatch] = useState("");
+  const [approvingBatch, setApprovingBatch] = useState(null); // batch id currently being approved/rejected
 
   const fetchProduct = useCallback(async () => {
     const res = await fetch(`${API}/products/${productId}/`);
     if (!res.ok) return;
     const d = await res.json();
     setProduct(d);
-    setForm({ name: d.name, size: d.size, weight: d.weight, description: d.description });
+    setForm({ name: d.name, size: d.size, weight: d.weight, hsn_code: d.hsn_code, drive_link: d.drive_link, description: d.description });
   }, [productId]);
 
   const fetchBatches = useCallback(async () => {
@@ -60,43 +64,26 @@ export function ProductDetailDialog({ productId, isAdmin, busy, setBusy, setMsg,
     fetchProduct(); onChanged();
   };
 
-  const addPhotoLinks = async () => {
-    if (!photoLinks.trim()) return;
-    setAddingPhotos(true);
+  /** One action: link (if a batch is picked and not yet linked) + approve
+      every pending SKU in it — the "approved once" flow. Also used to
+      approve/reject a batch's *remaining* pending SKUs once it's already
+      linked. */
+  const approveBatch = async (batchId, decision) => {
+    setApprovingBatch(batchId);
     try {
-      const { error } = await post(`${API}/products/${productId}/photos/`, { links: photoLinks });
+      const body = { decision };
+      if (batchId === pickedBatch) body.product_id = productId;
+      const { data, error } = await post(`${API}/bulk-listing/batches/${batchId}/approve/`, body);
       if (error) { setMsg({ type: "error", text: error }); return; }
-      setPhotoLinks("");
-      fetchProduct();
-    } finally { setAddingPhotos(false); }
-  };
-
-  const deletePhoto = async (photoId) => {
-    if (!window.confirm("Remove this photo?")) return;
-    const { error } = await post(`${API}/products/photos/${photoId}/`, null, "DELETE");
-    if (error) setMsg({ type: "error", text: error });
-    else fetchProduct();
-  };
-
-  const linkBatch = async () => {
-    if (!pickedBatch) return;
-    setLinking(true);
-    try {
-      const { data, error } = await post(`${API}/products/${productId}/link-batch/`, { batch_id: pickedBatch });
-      if (error) { setMsg({ type: "error", text: error }); return; }
-      const r = data.retroactively_linked;
-      setMsg({ type: "success", text: r?.linked ? `Batch linked — ${r.linked} already-approved SKU(s) joined the parent SKU.` : "Batch linked." });
+      const bits = [];
+      if (data.approved_count) bits.push(`${data.approved_count} approved — ${fmt(data.credited_total)} paid`);
+      if (data.rejected_count) bits.push(`${data.rejected_count} rejected`);
+      if (data.retroactively_linked?.linked) bits.push(`${data.retroactively_linked.linked} already-approved SKU(s) joined the parent`);
+      setMsg({ type: "success", text: bits.join(" · ") || "Done." });
       setPickedBatch("");
       await Promise.all([fetchBatches(), fetchUnlinked(), fetchListings(), fetchProduct()]);
       onChanged();
-    } finally { setLinking(false); }
-  };
-
-  const reviewListing = async (id, decision, comment) => {
-    const { data, error } = await post(`${API}/task-listings/${id}/review/`, { decision, comment });
-    if (error) { setMsg({ type: "error", text: error }); return; }
-    setMsg({ type: "success", text: data.credited ? `Approved — ${fmt(data.credited)} added.` : "Recorded." });
-    fetchListings(); fetchProduct(); onChanged();
+    } finally { setApprovingBatch(null); }
   };
 
   const deleteProduct = async () => {
@@ -135,44 +122,6 @@ export function ProductDetailDialog({ productId, isAdmin, busy, setBusy, setMsg,
         ) : (
           <div style={{ padding: 20, display: "flex", flexDirection: "column", gap: 18 }}>
 
-            {/* Photos */}
-            <div>
-              <div style={{ ...S.label, marginBottom: 8 }}>Photos</div>
-              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                {(product.photos || []).map((p) => (
-                  <div key={p.id} style={{ position: "relative", width: 84, height: 84 }}>
-                    <img src={p.url} alt="" style={{ width: 84, height: 84, objectFit: "cover",
-                      borderRadius: 10, border: `1px solid ${C.border}` }} />
-                    {isAdmin && (
-                      <button onClick={() => deletePhoto(p.id)} title="Remove" style={{
-                        position: "absolute", top: -6, right: -6, width: 22, height: 22, borderRadius: "50%",
-                        background: C.white, border: `1px solid ${C.redBorder}`, color: C.red,
-                        display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer",
-                        boxShadow: "0 1px 4px rgba(0,0,0,0.15)" }}>
-                        <DeleteOutlineIcon style={{ fontSize: 13 }} />
-                      </button>
-                    )}
-                  </div>
-                ))}
-                {(product.photos || []).length === 0 && !isAdmin && (
-                  <span style={{ fontSize: 12.5, color: C.gray400 }}>No photos yet.</span>
-                )}
-              </div>
-              {isAdmin && (
-                <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
-                  <input value={photoLinks} onChange={(e) => setPhotoLinks(e.target.value)}
-                    placeholder="Paste a photo link, or several separated by commas"
-                    style={field(isMobile, { flex: "1 1 260px" })} />
-                  <button onClick={addPhotoLinks} disabled={!photoLinks.trim() || addingPhotos}
-                    style={btn("secondary", "sm")}>
-                    {addingPhotos ? <CircularProgress size={13} style={{ color: C.white }} /> : (
-                      <><AddAPhotoIcon style={{ fontSize: 14, verticalAlign: "-2px" }} />&nbsp;Add</>
-                    )}
-                  </button>
-                </div>
-              )}
-            </div>
-
             {/* Details */}
             <div>
               <div style={{ ...S.label, marginBottom: 8 }}>Details</div>
@@ -182,6 +131,27 @@ export function ProductDetailDialog({ productId, isAdmin, busy, setBusy, setMsg,
                   <input value={form.name} disabled={!isAdmin}
                     onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
                     style={field(isMobile)} />
+                </div>
+                <div style={{ gridColumn: "1 / -1" }}>
+                  <label style={{ ...S.label, marginBottom: 3 }}>Drive folder link</label>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <input value={form.drive_link} disabled={!isAdmin}
+                      onChange={(e) => setForm((f) => ({ ...f, drive_link: e.target.value }))}
+                      style={field(isMobile, { flex: 1 })} placeholder="https://drive.google.com/…" />
+                    {product.drive_link && (
+                      <a href={product.drive_link} target="_blank" rel="noreferrer"
+                        style={{ ...btn("ghost", "sm"), display: "inline-flex", alignItems: "center",
+                          textDecoration: "none", whiteSpace: "nowrap" }}>
+                        Open <OpenInNewIcon style={{ fontSize: 13, marginLeft: 4 }} />
+                      </a>
+                    )}
+                  </div>
+                </div>
+                <div>
+                  <label style={{ ...S.label, marginBottom: 3 }}>HSN code</label>
+                  <input value={form.hsn_code} disabled={!isAdmin}
+                    onChange={(e) => setForm((f) => ({ ...f, hsn_code: e.target.value }))}
+                    style={field(isMobile, { fontFamily: "monospace" })} placeholder="e.g. 6203" />
                 </div>
                 <div>
                   <label style={{ ...S.label, marginBottom: 3 }}>Size</label>
@@ -196,7 +166,7 @@ export function ProductDetailDialog({ productId, isAdmin, busy, setBusy, setMsg,
                     style={field(isMobile)} placeholder="e.g. 250g" />
                 </div>
                 <div style={{ gridColumn: "1 / -1" }}>
-                  <label style={{ ...S.label, marginBottom: 3 }}>Description</label>
+                  <label style={{ ...S.label, marginBottom: 3 }}>Short description</label>
                   <textarea value={form.description} disabled={!isAdmin} rows={2}
                     onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))}
                     style={field(isMobile, { resize: "vertical" })} />
@@ -225,22 +195,34 @@ export function ProductDetailDialog({ productId, isAdmin, busy, setBusy, setMsg,
               <Stat label="batches" value={product.batches_count} />
             </div>
 
-            {/* Linked batches */}
+            {/* Bulk listing batches — approved once, optionally linked in the same click */}
             <div>
-              <div style={{ ...S.label, marginBottom: 8 }}>Linked bulk listing batches</div>
+              <div style={{ ...S.label, marginBottom: 8 }}>Bulk listing batches</div>
               {batches.length === 0 ? (
-                <div style={{ fontSize: 12.5, color: C.gray400 }}>No batches linked yet.</div>
+                <div style={{ fontSize: 12.5, color: C.gray400, marginBottom: isAdmin ? 10 : 0 }}>No batches linked yet.</div>
               ) : (
                 <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: isAdmin ? 10 : 0 }}>
                   {batches.map((b) => (
-                    <div key={b.id} style={{ display: "flex", alignItems: "center", gap: 8,
+                    <div key={b.id} style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap",
                       padding: "8px 12px", border: `1px solid ${C.border}`, borderRadius: 9, fontSize: 12.5 }}>
                       <Tag variant={b.platform === "meesho" ? "orange" : "blue"} fontSize={10}>{b.platform}</Tag>
-                      <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis",
+                      <span style={{ flex: "1 1 140px", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis",
                         whiteSpace: "nowrap", color: C.gray700 }}>{b.filename}</span>
                       <span style={{ color: C.gray500, fontWeight: 700, whiteSpace: "nowrap" }}>
                         {b.approved_count ?? 0}/{b.total_count} approved
                       </span>
+                      {isAdmin && b.pending_count > 0 && (
+                        <div style={{ display: "flex", gap: 6 }}>
+                          <button onClick={() => approveBatch(b.id, "APPROVE")} disabled={approvingBatch === b.id}
+                            style={btn("success", "sm")}>
+                            {approvingBatch === b.id ? "…" : `Approve remaining ${b.pending_count}`}
+                          </button>
+                          <button onClick={() => approveBatch(b.id, "REJECT")} disabled={approvingBatch === b.id}
+                            style={{ ...btn("ghost", "sm"), color: C.red, borderColor: C.redBorder }}>
+                            Reject
+                          </button>
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -250,33 +232,63 @@ export function ProductDetailDialog({ productId, isAdmin, busy, setBusy, setMsg,
                   <select value={pickedBatch} onChange={(e) => setPickedBatch(e.target.value)}
                     style={field(isMobile, { flex: "1 1 220px" })}>
                     <option value="">
-                      {unlinkedBatches.length ? "Link a generated batch…" : "No unlinked batches available"}
+                      {unlinkedBatches.length ? "Pick a generated batch…" : "No unlinked batches available"}
                     </option>
                     {unlinkedBatches.map((b) => (
                       <option key={b.id} value={b.id}>{b.filename} ({b.total_count} SKUs)</option>
                     ))}
                   </select>
-                  <button onClick={linkBatch} disabled={!pickedBatch || linking}
-                    style={btn("secondary", "sm")}>
-                    <LinkIcon style={{ fontSize: 14, verticalAlign: "-2px" }} />&nbsp;{linking ? "Linking…" : "Link"}
+                  <button onClick={() => approveBatch(pickedBatch, "APPROVE")}
+                    disabled={!pickedBatch || approvingBatch === pickedBatch}
+                    style={btn("success", "sm")}>
+                    <CheckCircleIcon style={{ fontSize: 14, verticalAlign: "-2px" }} />
+                    &nbsp;{approvingBatch === pickedBatch ? "Approving…" : "Approve batch"}
                   </button>
                 </div>
               )}
+              <div style={{ fontSize: 10.5, color: C.gray400, marginTop: 6 }}>
+                Approving links the batch to this product's parent SKU (if not already) and approves every
+                SKU in it in one step — no more approving each SKU one at a time.
+              </div>
             </div>
 
-            {/* SKUs */}
+            {/* SKUs — read-only status now that approval happens per batch above */}
             <div>
               <div style={{ ...S.label, marginBottom: 8 }}>SKUs on this product ({listings.length})</div>
               {listings.length === 0 ? (
                 <div style={{ fontSize: 12.5, color: C.gray400 }}>
-                  No SKUs yet — link a batch above and its SKUs will show up here.
+                  No SKUs yet — approve a batch above and its SKUs will show up here.
                 </div>
               ) : (
-                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  {listings.map((l) => (
-                    <ListingReviewRow key={l.id} listing={l} isMobile={isMobile} busy={busy}
-                      isAdmin={isAdmin} onReview={reviewListing} />
-                  ))}
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+                    <thead>
+                      <tr>
+                        {["SKU", "Status", "Reward"].map((h) => (
+                          <th key={h} style={{ textAlign: h === "Reward" ? "right" : "left", padding: "6px 8px",
+                            color: C.gray400, fontSize: 10.5, fontWeight: 800, textTransform: "uppercase",
+                            letterSpacing: "0.05em", borderBottom: `1px solid ${C.border}` }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {listings.map((l) => {
+                        const meta = LISTING_STATUS_META[l.status] || LISTING_STATUS_META.PENDING;
+                        return (
+                          <tr key={l.id}>
+                            <td style={{ padding: "7px 8px", fontFamily: "monospace", fontWeight: 700, color: C.gray800 }}>
+                              {l.sku_id}
+                            </td>
+                            <td style={{ padding: "7px 8px" }}><Tag variant={meta.tag} fontSize={10.5}>{meta.label}</Tag></td>
+                            <td style={{ padding: "7px 8px", textAlign: "right", fontFamily: "monospace",
+                              color: l.reward_credited_at ? C.green : C.gray400 }}>
+                              {l.reward_credited_at ? fmt(l.reward_amount) : "—"}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
                 </div>
               )}
             </div>

@@ -36,14 +36,17 @@ from . import bulk_listing as bl
 from . import bulk_listing_flipkart as blf
 from .models import (
     BulkListingBatch, BulkListingFieldPreset, FinalPrice, FlipkartBulkTemplate,
-    ParentItemPrice, TaskListing, WorkerTask,
+    ParentItemPrice, Product, TaskListing, WorkerTask,
 )
 from .permissions import get_authorized_business
 from .serializers import (
     BulkListingBatchDetailSerializer, BulkListingBatchSerializer, BulkListingFieldPresetSerializer,
     FlipkartBulkTemplateSerializer,
 )
-from .views import _sku_key, _workbook_from_upload, safe_decimal
+from .views import (
+    _approve_listing, _bulk_link_skus_to_parent, _is_admin, _reject_listing,
+    _sku_key, _workbook_from_upload, safe_decimal,
+)
 
 # Each module exposes the same contract — load_workbook/parse_template/
 # build_workbook returning the same spec-dict shape — so everything below
@@ -866,9 +869,112 @@ def bulk_listing_batch_download(request, business_id, pk):
 @api_view(["GET"])
 def bulk_listing_unlinked_batches(request, business_id):
     """Batches not yet attached to a Product — the pick-list for a Product
-    page's "Link a batch" action (see product_link_batch in views.py)."""
+    page's "Approve batch" action (see bulk_listing_batch_approve below)."""
     business = get_authorized_business(request, business_id)
     qs = (BulkListingBatch.objects.filter(business=business, product__isnull=True)
           .select_related("created_by", "worker_task"))
     batches = list(qs)
     return Response({"results": BulkListingBatchSerializer(batches, many=True).data, "total": len(batches)})
+
+
+@api_view(["POST"])
+def bulk_listing_batch_approve(request, business_id, pk):
+    """
+    The "approve once" action for a bulk-listing batch — replaces the old
+    two-step flow (link to a product, then approve N SKUs one at a time).
+    Body: {"decision": "APPROVE"|"REJECT", "product_id"?: int, "comment"?: str}.
+
+    Optionally links the batch to a product first (same conflict checks the
+    old product_link_batch had), then applies the decision to every PENDING
+    TaskListing under the batch's task in one transaction, reusing
+    _approve_listing/_reject_listing (views.py) so the catalogue-join +
+    wallet-credit logic isn't duplicated. Also retroactively links any of
+    this batch's listings that were already approved *before* a product was
+    picked — same as the old flow, for the case a batch was approved
+    standalone and only linked to a product afterwards.
+    """
+    business = get_authorized_business(request, business_id)
+    if not _is_admin(request.user):
+        return Response({"error": "Only an admin can approve a batch."}, status=status.HTTP_403_FORBIDDEN)
+
+    try:
+        batch = BulkListingBatch.objects.select_related("worker_task", "product").get(pk=pk, business=business)
+    except BulkListingBatch.DoesNotExist:
+        return Response({"error": "Batch not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    payload = request.data if isinstance(request.data, dict) else {}
+    decision = str(payload.get("decision") or "APPROVE").strip().upper()
+    if decision not in ("APPROVE", "REJECT"):
+        return Response({"error": "decision must be APPROVE or REJECT."}, status=status.HTTP_400_BAD_REQUEST)
+    comment = str(payload.get("comment") or "").strip()
+
+    task = batch.worker_task
+    if not task:
+        return Response({"error": "This batch has no worker task to approve."}, status=status.HTTP_400_BAD_REQUEST)
+
+    product = None
+    product_id = payload.get("product_id")
+    if product_id:
+        try:
+            product = Product.objects.select_related("parent_sku").get(pk=product_id, business=business)
+        except (Product.DoesNotExist, ValueError, TypeError):
+            return Response({"error": "Product not found."}, status=status.HTTP_400_BAD_REQUEST)
+        if batch.product_id and batch.product_id != product.pk:
+            return Response({"error": "That batch is already linked to a different product."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if task.parent_sku_id and task.parent_sku_id != product.parent_sku_id:
+            return Response(
+                {"error": "This batch's task is already linked to a different parent SKU — can't relink."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+    linked = False
+    credited_total = Decimal("0")
+    approved_count = 0
+    rejected_count = 0
+    retro_linked = None
+
+    with transaction.atomic():
+        if product:
+            batch.product = product
+            batch.save(update_fields=["product"])
+            if not task.parent_sku_id:
+                task.parent_sku = product.parent_sku
+                task.save(update_fields=["parent_sku"])
+            linked = True
+
+            already_approved_skus = list(
+                TaskListing.objects.filter(batch=batch, status=TaskListing.STATUS_APPROVED)
+                .values_list("sku_id", flat=True)
+            )
+            if already_approved_skus:
+                retro_linked = _bulk_link_skus_to_parent(
+                    business=business, parent=product.parent_sku, sku_ids=already_approved_skus,
+                )
+
+        # Fetched only now, inside the transaction and after any linking
+        # above — each listing's `task` must reflect the just-set
+        # parent_sku, or _approve_listing would see a stale, unlinked task
+        # and skip the catalogue-parent join entirely.
+        pending = list(TaskListing.objects.filter(batch=batch, status=TaskListing.STATUS_PENDING)
+                       .select_related("task", "created_by"))
+
+        for listing in pending:
+            if decision == "APPROVE":
+                _, _, credited = _approve_listing(
+                    business=business, listing=listing, reviewer=request.user, comment=comment,
+                )
+                approved_count += 1
+                if credited:
+                    credited_total += Decimal(str(credited))
+            else:
+                _reject_listing(listing=listing, reviewer=request.user, comment=comment)
+                rejected_count += 1
+
+    return Response({
+        "linked": linked,
+        "approved_count": approved_count,
+        "rejected_count": rejected_count,
+        "credited_total": float(credited_total),
+        "retroactively_linked": retro_linked,
+    })

@@ -2,7 +2,7 @@ from rest_framework import serializers
 from django.db.models import Sum
 
 from .helpers.helper import strip_html
-from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, ParentItemPrice, ParentPriceHistory, Order, LabelOrder, ReturnDelivery, ScannedOrder, ListingTemplate, ClaimTicket, WorkerTask, WalletEntry, WalletSettlement, TaskListing, PlatformRate, TaskDocument, BulkListingFieldPreset, FlipkartBulkTemplate, BulkListingBatch, Product, ProductPhoto
+from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, ParentItemPrice, ParentPriceHistory, Order, LabelOrder, ReturnDelivery, ScannedOrder, ListingTemplate, ClaimTicket, WorkerTask, WalletEntry, WalletSettlement, TaskListing, PlatformRate, TaskDocument, BulkListingFieldPreset, FlipkartBulkTemplate, BulkListingBatch, Product, ReturnVideoBatch
 
 
 class OrderPaymentSerializer(serializers.ModelSerializer):
@@ -68,15 +68,6 @@ class ParentItemPriceSerializer(serializers.ModelSerializer):
         read_only_fields = ["business"]
 
 
-class ProductPhotoSerializer(serializers.ModelSerializer):
-    """A pasted-in link, not an upload — `url` is exactly what the admin gave,
-    an <img> tag points straight at it."""
-
-    class Meta:
-        model = ProductPhoto
-        fields = ["id", "url", "sort_order", "created_at"]
-
-
 class ProductSerializer(serializers.ModelSerializer):
     """
     Stats (sku_count/total_paid/pending_*) are computed from FinalPrice/
@@ -84,7 +75,6 @@ class ProductSerializer(serializers.ModelSerializer):
     why. Kept as plain ints/decimals (not nested querysets) so a list of
     many products stays a flat, cheap-to-render response.
     """
-    photos = ProductPhotoSerializer(many=True, read_only=True)
     parent_sku_item_id = serializers.CharField(source="parent_sku.item_id", read_only=True)
     created_by_name = serializers.CharField(source="created_by.username", read_only=True, default=None)
     sku_count = serializers.SerializerMethodField()
@@ -96,8 +86,9 @@ class ProductSerializer(serializers.ModelSerializer):
     class Meta:
         model = Product
         fields = [
-            "id", "name", "parent_sku", "parent_sku_item_id", "size", "weight", "description",
-            "photos", "sku_count", "total_paid", "pending_count", "pending_value", "batches_count",
+            "id", "name", "parent_sku", "parent_sku_item_id", "size", "weight", "hsn_code",
+            "drive_link", "description",
+            "sku_count", "total_paid", "pending_count", "pending_value", "batches_count",
             "created_by_name", "created_at", "updated_at",
         ]
         read_only_fields = ["business"]
@@ -295,6 +286,7 @@ class BulkListingBatchSerializer(serializers.ModelSerializer):
     created_by_name  = serializers.CharField(source="created_by.username", read_only=True, default=None)
     worker_task_status = serializers.CharField(source="worker_task.status", read_only=True, default=None)
     approved_count   = serializers.SerializerMethodField()
+    pending_count    = serializers.SerializerMethodField()
     total_count      = serializers.IntegerField(source="row_count", read_only=True)
     product_name     = serializers.CharField(source="product.name", read_only=True, default=None)
 
@@ -302,13 +294,18 @@ class BulkListingBatchSerializer(serializers.ModelSerializer):
         model = BulkListingBatch
         fields = ["id", "platform", "category_label", "filename", "first_sku_id", "sku_ids",
                   "row_count", "source_kind", "worker_task", "worker_task_status",
-                  "approved_count", "total_count", "created_by_name", "created_at",
+                  "approved_count", "pending_count", "total_count", "created_by_name", "created_at",
                   "product", "product_name"]
 
     def get_approved_count(self, obj):
         if not obj.worker_task_id:
             return None
         return obj.worker_task.listings.filter(status="APPROVED").count()
+
+    def get_pending_count(self, obj):
+        if not obj.worker_task_id:
+            return None
+        return obj.worker_task.listings.filter(status="PENDING").count()
 
 
 class BulkListingBatchDetailSerializer(BulkListingBatchSerializer):
@@ -318,6 +315,23 @@ class BulkListingBatchDetailSerializer(BulkListingBatchSerializer):
 
     class Meta(BulkListingBatchSerializer.Meta):
         fields = BulkListingBatchSerializer.Meta.fields + ["payload_snapshot"]
+
+
+class ReturnVideoBatchSerializer(serializers.ModelSerializer):
+    """One Drive folder of return-claim videos, plus how many sub-orders
+    have already been claimed off it — self-serve, so no per-row
+    assignee/status to track here, just a running count."""
+    created_by_name = serializers.CharField(source="created_by.username", read_only=True, default=None)
+    claimed_count   = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ReturnVideoBatch
+        fields = ["id", "platform", "drive_link", "note", "is_open",
+                  "created_by_name", "created_at", "claimed_count"]
+        read_only_fields = ["business", "created_by", "created_at"]
+
+    def get_claimed_count(self, obj):
+        return obj.claims.count()
 
 
 class ClaimTicketSerializer(serializers.ModelSerializer):
@@ -368,6 +382,7 @@ class WorkerTaskSerializer(serializers.ModelSerializer):
     parent_sku_price = serializers.DecimalField(source="parent_sku.final_price", max_digits=12,
                                                 decimal_places=2, read_only=True, default=None)
     listing_template_name = serializers.CharField(source="listing_template.name", read_only=True, default=None)
+    video_batch_note = serializers.CharField(source="video_batch.note", read_only=True, default=None)
 
     class Meta:
         model = WorkerTask

@@ -36,10 +36,14 @@ export const tap = (isMobile, extra) => ({
   padding: 0, flexShrink: 0, ...extra,
 });
 
-/** A row that scrolls sideways rather than wrapping into ragged lines on a phone. */
+/** A row that scrolls sideways rather than wrapping into ragged lines on a
+    phone. The mask fades the trailing edge so an item cut off mid-word reads
+    as "more to scroll" rather than as truncated, broken text. */
 export const scrollRow = {
   display: "flex", gap: 8, overflowX: "auto", paddingBottom: 2,
   WebkitOverflowScrolling: "touch", scrollbarWidth: "none",
+  maskImage: "linear-gradient(to right, black calc(100% - 20px), transparent 100%)",
+  WebkitMaskImage: "linear-gradient(to right, black calc(100% - 20px), transparent 100%)",
 };
 
 export function Chevron({ open, size = 20, color = C.gray400 }) {

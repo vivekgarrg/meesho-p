@@ -21,7 +21,7 @@ from accounts.models import Business, User
 from .permissions import get_authorized_business, accessible_businesses
 from .helpers.label_pdf import extract_all_pages
 
-from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, PurchaseBill, PurchaseItem, BlockedCustomer, InventoryAdjustment, ConsumableItem, ConsumablePurchase, ConsumableUsage, InventoryLog, MeeshoInventory, MeeshoPriceUpdate, ExpenseInvoice, ExpenseInvoiceItem, TransportCharge, PackedStockEvent, EstimatedProfitOrder, ReturnDelivery, GstTransaction, GstInvoiceDetail, ScannedOrder, ListingTemplate, ClaimTicket, WorkerTask, WalletEntry, WalletSettlement, TaskListing, PlatformRate, TaskDocument, BusinessCostSetting, Employee, EmployeePayment, BusinessOwner, Product, ProductPhoto, BulkListingBatch
+from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, PurchaseBill, PurchaseItem, BlockedCustomer, InventoryAdjustment, ConsumableItem, ConsumablePurchase, ConsumableUsage, InventoryLog, MeeshoInventory, MeeshoPriceUpdate, ExpenseInvoice, ExpenseInvoiceItem, TransportCharge, PackedStockEvent, EstimatedProfitOrder, ReturnDelivery, GstTransaction, GstInvoiceDetail, ScannedOrder, ListingTemplate, ClaimTicket, WorkerTask, WalletEntry, WalletSettlement, TaskListing, PlatformRate, TaskDocument, BusinessCostSetting, Employee, EmployeePayment, BusinessOwner, Product, BulkListingBatch, ReturnVideoBatch
 from .serializers import (
     OrderPaymentSerializer, AdsCostSerializer,
     ReferralPaymentSerializer, CompensationRecoverySerializer,
@@ -41,7 +41,7 @@ from .serializers import (
     PlatformRateSerializer,
     TaskDocumentSerializer,
     ProductSerializer,
-    ProductPhotoSerializer,
+    ReturnVideoBatchSerializer,
 )
 
 
@@ -3747,6 +3747,67 @@ def _bulk_link_skus_to_parent(*, business, parent, sku_ids):
     }
 
 
+def _approve_listing(*, business, listing, reviewer, comment=""):
+    """
+    Approve one TaskListing: join the pricing catalogue (inheriting the
+    task's parent SKU if it has one, same as _bulk_link_skus_to_parent) and
+    pay reward_amount. Shared by the single-SKU review endpoint (still used
+    by Legacy Listings) and the batch-approve endpoint (Bulk Listing's "approve
+    once" path) so the crediting logic exists in exactly one place.
+
+    Returns (catalog_sku_created, parent_linked, credited) — same shape
+    task_listing_review already returned, now just callable per-listing from
+    a loop.
+    """
+    now = timezone.now()
+    listing.review_comment = comment
+    listing.reviewed_by = reviewer
+    listing.reviewed_at = now
+    listing.status = TaskListing.STATUS_APPROVED
+    credited = None
+    catalog_created = False
+    parent_linked = False
+
+    with transaction.atomic():
+        if listing.added_to_catalog_at is None:
+            if listing.task.parent_sku_id:
+                result = _bulk_link_skus_to_parent(
+                    business=business, parent=listing.task.parent_sku, sku_ids=[listing.sku_id],
+                )
+                catalog_created = bool(result.get("created"))
+                parent_linked = result.get("failed", 0) == 0
+            else:
+                catalog_sku, catalog_created = FinalPrice.objects.get_or_create(
+                    business=business, sku_id=listing.sku_id,
+                    defaults={"tax_percent": int(listing.tax_percent) if listing.tax_percent is not None else None},
+                )
+                if not catalog_created and catalog_sku.tax_percent is None and listing.tax_percent is not None:
+                    catalog_sku.tax_percent = int(listing.tax_percent)
+                    catalog_sku.save(update_fields=["tax_percent"])
+            listing.added_to_catalog_at = now
+
+        if listing.reward_credited_at is None:
+            listing.reward_amount = listing.task.reward_amount
+            entry = _credit(listing.task, WalletEntry.KIND_LISTING, listing.reward_amount,
+                            reviewer, listing.created_by,
+                            note=f"{listing.sku_id} ({listing.task.platform})", listing=listing)
+            if entry:
+                listing.reward_credited_at = now
+                credited = float(entry.amount)
+
+        listing.save()
+
+    return catalog_created, parent_linked, credited
+
+
+def _reject_listing(*, listing, reviewer, comment=""):
+    listing.review_comment = comment
+    listing.reviewed_by = reviewer
+    listing.reviewed_at = timezone.now()
+    listing.status = TaskListing.STATUS_REJECTED
+    listing.save()
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Products — the Team Tasks redesign's central object. See Product's own
 # docstring in models.py. Reuses _bulk_link_skus_to_parent above for the
@@ -3761,7 +3822,7 @@ def products_list(request, business_id):
 
     if request.method == "GET":
         search = request.GET.get("search", "").strip()
-        qs = Product.objects.filter(business=business).select_related("parent_sku", "created_by").prefetch_related("photos")
+        qs = Product.objects.filter(business=business).select_related("parent_sku", "created_by")
         if search:
             qs = qs.filter(
                 DQ(name__icontains=search) | DQ(parent_sku__item_id__icontains=search)
@@ -3802,6 +3863,7 @@ def products_list(request, business_id):
     product = Product.objects.create(
         business=business, name=name, parent_sku=parent,
         size=str(payload.get("size") or ""), weight=str(payload.get("weight") or ""),
+        hsn_code=str(payload.get("hsn_code") or ""), drive_link=str(payload.get("drive_link") or ""),
         description=str(payload.get("description") or ""), created_by=request.user,
     )
     return Response(
@@ -3814,7 +3876,7 @@ def products_list(request, business_id):
 def product_detail(request, business_id, pk):
     business = get_authorized_business(request, business_id)
     try:
-        product = Product.objects.select_related("parent_sku").prefetch_related("photos").get(pk=pk, business=business)
+        product = Product.objects.select_related("parent_sku").get(pk=pk, business=business)
     except Product.DoesNotExist:
         return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
 
@@ -3829,125 +3891,11 @@ def product_detail(request, business_id, pk):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     payload = request.data if isinstance(request.data, dict) else {}
-    for field in ("name", "size", "weight", "description"):
+    for field in ("name", "size", "weight", "hsn_code", "drive_link", "description"):
         if field in payload:
             setattr(product, field, payload[field])
     product.save()
     return Response(ProductSerializer(product, context={"request": request, "business_id": business_id}).data)
-
-
-@api_view(["POST"])
-def product_photos_add(request, business_id, pk):
-    """
-    Add photos by link, not upload. `links` is a single URL, or several
-    separated by commas — pasting a comma-separated batch is the common case
-    (several Drive/CDN links copied at once), so it's accepted in one field
-    rather than forcing one request per photo.
-    """
-    business = get_authorized_business(request, business_id)
-    if not _is_admin(request.user):
-        return Response({"error": "Only an admin can add photos."}, status=status.HTTP_403_FORBIDDEN)
-    try:
-        product = Product.objects.get(pk=pk, business=business)
-    except Product.DoesNotExist:
-        return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
-
-    payload = request.data if isinstance(request.data, dict) else {}
-    raw = payload.get("links") or payload.get("url") or ""
-    links = [u.strip() for u in str(raw).split(",")]
-    links = [u for u in links if u]
-    if not links:
-        return Response({"error": "Paste at least one photo link."}, status=status.HTTP_400_BAD_REQUEST)
-    not_a_link = [u for u in links if not u.lower().startswith(("http://", "https://"))]
-    if not_a_link:
-        return Response({"error": f"Not a valid link: {not_a_link[0]}"}, status=status.HTTP_400_BAD_REQUEST)
-
-    start = (ProductPhoto.objects.filter(product=product).aggregate(m=Max("sort_order"))["m"] or 0) + 1
-    created = ProductPhoto.objects.bulk_create([
-        ProductPhoto(product=product, url=u, sort_order=start + i)
-        for i, u in enumerate(links)
-    ])
-    return Response(
-        ProductPhotoSerializer(created, many=True, context={"request": request, "business_id": business_id}).data,
-        status=status.HTTP_201_CREATED,
-    )
-
-
-@api_view(["DELETE"])
-def product_photo_delete(request, business_id, photo_id):
-    business = get_authorized_business(request, business_id)
-    if not _is_admin(request.user):
-        return Response({"error": "Only an admin can delete photos."}, status=status.HTTP_403_FORBIDDEN)
-    try:
-        photo = ProductPhoto.objects.get(pk=photo_id, product__business=business)
-    except ProductPhoto.DoesNotExist:
-        return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
-    photo.delete()
-    return Response(status=status.HTTP_204_NO_CONTENT)
-
-
-@api_view(["POST"])
-def product_link_batch(request, business_id, pk):
-    """
-    Attach an already-generated BulkListingBatch to this product. From this
-    point on, every SKU in that batch joins the product's parent SKU — already
-    approved ones immediately (via _bulk_link_skus_to_parent below), still-
-    pending ones automatically the moment they're approved, because approval
-    (task_listing_review) already checks task.parent_sku_id and does exactly
-    the same linking — this view's only new job is making sure that field
-    ends up set.
-    """
-    business = get_authorized_business(request, business_id)
-    if not _is_admin(request.user):
-        return Response({"error": "Only an admin can link a batch."}, status=status.HTTP_403_FORBIDDEN)
-
-    try:
-        product = Product.objects.select_related("parent_sku").get(pk=pk, business=business)
-    except Product.DoesNotExist:
-        return Response({"error": "Product not found"}, status=status.HTTP_404_NOT_FOUND)
-
-    payload = request.data if isinstance(request.data, dict) else {}
-    batch_id = payload.get("batch_id")
-    try:
-        batch = BulkListingBatch.objects.select_related("worker_task").get(pk=batch_id, business=business)
-    except (BulkListingBatch.DoesNotExist, ValueError, TypeError):
-        return Response({"error": "Batch not found"}, status=status.HTTP_404_NOT_FOUND)
-
-    if batch.product_id and batch.product_id != product.pk:
-        return Response({"error": "That batch is already linked to a different product."},
-                        status=status.HTTP_400_BAD_REQUEST)
-
-    task = batch.worker_task
-    if task and task.parent_sku_id and task.parent_sku_id != product.parent_sku_id:
-        return Response(
-            {"error": "This batch's task is already linked to a different parent SKU — can't relink."},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
-
-    with transaction.atomic():
-        batch.product = product
-        batch.save(update_fields=["product"])
-
-        if task and not task.parent_sku_id:
-            task.parent_sku = product.parent_sku
-            task.save(update_fields=["parent_sku"])
-
-        # Retroactive: anything already approved before this link existed
-        # needs linking now — new approvals from here on link automatically.
-        already_approved_skus = list(
-            TaskListing.objects.filter(batch=batch, status=TaskListing.STATUS_APPROVED)
-            .values_list("sku_id", flat=True)
-        )
-        link_result = None
-        if already_approved_skus:
-            link_result = _bulk_link_skus_to_parent(
-                business=business, parent=product.parent_sku, sku_ids=already_approved_skus,
-            )
-
-    return Response({
-        "product": ProductSerializer(product, context={"request": request, "business_id": business_id}).data,
-        "retroactively_linked": link_result,
-    })
 
 
 @api_view(["GET"])
@@ -3986,12 +3934,20 @@ def legacy_listings(request, business_id):
     way, before Bulk Listing became the only path in. Kept reachable here so
     nothing already in the pipeline (pending, or long since approved) becomes
     invisible just because the page reorganised around Product.
+
+    Excludes anything with a `batch` even if that batch isn't linked to a
+    product yet — those belong to the batch-level "Approve batch" flow on the
+    Product page (see bulk_listing_batch_approve), not per-SKU review here.
+    Without this, a freshly generated, not-yet-linked batch would show up
+    with its own per-SKU Approve/Reject, defeating the point of batch-level
+    approval.
     """
     business = get_authorized_business(request, business_id)
     admin = _is_admin(request.user)
 
     qs = TaskListing.objects.filter(
         business=business, task__task_type=WorkerTask.TYPE_LISTING, task__parent_sku_id__isnull=True,
+        batch__isnull=True,
     ).select_related("task", "created_by", "reviewed_by").order_by("-created_at")
     if not admin:
         qs = qs.filter(created_by=request.user)
@@ -10022,6 +9978,115 @@ def _resolve_rate(business, platform, task_type, user=None):
     ).first()
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# Return video batches — one Drive folder of unboxing videos covering many
+# sub-orders, self-serve: whoever is personally raising a claim finds their
+# sub-order in the folder and claims it themselves (see return_video_batch_claim),
+# rather than an admin pre-assigning one video per person.
+# ══════════════════════════════════════════════════════════════════════════════
+
+@api_view(["GET", "POST"])
+def return_video_batches_list(request, business_id):
+    """
+    GET  — every batch for the business (open and closed, so a worker can
+           still see history) — the pick-list ReturnClaimsPanel shows above
+           its kanban board.
+    POST — create a batch (admin-only): one Drive folder covering many
+           sub-orders' unboxing videos, for workers to self-claim from.
+    """
+    business = get_authorized_business(request, business_id)
+
+    if request.method == "GET":
+        qs = ReturnVideoBatch.objects.filter(business=business).select_related("created_by")
+        batches = list(qs)
+        return Response({
+            "results": ReturnVideoBatchSerializer(batches, many=True).data,
+            "total": len(batches),
+        })
+
+    if not _is_admin(request.user):
+        return Response({"error": "Only an admin can create a return batch."}, status=status.HTTP_403_FORBIDDEN)
+
+    payload = request.data if isinstance(request.data, dict) else {}
+    drive_link = str(payload.get("drive_link") or "").strip()
+    if not drive_link:
+        return Response({"error": "Paste the Drive folder link."}, status=status.HTTP_400_BAD_REQUEST)
+    platform = str(payload.get("platform") or WorkerTask.PLATFORM_MEESHO).strip().upper()
+    if platform not in {c[0] for c in WorkerTask.PLATFORM_CHOICES}:
+        return Response({"error": "Unknown platform."}, status=status.HTTP_400_BAD_REQUEST)
+
+    batch = ReturnVideoBatch.objects.create(
+        business=business, platform=platform, drive_link=drive_link,
+        note=str(payload.get("note") or "").strip()[:255], created_by=request.user,
+    )
+    return Response(ReturnVideoBatchSerializer(batch).data, status=status.HTTP_201_CREATED)
+
+
+@api_view(["PATCH"])
+def return_video_batch_detail(request, business_id, pk):
+    """Admin-only: open/close a batch (e.g. once every video in the folder
+    has been claimed) — nothing else about a batch is editable."""
+    business = get_authorized_business(request, business_id)
+    if not _is_admin(request.user):
+        return Response({"error": "Only an admin can edit a return batch."}, status=status.HTTP_403_FORBIDDEN)
+    try:
+        batch = ReturnVideoBatch.objects.get(pk=pk, business=business)
+    except ReturnVideoBatch.DoesNotExist:
+        return Response({"error": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    payload = request.data if isinstance(request.data, dict) else {}
+    if "is_open" in payload:
+        batch.is_open = bool(payload["is_open"])
+        batch.save(update_fields=["is_open"])
+    return Response(ReturnVideoBatchSerializer(batch).data)
+
+
+@api_view(["POST"])
+def return_video_batch_claim(request, business_id, pk):
+    """
+    The self-serve step: whoever is personally raising a claim for a
+    sub-order in this batch's folder claims it here, creating their own
+    WorkerTask — no admin pre-assignment. Everything downstream (submit,
+    review) is the existing worker_task_submit/worker_task_review, untouched.
+    """
+    business = get_authorized_business(request, business_id)
+    try:
+        batch = ReturnVideoBatch.objects.get(pk=pk, business=business)
+    except ReturnVideoBatch.DoesNotExist:
+        return Response({"error": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+    if not batch.is_open:
+        return Response({"error": "This batch is closed."}, status=status.HTTP_400_BAD_REQUEST)
+
+    payload = request.data if isinstance(request.data, dict) else {}
+    suborder_no = str(payload.get("suborder_no") or "").strip()[:100]
+    if not suborder_no:
+        return Response({"error": "Enter the sub-order number you're raising a claim for."},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    # Same spirit as the SKU-uniqueness check task_listing_add used to do —
+    # one sub-order, one claimant, a clear conflict instead of a silent
+    # duplicate task.
+    clash = WorkerTask.objects.filter(
+        business=business, task_type=WorkerTask.TYPE_RETURN_CLAIM, suborder_no__iexact=suborder_no,
+    ).first()
+    if clash:
+        who = clash.assignees.first()
+        return Response({
+            "error": f"'{suborder_no}' has already been claimed" + (f" by {who.username}." if who else "."),
+        }, status=status.HTTP_409_CONFLICT)
+
+    rate = _resolve_rate(business, batch.platform, WorkerTask.TYPE_RETURN_CLAIM, user=request.user)
+    task = WorkerTask.objects.create(
+        business=business, task_type=WorkerTask.TYPE_RETURN_CLAIM, platform=batch.platform,
+        title=f"Return claim — {suborder_no}", source_link=batch.drive_link,
+        suborder_no=suborder_no, video_batch=batch, created_by=request.user,
+        reward_amount=rate.reward_amount if rate else Decimal("0"),
+        bonus_amount=rate.bonus_amount if rate else Decimal("0"),
+    )
+    task.assignees.set([request.user])
+    return Response(WorkerTaskSerializer(task, context={"request": request}).data, status=status.HTTP_201_CREATED)
+
+
 @api_view(["GET", "POST"])
 def worker_tasks_list(request, business_id):
     """
@@ -10332,7 +10397,10 @@ def worker_task_review(request, business_id, pk):
 
       LISTING       → the task's reward
       RETURN_CLAIM  → the raise fee now; the Meesho-approval bonus is released
-                      later by the claim sheet (see _release_claim_bonuses)
+                      later by the claim sheet (see _auto_resolve_return_claims)
+                      — this is the fallback for a task whose sheet never
+                      shows up; most claims now auto-resolve from the sheet
+                      upload directly, without ever reaching this endpoint
 
     Rejecting pays nothing and records why. Money already credited is never
     clawed back automatically — use a manual adjustment, so a reversal is always
@@ -10385,49 +10453,97 @@ def worker_task_review(request, business_id, pk):
     })
 
 
-def _release_claim_bonuses(business, user=None):
+def _auto_resolve_return_claims(business, user=None):
     """
-    Pay the Meesho-approval bonus on claim tasks whose ticket now reads Approved.
+    Runs after every claim-ticket sheet import — the only thing that can
+    tell us what Meesho actually decided. Two passes, both keyed on
+    sub-order and each idempotent on its own `*_credited_at` guard:
 
-    Called after a ticket sheet import, which is the only thing that can tell us
-    Meesho accepted a claim. Matching is on sub-order, and the task must already
-    be approved by you — the bonus rewards a claim that stuck, not one that was
-    never accepted internally.
+    1. A claim task still SUBMITTED (nobody has manually reviewed it) whose
+       sub-order now has a decided ticket (Approved or Rejected) is
+       auto-approved and paid the base reward either way — raising the
+       claim correctly is the worker's job; Meesho's decision on the claim
+       itself isn't. Manual admin approve/reject (worker_task_review)
+       stays as the fallback for a task whose ticket never shows up.
+    2. Whichever way a task got to APPROVED (this auto-step or a manual
+       click), if its ticket reads Approved it also gets the bonus on top
+       — this is the bonus release that already existed before this
+       function grew step 1; now both happen from one sheet upload instead
+       of needing an admin click in between.
     """
-    pending = WorkerTask.objects.filter(
-        business=business,
-        task_type=WorkerTask.TYPE_RETURN_CLAIM,
-        status=WorkerTask.STATUS_APPROVED,
-        bonus_credited_at__isnull=True,
+    now = timezone.now()
+
+    # ── Step 1: auto-approve anything still awaiting review ──────────────
+    submitted = list(WorkerTask.objects.filter(
+        business=business, task_type=WorkerTask.TYPE_RETURN_CLAIM,
+        status=WorkerTask.STATUS_SUBMITTED,
+    ).exclude(suborder_no="").select_related("submitted_by"))
+
+    auto_resolved = 0
+    if submitted:
+        subs = [t.suborder_no for t in submitted]
+        # Model default ordering is (-created_at_meesho, -uploaded_at), so the
+        # first ticket seen per sub-order here is the most recent one.
+        tickets_by_sub = {}
+        for ticket in ClaimTicket.objects.filter(
+            business=business, suborder_no__in=subs,
+            ticket_status__in=[ClaimTicket.STATUS_APPROVED, ClaimTicket.STATUS_REJECTED],
+        ):
+            tickets_by_sub.setdefault(ticket.suborder_no, ticket)
+
+        for task in submitted:
+            ticket = tickets_by_sub.get(task.suborder_no)
+            if ticket is None:
+                continue
+            earner = task.submitted_by or task.assignees.first()
+            if earner is None:
+                continue
+            task.status = WorkerTask.STATUS_APPROVED
+            task.reviewed_by = user
+            task.reviewed_at = now
+            task.review_comment = (
+                "Auto-approved — Meesho approved the claim."
+                if ticket.ticket_status == ClaimTicket.STATUS_APPROVED else
+                "Auto-approved — claim raised correctly; Meesho rejected the claim itself, base fee still paid."
+            )
+            if task.reward_credited_at is None:
+                entry = _credit(task, WalletEntry.KIND_CLAIM_RAISED, task.reward_amount, user, earner,
+                                note=task.title or task.suborder_no)
+                if entry:
+                    task.reward_credited_at = now
+            task.save()
+            auto_resolved += 1
+
+    # ── Step 2: bonus on top for anything Approved (just now, or already,
+    #    by a manual click) whose ticket says Meesho approved it. ─────────
+    pending_bonus = WorkerTask.objects.filter(
+        business=business, task_type=WorkerTask.TYPE_RETURN_CLAIM,
+        status=WorkerTask.STATUS_APPROVED, bonus_credited_at__isnull=True,
     ).exclude(bonus_amount=0).exclude(suborder_no="")
 
-    if not pending:
-        return 0, 0.0
+    bonus_count, bonus_total = 0, Decimal("0")
+    if pending_bonus:
+        approved_subs = set(
+            ClaimTicket.objects.filter(
+                business=business, ticket_status=ClaimTicket.STATUS_APPROVED,
+                suborder_no__in=[t.suborder_no for t in pending_bonus],
+            ).values_list("suborder_no", flat=True)
+        )
+        for task in pending_bonus:
+            if task.suborder_no not in approved_subs:
+                continue
+            earner = task.submitted_by or task.assignees.first()
+            if earner is None:
+                continue
+            entry = _credit(task, WalletEntry.KIND_CLAIM_BONUS, task.bonus_amount, user, earner,
+                            note=f"Meesho approved claim for {task.suborder_no}")
+            if entry:
+                task.bonus_credited_at = now
+                task.save(update_fields=["bonus_credited_at", "updated_at"])
+                bonus_count += 1
+                bonus_total += entry.amount
 
-    approved_subs = set(
-        ClaimTicket.objects.filter(
-            business=business,
-            ticket_status=ClaimTicket.STATUS_APPROVED,
-            suborder_no__in=[t.suborder_no for t in pending],
-        ).values_list("suborder_no", flat=True)
-    )
-
-    now = timezone.now()
-    count, total = 0, Decimal("0")
-    for task in pending:
-        if task.suborder_no not in approved_subs:
-            continue
-        earner = task.submitted_by or task.assignees.first()
-        if earner is None:
-            continue
-        entry = _credit(task, WalletEntry.KIND_CLAIM_BONUS, task.bonus_amount, user, earner,
-                        note=f"Meesho approved claim for {task.suborder_no}")
-        if entry:
-            task.bonus_credited_at = now
-            task.save(update_fields=["bonus_credited_at", "updated_at"])
-            count += 1
-            total += entry.amount
-    return count, float(total)
+    return {"auto_resolved": auto_resolved, "bonus_count": bonus_count, "bonus_total": float(bonus_total)}
 
 
 @api_view(["GET"])
@@ -10714,70 +10830,15 @@ def task_listing_review(request, business_id, pk):
     if decision not in ("APPROVE", "REJECT"):
         return Response({"error": "decision must be APPROVE or REJECT."},
                         status=status.HTTP_400_BAD_REQUEST)
-
-    now = timezone.now()
-    listing.review_comment = str(payload.get("comment") or "").strip()
-    listing.reviewed_by = request.user
-    listing.reviewed_at = now
-    credited = None
+    comment = str(payload.get("comment") or "").strip()
 
     if decision == "REJECT":
-        listing.status = TaskListing.STATUS_REJECTED
-        listing.save()
+        _reject_listing(listing=listing, reviewer=request.user, comment=comment)
         return Response({"listing": TaskListingSerializer(listing, context={"request": request}).data, "credited": None})
 
-    listing.status = TaskListing.STATUS_APPROVED
-
-    # Everything approval does — joining the catalogue (and syncing to the
-    # task's parent SKU, if any) and paying out — happens in one transaction,
-    # so a failure partway through can't leave a listing marked "approved"
-    # without its SKU actually in the catalogue, or paid without being linked.
-    catalog_created = False
-    parent_linked = False
-    with transaction.atomic():
-        # Approving is what makes the SKU real: it joins the pricing catalogue
-        # so the rest of the app (pricing, inventory, SKU analysis) can see it.
-        # Only ever done here, so a SKU can't enter the catalogue without your
-        # sign-off.
-        if listing.added_to_catalog_at is None:
-            if listing.task.parent_sku_id:
-                # Linked to a parent: reuse the same bulk-link path the pricing
-                # tab uses, so the SKU is created *and* immediately inherits the
-                # parent's price/tax/packaging instead of landing unpriced.
-                result = _bulk_link_skus_to_parent(
-                    business=business, parent=listing.task.parent_sku, sku_ids=[listing.sku_id],
-                )
-                catalog_created = bool(result.get("created"))
-                parent_linked = result.get("failed", 0) == 0
-            else:
-                # Deliberately only the tax rate is carried over. FinalPrice.item_price
-                # is the *purchase* cost, and the listing's price is what it sells
-                # for — copying one into the other would quietly corrupt every
-                # profit figure.
-                catalog_sku, catalog_created = FinalPrice.objects.get_or_create(
-                    business=business, sku_id=listing.sku_id,
-                    defaults={"tax_percent": int(listing.tax_percent) if listing.tax_percent is not None else None},
-                )
-                # The row can already exist here — e.g. pre-registered unpriced by
-                # a Bulk Listing generation (see bulk_listing_views) before this
-                # SKU was ever approved — in which case get_or_create's `defaults`
-                # never ran. Backfill the tax rate now rather than leaving it
-                # permanently null just because the row predates approval.
-                if not catalog_created and catalog_sku.tax_percent is None and listing.tax_percent is not None:
-                    catalog_sku.tax_percent = int(listing.tax_percent)
-                    catalog_sku.save(update_fields=["tax_percent"])
-            listing.added_to_catalog_at = now
-
-        if listing.reward_credited_at is None:
-            listing.reward_amount = listing.task.reward_amount
-            entry = _credit(listing.task, WalletEntry.KIND_LISTING, listing.reward_amount,
-                            request.user, listing.created_by,
-                            note=f"{listing.sku_id} ({listing.task.platform})", listing=listing)
-            if entry:
-                listing.reward_credited_at = now
-                credited = float(entry.amount)
-
-        listing.save()
+    catalog_created, parent_linked, credited = _approve_listing(
+        business=business, listing=listing, reviewer=request.user, comment=comment,
+    )
 
     return Response({
         "listing": TaskListingSerializer(listing, context={"request": request}).data,
@@ -11243,9 +11304,11 @@ def claim_tickets_upload(request, business_id):
                 linked += 1
                 ticket.save(update_fields=["linked_return", "updated_at"])
 
-    # An imported ticket reading Approved is the only signal that Meesho
-    # accepted a claim, so this is the moment worker bonuses can be released.
-    bonus_count, bonus_total = _release_claim_bonuses(business, request.user)
+    # An imported ticket reading Approved/Rejected is the only signal we ever
+    # get of what Meesho decided, so this is the moment a still-submitted
+    # claim task gets auto-approved (paid either way) and any now-Approved
+    # task's bonus gets released — see _auto_resolve_return_claims.
+    resolution = _auto_resolve_return_claims(business, request.user)
 
     return Response({
         "success": True,
@@ -11256,8 +11319,9 @@ def claim_tickets_upload(request, business_id):
         "stale_kept": stale,
         "linked": linked,
         "unlinked": created + updated - linked,
-        "bonuses_released": bonus_count,
-        "bonus_total": bonus_total,
+        "claims_auto_resolved": resolution["auto_resolved"],
+        "bonuses_released": resolution["bonus_count"],
+        "bonus_total": resolution["bonus_total"],
         "stats": _claim_stats(business),
     })
 

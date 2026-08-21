@@ -1688,6 +1688,10 @@ class Product(models.Model):
     )
     size = models.CharField(max_length=100, blank=True)
     weight = models.CharField(max_length=100, blank=True, help_text="Free text, e.g. \"250g\"")
+    hsn_code = models.CharField(max_length=20, blank=True)
+    # A single Drive folder with every reference photo/video for this
+    # product — replaces the old one-link-per-photo ProductPhoto table.
+    drive_link = models.URLField(max_length=2000, blank=True)
     description = models.TextField(blank=True)
 
     created_by = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True,
@@ -1701,19 +1705,6 @@ class Product(models.Model):
 
     def __str__(self):
         return self.name
-
-
-class ProductPhoto(models.Model):
-    """One photo of a Product — a link the admin pastes in (Drive, a CDN, an
-    image host), not an upload. No file storage involved at all."""
-    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name="photos")
-    url = models.URLField(max_length=2000)
-    sort_order = models.PositiveIntegerField(default=0)
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        db_table = "product_photos"
-        ordering = ["sort_order", "created_at"]
 
 
 class ClaimTicket(models.Model):
@@ -1831,6 +1822,40 @@ class ClaimTicket(models.Model):
         return (self.reopen_validity - timezone.localdate()).days
 
 
+class ReturnVideoBatch(models.Model):
+    """
+    One Drive folder an admin uploads, covering the unboxing videos for many
+    sub-orders at once — the return-claim equivalent of BulkListingBatch.
+    Nothing is parsed out of it (unlike BulkListingBatch, which reads an
+    actual spreadsheet): it's just a shared link plus which sub-orders have
+    already been claimed off it.
+
+    Self-serve by design: a worker who is personally raising a claim finds
+    their sub-order's video in this folder and claims it themselves (see
+    WorkerTask.video_batch / the `claim` endpoint) rather than an admin
+    pre-assigning one video per person.
+    """
+    business = models.ForeignKey("accounts.Business", on_delete=models.PROTECT,
+                                 related_name="return_video_batches")
+    platform = models.CharField(max_length=20, choices=[
+        ("MEESHO", "Meesho"), ("AMAZON", "Amazon"), ("FLIPKART", "Flipkart"),
+    ], default="MEESHO")
+    drive_link = models.URLField(max_length=2000)
+    note = models.CharField(max_length=255, blank=True, help_text="e.g. \"Week 34 returns\"")
+    is_open = models.BooleanField(default=True, help_text="Closed once fully worked through")
+
+    created_by = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True,
+                                   blank=True, related_name="return_video_batches_created")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "return_video_batches"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return self.note or f"Return batch #{self.pk}"
+
+
 class WorkerTask(models.Model):
     """
     A piece of paid piecework handed to a team member.
@@ -1901,6 +1926,12 @@ class WorkerTask(models.Model):
     # RETURN_CLAIM only: which return this claim is for. This is what lets the
     # uploaded ticket sheet find the task later and release the bonus.
     suborder_no = models.CharField(max_length=100, blank=True, db_index=True)
+
+    # RETURN_CLAIM only, and only when self-claimed from a shared folder
+    # rather than admin-created one-off: which ReturnVideoBatch this claim's
+    # video came from.
+    video_batch = models.ForeignKey(ReturnVideoBatch, on_delete=models.SET_NULL, null=True,
+                                    blank=True, related_name="claims")
 
     # RETURN_CLAIM only: the physical packet id / reverse-AWB off the returned
     # parcel. Either the admin (at creation) or the worker (at submission) may
