@@ -728,6 +728,7 @@ export function BulkListingTab() {
   const [imageText, setImageText] = useState("");     // "New Sheet" mode input
   const [prefilledImages, setPrefilledImages] = useState([]); // "Prefilled Sheet" mode input
   const [prefix, setPrefix] = useState("");
+  const [titlesPaste, setTitlesPaste] = useState("");
   const [listingType, setListingType] = useState("unique");
   const [groupIdBase, setGroupIdBase] = useState("Group");
   const [rows, setRows] = useState([]);
@@ -935,6 +936,12 @@ export function BulkListingTab() {
       });
       return null;
     });
+  };
+
+  const applyTitles = () => {
+    const titles = titlesPaste.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
+    if (!titles.length) return;
+    setRows((rs) => rs.map((r, i) => (titles[i] ? { ...r, title: titles[i] } : r)));
   };
 
   const applyPrefix = () => {
@@ -1351,6 +1358,29 @@ export function BulkListingTab() {
                   </div>
                 ) : (
                   <>
+                    {titleField && (
+                      <div style={{ marginBottom: 14 }}>
+                        <label style={S.label}>Paste titles (comma-separated) — fills the Title column for every row</label>
+                        <div style={{ display: "flex", alignItems: "flex-end", gap: 8, flexWrap: "wrap" }}>
+                          <textarea value={titlesPaste} onChange={(e) => setTitlesPaste(e.target.value)} rows={2}
+                            placeholder="Red Cotton Kurti, Blue Cotton Kurti, Green Cotton Kurti, …"
+                            style={{ ...S.inp, resize: "vertical", flex: "1 1 260px", minWidth: 220 }} />
+                          <button onClick={applyTitles} disabled={!titlesPaste.trim()} style={btn("secondary", "sm")}>
+                            <AutoAwesomeIcon style={{ fontSize: 15, verticalAlign: "-3px" }} />&nbsp;Fill titles for all {rowCount}
+                          </button>
+                        </div>
+                        {titlesPaste.trim() && (() => {
+                          const n = titlesPaste.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean).length;
+                          return (
+                            <div style={{ fontSize: 11, color: n === rowCount ? C.gray400 : C.amber, marginTop: 6 }}>
+                              {n} title{n === 1 ? "" : "s"} pasted
+                              {n !== rowCount && ` — ${rowCount} row${rowCount === 1 ? "" : "s"} to fill, applied in order`}
+                            </div>
+                          );
+                        })()}
+                      </div>
+                    )}
+
                     <div style={{ display: "flex", alignItems: "flex-end", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
                       <div style={{ maxWidth: 260 }}>
                         <label style={S.label}>SKU / Style prefix</label>
