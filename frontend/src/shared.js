@@ -88,7 +88,10 @@ export const C = {
   colorsSet: ["#6D28D9", "#059669", "#2563EB", "#D97706", "#EC4899", "#06B6D4", "#10B981"],
 };
 
-export const CHART_COLORS = ["#6D28D9", "#059669", "#2563EB", "#D97706", "#EC4899", "#06B6D4", "#10B981", "#8B5CF6"];
+export const CHART_COLORS = [
+  "#6D28D9", "#059669", "#2563EB", "#D97706", "#EC4899", "#06B6D4", "#10B981", "#8B5CF6",
+  "#F43F5E", "#0EA5E9", "#EAB308", "#14B8A6", "#F97316", "#A855F7", "#84CC16", "#0891B2",
+];
 
 export const STATUS_COLORS = {
   DELIVERED: C.green,

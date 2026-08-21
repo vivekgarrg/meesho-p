@@ -21,8 +21,8 @@ import TableBody from "@mui/material/TableBody";
 import Alert from "@mui/material/Alert";
 import Collapse from "@mui/material/Collapse";
 import { DataGrid } from "@mui/x-data-grid";
-import { BarChart } from "@mui/x-charts/BarChart";
-import { PieChart } from "@mui/x-charts/PieChart";
+import { AppBarChart } from "../Charts/AppBarChart";
+import { AppPieChart } from "../Charts/AppPieChart";
 import { API, fmt } from "../../App";
 import { useDateFilter } from "../../contexts/DateFilterContext";
 
@@ -730,11 +730,7 @@ function SKUDetailModal({ sku, months, initialRange, initialMonth, onClose }) {
                   <Box sx={{ ...DS.card, p: 2.5, flex: "0 0 300px" }}>
                     <Typography sx={{ fontWeight: 700, fontSize: 14, mb: 0.5 }}>Order Distribution</Typography>
                     <Typography sx={{ fontSize: 12, color: "#94A3B8", mb: 1 }}>{nTotal} total orders</Typography>
-                    <PieChart
-                      series={[{ data: statusPieData, innerRadius: 50, outerRadius: 78, paddingAngle: 2 }]}
-                      height={200}
-                      slotProps={{ legend: { direction: "column", position: { vertical: "middle", horizontal: "right" }, labelStyle: { fontSize: 11 } } }}
-                    />
+                    <AppPieChart data={statusPieData} height={200} valueFormatter={(v) => v} />
                     <Box sx={{ display: "flex", gap: 0.75, flexWrap: "wrap", mt: 1 }}>
                       {statusPieData.map(s => (
                         <Chip key={s.label} label={`${s.label} ${pct(s.value, nTotal)}%`} size="small"
@@ -745,16 +741,13 @@ function SKUDetailModal({ sku, months, initialRange, initialMonth, onClose }) {
                   <Box sx={{ ...DS.card, p: 2.5, flex: "1 1 300px" }}>
                     <Typography sx={{ fontWeight: 700, fontSize: 14, mb: 0.5 }}>Net P&L by Status</Typography>
                     <Typography sx={{ fontSize: 12, color: "#94A3B8", mb: 1 }}>Green = profit · Red = loss</Typography>
-                    <BarChart
+                    <AppBarChart
                       dataset={plBarData}
-                      xAxis={[{
-                        scaleType: "band", dataKey: "s", tickLabelStyle: { fontSize: 11 },
-                        colorMap: { type: "ordinal", values: plBarData.map(x => x.s), colors: plBarData.map(x => x.v >= 0 ? "#059669" : "#DC2626") },
-                      }]}
-                      series={[{ dataKey: "v", label: "Net P&L", valueFormatter: v => fmt(v) }]}
-                      height={230} borderRadius={6}
-                      margin={{ left: 72, bottom: 50, right: 10, top: 10 }}
-                      slotProps={{ legend: { hidden: true } }}
+                      indexKey="s"
+                      series={[{ dataKey: "v", label: "Net P&L" }]}
+                      diverging
+                      valueFormatter={fmt}
+                      height={230}
                     />
                   </Box>
                 </Box>
@@ -771,16 +764,16 @@ function SKUDetailModal({ sku, months, initialRange, initialMonth, onClose }) {
                     <Box sx={{ ...DS.card, p: 2.5 }}>
                       <Typography sx={{ fontWeight: 700, fontSize: 14, mb: 0.5 }}>Monthly Trend — All Time</Typography>
                       <Typography sx={{ fontSize: 12, color: "#94A3B8", mb: 1.5 }}>Delivered profit vs return & RTO losses</Typography>
-                      <BarChart
+                      <AppBarChart
                         dataset={monthlyChartData}
-                        xAxis={[{ scaleType: "band", dataKey: "month" }]}
+                        indexKey="month"
                         series={[
-                          { dataKey: "Delivered", label: "Delivered +", color: "#059669", stack: "a" },
-                          { dataKey: "Return", label: "Return −", color: "#DC2626", stack: "b" },
-                          { dataKey: "RTO", label: "RTO −", color: "#D97706", stack: "b" },
+                          { dataKey: "Delivered", label: "Delivered +", color: "#059669" },
+                          { dataKey: "Return", label: "Return −", color: "#DC2626" },
+                          { dataKey: "RTO", label: "RTO −", color: "#D97706" },
                         ]}
-                        height={240} borderRadius={5}
-                        margin={{ left: 68, bottom: 30, right: 10, top: 10 }}
+                        valueFormatter={fmt}
+                        height={240}
                       />
                     </Box>
                     <Box sx={{ ...DS.card, overflow: "hidden" }}>
@@ -1453,22 +1446,14 @@ export function SKUAnalysisTab() {
               <Typography sx={{ fontSize: 12, color: "#94A3B8", mb: 1.5 }}>
                 Click a bar to open that SKU's full analysis · Green = profit, Red = loss
               </Typography>
-              <BarChart
+              <AppBarChart
                 dataset={chartData}
-                xAxis={[{
-                  scaleType: "band", dataKey: "sku_id",
-                  tickLabelStyle: { fontSize: 10 },
-                  colorMap: {
-                    type: "ordinal",
-                    values: chartData.map(d => d.sku_id),
-                    colors: chartData.map(d => d.net_profit >= 0 ? "#059669" : "#DC2626"),
-                  },
-                }]}
-                series={[{ dataKey: "net_profit", label: "Net P&L", valueFormatter: v => fmt(v) }]}
-                height={230} borderRadius={6}
-                margin={{ left: 72, bottom: 64, right: 10, top: 10 }}
-                slotProps={{ legend: { hidden: true } }}
-                onAxisClick={(_, d) => { const sku = allData.find(s => s.sku_id === d?.axisValue); if (sku) setSelSKU(sku); }}
+                indexKey="sku_id"
+                series={[{ dataKey: "net_profit", label: "Net P&L" }]}
+                diverging
+                valueFormatter={fmt}
+                height={230}
+                onBarClick={(skuId) => { const sku = allData.find(s => s.sku_id === skuId); if (sku) setSelSKU(sku); }}
               />
             </Box>
           )}

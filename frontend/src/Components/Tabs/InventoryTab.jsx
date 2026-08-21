@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import { BarChart } from "@mui/x-charts/BarChart";
-import { PieChart } from "@mui/x-charts/PieChart";
-import { LineChart } from "@mui/x-charts/LineChart";
+import { AppBarChart } from "../Charts/AppBarChart";
+import { AppPieChart } from "../Charts/AppPieChart";
+import { AppLineChart } from "../Charts/AppLineChart";
 import {
   Autocomplete, Box, Button, Card, CardContent, Chip, CircularProgress,
   Dialog, DialogActions, DialogContent, DialogTitle, Divider,
@@ -570,8 +570,7 @@ function OverviewSection() {
     { id: 2, value: stock_status.out || 0, label: "Out of Stock", color: C.red },
   ].filter(d => d.value > 0);
 
-  const monthLabels = monthly_purchases.map(m => m.month);
-  const monthQtys = monthly_purchases.map(m => m.total_qty || 0);
+  const monthlyLineData = monthly_purchases.map(m => ({ month: m.month, qty: m.total_qty || 0 }));
 
   const catColors = ["#6D28D9", "#2563EB", "#059669", "#D97706", "#E11D48", "#64748B"];
   const consCats = [...new Set(consumable_monthly.map(m => m.category))];
@@ -594,13 +593,13 @@ function OverviewSection() {
           <CardContent>
             <Typography variant="subtitle2" fontWeight={700} mb={2}>Top SKUs by Stock Level</Typography>
             {stock_by_sku.length > 0 ? (
-              <BarChart
+              <AppBarChart
                 dataset={stock_by_sku.slice(0, 15)}
-                yAxis={[{ scaleType: "band", dataKey: "sku_id" }]}
-                series={[{ dataKey: "stock", label: "Stock", color: C.orange }]}
+                indexKey="sku_id"
+                series={[{ dataKey: "stock", label: "Stock" }]}
+                colorful
                 layout="horizontal"
                 height={320}
-                margin={{ left: 100, right: 20, top: 10, bottom: 30 }}
               />
             ) : <Box py={4} textAlign="center"><Typography color="text.secondary">No stock data</Typography></Box>}
           </CardContent>
@@ -609,11 +608,7 @@ function OverviewSection() {
           <CardContent>
             <Typography variant="subtitle2" fontWeight={700} mb={2}>Stock Status Distribution</Typography>
             {pieData.length > 0 ? (
-              <PieChart
-                series={[{ data: pieData, innerRadius: 55, outerRadius: 100, paddingAngle: 3, cornerRadius: 4 }]}
-                height={280}
-                slotProps={{ legend: { position: { vertical: "bottom", horizontal: "middle" } } }}
-              />
+              <AppPieChart data={pieData} height={280} showLegend />
             ) : <Box py={4} textAlign="center"><Typography color="text.secondary">No data</Typography></Box>}
           </CardContent>
         </Card>
@@ -624,12 +619,12 @@ function OverviewSection() {
         <Card variant="outlined" sx={{ flex: 1, borderRadius: 3, borderColor: "#E2E8F0" }}>
           <CardContent>
             <Typography variant="subtitle2" fontWeight={700} mb={2}>Monthly Purchase Trend</Typography>
-            {monthLabels.length > 1 ? (
-              <LineChart
-                xAxis={[{ data: monthLabels, scaleType: "point" }]}
-                series={[{ data: monthQtys, label: "Units Purchased", color: C.blue }]}
+            {monthlyLineData.length > 1 ? (
+              <AppLineChart
+                dataset={monthlyLineData}
+                indexKey="month"
+                series={[{ dataKey: "qty", label: "Units Purchased", color: C.blue }]}
                 height={220}
-                margin={{ left: 50, right: 20, top: 10, bottom: 40 }}
               />
             ) : <Box py={4} textAlign="center"><Typography color="text.secondary">Not enough data</Typography></Box>}
           </CardContent>
@@ -638,12 +633,13 @@ function OverviewSection() {
           <CardContent>
             <Typography variant="subtitle2" fontWeight={700} mb={2}>Top SKUs by Purchase Value</Typography>
             {top_by_value.length > 0 ? (
-              <BarChart
+              <AppBarChart
                 dataset={top_by_value.slice(0, 10)}
-                xAxis={[{ scaleType: "band", dataKey: "sku_id" }]}
-                series={[{ dataKey: "purchase_value", label: "Value ₹", color: C.green }]}
+                indexKey="sku_id"
+                series={[{ dataKey: "purchase_value", label: "Value ₹" }]}
+                colorful
+                valueFormatter={fmt}
                 height={220}
-                margin={{ left: 60, right: 20, top: 10, bottom: 50 }}
               />
             ) : <Box py={4} textAlign="center"><Typography color="text.secondary">No data</Typography></Box>}
           </CardContent>

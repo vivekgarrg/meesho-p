@@ -1,9 +1,9 @@
 import React, { useEffect, useState } from "react";
-import { BarChart } from "@mui/x-charts/BarChart";
-import { LineChart } from "@mui/x-charts/LineChart";
 import CircularProgress from "@mui/material/CircularProgress";
 import { API, C, S, fmt } from "../../App";
 import { useDateFilter } from "../../contexts/DateFilterContext";
+import { AppBarChart } from "../Charts/AppBarChart";
+import { AppLineChart } from "../Charts/AppLineChart";
 
 const BUCKET_META = [
   { key: "delivered_count", label: "Delivered", color: C.green },
@@ -68,9 +68,7 @@ export function DailyProfitTab() {
   const days = data?.days || [];
   const totals = data?.totals;
 
-  const barSeries = BUCKET_META.map(({ key, label, color }) => ({
-    dataKey: key, label, color, stack: "outcome",
-  }));
+  const barSeries = BUCKET_META.map(({ key, label, color }) => ({ dataKey: key, label, color }));
 
   const netPos = (totals?.net_profit ?? 0) >= 0;
 
@@ -134,14 +132,14 @@ export function DailyProfitTab() {
             <p style={{ fontSize: 12, color: C.gray400, marginBottom: 14 }}>
               Each bar is everything shipped that day; the "awaiting Meesho data" slice shrinks as sheets are uploaded.
             </p>
-            <BarChart
+            <AppBarChart
               dataset={days}
-              xAxis={[{ scaleType: "band", dataKey: "date", valueFormatter: fmtDay, tickLabelStyle: { fontSize: 10 } }]}
+              indexKey="date"
               series={barSeries}
+              stacked
+              indexFormatter={fmtDay}
+              maxTicks={15}
               height={260}
-              borderRadius={3}
-              margin={{ left: 44, right: 10, top: 10, bottom: 34 }}
-              slotProps={{ legend: { position: { vertical: "top", horizontal: "right" }, labelStyle: { fontSize: 10.5 } } }}
             />
           </div>
 
@@ -153,13 +151,14 @@ export function DailyProfitTab() {
             <p style={{ fontSize: 12, color: C.gray400, marginBottom: 14 }}>
               Settlement-based — a recent day's line will keep rising as its still-pending orders settle.
             </p>
-            <LineChart
+            <AppLineChart
               dataset={days}
-              xAxis={[{ scaleType: "band", dataKey: "date", valueFormatter: fmtDay, tickLabelStyle: { fontSize: 10 } }]}
-              series={[{ dataKey: "net_profit", label: "Net Profit", color: C.orange, valueFormatter: (v) => fmt(v) }]}
+              indexKey="date"
+              series={[{ dataKey: "net_profit", label: "Net Profit", color: C.orange }]}
+              indexFormatter={fmtDay}
+              valueFormatter={fmt}
+              maxTicks={15}
               height={220}
-              margin={{ left: 56, right: 10, top: 10, bottom: 34 }}
-              slotProps={{ legend: { hidden: true } }}
             />
           </div>
 

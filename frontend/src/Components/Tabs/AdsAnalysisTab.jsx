@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { BarChart } from "@mui/x-charts/BarChart";
+import { AppBarChart } from "../Charts/AppBarChart";
 import {
   Box, Chip, CircularProgress, Paper, Stack, Table, TableBody, TableCell,
   TableContainer, TableHead, TableRow, Tooltip, Typography,
@@ -204,17 +204,16 @@ export function AdsAnalysisTab() {
             <Paper variant="outlined" sx={{ p: 2.5, borderRadius: 3, borderColor: "#E2E8F0" }}>
               <Typography sx={{ fontWeight: 700, fontSize: 14, mb: 0.5 }}>Ads Profit vs Spend — Monthly Trend</Typography>
               <Typography sx={{ fontSize: 12, color: "#94A3B8", mb: 1.5 }}>Green = profit earned from ad orders · Red = ad spend · Net benefit is the gap</Typography>
-              <BarChart
+              <AppBarChart
                 dataset={chartDataset}
-                xAxis={[{ scaleType: "band", dataKey: "month" }]}
+                indexKey="month"
                 series={[
                   { dataKey: "Ad Profit", label: "Ad Profit", color: C.green },
                   { dataKey: "Ads Spend", label: "Ads Spend", color: C.red },
                   { dataKey: "Net Benefit", label: "Net Benefit", color: C.blue },
                 ]}
-                height={260} borderRadius={5}
-                margin={{ left: 68, bottom: 40, right: 10, top: 10 }}
-                slotProps={{ legend: { position: { vertical: "top", horizontal: "right" } } }}
+                valueFormatter={fmt}
+                height={260}
               />
             </Paper>
           )}

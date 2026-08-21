@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { API, C, S, SKUTable, StatCard } from "../../App";
-import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { API, C, S, SKUTable, StatCard, fmt } from "../../App";
+import { AppBarChart } from "../Charts/AppBarChart";
 
 
 export function SKULossTab() {
@@ -41,15 +41,13 @@ export function SKULossTab() {
         {chartData.length > 0 && (
           <div style={S.card}>
             <p style={S.cardTitle}>Top 10 Loss-making SKUs</p>
-            <ResponsiveContainer width="100%" height={220}>
-              <BarChart data={chartData} margin={{ top: 4, right: 8, left: 0, bottom: 50 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke={C.gray100} />
-                <XAxis dataKey="sku_id" tick={{ fill: C.gray500, fontSize: 10 }} angle={-30} textAnchor="end" interval={0} tickLine={false} />
-                <YAxis tick={{ fill: C.gray400, fontSize: 11 }} axisLine={false} tickLine={false} />
-                <Tooltip contentStyle={{ background: C.white, border: `1px solid ${C.border}`, borderRadius: 8 }} formatter={(v) => fmt(v)} />
-                <Bar dataKey="net_profit" radius={[5, 5, 0, 0]} fill={C.red} />
-              </BarChart>
-            </ResponsiveContainer>
+            <AppBarChart
+              dataset={chartData}
+              indexKey="sku_id"
+              series={[{ dataKey: "net_profit", label: "Net P&L", color: C.red }]}
+              height={220}
+              valueFormatter={fmt}
+            />
           </div>
         )}
   

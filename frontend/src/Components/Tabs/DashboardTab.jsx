@@ -1,10 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
-import {
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-  LineChart, Line, Legend, PieChart, Pie, Cell,
-} from "recharts";
 import {  S, API, fmt,  Tag } from "../../App";
 import { DateRangePicker } from "../shared/DateRangePicker";
+import { AppBarChart } from "../Charts/AppBarChart";
+import { AppLineChart } from "../Charts/AppLineChart";
+import { AppPieChart } from "../Charts/AppPieChart";
 
 export const C = {
   orange: "#E8510A",
@@ -231,36 +230,23 @@ export function DashboardTab() {
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18 }}>
         <div style={S.card}>
           <SectionTitle>Orders by Lifecycle Status</SectionTitle>
-          <ResponsiveContainer width="100%" height={210}>
-            <BarChart data={order_stats.by_status} margin={{ top: 4, right: 8, left: -8, bottom: 4 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke={C.gray100} />
-              <XAxis dataKey="reason_for_credit_entry" tick={{ fill: C.gray400, fontSize: 11 }} axisLine={false} tickLine={false} />
-              <YAxis tick={{ fill: C.gray400, fontSize: 11 }} axisLine={false} tickLine={false} />
-              <Tooltip contentStyle={{ background: C.white, border: `1px solid ${C.border}`, borderRadius: 8 }} cursor={{ fill: C.gray50 }} />
-              <Bar dataKey="count" radius={[5, 5, 0, 0]}>
-                {order_stats.by_status.map((entry, i) => (
-                  <Cell key={i} fill={STATUS_COLOR[entry.reason_for_credit_entry] || C.gray300} />
-                ))}
-              </Bar>
-            </BarChart>
-          </ResponsiveContainer>
+          <AppBarChart
+            dataset={order_stats.by_status}
+            indexKey="reason_for_credit_entry"
+            series={[{ dataKey: "count", label: "Orders" }]}
+            colorByIndex={STATUS_COLOR}
+            height={210}
+          />
         </div>
 
         <div style={S.card}>
           <SectionTitle>Payments by Settlement Status</SectionTitle>
-          <ResponsiveContainer width="100%" height={210}>
-            <BarChart data={payment_stats.by_status} margin={{ top: 4, right: 8, left: -8, bottom: 4 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke={C.gray100} />
-              <XAxis dataKey="live_order_status" tick={{ fill: C.gray400, fontSize: 11 }} axisLine={false} tickLine={false} />
-              <YAxis tick={{ fill: C.gray400, fontSize: 11 }} axisLine={false} tickLine={false} />
-              <Tooltip
-                contentStyle={{ background: C.white, border: `1px solid ${C.border}`, borderRadius: 8 }}
-                cursor={{ fill: C.gray50 }}
-                formatter={(v, name) => [name === "total_settlement" ? fmt(v) : v, name === "total_settlement" ? "Settlement" : "Count"]}
-              />
-              <Bar dataKey="count" radius={[5, 5, 0, 0]} fill={C.blue} name="Count" />
-            </BarChart>
-          </ResponsiveContainer>
+          <AppBarChart
+            dataset={payment_stats.by_status}
+            indexKey="live_order_status"
+            series={[{ dataKey: "count", label: "Count", color: C.blue }]}
+            height={210}
+          />
         </div>
       </div>
 
@@ -268,17 +254,11 @@ export function DashboardTab() {
       <div style={{ display: "grid", gridTemplateColumns: "1fr 2fr", gap: 18 }}>
         <div style={S.card}>
           <SectionTitle>Order–Payment Match Rate</SectionTitle>
-          <ResponsiveContainer width="100%" height={200}>
-            <PieChart>
-              <Pie data={matchPieData} cx="50%" cy="45%" innerRadius={50} outerRadius={76} dataKey="value" paddingAngle={3}>
-                {matchPieData.map((_, i) => (
-                  <Cell key={i} fill={i === 0 ? C.green : C.amber} />
-                ))}
-              </Pie>
-              <Legend iconSize={10} formatter={(v) => <span style={{ fontSize: 11, color: C.gray600 }}>{v}</span>} />
-              <Tooltip contentStyle={{ background: C.white, border: `1px solid ${C.border}`, borderRadius: 8 }} />
-            </PieChart>
-          </ResponsiveContainer>
+          <AppPieChart
+            data={matchPieData.map((d, i) => ({ ...d, color: i === 0 ? C.green : C.amber }))}
+            height={200}
+            showLegend
+          />
           <div style={{ textAlign: "center", marginTop: 4 }}>
             <span style={{ fontSize: 20, fontWeight: 800, color: matchRate >= 80 ? C.green : C.amber, fontFamily: "monospace" }}>
               {matchRate}%
@@ -316,29 +296,15 @@ export function DashboardTab() {
           <p style={{ fontSize: 12, color: C.gray400, marginBottom: 12 }}>
             Orders placed each day vs settlements received — gap shows pending settlements.
           </p>
-          <ResponsiveContainer width="100%" height={250}>
-            <LineChart data={timelineData} margin={{ top: 4, right: 16, left: -8, bottom: 4 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke={C.gray100} />
-              <XAxis
-                dataKey="date"
-                tick={{ fill: C.gray400, fontSize: 10 }}
-                axisLine={false}
-                tickLine={false}
-                interval="preserveStartEnd"
-              />
-              <YAxis tick={{ fill: C.gray400, fontSize: 11 }} axisLine={false} tickLine={false} />
-              <Tooltip
-                contentStyle={{ background: C.white, border: `1px solid ${C.border}`, borderRadius: 8 }}
-                formatter={(v, name) => [v, name === "orders" ? "Orders Placed" : "Settlements"]}
-              />
-              <Legend
-                iconSize={10}
-                formatter={(v) => <span style={{ fontSize: 11, color: C.gray600 }}>{v === "orders" ? "Orders Placed" : "Settlements"}</span>}
-              />
-              <Line type="monotone" dataKey="orders" stroke={C.blue} strokeWidth={2} dot={false} name="orders" />
-              <Line type="monotone" dataKey="settlements" stroke={C.green} strokeWidth={2} dot={false} name="settlements" />
-            </LineChart>
-          </ResponsiveContainer>
+          <AppLineChart
+            dataset={timelineData}
+            indexKey="date"
+            series={[
+              { dataKey: "orders", label: "Orders Placed", color: C.blue },
+              { dataKey: "settlements", label: "Settlements", color: C.green },
+            ]}
+            height={250}
+          />
         </div>
       )}
     </div>

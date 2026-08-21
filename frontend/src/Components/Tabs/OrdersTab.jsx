@@ -19,7 +19,7 @@ import ClearIcon from "@mui/icons-material/Clear";
 import SearchIcon from "@mui/icons-material/Search";
 
 import { DataGrid } from "@mui/x-data-grid";
-import { BarChart } from "@mui/x-charts/BarChart";
+import { AppBarChart } from "../Charts/AppBarChart";
 
 import { API, C, fmt } from "../../App";
 import { UnsettledOrdersTab } from "./UnsettledOrdersTab";
@@ -407,17 +407,13 @@ export function OrdersTab() {
             <Typography sx={{ fontSize: 13, fontWeight: 700, color: C.gray800 }}>Daily Order Volume</Typography>
             <Typography sx={{ fontSize: 11, color: C.gray400 }}>{dailyData.length} active days · {periodLabel}</Typography>
           </Box>
-          <BarChart
+          <AppBarChart
             dataset={dailyData}
-            xAxis={[{
-              scaleType: "band", dataKey: "label",
-              tickLabelStyle: { fontSize: 9, fill: C.gray400 },
-              tickInterval: (_, i) => i % Math.max(1, Math.floor(dailyData.length / 20)) === 0,
-            }]}
-            series={[{ dataKey: "count", label: "Orders", color: C.orange, valueFormatter: v => v?.toLocaleString("en-IN") }]}
-            height={200} borderRadius={4}
-            margin={{ left: 42, bottom: 34, right: 10, top: 8 }}
-            slotProps={{ legend: { hidden: true } }}
+            indexKey="label"
+            series={[{ dataKey: "count", label: "Orders", color: C.orange }]}
+            valueFormatter={(v) => v?.toLocaleString("en-IN")}
+            maxTicks={20}
+            height={200}
           />
         </Box>
       )}

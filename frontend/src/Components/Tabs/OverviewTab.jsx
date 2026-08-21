@@ -2,10 +2,10 @@ import React, { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import CircularProgress from "@mui/material/CircularProgress";
 import Alert from "@mui/material/Alert";
-import { BarChart } from "@mui/x-charts/BarChart";
-import { LineChart } from "@mui/x-charts/LineChart";
-import { PieChart } from "@mui/x-charts/PieChart";
-import { API, C, CHART_COLORS, fmt, btn, Tag } from "../../App";
+import { AppBarChart } from "../Charts/AppBarChart";
+import { AppLineChart } from "../Charts/AppLineChart";
+import { AppPieChart } from "../Charts/AppPieChart";
+import { API, C, fmt, btn, Tag } from "../../App";
 import { useDateFilter } from "../../contexts/DateFilterContext";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -507,7 +507,7 @@ export function OverviewTab() {
     { label: "TCS", value: Math.abs(Number(tcsAmt)) },
     { label: "TDS", value: Math.abs(Number(tdsAmt)) },
     { label: "Shipping", value: Math.abs(Number(profit?.total_shipping_cost)) },
-  ].filter(d => d.value > 0.01).map((d, i) => ({ ...d, id: i, color: CHART_COLORS[i % CHART_COLORS.length] }));
+  ].filter(d => d.value > 0.01);
 
   const timelineData = (() => {
     if (!dash) return [];
@@ -1046,8 +1046,7 @@ export function OverviewTab() {
             {/* Match donut */}
             <SectionCard title="Payment–Order Match Rate" style={{ flex: "0 0 240px" }}>
               {matchPieData.length > 0 && (
-                <PieChart series={[{ data: matchPieData, innerRadius: 48, outerRadius: 74, paddingAngle: 3 }]}
-                  height={160} slotProps={{ legend: { direction: "row", position: { vertical: "bottom", horizontal: "middle" }, labelStyle: { fontSize: 11 } } }} />
+                <AppPieChart data={matchPieData} height={160} showLegend />
               )}
               <div style={{ textAlign: "center", marginTop: 8 }}>
                 <p style={{ fontSize: 28, fontWeight: 900, fontFamily: "monospace", color: matchRate >= 80 ? C.green : C.amber }}>{matchRate}%</p>
@@ -1111,8 +1110,7 @@ export function OverviewTab() {
         <div style={{ display: "flex", gap: 18, flexWrap: "wrap" }}>
           {deductionPieData.length > 0 && (
             <SectionCard title="Deduction Split" style={{ flex: "0 0 340px" }}>
-              <PieChart series={[{ data: deductionPieData, innerRadius: 52, outerRadius: 80, paddingAngle: 2 }]}
-                height={230} slotProps={{ legend: { direction: "column", position: { vertical: "middle", horizontal: "right" }, labelStyle: { fontSize: 11 } } }} />
+              <AppPieChart data={deductionPieData} height={230} showLegend valueFormatter={fmt} />
             </SectionCard>
           )}
           {timelineData.length > 0 && (
@@ -1120,13 +1118,16 @@ export function OverviewTab() {
               <p style={{ fontSize: 11, color: C.gray400, marginBottom: 10 }}>
                 Settlements per day vs orders placed. Gap = pending settlement.
               </p>
-              <LineChart dataset={timelineData}
-                xAxis={[{ dataKey: "date", scaleType: "point", tickLabelStyle: { fontSize: 10 } }]}
+              <AppLineChart
+                dataset={timelineData}
+                indexKey="date"
                 series={[
-                  { dataKey: "settlements", label: "Settlements", color: C.green, showMark: false },
-                  { dataKey: "orders", label: "Orders Placed", color: C.blue, showMark: false },
+                  { dataKey: "settlements", label: "Settlements", color: C.green },
+                  { dataKey: "orders", label: "Orders Placed", color: C.blue },
                 ]}
-                height={230} margin={{ left: 48, right: 10, top: 10, bottom: 30 }} />
+                maxTicks={15}
+                height={230}
+              />
             </SectionCard>
           )}
         </div>
@@ -1135,18 +1136,20 @@ export function OverviewTab() {
         {dash && order_stats?.by_status?.length > 0 && (
           <div style={{ display: "flex", gap: 18, flexWrap: "wrap" }}>
             <SectionCard title="Orders by Lifecycle Status" style={{ flex: "1 1 300px", minWidth: 0 }}>
-              <BarChart dataset={order_stats.by_status}
-                xAxis={[{ scaleType: "band", dataKey: "reason_for_credit_entry", tickLabelStyle: { fontSize: 10 } }]}
+              <AppBarChart
+                dataset={order_stats.by_status}
+                indexKey="reason_for_credit_entry"
                 series={[{ dataKey: "count", label: "Orders", color: C.blue }]}
-                height={200} borderRadius={6} margin={{ left: 48, bottom: 48, right: 8, top: 8 }}
-                slotProps={{ legend: { hidden: true } }} />
+                height={200}
+              />
             </SectionCard>
             <SectionCard title="Payments by Settlement Status" style={{ flex: "1 1 300px", minWidth: 0 }}>
-              <BarChart dataset={payment_stats.by_status}
-                xAxis={[{ scaleType: "band", dataKey: "live_order_status" }]}
+              <AppBarChart
+                dataset={payment_stats.by_status}
+                indexKey="live_order_status"
                 series={[{ dataKey: "count", label: "Payments", color: C.blue }]}
-                height={200} borderRadius={6} margin={{ left: 48, bottom: 30, right: 8, top: 8 }}
-                slotProps={{ legend: { hidden: true } }} />
+                height={200}
+              />
             </SectionCard>
           </div>
         )}

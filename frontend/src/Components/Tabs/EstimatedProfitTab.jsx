@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import CircularProgress from "@mui/material/CircularProgress";
-import { BarChart } from "@mui/x-charts/BarChart";
-import { PieChart } from "@mui/x-charts/PieChart";
+import { AppBarChart } from "../Charts/AppBarChart";
+import { AppPieChart } from "../Charts/AppPieChart";
 import { API, C, fmt } from "../../App";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -401,11 +401,7 @@ export function EstimatedProfitTab() {
 
   const statusRows = result?.status_breakdown?.filter(r => r.count > 0) || [];
 
-  const divergingChartData = statusRows.map(r => ({
-    status: r.status,
-    profitVal: r.net >= 0 ? r.net : null,
-    lossVal: r.net < 0 ? r.net : null,
-  }));
+  const divergingChartData = statusRows.map(r => ({ status: r.status, net: r.net }));
 
   const statusMeta = getStatusMeta();
   const pieData = statusRows.map((r, i) => ({
@@ -416,11 +412,7 @@ export function EstimatedProfitTab() {
   const topProfit = result?.top_profit_skus || [];
   const topLoss = result?.top_loss_skus || [];
   const tornadoRows = [...topLoss].reverse().concat(topProfit); // losses (top) → profits (bottom)
-  const tornadoData = tornadoRows.map(r => ({
-    sku: r.sku_id,
-    profitVal: r.net_profit >= 0 ? r.net_profit : null,
-    lossVal: r.net_profit < 0 ? r.net_profit : null,
-  }));
+  const tornadoData = tornadoRows.map(r => ({ sku: r.sku_id, net: r.net_profit }));
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
@@ -543,44 +535,33 @@ export function EstimatedProfitTab() {
         <div style={{ display: "flex", gap: 18, flexWrap: "wrap" }}>
           {divergingChartData.length > 0 && (
             <SectionCard title="Net P&L by Status" style={{ flex: "1 1 380px" }}>
-              <BarChart
+              <AppBarChart
                 dataset={divergingChartData}
-                xAxis={[{ scaleType: "band", dataKey: "status", tickLabelStyle: { fontSize: 10 } }]}
-                series={[
-                  { dataKey: "profitVal", label: "Profit", color: C.green },
-                  { dataKey: "lossVal", label: "Loss", color: C.red },
-                ]}
-                height={230} borderRadius={6} margin={{ left: 56, bottom: 34, right: 10, top: 10 }}
-                slotProps={{ legend: { hidden: true } }}
+                indexKey="status"
+                series={[{ dataKey: "net", label: "Net P&L" }]}
+                diverging
+                valueFormatter={fmt}
+                height={230}
               />
             </SectionCard>
           )}
           {pieData.length > 0 && (
             <SectionCard title="Orders by Status" style={{ flex: "0 0 300px" }}>
-              <PieChart
-                series={[{ data: pieData, innerRadius: 48, outerRadius: 76, paddingAngle: 2 }]}
-                height={200}
-                slotProps={{ legend: { direction: "column", position: { vertical: "middle", horizontal: "right" }, labelStyle: { fontSize: 11 } } }}
-              />
+              <AppPieChart data={pieData} height={200} showLegend />
             </SectionCard>
           )}
         </div>
 
         {tornadoData.length > 0 && (
           <SectionCard title="Biggest Winners & Losers" subtitle="Top loss-making and top profit-making SKUs across all saved orders">
-            <BarChart
+            <AppBarChart
               dataset={tornadoData}
+              indexKey="sku"
+              series={[{ dataKey: "net", label: "Net P&L" }]}
+              diverging
               layout="horizontal"
-              yAxis={[{ scaleType: "band", dataKey: "sku", tickLabelStyle: { fontSize: 10 }, width: 160 }]}
-              xAxis={[{ tickLabelStyle: { fontSize: 10 } }]}
-              series={[
-                { dataKey: "profitVal", label: "Profit", color: C.green, valueFormatter: (v) => (v == null ? "" : fmt(v)) },
-                { dataKey: "lossVal", label: "Loss", color: C.red, valueFormatter: (v) => (v == null ? "" : fmt(v)) },
-              ]}
+              valueFormatter={fmt}
               height={Math.max(160, tornadoData.length * 28)}
-              borderRadius={4}
-              margin={{ left: 170, right: 16, top: 10, bottom: 30 }}
-              slotProps={{ legend: { hidden: true } }}
             />
           </SectionCard>
         )}
