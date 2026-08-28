@@ -8,8 +8,10 @@ import LocalShippingOutlinedIcon from "@mui/icons-material/LocalShippingOutlined
 import CardGiftcardIcon from "@mui/icons-material/CardGiftcard";
 import FolderOpenIcon from "@mui/icons-material/FolderOpenOutlined";
 import LockOutlinedIcon from "@mui/icons-material/LockOutlined";
+import VideocamIcon from "@mui/icons-material/Videocam";
 import { CircularProgress } from "@mui/material";
 import { field, STATUS_META } from "./TeamTasksShared";
+import { ClaimVideoTool } from "./ClaimVideoTool";
 
 const COLUMNS = ["ASSIGNED", "SUBMITTED", "APPROVED", "REJECTED"];
 const COLUMN_WIDTH = 300;
@@ -148,6 +150,7 @@ function ClaimCard({ task, isAdmin, busy, onSubmit, onReview }) {
   const [note, setNote] = useState(task.submitted_note || "");
   const [rejecting, setRejecting] = useState(false);
   const [reason, setReason] = useState("");
+  const [toolOpen, setToolOpen] = useState(false);
 
   const identity = [
     task.suborder_no && { label: "SUB ", value: task.suborder_no },
@@ -191,6 +194,15 @@ function ClaimCard({ task, isAdmin, busy, onSubmit, onReview }) {
       <div style={{ padding: isMobile ? 12 : 14, background: C.gray50, borderTop: `1px solid ${C.border}` }}>
         {!isAdmin && task.status !== "APPROVED" ? (
           <>
+            <button onClick={() => setToolOpen(true)}
+              style={{ ...btn("ghost", "sm"), width: "100%", marginBottom: 10 }}>
+              <VideocamIcon style={{ fontSize: 14, verticalAlign: "-2px" }} />
+              &nbsp;Prep claim video &amp; screenshots
+            </button>
+            {toolOpen && (
+              <ClaimVideoTool task={task} onClose={() => setToolOpen(false)}
+                onPacketId={(v) => setPacket(v)} />
+            )}
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: 8 }}>
               <div>
                 <label style={S.label}>Claim / ticket ref</label>

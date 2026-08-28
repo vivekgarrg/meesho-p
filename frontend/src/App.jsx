@@ -42,6 +42,7 @@ import { ExtensionTab } from "./Components/Tabs/ExtensionTab";
 import { BulkListingTab } from "./Components/Tabs/BulkListingTab";
 import { ClaimSheetTab } from "./Components/Tabs/ClaimSheetTab";
 import { TeamTasksTab } from "./Components/Tabs/TeamTasksTab";
+import { ClaimVideoToolTab } from "./Components/Tabs/ClaimVideoToolTab";
 import { GstTab } from "./Components/Tabs/GstTab";
 import { SKU_PAGE_SIZE as skuPageSize } from "./lib/helper";
 import TableData from "./Components/Table/TableData";
@@ -769,6 +770,7 @@ function AppShell() {
             <Route path="/product-photos" element={<ProductPhotosTab />} />
             <Route path="/extension" element={<ExtensionTab />} />
             <Route path="/bulk-listing" element={<BulkListingTab />} />
+            <Route path="/claim-video-tool" element={<ClaimVideoToolTab />} />
             <Route path="/business-profile" element={<BusinessProfilePage />} />
             <Route path="/admin" element={<AdminPanel />} />
             <Route path="*" element={<Navigate to="/" replace />} />

@@ -44,6 +44,16 @@ export default defineConfig(({ command }) => ({
     outDir: '../backend/frontend_build',
     emptyOutDir: true,
   },
+  optimizeDeps: {
+    // @ffmpeg/ffmpeg constructs its own worker via `new Worker(new URL(...))`
+    // internally. Vite's dev-time esbuild pre-bundler rewrites that into a
+    // synthetic `.vite/deps/worker.js?worker_file` URL it can't actually
+    // serve (fails with ERR_FAILED, silently hanging the caller) — excluding
+    // it here makes the dev server serve the package's real ESM files
+    // directly instead, which resolves the worker correctly. The production
+    // build is unaffected (Rollup handles `new Worker(new URL(...))` natively).
+    exclude: ['@ffmpeg/ffmpeg', '@ffmpeg/util'],
+  },
   server: {
     host: '0.0.0.0',
     port: FRONTEND_PORT,

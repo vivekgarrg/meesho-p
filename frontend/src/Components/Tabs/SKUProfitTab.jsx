@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import Box from "@mui/material/Box";
 import Typography from "@mui/material/Typography";
 import Button from "@mui/material/Button";
@@ -288,10 +288,16 @@ function MetricsPanel({ data, filterLabel, profitSummary }) {
 }
 
 // ── SKU DataGrid ──────────────────────────────────────────────────────────────
-function SKUDataTable({ data, onRowClick }) {
+// `mode="parent"` renders one row per parent SKU (or per standalone SKU with
+// no parent on file) instead of one row per child SKU — same columns work
+// unchanged since grouped rows carry the same summed field names, except the
+// identity column swaps to show the child count instead of a single parent
+// tag, and per-unit cost is dropped (summing a per-unit cost across different
+// SKUs isn't a meaningful number).
+function SKUDataTable({ data, onRowClick, mode = "sku" }) {
   const columns = [
     {
-      field: "sku_id", headerName: "SKU", minWidth: 190, flex: 1.2,
+      field: "sku_id", headerName: mode === "parent" ? "Parent SKU" : "SKU", minWidth: 190, flex: 1.2,
       renderCell: p => (
         <Box sx={{ py: 0.5 }}>
           <Chip label={p.value} size="small" sx={{
@@ -299,7 +305,11 @@ function SKUDataTable({ data, onRowClick }) {
             bgcolor: "#FFF7ED", color: "#C2410C", border: "1px solid #FED7AA",
             maxWidth: 170, "& .MuiChip-label": { overflow: "hidden", textOverflow: "ellipsis" },
           }} />
-          {p.row.parent && (
+          {mode === "parent" ? (
+            <Typography sx={{ fontSize: 11, color: "#94A3B8", mt: 0.3, pl: 0.5 }}>
+              {p.row.child_count} SKU{p.row.child_count === 1 ? "" : "s"}
+            </Typography>
+          ) : p.row.parent && (
             <Typography sx={{ fontSize: 11, color: "#94A3B8", mt: 0.3, pl: 0.5 }}>↳ {p.row.parent}</Typography>
           )}
         </Box>
@@ -333,7 +343,9 @@ function SKUDataTable({ data, onRowClick }) {
         );
       },
     },
-    {
+    // Summing a per-unit cost across different SKUs isn't a meaningful
+    // number, so this column only makes sense per individual SKU.
+    mode !== "parent" && {
       field: "one_unit_price", headerName: "Unit Cost", width: 100, type: "number",
       valueFormatter: value => fmt(value),
       renderCell: p => <Typography sx={{ fontFamily: "monospace", fontSize: 13, color: "#475569" }}>{fmt(p.value)}</Typography>,
@@ -378,7 +390,7 @@ function SKUDataTable({ data, onRowClick }) {
         </Tooltip>
       ),
     },
-  ];
+  ].filter(Boolean);
 
   return (
     <DataGrid
@@ -1269,6 +1281,8 @@ export function SKUAnalysisTab() {
   const [selSKU, setSelSKU] = useState(null);
   const [marginThreshold, setMarginThreshold] = useState(50);
   const [reloadTick, setReloadTick] = useState(0);
+  const [groupBy, setGroupBy] = useState("sku"); // "sku" | "parent"
+  const [drillParent, setDrillParent] = useState(null); // parent key while looking at one group's children
 
   useEffect(() => {
     const ctrl = new AbortController();
@@ -1305,17 +1319,56 @@ export function SKUAnalysisTab() {
     return () => ctrl.abort();
   }, [JSON.stringify(range), reloadTick]); // eslint-disable-line
 
-  const profitRows = allData.filter(s => s.net_profit > 0);
-  const lossRows = allData.filter(s => s.net_profit < 0).reverse();
-  const lowMarginRows = allData
+  // Rolls every child SKU under its parent's item_id (or, for a SKU with no
+  // parent on file, under itself — a "group of one" rather than a special
+  // ungrouped bucket, so every row still shows up somewhere). Numeric fields
+  // are summed generically — the backend's per-status buckets (delivered/
+  // return/rto/claim/exchange × count/quantity/cost/…) are too numerous and
+  // too likely to change to hand-list here — the two per-unit averages are
+  // recomputed from the summed totals afterward instead of being summed
+  // themselves, since averaging averages would be meaningless.
+  const groupedData = useMemo(() => {
+    const groups = {};
+    for (const row of allData) {
+      const key = row.parent_item_id || row.sku_id;
+      if (!groups[key]) {
+        groups[key] = { sku_id: key, parent_item_id: row.parent_item_id || null, is_group: true, child_count: 0, _children: [] };
+      }
+      const g = groups[key];
+      g.child_count += 1;
+      g._children.push(row.sku_id);
+      for (const [field, value] of Object.entries(row)) {
+        if (typeof value === "number" && field !== "avg_profit_per_piece" && field !== "avg_settlement_per_piece") {
+          g[field] = (g[field] || 0) + value;
+        }
+      }
+    }
+    return Object.values(groups).map((g) => {
+      const qty = Number(g.delivered_quantity || 0);
+      const pft = Number(g.delivered_profit || 0);
+      const cost = Number(g.delivered_final_purchase_cost ?? g.delivered_purchase_cost ?? 0);
+      return {
+        ...g,
+        avg_profit_per_piece: qty > 0 ? pft / qty : null,
+        avg_settlement_per_piece: qty > 0 ? (pft + cost) / qty : null,
+      };
+    }).sort((a, b) => b.net_profit - a.net_profit);
+  }, [allData]);
+
+  const activeData = groupBy === "parent" ? groupedData : allData;
+  const drillRows = drillParent ? allData.filter(s => (s.parent_item_id || s.sku_id) === drillParent) : null;
+
+  const profitRows = activeData.filter(s => s.net_profit > 0);
+  const lossRows = activeData.filter(s => s.net_profit < 0).reverse();
+  const lowMarginRows = activeData
     .filter(s => s.avg_profit_per_piece !== null && s.avg_profit_per_piece < marginThreshold && (s.delivered_quantity || 0) > 0)
     .sort((a, b) => a.avg_profit_per_piece - b.avg_profit_per_piece);
 
-  const viewData = view === "profit" ? profitRows : view === "loss" ? lossRows : view === "low-margin" ? lowMarginRows : allData;
-  const chartData = [...allData].sort((a, b) => Math.abs(b.net_profit) - Math.abs(a.net_profit)).slice(0, 12);
+  const viewData = view === "profit" ? profitRows : view === "loss" ? lossRows : view === "low-margin" ? lowMarginRows : activeData;
+  const chartData = [...activeData].sort((a, b) => Math.abs(b.net_profit) - Math.abs(a.net_profit)).slice(0, 12);
 
   const VIEWS = [
-    { id: "all", label: "All SKUs", count: allData.length, activeBg: "#1E3A5F", activeText: "#fff", idleBg: "#EFF6FF", idleText: "#1E3A5F", idleBorder: "#BFDBFE" },
+    { id: "all", label: "All SKUs", count: activeData.length, activeBg: "#1E3A5F", activeText: "#fff", idleBg: "#EFF6FF", idleText: "#1E3A5F", idleBorder: "#BFDBFE" },
     { id: "profit", label: "Profitable", count: profitRows.length, activeBg: "#059669", activeText: "#fff", idleBg: "#ECFDF5", idleText: "#059669", idleBorder: "#A7F3D0" },
     { id: "loss", label: "In Loss", count: lossRows.length, activeBg: "#DC2626", activeText: "#fff", idleBg: "#FFF1F2", idleText: "#DC2626", idleBorder: "#FECDD3" },
     { id: "low-margin", label: "Low Margin", count: lowMarginRows.length, activeBg: "#D97706", activeText: "#fff", idleBg: "#FFFBEB", idleText: "#D97706", idleBorder: "#FDE68A" },
@@ -1361,6 +1414,33 @@ export function SKUAnalysisTab() {
             );
           })}
         </Box>
+      </Box>
+
+      {/* ── Group-by toggle ──────────────────────────────────────────────── */}
+      <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+        <Typography sx={{ fontSize: 12, fontWeight: 700, color: "#94A3B8" }}>Group by:</Typography>
+        <Box sx={{ display: "inline-flex", bgcolor: "#F1F5F9", borderRadius: "10px", p: "3px", border: "1px solid #E2E8F0" }}>
+          {[{ id: "sku", label: "SKU" }, { id: "parent", label: "Parent SKU" }].map(g => {
+            const active = groupBy === g.id;
+            return (
+              <Box key={g.id} onClick={() => { setGroupBy(g.id); setDrillParent(null); setView("all"); }} sx={{
+                px: 1.75, py: 0.625, borderRadius: "8px", cursor: "pointer",
+                bgcolor: active ? "#fff" : "transparent",
+                boxShadow: active ? "0 1px 3px rgba(0,0,0,0.12)" : "none",
+                transition: "all 0.15s",
+              }}>
+                <Typography sx={{ fontSize: 12.5, fontWeight: 700, color: active ? "#0F172A" : "#64748B" }}>
+                  {g.label}
+                </Typography>
+              </Box>
+            );
+          })}
+        </Box>
+        {groupBy === "parent" && (
+          <Typography sx={{ fontSize: 11.5, color: "#94A3B8" }}>
+            {groupedData.length} parent group{groupedData.length === 1 ? "" : "s"} · SKUs with no parent on file show as their own group
+          </Typography>
+        )}
       </Box>
 
       {/* ── Missing SKUs panel ───────────────────────────────────────────── */}
@@ -1437,14 +1517,14 @@ export function SKUAnalysisTab() {
         <>
           <MetricsPanel data={allData} filterLabel={label} profitSummary={profitSummary} />
 
-          {/* ── Top SKUs chart ─────────────────────────────────────────── */}
-          {chartData.length > 0 && (
+          {/* ── Top SKUs / parent groups chart ─────────────────────────── */}
+          {!drillParent && chartData.length > 0 && (
             <Box sx={{ ...DS.card, p: 2.5 }}>
               <Typography sx={{ fontWeight: 700, fontSize: 15, mb: 0.25 }}>
-                Top {chartData.length} SKUs by Absolute Impact
+                Top {chartData.length} {groupBy === "parent" ? "Parent Groups" : "SKUs"} by Absolute Impact
               </Typography>
               <Typography sx={{ fontSize: 12, color: "#94A3B8", mb: 1.5 }}>
-                Click a bar to open that SKU's full analysis · Green = profit, Red = loss
+                Click a bar to {groupBy === "parent" ? "see that group's SKUs" : "open that SKU's full analysis"} · Green = profit, Red = loss
               </Typography>
               <AppBarChart
                 dataset={chartData}
@@ -1453,29 +1533,58 @@ export function SKUAnalysisTab() {
                 diverging
                 valueFormatter={fmt}
                 height={230}
-                onBarClick={(skuId) => { const sku = allData.find(s => s.sku_id === skuId); if (sku) setSelSKU(sku); }}
+                onBarClick={(key) => {
+                  const row = activeData.find(s => s.sku_id === key);
+                  if (!row) return;
+                  if (groupBy === "parent") setDrillParent(row.sku_id); else setSelSKU(row);
+                }}
               />
             </Box>
           )}
 
           {/* ── Low Margin Panel ──────────────────────────────────────── */}
-          {view === "low-margin" && (
-            <LowMarginPanel rows={lowMarginRows} threshold={marginThreshold} setThreshold={setMarginThreshold} onRowClick={setSelSKU} />
+          {!drillParent && view === "low-margin" && (
+            <LowMarginPanel rows={lowMarginRows} threshold={marginThreshold} setThreshold={setMarginThreshold}
+              onRowClick={(row) => { if (groupBy === "parent") setDrillParent(row.sku_id); else setSelSKU(row); }} />
           )}
 
-          {/* ── SKU DataGrid ──────────────────────────────────────────── */}
-          {view !== "low-margin" && (
+          {/* ── Drilled into one parent group's child SKUs ──────────────── */}
+          {drillParent && (
+            <Box sx={{ ...DS.card, overflow: "hidden" }}>
+              <Box sx={{ px: 2.5, py: 1.75, borderBottom: "1px solid #E8EDF3", display: "flex", alignItems: "center", gap: 1.5 }}>
+                <Button size="small" onClick={() => setDrillParent(null)} sx={{ textTransform: "none", fontWeight: 700, minWidth: 0, px: 1 }}>
+                  ← Back
+                </Button>
+                <Box>
+                  <Typography sx={{ fontWeight: 700, fontSize: 15 }}>
+                    {drillRows.length} SKU{drillRows.length === 1 ? "" : "s"}
+                    <Typography component="span" sx={{ fontSize: 13, fontWeight: 400, color: "#94A3B8", ml: 1 }}>
+                      under <Box component="span" sx={{ fontFamily: "monospace", fontWeight: 700, color: "#0F172A" }}>{drillParent}</Box>
+                    </Typography>
+                  </Typography>
+                  <Typography sx={{ fontSize: 12, color: "#94A3B8", mt: 0.25 }}>Click any row to open full P&L analysis</Typography>
+                </Box>
+              </Box>
+              <SKUDataTable data={drillRows} onRowClick={setSelSKU} />
+            </Box>
+          )}
+
+          {/* ── SKU / Parent-group DataGrid ──────────────────────────────── */}
+          {!drillParent && view !== "low-margin" && (
             <Box sx={{ ...DS.card, overflow: "hidden" }}>
               <Box sx={{ px: 2.5, py: 1.75, borderBottom: "1px solid #E8EDF3" }}>
                 <Typography sx={{ fontWeight: 700, fontSize: 15 }}>
-                  {viewData.length} SKUs
+                  {viewData.length} {groupBy === "parent" ? "parent group" + (viewData.length === 1 ? "" : "s") : "SKUs"}
                   <Typography component="span" sx={{ fontSize: 13, fontWeight: 400, color: "#94A3B8", ml: 1 }}>
                     {view === "profit" ? "— profitable" : view === "loss" ? "— in loss" : "— all"}
                   </Typography>
                 </Typography>
-                <Typography sx={{ fontSize: 12, color: "#94A3B8", mt: 0.25 }}>Click any row to open full P&L analysis</Typography>
+                <Typography sx={{ fontSize: 12, color: "#94A3B8", mt: 0.25 }}>
+                  {groupBy === "parent" ? "Click any row to see that parent's SKUs" : "Click any row to open full P&L analysis"}
+                </Typography>
               </Box>
-              <SKUDataTable data={viewData} onRowClick={setSelSKU} />
+              <SKUDataTable data={viewData} mode={groupBy}
+                onRowClick={(row) => { if (groupBy === "parent") setDrillParent(row.sku_id); else setSelSKU(row); }} />
             </Box>
           )}
         </>

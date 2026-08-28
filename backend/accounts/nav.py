@@ -47,6 +47,7 @@ NAV_CATALOG = [
     {"path": "/product-photos",    "label": "AI Photos",         "group": "Tools"},
     {"path": "/extension",         "label": "Browser Extension", "group": "Tools"},
     {"path": "/bulk-listing",      "label": "Bulk Listing",      "group": "Tools"},
+    {"path": "/claim-video-tool",  "label": "Claim Video Tool",  "group": "Tools"},
     {"path": "/fraud",             "label": "Fraud Watch",       "group": "Tools"},
     {"path": "/business-profile",  "label": "Business Profile",  "group": "Tools"},
 
@@ -80,6 +81,11 @@ API_OWNERSHIP = {
 
     "labels/":               ["/labels"],
     "bulk-labels/":          ["/bulk-labels"],
+    # More specific than "returns/" below, so it wins on longest-prefix-first —
+    # a worker on Team Tasks or the standalone Claim Video Tool can look up a
+    # sub-order's AWB/packet id without needing separate Returns & Claims
+    # page access.
+    "returns/lookup/":       ["/tasks", "/returns", "/claim-video-tool"],
     "returns/":              ["/returns"],
     # The claim sheet writes back onto returns, so either screen may reach it.
     "claims/":               ["/claims", "/returns"],

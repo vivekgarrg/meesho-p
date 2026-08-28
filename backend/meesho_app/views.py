@@ -1908,6 +1908,14 @@ def profit_summary(request, business_id):
             "total_purchase_cost": 0,
         }
 
+    # Attach each row's parent SKU (item_id string, not the raw pk) so the
+    # frontend can offer a "group by parent" view without a second request —
+    # sku_parent_map (sku_id -> parent pk) was already built above for pricing.
+    parent_item_id_map = {p.id: p.item_id for p in _fp_parent}
+    for _sid, _row in order_wise_profit.items():
+        _pid = sku_parent_map.get(_sid)
+        _row["parent_item_id"] = parent_item_id_map.get(_pid) if _pid else None
+
     # The unresolved SQL sum, kept for reference only. It differs from `revenue`
     # by exactly the double-counted advances and superseded payouts.
     raw_settlement = agg["revenue"] or Decimal("0")

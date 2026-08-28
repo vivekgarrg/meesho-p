@@ -1,11 +1,17 @@
 from datetime import timedelta
 from pathlib import Path
+import mimetypes
 import os
 
 try:
     import dj_database_url
 except ImportError:  # optional locally until requirements are installed
     dj_database_url = None
+
+# Not every host's system mime.types database registers this, and a wrong
+# Content-Type here makes WebAssembly.instantiateStreaming fail its MIME check
+# (falls back to slower ArrayBuffer instantiation) — needed for ffmpeg-core.wasm.
+mimetypes.add_type("application/wasm", ".wasm")
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
