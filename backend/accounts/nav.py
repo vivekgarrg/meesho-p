@@ -19,6 +19,7 @@ NAV_CATALOG = [
     {"path": "/ads-analysis",      "label": "Ads Analysis",      "group": "Analytics"},
     {"path": "/estimated-profit",  "label": "Estimated Profit",  "group": "Analytics"},
     {"path": "/daily-profit",      "label": "Daily Profit",      "group": "Analytics"},
+    {"path": "/customer-insights", "label": "Customer Insights", "group": "Analytics"},
 
     {"path": "/orders",            "label": "Orders",            "group": "Operations"},
     {"path": "/order-scan",        "label": "Order Scan",        "group": "Operations"},
@@ -117,6 +118,7 @@ API_OWNERSHIP = {
 
     "fraud-customers/":      ["/fraud"],
     "blocked-customers/":    ["/fraud", "/labels"],
+    "customer-insights/":    ["/customer-insights"],
 
     "purchases/":            ["/purchases"],
     "consumables/":          ["/purchases", "/expenses"],

@@ -7372,6 +7372,354 @@ def blocked_customer_detail(request, business_id, bc_id):
     return Response({"id": bc.id, "reason": bc.reason})
 
 
+def _percentile(sorted_vals, p):
+    """Nearest-rank percentile of an already-sorted list. p in [0, 1]."""
+    if not sorted_vals:
+        return 0.0
+    idx = min(len(sorted_vals) - 1, int(round(p * (len(sorted_vals) - 1))))
+    return sorted_vals[idx]
+
+
+CUSTOMER_SEGMENT_LABELS = {
+    "vip":                "VIP",
+    "at_risk":            "At Risk",
+    "frequent_returner":  "Frequent Returner",
+    "growing":            "Growing",
+    "steady":             "Steady",
+}
+
+
+def _customer_segment(total_value, return_rate, value_threshold, value_median):
+    """
+    Value x reliability, not return-rate alone — a high-value loyal customer
+    and a low-value one aren't the same story commercially. VIP and At Risk
+    split on the same "high value" line, so the only difference between them
+    is reliability; Frequent Returner catches unreliable customers regardless
+    of value, since a low-value serial returner is still worth flagging.
+    """
+    high_value = total_value >= value_threshold
+    mid_value  = total_value >= value_median
+    if return_rate >= 0.30:
+        return "at_risk" if high_value else "frequent_returner"
+    if high_value:
+        return "vip"
+    if mid_value:
+        return "growing"
+    return "steady"
+
+
+@api_view(["GET"])
+def customer_insights(request, business_id):
+    """
+    Repeat-customer value & return analytics. Same identity convention as
+    fraud_customers (customer_name + customer_pincode via LabelOrder — there's
+    no real Customer model) and reuses its order-outcome resolution, extended
+    with order value (from OrderPayment) and a value x return-rate segment
+    instead of return-rate alone, so this answers "who's worth the most /
+    costing the most", not just "who's risky" (that's still Fraud Watch's job
+    — this endpoint doesn't touch `_risk_level` or replace it).
+
+    Two modes, same endpoint:
+    - List (default): date_from/date_to window everything — eligibility,
+      totals, segments, trend. Powers the dashboard.
+    - Detail (customer_name + customer_pincode both given): ignores the date
+      window and min_orders, returns that one customer's full lifetime
+      record — powers the detail modal, same "list is windowed, detail is
+      lifetime" split SKUDetailModal already uses elsewhere in this app.
+    """
+    business = get_authorized_business(request, business_id)
+    date_from = request.GET.get("date_from", "").strip()
+    date_to   = request.GET.get("date_to", "").strip()
+    min_orders = int(request.GET.get("min_orders", 2))
+    detail_name    = request.GET.get("customer_name", "").strip()
+    detail_pincode = request.GET.get("customer_pincode", "").strip()
+    detail_mode = bool(detail_name and detail_pincode)
+
+    empty_list_response = {
+        "results": [], "summary": {}, "segment_counts": {}, "monthly_trend": [],
+        "top_return_skus": [], "insights": [],
+    }
+
+    label_qs = LabelOrder.objects.filter(business=business).exclude(customer_name="")
+    if detail_mode:
+        label_qs = label_qs.filter(customer_name=detail_name, customer_pincode=detail_pincode)
+    all_label_rows = list(label_qs.values(
+        "order_id", "customer_name", "customer_pincode",
+        "customer_address", "customer_city", "customer_state",
+        "sku", "qty", "order_date",
+    ))
+    if not all_label_rows:
+        return Response({"customer": None} if detail_mode else empty_list_response)
+
+    customer_orders = {}
+    all_order_ids = []
+    for lo in all_label_rows:
+        key = (lo["customer_name"], lo["customer_pincode"])
+        customer_orders.setdefault(key, []).append({
+            "order_id":   lo["order_id"], "sku": lo["sku"] or "", "qty": lo["qty"] or 1,
+            "order_date": str(lo["order_date"]) if lo["order_date"] else "",
+            "address":    lo["customer_address"] or "", "city": lo["customer_city"] or "",
+            "state":      lo["customer_state"] or "",
+        })
+        all_order_ids.append(lo["order_id"])
+
+    outcome_map = {}
+    for row in Order.objects.filter(business=business, sub_order_no__in=all_order_ids).values("sub_order_no", "reason_for_credit_entry"):
+        outcome_map.setdefault(row["sub_order_no"], []).append(row["reason_for_credit_entry"])
+
+    claimed_ids = set(
+        OrderPayment.objects.filter(business=business, sub_order_no__in=all_order_ids, claims__isnull=False)
+        .exclude(claims=0).values_list("sub_order_no", flat=True).distinct()
+    )
+
+    value_map, settled_map = {}, {}
+    for row in OrderPayment.objects.filter(business=business, sub_order_no__in=all_order_ids).values("sub_order_no", "total_sale_amount", "final_settlement_amount"):
+        sid = row["sub_order_no"]
+        value_map[sid]   = value_map.get(sid, Decimal("0"))   + (row["total_sale_amount"] or Decimal("0"))
+        settled_map[sid] = settled_map.get(sid, Decimal("0")) + (row["final_settlement_amount"] or Decimal("0"))
+
+    return_reason_map = {
+        row["suborder_no"]: row["return_reason"]
+        for row in ReturnDelivery.objects.filter(business=business, suborder_no__in=all_order_ids).values("suborder_no", "return_reason")
+    }
+
+    blocked_set = set(
+        BlockedCustomer.objects.filter(business=business, is_active=True)
+        .values_list("customer_name", "customer_pincode")
+    )
+
+    RETURN_STATUSES = {"RETURN", "RETURNED"}
+
+    def in_window(order_date_str):
+        if not (date_from or date_to):
+            return True
+        if not order_date_str:
+            return False
+        if date_from and order_date_str < date_from:
+            return False
+        if date_to and order_date_str > date_to:
+            return False
+        return True
+
+    # One pass: dedupe, resolve status/value/return-reason per order, per customer.
+    built = []
+    for key, orders in customer_orders.items():
+        seen = {}
+        for o in orders:
+            seen.setdefault(o["order_id"], o)
+        enriched = []
+        for o in seen.values():
+            statuses = outcome_map.get(o["order_id"], [])
+            if "DELIVERED" in statuses: resolved = "DELIVERED"
+            elif any(s in RETURN_STATUSES for s in statuses): resolved = "RETURN"
+            elif "RTO_COMPLETE" in statuses: resolved = "RTO"
+            elif "CANCELLED" in statuses: resolved = "CANCELLED"
+            else: resolved = "PENDING"
+            enriched.append({
+                **o, "status": resolved,
+                "value":   float(value_map.get(o["order_id"], 0)),
+                "settled": float(settled_map.get(o["order_id"], 0)),
+                "claimed": o["order_id"] in claimed_ids,
+                "return_reason": return_reason_map.get(o["order_id"], "") or "",
+            })
+        enriched.sort(key=lambda x: x["order_date"], reverse=True)
+        built.append((key, enriched))
+
+    def summarize(orders):
+        delivered = sum(1 for o in orders if o["status"] == "DELIVERED")
+        returned  = sum(1 for o in orders if o["status"] == "RETURN")
+        rto       = sum(1 for o in orders if o["status"] == "RTO")
+        cancelled = sum(1 for o in orders if o["status"] == "CANCELLED")
+        pending   = sum(1 for o in orders if o["status"] == "PENDING")
+        total     = len(orders)
+        total_value   = sum(o["value"] for o in orders)
+        total_settled = sum(o["settled"] for o in orders)
+        sku_stats = {}
+        for o in orders:
+            sku = o["sku"] or "Unknown"
+            s = sku_stats.setdefault(sku, {"sku": sku, "orders": 0, "qty": 0, "delivered": 0, "returned": 0, "rto": 0})
+            s["orders"] += 1
+            s["qty"]    += int(o["qty"] or 1)
+            if o["status"] == "DELIVERED": s["delivered"] += 1
+            elif o["status"] == "RETURN":  s["returned"]  += 1
+            elif o["status"] == "RTO":     s["rto"]       += 1
+        return {
+            "total_orders": total, "delivered": delivered, "returned": returned, "rto": rto,
+            "cancelled": cancelled, "pending": pending,
+            "return_rate": round(returned / total, 3) if total else 0.0,
+            "rto_rate":    round(rto / total, 3) if total else 0.0,
+            "claim_count": sum(1 for o in orders if o["claimed"]),
+            "total_order_value":   round(total_value, 2),
+            "total_settled_value": round(total_settled, 2),
+            "avg_order_value":     round(total_value / total, 2) if total else 0.0,
+            "sku_breakdown": sorted(sku_stats.values(), key=lambda x: -x["orders"]),
+        }
+
+    if detail_mode:
+        key, enriched = built[0]
+        name, pincode = key
+        s = summarize(enriched)
+        sample = enriched[0] if enriched else {}
+        return Response({"customer": {
+            "customer_name": name, "customer_pincode": pincode,
+            "customer_address": sample.get("address", ""), "customer_city": sample.get("city", ""),
+            "customer_state": sample.get("state", ""),
+            **s,
+            "first_order_date": enriched[-1]["order_date"] if enriched else "",
+            "last_order":       enriched[0]["order_date"] if enriched else "",
+            "is_blocked": key in blocked_set,
+            "orders": enriched,
+        }})
+
+    # ── List mode ────────────────────────────────────────────────────────
+    # The date window applies before eligibility is decided, so "repeat" and
+    # every figure shown genuinely describes the selected period rather than
+    # a customer's lifetime leaking into a filtered view.
+    all_windowed = []          # every customer's windowed orders, repeat or not — for the overall-rate comparison
+    candidates = []            # (key, windowed) for customers meeting min_orders in this window
+    for key, enriched in built:
+        windowed = [o for o in enriched if in_window(o["order_date"])]
+        if not windowed:
+            continue
+        all_windowed.extend(windowed)
+        if len(windowed) >= min_orders:
+            candidates.append((key, windowed))
+
+    if not candidates:
+        return Response(empty_list_response)
+
+    per_customer = []
+    for key, windowed in candidates:
+        name, pincode = key
+        s = summarize(windowed)
+        sample = windowed[0]
+        per_customer.append({
+            "customer_name": name, "customer_pincode": pincode,
+            "customer_address": sample.get("address", ""), "customer_city": sample.get("city", ""),
+            "customer_state": sample.get("state", ""),
+            **s,
+            "last_order":  windowed[0]["order_date"],
+            "is_blocked":  key in blocked_set,
+        })
+
+    values_sorted   = sorted(r["total_order_value"] for r in per_customer)
+    value_threshold = _percentile(values_sorted, 0.75)
+    value_median    = _percentile(values_sorted, 0.5)
+    for r in per_customer:
+        seg = _customer_segment(r["total_order_value"], r["return_rate"], value_threshold, value_median)
+        r["segment"] = seg
+        r["segment_label"] = CUSTOMER_SEGMENT_LABELS[seg]
+
+    per_customer.sort(key=lambda r: -r["total_order_value"])
+
+    # ── Summary, segment distribution, trend, top-returned SKUs — all off
+    # the full (unfiltered-by-segment-chip) repeat-customer set, so the KPI
+    # cards and charts don't shift under a table filter the user picked. ──
+    repeat_customer_count = len(per_customer)
+    total_repeat_revenue  = round(sum(r["total_order_value"] for r in per_customer), 2)
+    total_repeat_orders   = sum(r["total_orders"] for r in per_customer)
+    repeat_returned       = sum(r["returned"] for r in per_customer)
+    repeat_return_rate    = round(repeat_returned / total_repeat_orders, 3) if total_repeat_orders else 0.0
+
+    overall_total    = len(all_windowed)
+    overall_returned = sum(1 for o in all_windowed if o["status"] == "RETURN")
+    overall_return_rate = round(overall_returned / overall_total, 3) if overall_total else 0.0
+
+    segment_counts = {seg: 0 for seg in CUSTOMER_SEGMENT_LABELS}
+    for r in per_customer:
+        segment_counts[r["segment"]] += 1
+
+    monthly = {}
+    for key, windowed in candidates:
+        for o in windowed:
+            month = o["order_date"][:7]
+            if not month:
+                continue
+            m = monthly.setdefault(month, {"month": month, "revenue": 0.0, "customers": set()})
+            m["revenue"] += o["value"]
+            m["customers"].add(key)
+    monthly_trend = [
+        {"month": m["month"], "revenue": round(m["revenue"], 2), "repeat_customers": len(m["customers"])}
+        for m in sorted(monthly.values(), key=lambda x: x["month"])
+    ]
+
+    return_sku_stats = {}
+    for key, windowed in candidates:
+        for o in windowed:
+            if o["status"] != "RETURN":
+                continue
+            sku = o["sku"] or "Unknown"
+            rs = return_sku_stats.setdefault(sku, {"sku": sku, "returned": 0, "value": 0.0})
+            rs["returned"] += 1
+            rs["value"] += o["value"]
+    top_return_skus = sorted(return_sku_stats.values(), key=lambda x: -x["returned"])[:10]
+    for rs in top_return_skus:
+        rs["value"] = round(rs["value"], 2)
+
+    # ── Insights — a handful of rule-based, plain-English call-outs, not a
+    # wall of text. This is the "what should be done" section. ──────────────
+    insights = []
+    vip_recent_returns = [
+        r for r in per_customer if r["segment"] == "vip" and r["returned"] > 0
+    ]
+    if vip_recent_returns:
+        insights.append({
+            "type": "warning",
+            "text": f"{len(vip_recent_returns)} VIP customer{'s' if len(vip_recent_returns) != 1 else ''} had at least one return this period — worth a quick check before it becomes a pattern.",
+        })
+    at_risk = [r for r in per_customer if r["segment"] == "at_risk"]
+    if at_risk:
+        at_risk_value = round(sum(r["total_order_value"] for r in at_risk), 2)
+        insights.append({
+            "type": "danger",
+            "text": f"{len(at_risk)} high-value customer{'s are' if len(at_risk) != 1 else ' is'} At Risk (₹{at_risk_value:,.0f} in order value, return rate ≥ 30%) — a manual outreach could save this revenue before it churns or costs more.",
+        })
+    frequent = [r for r in per_customer if r["segment"] == "frequent_returner"]
+    if frequent:
+        insights.append({
+            "type": "danger",
+            "text": f"{len(frequent)} repeat customer{'s' if len(frequent) != 1 else ''} return{'s' if len(frequent) == 1 else ''} ≥ 30% of their orders regardless of value — consider reviewing them in Fraud Watch.",
+        })
+    if overall_total > 0:
+        if repeat_return_rate <= overall_return_rate:
+            insights.append({
+                "type": "success",
+                "text": f"Repeat customers return {repeat_return_rate * 100:.1f}% of orders vs {overall_return_rate * 100:.1f}% overall — your repeat base is more reliable than average.",
+            })
+        else:
+            insights.append({
+                "type": "warning",
+                "text": f"Repeat customers return {repeat_return_rate * 100:.1f}% of orders vs {overall_return_rate * 100:.1f}% overall — repeating doesn't currently mean more reliable here.",
+            })
+    vip_count = segment_counts.get("vip", 0)
+    if vip_count:
+        vip_revenue = round(sum(r["total_order_value"] for r in per_customer if r["segment"] == "vip"), 2)
+        insights.append({
+            "type": "success",
+            "text": f"{vip_count} VIP customer{'s' if vip_count != 1 else ''} account{'s' if vip_count == 1 else ''} for ₹{vip_revenue:,.0f} of repeat revenue this period — your highest-value, most reliable group.",
+        })
+
+    segment_filter = request.GET.get("segment", "")
+    results = per_customer
+    if segment_filter in CUSTOMER_SEGMENT_LABELS:
+        results = [r for r in per_customer if r["segment"] == segment_filter]
+
+    return Response({
+        "results": results,
+        "summary": {
+            "repeat_customer_count": repeat_customer_count,
+            "total_repeat_revenue":  total_repeat_revenue,
+            "avg_orders_per_customer": round(total_repeat_orders / repeat_customer_count, 2) if repeat_customer_count else 0.0,
+            "repeat_return_rate":  repeat_return_rate,
+            "overall_return_rate": overall_return_rate,
+        },
+        "segment_counts": {CUSTOMER_SEGMENT_LABELS[k]: v for k, v in segment_counts.items()},
+        "monthly_trend": monthly_trend,
+        "top_return_skus": top_return_skus,
+        "insights": insights,
+    })
+
+
 @api_view(["DELETE"])
 def inventory_delete_sku(request, business_id, sku_id):
     """Delete all purchase items for a parent SKU; also delete bills that become empty."""

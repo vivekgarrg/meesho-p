@@ -18,6 +18,7 @@ export const NAV_GROUPS = [
       { path: "/ads-analysis", label: "Ads Analysis", icon: "◬" },
       { path: "/estimated-profit", label: "Estimated Profit", icon: "🧮" },
       { path: "/daily-profit", label: "Daily Profit", icon: "📅" },
+      { path: "/customer-insights", label: "Customer Insights", icon: "👥" },
     ],
   },
   {

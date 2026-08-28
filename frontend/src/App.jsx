@@ -43,6 +43,7 @@ import { BulkListingTab } from "./Components/Tabs/BulkListingTab";
 import { ClaimSheetTab } from "./Components/Tabs/ClaimSheetTab";
 import { TeamTasksTab } from "./Components/Tabs/TeamTasksTab";
 import { ClaimVideoToolTab } from "./Components/Tabs/ClaimVideoToolTab";
+import { CustomerInsightsTab } from "./Components/Tabs/CustomerInsightsTab";
 import { GstTab } from "./Components/Tabs/GstTab";
 import { SKU_PAGE_SIZE as skuPageSize } from "./lib/helper";
 import TableData from "./Components/Table/TableData";
@@ -750,6 +751,7 @@ function AppShell() {
             <Route path="/ads-analysis" element={<AdsAnalysisTab />} />
             <Route path="/estimated-profit" element={<EstimatedProfitTab />} />
             <Route path="/daily-profit" element={<DailyProfitTab />} />
+            <Route path="/customer-insights" element={<CustomerInsightsTab />} />
             <Route path="/pricing" element={<PricingTab />} />
             <Route path="/tax-check" element={<TaxCheckTab />} />
             <Route path="/gst" element={<GstTab />} />

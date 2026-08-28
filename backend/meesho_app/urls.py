@@ -60,6 +60,7 @@ urlpatterns = [
     path("fraud-customers/",                  views.fraud_customers,          name="fraud_customers"),
     path("blocked-customers/",                views.blocked_customers_list,   name="blocked_customers_list"),
     path("blocked-customers/<int:bc_id>/",    views.blocked_customer_detail,  name="blocked_customer_detail"),
+    path("customer-insights/",                views.customer_insights,        name="customer_insights"),
     # Purchases & Inventory
     path("purchases/",              views.purchases_list,      name="purchases_list"),
     path("purchases/<int:bill_id>/",     views.purchase_detail, name="purchase_detail"),
