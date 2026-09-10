@@ -24,7 +24,6 @@ import { AppBarChart } from "../Charts/AppBarChart";
 import { AppLineChart } from "../Charts/AppLineChart";
 import { AppPieChart } from "../Charts/AppPieChart";
 import { API, C, fmt } from "../../App";
-import { useDateFilter } from "../../contexts/DateFilterContext";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Design tokens — mirrors OverviewTab.jsx so this reads as the same app.
@@ -102,7 +101,7 @@ function StatusChip({ status }) {
 // ── Detail modal — fetches this one customer's full lifetime history via the
 // same endpoint (customer_name + customer_pincode params), independent of
 // whatever date range the dashboard list is currently windowed to. ──────────
-function CustomerDetailModal({ customer, onClose, onChanged }) {
+function CustomerDetailModal({ customer, onClose, onChanged, returnDataAvailable }) {
   const [detail, setDetail] = useState(null);
   const [blocking, setBlocking] = useState(false);
 
@@ -151,7 +150,7 @@ function CustomerDetailModal({ customer, onClose, onChanged }) {
               {[
                 { label: "Lifetime orders", value: detail.total_orders },
                 { label: "Lifetime value", value: fmt(detail.total_order_value) },
-                { label: "Return rate", value: `${Math.round(detail.return_rate * 100)}%` },
+                { label: "Return rate", value: returnDataAvailable === false ? "No data" : `${Math.round(detail.return_rate * 100)}%` },
                 { label: "Avg order value", value: fmt(detail.avg_order_value) },
                 { label: "First order", value: detail.first_order_date?.slice(0, 10) || "—" },
                 { label: "Last order", value: detail.last_order?.slice(0, 10) || "—" },
@@ -206,7 +205,6 @@ function CustomerDetailModal({ customer, onClose, onChanged }) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 export function CustomerInsightsTab() {
-  const { range, label } = useDateFilter();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [segmentFilter, setSegmentFilter] = useState("all");
@@ -214,18 +212,21 @@ export function CustomerInsightsTab() {
   const [selected, setSelected] = useState(null);
   const [reloadTick, setReloadTick] = useState(0);
 
+  // Deliberately ignores the app's global date filter — a customer who
+  // ordered 3 times over 6 months is still a repeat customer, and windowing
+  // to "this month" would undercount or hide them entirely (confirmed against
+  // real data: months of order history, current-month filter showing zero).
+  // Repeat-customer behavior only makes sense read over full history, same
+  // reasoning Fraud Watch already applies by not touching the date filter.
   const fetchData = useCallback(() => {
     const ctrl = new AbortController();
     setLoading(true);
-    const params = new URLSearchParams();
-    if (range.date_from) params.set("date_from", range.date_from);
-    if (range.date_to) params.set("date_to", range.date_to);
-    fetch(`${API}/customer-insights/?${params}`, { signal: ctrl.signal })
+    fetch(`${API}/customer-insights/`, { signal: ctrl.signal })
       .then(r => r.json())
       .then(d => { setData(d); setLoading(false); })
       .catch(e => { if (e.name !== "AbortError") setLoading(false); });
     return () => ctrl.abort();
-  }, [JSON.stringify(range), reloadTick]); // eslint-disable-line
+  }, [reloadTick]);
 
   useEffect(() => fetchData(), [fetchData]);
 
@@ -253,27 +254,36 @@ export function CustomerInsightsTab() {
   return (
     <Box sx={{ display: "flex", flexDirection: "column", gap: "20px" }}>
       {selected && (
-        <CustomerDetailModal customer={selected} onClose={() => setSelected(null)} onChanged={() => setReloadTick(t => t + 1)} />
+        <CustomerDetailModal customer={selected} onClose={() => setSelected(null)} onChanged={() => setReloadTick(t => t + 1)}
+          returnDataAvailable={summary.return_data_available} />
       )}
 
       {/* Header */}
-      <Box>
-        <Typography sx={{ fontWeight: 900, fontSize: 26, color: "#0F172A", lineHeight: 1.1 }}>Customer Insights</Typography>
-        <Typography sx={{ fontSize: 13, color: "#94A3B8", mt: "4px" }}>
-          Repeat customers, grouped by name + pincode · <strong style={{ color: "#475569" }}>{label}</strong> · at least 2 orders
-        </Typography>
+      <Box sx={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", flexWrap: "wrap", gap: "12px" }}>
+        <Box>
+          <Typography sx={{ fontWeight: 900, fontSize: 26, color: "#0F172A", lineHeight: 1.1 }}>Customer Insights</Typography>
+          <Typography sx={{ fontSize: 13, color: "#94A3B8", mt: "4px" }}>
+            Repeat customers, grouped by name + pincode · <strong style={{ color: "#475569" }}>full order history</strong> · at least 2 orders
+          </Typography>
+        </Box>
+        <Box sx={{ display: "flex", alignItems: "center", gap: "6px", background: "#EFF6FF", border: "1px solid #BFDBFE",
+          borderRadius: "8px", px: "12px", py: "6px" }}>
+          <Typography sx={{ fontSize: 11.5, color: "#1E40AF", fontWeight: 600 }}>
+            ℹ️ Always shows lifetime history — the period selector above doesn't apply on this page
+          </Typography>
+        </Box>
       </Box>
 
       {loading && !data ? (
         <Box sx={{ display: "flex", flexDirection: "column", alignItems: "center", py: 10, gap: 2 }}>
           <CircularProgress sx={{ color: "#3B82F6" }} />
-          <Typography sx={{ color: "#94A3B8", fontSize: 14 }}>Crunching customer history for {label}…</Typography>
+          <Typography sx={{ color: "#94A3B8", fontSize: 14 }}>Crunching customer history…</Typography>
         </Box>
       ) : results.length === 0 ? (
         <Box sx={{ ...T.card, textAlign: "center", py: 10 }}>
           <Typography sx={{ fontSize: 44, mb: "12px" }}>👥</Typography>
-          <Typography sx={{ fontWeight: 800, fontSize: 20, mb: "4px", color: "#0F172A" }}>No repeat customers in {label}</Typography>
-          <Typography sx={{ color: "#94A3B8" }}>Try All time, or a wider date range — this needs at least 2 orders from the same customer.</Typography>
+          <Typography sx={{ fontWeight: 800, fontSize: 20, mb: "4px", color: "#0F172A" }}>No repeat customers found</Typography>
+          <Typography sx={{ color: "#94A3B8" }}>No customer has 2+ orders on record yet — this covers full history, not a date range.</Typography>
         </Box>
       ) : (
         <>
@@ -282,9 +292,14 @@ export function CustomerInsightsTab() {
             <KPICard label="Repeat customers" value={summary.repeat_customer_count} color={C.blue} />
             <KPICard label="Repeat revenue" value={fmt(summary.total_repeat_revenue)} color={C.green} />
             <KPICard label="Avg orders / customer" value={summary.avg_orders_per_customer} color={C.gray800} accent="#8B5CF6" />
-            <KPICard label="Return rate: repeat vs overall" color={returnRateColor} accent={returnRateColor}
-              value={`${Math.round((summary.repeat_return_rate || 0) * 100)}% / ${Math.round((summary.overall_return_rate || 0) * 100)}%`}
-              sub={summary.repeat_return_rate <= summary.overall_return_rate ? "Repeat customers are more reliable" : "Repeat customers return more than average"} />
+            {summary.return_data_available === false ? (
+              <KPICard label="Return rate: repeat vs overall" color={C.gray400} accent={C.gray300}
+                value="No data" sub="No Returns export on file yet — not confirmed zero" />
+            ) : (
+              <KPICard label="Return rate: repeat vs overall" color={returnRateColor} accent={returnRateColor}
+                value={`${Math.round((summary.repeat_return_rate || 0) * 100)}% / ${Math.round((summary.overall_return_rate || 0) * 100)}%`}
+                sub={summary.repeat_return_rate <= summary.overall_return_rate ? "Repeat customers are more reliable" : "Repeat customers return more than average"} />
+            )}
           </Box>
 
           {/* Insights — the "what should be done" section, front and center */}
@@ -333,7 +348,9 @@ export function CustomerInsightsTab() {
               <Typography sx={{ fontWeight: 700, fontSize: 15, mb: "4px" }}>Most-Returned SKUs</Typography>
               <Typography sx={{ fontSize: 12, color: "#94A3B8", mb: "14px" }}>What repeat customers send back most</Typography>
               {topReturnSkus.length === 0 ? (
-                <Typography sx={{ fontSize: 12.5, color: C.gray400, textAlign: "center", py: 4 }}>No returns from repeat customers in this period.</Typography>
+                <Typography sx={{ fontSize: 12.5, color: C.gray400, textAlign: "center", py: 4 }}>
+                  {summary.return_data_available === false ? "No return data on file for this business yet." : "No returns from repeat customers on record."}
+                </Typography>
               ) : (
                 <AppBarChart dataset={topReturnSkus} indexKey="sku"
                   series={[{ dataKey: "returned", label: "Times returned" }]}
@@ -393,9 +410,13 @@ export function CustomerInsightsTab() {
                       <TableCell sx={{ py: "10px", px: "14px", textAlign: "center", fontFamily: "monospace", fontWeight: 700 }}>{c.total_orders}</TableCell>
                       <TableCell sx={{ py: "10px", px: "14px", textAlign: "right", fontFamily: "monospace", fontWeight: 800, color: C.gray800 }}>{fmt(c.total_order_value)}</TableCell>
                       <TableCell sx={{ py: "10px", px: "14px" }}>
-                        <Typography sx={{ fontFamily: "monospace", fontWeight: 700, fontSize: 12, color: c.return_rate >= 0.3 ? C.red : c.return_rate >= 0.15 ? "#D97706" : C.green }}>
-                          {Math.round(c.return_rate * 100)}% <span style={{ color: C.gray400, fontWeight: 400 }}>({c.returned})</span>
-                        </Typography>
+                        {summary.return_data_available === false ? (
+                          <Typography sx={{ fontFamily: "monospace", fontSize: 12, color: C.gray300 }}>No data</Typography>
+                        ) : (
+                          <Typography sx={{ fontFamily: "monospace", fontWeight: 700, fontSize: 12, color: c.return_rate >= 0.3 ? C.red : c.return_rate >= 0.15 ? "#D97706" : C.green }}>
+                            {Math.round(c.return_rate * 100)}% <span style={{ color: C.gray400, fontWeight: 400 }}>({c.returned})</span>
+                          </Typography>
+                        )}
                       </TableCell>
                       <TableCell sx={{ py: "10px", px: "14px", fontFamily: "monospace", fontSize: 11, color: C.gray500 }}>{c.last_order?.slice(0, 10) || "—"}</TableCell>
                       <TableCell sx={{ py: "10px", px: "14px", textAlign: "center" }}>

@@ -485,7 +485,11 @@ export function OverviewTab() {
   const claimRate = pct2(nClaim, nTotal);
   const otherRate = pct2(nOther, nTotal);
 
-  const shipped = profit?.shipped_summary ?? {};
+  const shipped = {
+    count: profit?.total_shipped_count ?? 0,
+    settlement_paid: profit?.total_shipped_settlement ?? 0,
+    expected_profit: profit?.total_shipped_provisional_profit ?? 0,
+  };
   const taxSummary = profit?.tax_summary ?? {};
   const grossRev = profit?.gross_revenue ?? 0;
   const tcsAmt = profit?.total_tcs ?? 0;
@@ -567,6 +571,7 @@ export function OverviewTab() {
     { icon: "🔁", label: "Exchanged", count: nExchange, gross: exchGross, cost: exchPkgCost, rate: exchangeRate, net: nExchangeProfitLoss, netColor: nExchangeProfitLoss >= 0 ? C.gray600 : C.blue },
     { icon: "⚠", label: "Claim", count: nClaim, gross: claimGross, cost: claimCost, net: nClaimProfitLoss, rate: claimRate, netColor: nClaimProfitLoss >= 0 ? C.gray600 : "#7C3AED" },
     { icon: "⊘", label: "Unknown", count: nOther, gross: otherNet, cost: 0, net: otherNet, rate: otherRate, netColor: otherNet >= 0 ? C.gray600 : C.red },
+    { icon: "🚚", label: "Shipped", count: shipped.count, gross: shipped.settlement_paid, cost: 0, net: shipped.expected_profit, rate: pct2(shipped.count, nTotal), netColor: C.blue },
   ];
 
   const statusIcons = {
@@ -647,12 +652,11 @@ export function OverviewTab() {
             <span style={{ fontSize: 24, flexShrink: 0 }}>🚚</span>
             <div>
               <p style={{ fontSize: 13, fontWeight: 700, color: C.amber, marginBottom: 4 }}>
-                {shipped.count} orders SHIPPED — excluded from P&L until settled
+                {shipped.count} orders SHIPPED (in-transit) — provisional, excluded from Net P&L above until delivered/returned/RTO'd
               </p>
               <div style={{ display: "flex", gap: 20, flexWrap: "wrap" }}>
-                <span style={{ fontSize: 12, color: C.gray500 }}>Expected settlement: <strong style={{ fontFamily: "monospace" }}>{fmt(shipped.settlement_paid)}</strong></span>
-                <span style={{ fontSize: 12, color: C.gray500 }}>If delivered: <strong style={{ fontFamily: "monospace", color: Number(shipped.expected_profit) >= 0 ? C.green : C.red }}>{fmt(shipped.expected_profit)}</strong></span>
-                <span style={{ fontSize: 12, color: C.gray500 }}>Expected sale: <strong style={{ fontFamily: "monospace" }}>{fmt(shipped.expected_sale)}</strong></span>
+                <span style={{ fontSize: 12, color: C.gray500 }}>Provisional settlement: <strong style={{ fontFamily: "monospace" }}>{fmt(shipped.settlement_paid)}</strong></span>
+                <span style={{ fontSize: 12, color: C.gray500 }}>Provisional profit if delivered: <strong style={{ fontFamily: "monospace", color: Number(shipped.expected_profit) >= 0 ? C.green : C.red }}>{fmt(shipped.expected_profit)}</strong></span>
               </div>
             </div>
           </div>
@@ -665,15 +669,16 @@ export function OverviewTab() {
             // order_summary took the whole page down.
             Object.keys(orders_summary_cards_data || {}).map(key => {
               const title = key.split("_")[0].toLocaleUpperCase();
+              const isShipped = key === "shipped_summary";
               const data = orders_summary_cards_data?.[key] || {};
-              const color = data.net_profit_loss > 0 ? C.green : C.red
+              const color = isShipped ? C.blue : (data.net_profit_loss > 0 ? C.green : C.red)
               const row = settlementRows.find(obj => obj.label.toLowerCase() === title.toLocaleLowerCase())
               const cardColor = row?.netColor;
               return (
                 <OutcomeCard
                   key={key}
-                  icon={row?.icon} label={title} count={data.order_count} rate={row?.rate} rateColor={cardColor}
-                  netLabel="Net Profit" net={Number(data.net_profit_loss || 0)} netColor={color}
+                  icon={row?.icon} label={isShipped ? `${title} (provisional)` : title} count={data.order_count} rate={row?.rate} rateColor={cardColor}
+                  netLabel={isShipped ? "Provisional Profit" : "Net Profit"} net={Number(data.net_profit_loss || 0)} netColor={color}
                   subStats={[
                     { label: "Gross settlement", value: fmt(data.total_settlement ?? 0) },
                     { label: "Item cost (all-in)", value: fmt(data.final_item_cost ?? 0), color: C.red },
@@ -825,6 +830,12 @@ export function OverviewTab() {
               icon: "🤝", label: "Affiliate Fee",
               desc: "Influencer / affiliate partner payouts",
               value: profit.total_affiliate_fee, pct: null,
+              accent: "#DC2626", bg: "#FFF1F2", border: "#FECDD3",
+            },
+            {
+              icon: "🛡️", label: "Return Assurance Fee",
+              desc: "Return Assurance Program charges",
+              value: profit.total_return_assurance_fee, pct: null,
               accent: "#DC2626", bg: "#FFF1F2", border: "#FECDD3",
             },
           ];

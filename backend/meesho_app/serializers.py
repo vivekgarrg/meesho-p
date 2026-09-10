@@ -2,7 +2,7 @@ from rest_framework import serializers
 from django.db.models import Sum
 
 from .helpers.helper import strip_html
-from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, ParentItemPrice, ParentPriceHistory, Order, LabelOrder, ReturnDelivery, ScannedOrder, ListingTemplate, ClaimTicket, WorkerTask, WalletEntry, WalletSettlement, TaskListing, PlatformRate, TaskDocument, BulkListingFieldPreset, FlipkartBulkTemplate, BulkListingBatch, Product, ReturnVideoBatch
+from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, ParentItemPrice, ParentPriceHistory, Order, LabelOrder, ReturnDelivery, ScannedOrder, ListingTemplate, ClaimTicket, WorkerTask, WalletEntry, WalletSettlement, TaskListing, PlatformRate, TaskDocument, BulkListingFieldPreset, FlipkartBulkTemplate, FlipkartFieldPreset, BulkListingBatch, Product, ReturnVideoBatch
 
 
 class OrderPaymentSerializer(serializers.ModelSerializer):
@@ -269,13 +269,36 @@ class FlipkartBulkTemplateSerializer(serializers.ModelSerializer):
     list-row response would be wasteful, and the raw bytes only ever need
     to travel back out through `bulk_listing_generate`'s own template_id
     lookup, not through this serializer."""
-    created_by_name = serializers.CharField(source="created_by.username", read_only=True, default=None)
+    created_by_name  = serializers.CharField(source="created_by.username", read_only=True, default=None)
+    reviewed_by_name = serializers.CharField(source="reviewed_by.username", read_only=True, default=None)
     file_size        = serializers.IntegerField(read_only=True)
 
     class Meta:
         model = FlipkartBulkTemplate
         fields = ["id", "name", "category_label", "original_filename", "file_size",
+                  "status", "reviewed_by_name", "reviewed_at", "review_comment",
                   "created_by_name", "created_at", "updated_at"]
+
+
+class FlipkartFieldPresetSerializer(serializers.ModelSerializer):
+    created_by_name = serializers.CharField(source="created_by.username", read_only=True, default=None)
+    field_count     = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = FlipkartFieldPreset
+        fields = "__all__"
+        read_only_fields = ["business", "created_by", "created_at", "updated_at"]
+
+    def validate_name(self, value):
+        name = (value or "").strip()
+        if not name:
+            raise serializers.ValidationError("A preset needs a name.")
+        return name
+
+    def validate_fields(self, value):
+        if not isinstance(value, dict):
+            raise serializers.ValidationError("fields must be an object of key → value.")
+        return value
 
 
 class BulkListingBatchSerializer(serializers.ModelSerializer):

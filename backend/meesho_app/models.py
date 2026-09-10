@@ -1555,6 +1555,15 @@ class FlipkartBulkTemplate(models.Model):
     platform that asked for this.
     """
 
+    STATUS_PENDING  = "PENDING"
+    STATUS_APPROVED = "APPROVED"
+    STATUS_REJECTED = "REJECTED"
+    STATUS_CHOICES = [
+        (STATUS_PENDING,  "Awaiting review"),
+        (STATUS_APPROVED, "Approved"),
+        (STATUS_REJECTED, "Rejected"),
+    ]
+
     business = models.ForeignKey(
         "accounts.Business", on_delete=models.PROTECT, related_name="flipkart_bulk_templates",
     )
@@ -1562,6 +1571,21 @@ class FlipkartBulkTemplate(models.Model):
     category_label = models.CharField(max_length=255, blank=True)
     original_filename = models.CharField(max_length=255, blank=True)
     file_data = models.BinaryField()
+
+    # A template only becomes selectable for generation once an admin
+    # approves it (see bulk_listing_views._resolve_source) — an uploader who
+    # isn't an admin can save one, but it stays hidden from real use until
+    # reviewed. Re-uploading new bytes under an existing name resets this
+    # back to PENDING unless the editor is themself an admin, so an approved
+    # template's content can't be silently swapped by a non-admin.
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES,
+                              default=STATUS_PENDING, db_index=True)
+    reviewed_by = models.ForeignKey(
+        "accounts.User", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="flipkart_bulk_templates_reviewed",
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    review_comment = models.TextField(blank=True)
 
     created_by = models.ForeignKey(
         "accounts.User", on_delete=models.SET_NULL, null=True, blank=True,
@@ -1581,6 +1605,46 @@ class FlipkartBulkTemplate(models.Model):
     @property
     def file_size(self):
         return len(self.file_data or b"")
+
+
+class FlipkartFieldPreset(models.Model):
+    """
+    A named set of Flipkart bulk-listing attribute values, saved so a future
+    product in the same (or a similar) category doesn't need everything
+    retyped. Deliberately its own table rather than reusing
+    BulkListingFieldPreset (Meesho-only by convention today) — a Flipkart
+    field key only ever means something against a Flipkart template's own
+    field list, same reasoning FlipkartBulkTemplate's docstring gives for
+    keeping template storage separate from Meesho's.
+    """
+
+    business = models.ForeignKey(
+        "accounts.Business", on_delete=models.PROTECT, related_name="flipkart_field_presets",
+    )
+    name = models.CharField(max_length=200, db_index=True)
+    source_label = models.CharField(max_length=255, blank=True)
+    fields = models.JSONField(default=dict, help_text="field key -> value to prefill")
+    labels = models.JSONField(default=dict, blank=True,
+                              help_text="field key -> the human label shown at save time")
+
+    created_by = models.ForeignKey(
+        "accounts.User", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="flipkart_field_presets_created",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "flipkart_field_presets"
+        ordering = ["name"]
+        unique_together = [("business", "name")]
+
+    def __str__(self):
+        return f"{self.name} ({len(self.fields or {})} fields)"
+
+    @property
+    def field_count(self):
+        return len(self.fields or {})
 
 
 class BulkListingBatch(models.Model):

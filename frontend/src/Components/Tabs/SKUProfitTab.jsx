@@ -58,6 +58,7 @@ const STATUS = {
   exchange: { icon: "🔁", color: "#2563EB", bg: "#EFF6FF", border: "#BFDBFE", label: "Exchange" },
   claim: { icon: "⚠", color: "#7C3AED", bg: "#F5F3FF", border: "#DDD6FE", label: "Claim" },
   other: { icon: "⊘", color: "#64748B", bg: "#F8FAFC", border: "#E2E8F0", label: "Other" },
+  shipped: { icon: "🚚", color: "#2563EB", bg: "#EFF6FF", border: "#BFDBFE", label: "Shipped (provisional)" },
 };
 
 // ── Reusable atoms ─────────────────────────────────────────────────────────────
@@ -321,6 +322,7 @@ function SKUDataTable({ data, onRowClick, mode = "sku" }) {
         const s = p.row;
         const del = s.delivered_count || 0, ret = s.return_count || 0;
         const rto = s.rto_count || 0, claim = s.claim_count || 0;
+        const shippedCnt = s.shipped_count || 0;
         const total = del + ret + rto + (s.cancelled_count || 0) + claim;
         const dr = pct(del, total);
         const drColor = dr >= 70 ? "#059669" : dr >= 45 ? "#D97706" : "#DC2626";
@@ -331,6 +333,7 @@ function SKUDataTable({ data, onRowClick, mode = "sku" }) {
               {ret > 0 && <span style={{ fontSize: 11, fontWeight: 600, color: "#DC2626", background: "#FFF1F2", padding: "1px 6px", borderRadius: 20, border: "1px solid #FECDD3" }}>↩ {ret}</span>}
               {rto > 0 && <span style={{ fontSize: 11, fontWeight: 600, color: "#D97706", background: "#FFFBEB", padding: "1px 6px", borderRadius: 20, border: "1px solid #FDE68A" }}>🔄 {rto}</span>}
               {claim > 0 && <span style={{ fontSize: 11, fontWeight: 700, color: "#7C3AED", background: "#F5F3FF", padding: "1px 6px", borderRadius: 20, border: "1px solid #DDD6FE" }}>⚠ {claim}</span>}
+              {shippedCnt > 0 && <span title="Shipped, not yet settled (provisional)" style={{ fontSize: 11, fontWeight: 600, color: "#2563EB", background: "#EFF6FF", padding: "1px 6px", borderRadius: 20, border: "1px solid #BFDBFE" }}>🚚 {shippedCnt}</span>}
             </Box>
             <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
               <LinearProgress variant="determinate" value={dr} sx={{
@@ -480,6 +483,10 @@ function SKUDetailModal({ sku, months, initialRange, initialMonth, onClose }) {
   const claimNet = Number(d.claim_loss || 0);
   const claimsRcv = Number(d.claims_total || 0);
   const otherNet = Number(d.other_net || 0);
+  const nShipped = Number(d.shipped_count || 0);
+  const shippedGross = Number(d.shipped_total_settlement || 0);
+  const shippedCost = Number(d.shipped_final_purchase_cost ?? 0);
+  const shippedProfit = Number(d.shipped_profit || 0);
   const pkgCost = Number(d.total_packaging_cost || 0);
   const taxCost = Number(d.total_tax_cost || 0);
   const totalNet = Number(d.net_profit || 0) || (delNet + retNet + rtoNet + exchNet + claimNet + otherNet);
@@ -525,6 +532,7 @@ function SKUDetailModal({ sku, months, initialRange, initialMonth, onClose }) {
     { ...STATUS.exchange, count: nExchange, qty: null, gross: null, cost: null, net: exchNet, note: "2×pkg deducted", show: nExchange > 0, netColor: exchNet >= 0 ? "#64748B" : "#2563EB" },
     { ...STATUS.claim, count: nClaim, qty: null, gross: claimsRcv || null, cost: claimsRcv ? -(claimsRcv - claimNet) : null, net: claimNet, note: claimsRcv > 0 ? `${fmt(claimsRcv)} received` : "item cost deducted", show: nClaim > 0, netColor: claimNet >= 0 ? "#059669" : "#7C3AED" },
     { ...STATUS.other, count: nOther, qty: null, gross: null, cost: null, net: otherNet, note: "cancelled / adj", show: nOther > 0, netColor: "#64748B" },
+    { ...STATUS.shipped, count: nShipped, qty: null, gross: shippedGross || null, cost: shippedCost ? -shippedCost : null, net: shippedProfit, note: "in-transit — excluded from Total below", show: nShipped > 0, netColor: "#2563EB" },
   ].filter(r => r.show);
 
   const handleMonthSelect = (m, r) => {

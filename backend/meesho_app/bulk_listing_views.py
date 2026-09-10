@@ -35,13 +35,13 @@ from django.db.models import Q as DQ
 from . import bulk_listing as bl
 from . import bulk_listing_flipkart as blf
 from .models import (
-    BulkListingBatch, BulkListingFieldPreset, FinalPrice, FlipkartBulkTemplate,
+    BulkListingBatch, BulkListingFieldPreset, FinalPrice, FlipkartBulkTemplate, FlipkartFieldPreset,
     ParentItemPrice, Product, TaskListing, WorkerTask,
 )
 from .permissions import get_authorized_business
 from .serializers import (
     BulkListingBatchDetailSerializer, BulkListingBatchSerializer, BulkListingFieldPresetSerializer,
-    FlipkartBulkTemplateSerializer,
+    FlipkartBulkTemplateSerializer, FlipkartFieldPresetSerializer,
 )
 from .views import (
     _approve_listing, _bulk_link_skus_to_parent, _is_admin, _reject_listing,
@@ -102,6 +102,11 @@ def _resolve_source(request, module, platform, business):
             template = FlipkartBulkTemplate.objects.get(pk=template_id, business=business)
         except (FlipkartBulkTemplate.DoesNotExist, ValueError):
             raise ValueError("That saved template no longer exists.")
+        if template.status != FlipkartBulkTemplate.STATUS_APPROVED:
+            raise ValueError(
+                "This template hasn't been approved yet — ask an admin to review it "
+                "before using it to generate a listing."
+            )
         meta = {"kind": BulkListingBatch.SOURCE_TEMPLATE, "built_in_key": "", "template": template,
                 "file_bytes": bytes(template.file_data)}
         return module.load_workbook(BytesIO(bytes(template.file_data))), template.original_filename, meta
@@ -219,10 +224,19 @@ def _persist_batch_and_worker_task(*, business, request, platform, spec, source_
       - a BulkListingBatch record (the file bytes, the source template bytes,
         and the row data — so it can be re-downloaded byte-for-byte or
         reloaded into the form to edit and regenerate)
-      - every SKU registered into FinalPrice immediately, without a price
-        (same pattern as sku_parent_opt_out) — makes the SKU visible to the
-        rest of the app right away and closes the race window against
-        another generation reusing it before this one is even reviewed
+      - Meesho only: every SKU registered into FinalPrice immediately,
+        without a price (same pattern as sku_parent_opt_out) — makes the SKU
+        visible to the rest of the app right away and closes the race window
+        against another generation reusing it before this one is even
+        reviewed. Flipkart SKUs deliberately skip this — a Flipkart listing
+        must stay out of the pricing catalogue (invisible/unorderable
+        everywhere else in the app) until an admin approves it. The
+        TaskListing row created below still enforces per-business SKU
+        uniqueness and is what _existing_sku_clash checks against, so the
+        race-window protection holds without an early FinalPrice row —
+        _approve_listing (views.py) creates it, exactly once, at the moment
+        of approval, the same way the manual "add one SKU to a task" flow
+        already does for every platform.
       - one WorkerTask + one TaskListing per SKU, submitted straight into the
         existing Team Tasks review queue — this is what "generating a bulk
         listing now creates paid, reviewable work" (point 5) actually is:
@@ -248,7 +262,8 @@ def _persist_batch_and_worker_task(*, business, request, platform, spec, source_
             sku_ids=list(sku_ids), row_count=len(sku_ids), created_by=request.user,
         )
 
-        FinalPrice.objects.bulk_create([FinalPrice(business=business, sku_id=s) for s in sku_ids])
+        if platform == "meesho":
+            FinalPrice.objects.bulk_create([FinalPrice(business=business, sku_id=s) for s in sku_ids])
 
         now = timezone.now()
         task = WorkerTask.objects.create(
@@ -784,18 +799,35 @@ def bulk_listing_flipkart_templates(request, business_id):
             return Response({"error": "Could not find a SKU ID column in this template."},
                             status=status.HTTP_400_BAD_REQUEST)
 
+        # An admin's own upload doesn't need to wait on itself — it's
+        # approved on the spot, as if they'd reviewed it. New bytes under an
+        # existing name reset review — even an already-approved template —
+        # unless the editor is themself an admin, so a non-admin can't
+        # silently swap an approved template's content without review.
+        is_admin_upload = _is_admin(request.user)
+        new_status = FlipkartBulkTemplate.STATUS_APPROVED if is_admin_upload else FlipkartBulkTemplate.STATUS_PENDING
+        review_fields = (
+            {"reviewed_by": request.user, "reviewed_at": timezone.now(), "review_comment": ""}
+            if is_admin_upload else
+            {"reviewed_by": None, "reviewed_at": None, "review_comment": ""}
+        )
+
         existing = FlipkartBulkTemplate.objects.filter(business=business, name__iexact=name).first()
         if existing:
             existing.category_label = spec["category_label"]
             existing.original_filename = uploaded.name
             existing.file_data = file_bytes
             existing.created_by = request.user
+            existing.status = new_status
+            for k, v in review_fields.items():
+                setattr(existing, k, v)
             existing.save()
             template, created = existing, False
         else:
             template = FlipkartBulkTemplate.objects.create(
                 business=business, name=name, category_label=spec["category_label"],
                 original_filename=uploaded.name, file_data=file_bytes, created_by=request.user,
+                status=new_status, **review_fields,
             )
             created = True
 
@@ -816,6 +848,102 @@ def bulk_listing_flipkart_template_detail(request, business_id, pk):
     except FlipkartBulkTemplate.DoesNotExist:
         return Response({"error": "Template not found."}, status=status.HTTP_404_NOT_FOUND)
     template.delete()
+    return Response({"deleted": True})
+
+
+@api_view(["POST"])
+def bulk_listing_flipkart_template_review(request, business_id, pk):
+    """
+    Approve or reject a saved Flipkart template — same decision shape as
+    task_listing_review (views.py), same admin-only gate. Approving is what
+    makes a template selectable via template_id= (see _resolve_source's
+    enforcement above); a pending or rejected one can't be used to generate.
+    """
+    business = get_authorized_business(request, business_id)
+    if not _is_admin(request.user):
+        return Response({"error": "Only an admin can review templates."},
+                        status=status.HTTP_403_FORBIDDEN)
+
+    try:
+        template = FlipkartBulkTemplate.objects.get(pk=pk, business=business)
+    except FlipkartBulkTemplate.DoesNotExist:
+        return Response({"error": "Template not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    payload = request.data if isinstance(request.data, dict) else {}
+    decision = str(payload.get("decision") or "").strip().upper()
+    if decision not in ("APPROVE", "REJECT"):
+        return Response({"error": "decision must be APPROVE or REJECT."},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    template.status = (FlipkartBulkTemplate.STATUS_APPROVED if decision == "APPROVE"
+                       else FlipkartBulkTemplate.STATUS_REJECTED)
+    template.reviewed_by = request.user
+    template.reviewed_at = timezone.now()
+    template.review_comment = str(payload.get("comment") or "").strip()
+    template.save()
+
+    return Response({"template": FlipkartBulkTemplateSerializer(template).data})
+
+
+@api_view(["GET", "POST"])
+def bulk_listing_flipkart_presets(request, business_id):
+    """
+    Flipkart's own equivalent of bulk_listing_presets — kept as a separate
+    table/endpoint (FlipkartFieldPreset) rather than shared with Meesho's
+    BulkListingFieldPreset, same reasoning FlipkartBulkTemplate already
+    applies to templates: a Flipkart field key only ever means something
+    against a Flipkart template's own field list.
+
+    GET  — every Flipkart preset saved for this business.
+    POST — save one. An existing preset with the same name is updated in
+           place (case-insensitively), same idempotency as bulk_listing_presets.
+    """
+    business = get_authorized_business(request, business_id)
+
+    if request.method == "POST":
+        payload = request.data if isinstance(request.data, dict) else {}
+        name = str(payload.get("name") or "").strip()
+        if not name:
+            return Response({"error": "Give the preset a name."}, status=status.HTTP_400_BAD_REQUEST)
+        fields = payload.get("fields")
+        if not isinstance(fields, dict):
+            return Response({"error": "fields must be an object of key → value."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        labels = payload.get("labels") if isinstance(payload.get("labels"), dict) else {}
+        source_label = str(payload.get("source_label") or "")[:255]
+
+        existing = FlipkartFieldPreset.objects.filter(business=business, name__iexact=name).first()
+        if existing:
+            existing.fields = fields
+            existing.labels = labels
+            existing.source_label = source_label
+            existing.created_by = request.user
+            existing.save()
+            preset, created = existing, False
+        else:
+            preset = FlipkartFieldPreset.objects.create(
+                business=business, name=name, fields=fields, labels=labels,
+                source_label=source_label, created_by=request.user,
+            )
+            created = True
+
+        return Response(
+            {"created": created, "preset": FlipkartFieldPresetSerializer(preset).data},
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
+
+    presets = FlipkartFieldPreset.objects.filter(business=business).select_related("created_by")
+    return Response({"results": FlipkartFieldPresetSerializer(presets, many=True).data})
+
+
+@api_view(["DELETE"])
+def bulk_listing_flipkart_preset_detail(request, business_id, pk):
+    business = get_authorized_business(request, business_id)
+    try:
+        preset = FlipkartFieldPreset.objects.get(pk=pk, business=business)
+    except FlipkartFieldPreset.DoesNotExist:
+        return Response({"error": "Preset not found."}, status=status.HTTP_404_NOT_FOUND)
+    preset.delete()
     return Response({"deleted": True})
 
 

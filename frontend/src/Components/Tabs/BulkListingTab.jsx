@@ -9,6 +9,7 @@ import SaveIcon from "@mui/icons-material/Save";
 import ChangeCircleIcon from "@mui/icons-material/ChangeCircle";
 import { CircularProgress } from "@mui/material";
 import { BulkListingBatchesPanel } from "./BulkListingBatchesPanel";
+import { useAuth } from "../../contexts/AuthContext";
 
 /**
  * Turns any Meesho category bulk-listing template (uploaded fresh, or one of
@@ -264,12 +265,18 @@ function DraggableThumb({ url, index, isMain, onDragStart, onDrop }) {
  */
 function FlipkartFlow() {
   const fileInputRef = useRef(null);
+  const { isSuperAdmin } = useAuth();
 
   const [templates, setTemplates] = useState([]);
   const [spec, setSpec] = useState(null);
   const [source, setSource] = useState(null); // { type: "file", file } | { type: "template", id, name }
   const [parsing, setParsing] = useState(false);
   const [savingTemplate, setSavingTemplate] = useState(false);
+  const [reviewingId, setReviewingId] = useState(null);
+
+  const [presets, setPresets] = useState([]);
+  const [presetId, setPresetId] = useState("");
+  const [savingPreset, setSavingPreset] = useState(false);
 
   const [rows, setRows] = useState([]); // { sku, images: [...], attributes: {} }
   const [expanded, setExpanded] = useState(new Set());
@@ -279,7 +286,14 @@ function FlipkartFlow() {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
 
-  useEffect(() => { refreshTemplates(); }, []);
+  useEffect(() => { refreshTemplates(); refreshPresets(); }, []);
+
+  const approvedTemplates = useMemo(() => templates.filter((t) => t.status === "APPROVED"), [templates]);
+
+  const refreshPresets = () => {
+    fetch(`${API}/bulk-listing/flipkart-presets/`).then((r) => r.json())
+      .then((d) => setPresets(d.results || [])).catch(() => {});
+  };
 
   const refreshTemplates = () => {
     fetch(`${API}/bulk-listing/flipkart-templates/`).then((r) => r.json())
@@ -422,6 +436,85 @@ function FlipkartFlow() {
     }
   };
 
+  const reviewTemplate = async (id, decision) => {
+    setReviewingId(id);
+    try {
+      const res = await fetch(`${API}/bulk-listing/flipkart-templates/${id}/review/`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ decision }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) { setMsg({ type: "error", text: d.error || "Could not review that template." }); return; }
+      setMsg({ type: "success", text: decision === "APPROVE" ? "Template approved — it's now usable." : "Template rejected." });
+      refreshTemplates();
+    } catch {
+      setMsg({ type: "error", text: "Network error." });
+    } finally {
+      setReviewingId(null);
+    }
+  };
+
+  // Row 1 is this flow's equivalent of Meesho's single `shared` object — a
+  // preset applies onto it, and syncFromRow1 (if checked) carries it to the
+  // rest, same as any other Row 1 edit.
+  const loadPreset = (id) => {
+    setPresetId(id);
+    if (!id) return;
+    const preset = presets.find((p) => String(p.id) === String(id));
+    if (!preset || rows.length === 0) return;
+    setRows((rs) => rs.map((r, i) => (
+      i === 0 ? { ...r, attributes: { ...r.attributes, ...preset.fields } } : r
+    )));
+  };
+
+  const savePreset = async () => {
+    if (rows.length === 0) return;
+    const name = window.prompt("Save Row 1's attribute values as a preset named:");
+    if (!name || !name.trim()) return;
+    const fields = {};
+    const labels = {};
+    attributeFields.forEach((f) => {
+      const v = rows[0].attributes[f.key];
+      if (v !== undefined && v !== null && v !== "") {
+        fields[f.key] = v;
+        labels[f.key] = f.label;
+      }
+    });
+    if (!Object.keys(fields).length) {
+      setMsg({ type: "error", text: "Fill in some fields on Row 1 before saving a preset." });
+      return;
+    }
+    setSavingPreset(true);
+    try {
+      const res = await fetch(`${API}/bulk-listing/flipkart-presets/`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: name.trim(), fields, labels, source_label: spec?.category_label || "" }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) { setMsg({ type: "error", text: d.error || "Could not save the preset." }); return; }
+      setMsg({ type: "success", text: `Saved "${name.trim()}" — ${Object.keys(fields).length} field(s).` });
+      refreshPresets();
+    } catch {
+      setMsg({ type: "error", text: "Network error." });
+    } finally {
+      setSavingPreset(false);
+    }
+  };
+
+  const deletePreset = async (id, name) => {
+    if (!window.confirm(`Delete the saved preset "${name}"?`)) return;
+    try {
+      const res = await fetch(`${API}/bulk-listing/flipkart-presets/${id}/`, { method: "DELETE" });
+      if (!res.ok) { setMsg({ type: "error", text: "Could not delete that preset." }); return; }
+      if (String(presetId) === String(id)) setPresetId("");
+      refreshPresets();
+    } catch {
+      setMsg({ type: "error", text: "Network error." });
+    }
+  };
+
   const setRowSku = (i) => (value) =>
     setRows((rs) => rs.map((r, j) => (j === i ? { ...r, sku: value } : r)));
 
@@ -545,17 +638,17 @@ function FlipkartFlow() {
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
               <input ref={fileInputRef} type="file" accept=".xls,.xlsx" onChange={onFilePicked}
                 disabled={parsing} style={{ fontSize: 12.5 }} />
-              {templates.length > 0 && (
+              {approvedTemplates.length > 0 && (
                 <>
                   <span style={{ fontSize: 11.5, color: C.gray400 }}>or</span>
                   <select disabled={parsing} defaultValue="" style={{ ...S.inp, maxWidth: 260, width: "auto" }}
                     onChange={(e) => {
-                      const t = templates.find((x) => String(x.id) === e.target.value);
+                      const t = approvedTemplates.find((x) => String(x.id) === e.target.value);
                       if (t) parseSource({ type: "template", id: t.id, name: t.name, originalFilename: t.original_filename });
                       e.target.value = "";
                     }}>
                     <option value="" disabled>Use a saved template…</option>
-                    {templates.map((t) => (
+                    {approvedTemplates.map((t) => (
                       <option key={t.id} value={t.id}>{t.name} ({t.category_label})</option>
                     ))}
                   </select>
@@ -571,17 +664,36 @@ function FlipkartFlow() {
             </div>
             {templates.length > 0 && (
               <div style={{ marginTop: 10, display: "flex", gap: 6, flexWrap: "wrap" }}>
-                {templates.map((t) => (
-                  <span key={t.id} style={{ display: "inline-flex", alignItems: "center", gap: 5,
-                    fontSize: 11, color: C.gray500, background: C.gray50, border: `1px solid ${C.border}`,
-                    borderRadius: 8, padding: "3px 5px 3px 9px" }}>
-                    {t.name}
-                    <button onClick={() => deleteTemplate(t.id, t.name)} title="Delete this saved template"
-                      style={{ background: "none", border: "none", cursor: "pointer", color: C.gray400, fontSize: 14, padding: "0 3px" }}>
-                      ×
-                    </button>
-                  </span>
-                ))}
+                {templates.map((t) => {
+                  const badge = t.status === "APPROVED" ? "green" : t.status === "REJECTED" ? "red" : "amber";
+                  const label = t.status === "APPROVED" ? "Approved" : t.status === "REJECTED" ? "Rejected" : "Pending";
+                  return (
+                    <span key={t.id} style={{ display: "inline-flex", alignItems: "center", gap: 6,
+                      fontSize: 11, color: C.gray500, background: C.gray50, border: `1px solid ${C.border}`,
+                      borderRadius: 8, padding: "3px 5px 3px 9px" }}>
+                      {t.name}
+                      <Tag variant={badge} fontSize={10}>{label}</Tag>
+                      {isSuperAdmin && t.status === "PENDING" && (
+                        <>
+                          <button onClick={() => reviewTemplate(t.id, "APPROVE")} disabled={reviewingId === t.id}
+                            title="Approve this template" style={{ background: "none", border: "none",
+                            cursor: "pointer", color: C.green, fontSize: 11, fontWeight: 700, padding: "0 3px" }}>
+                            ✓ Approve
+                          </button>
+                          <button onClick={() => reviewTemplate(t.id, "REJECT")} disabled={reviewingId === t.id}
+                            title="Reject this template" style={{ background: "none", border: "none",
+                            cursor: "pointer", color: C.red, fontSize: 11, fontWeight: 700, padding: "0 3px" }}>
+                            ✕ Reject
+                          </button>
+                        </>
+                      )}
+                      <button onClick={() => deleteTemplate(t.id, t.name)} title="Delete this saved template"
+                        style={{ background: "none", border: "none", cursor: "pointer", color: C.gray400, fontSize: 14, padding: "0 3px" }}>
+                        ×
+                      </button>
+                    </span>
+                  );
+                })}
               </div>
             )}
           </>
@@ -590,6 +702,39 @@ function FlipkartFlow() {
 
       {spec && (
         <>
+          <Section title="Saved presets" right={
+            <button onClick={savePreset} disabled={savingPreset || rows.length === 0} style={btn("ghost", "sm")}>
+              <SaveIcon style={{ fontSize: 14, verticalAlign: "-3px" }} />&nbsp;Save Row 1 as preset
+            </button>
+          }>
+            {presets.length === 0 ? (
+              <div style={{ fontSize: 12.5, color: C.gray400 }}>
+                No presets saved yet — fill in Row 1's attribute values below, then "Save Row 1 as
+                preset" to reuse them on a future product in this category.
+              </div>
+            ) : (
+              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                <select value={presetId} onChange={(e) => loadPreset(e.target.value)} style={{ ...S.inp, maxWidth: 360 }}>
+                  <option value="">— pick a saved preset to apply to Row 1 —</option>
+                  {presets.map((p) => (
+                    <option key={p.id} value={p.id}>{p.name} ({p.field_count} fields{p.source_label ? ` · ${p.source_label}` : ""})</option>
+                  ))}
+                </select>
+                {presets.map((p) => (
+                  <span key={p.id} style={{ display: "inline-flex", alignItems: "center", gap: 5,
+                    fontSize: 11, color: C.gray500, background: C.gray50, border: `1px solid ${C.border}`,
+                    borderRadius: 8, padding: "3px 5px 3px 9px" }}>
+                    {p.name}
+                    <button onClick={() => deletePreset(p.id, p.name)} title="Delete this preset"
+                      style={{ background: "none", border: "none", cursor: "pointer", color: C.gray400, fontSize: 14, padding: "0 3px" }}>
+                      ×
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+          </Section>
+
           <Section title={`The ${rows.length} listing${rows.length === 1 ? "" : "s"}`.trim()}>
             {rows.length === 0 ? (
               <div style={{ fontSize: 12.5, color: C.gray400 }}>No rows found in this template.</div>

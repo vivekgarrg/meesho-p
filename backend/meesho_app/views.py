@@ -442,6 +442,8 @@ def _classify_rows(payment_rows):
             _seen2["claim"] = r
         elif r.recovery_reason and r.recovery_reason.lower() == "affiliate fee":
             _seen2["affiliate"] = r
+        elif r.recovery_reason and r.recovery_reason.lower() == "return assurance program fees":
+            _seen2["return_assurance"] = r
         else:
             _seen2["others"] = r
             _seen2["others"] = r
@@ -464,24 +466,26 @@ def _classify_rows(payment_rows):
     
     claim_rows = _seen2.get("claim", [])
     affiliate_rows = _seen2.get("affiliate", [])
+    return_assurance_rows = _seen2.get("return_assurance", [])
     other_adj_rows = _seen2.get("others", [])
 
     return {
         "rows":           rows,
         "main":           main,
         "adj":            adj,
-        
+
         #status wise rows
         "shipped_rows":   shipped,
         "return_rows":    return_rows,
         "delivered_rows": delivered_rows,
-        "rto_rows": rto_rows, 
+        "rto_rows": rto_rows,
         "exchange_rows": exchange_rows,
         "other_status_rows": other_status_rows,
-        
+
         #adjustment rows
         "claim_rows": claim_rows,
         "affiliate_rows": affiliate_rows,
+        "return_assurance_rows": return_assurance_rows,
         "other_adj_rows": other_adj_rows
     }
 
@@ -626,6 +630,12 @@ def _affiliate_total(adj_rows):
     return raw if raw else Decimal("0")
 
 
+def _return_assurance_total(adj_rows):
+    raw = sum(Decimal(r.final_settlement_amount or 0)
+              for r in adj_rows if r.recovery_reason and r.recovery_reason.lower() == "return assurance program fees")
+    return raw if raw else Decimal("0")
+
+
 # ── Per-order profit formula ───────────────────────────────────────────────────
 
 def compute_order_net(payment_rows, sku_final_price, sku_packaging_price, quantity, unique_statuses,
@@ -653,21 +663,23 @@ def compute_order_net(payment_rows, sku_final_price, sku_packaging_price, quanti
     adj_rows      = c["adj"]
     main_rows     = c["main"]
     affiliate_fees = _affiliate_total(adj_rows)
+    return_assurance_fees = _return_assurance_total(adj_rows)
     claims         = _extract_claims(adj_rows)
     return_shipping_fee = _extract_return_fee(main_rows)
     sub_order_no   = payment_rows[0].sub_order_no
 
     total_settlement = _resolve_settlement(c)
-    
+
     net = 0
     status = ""
-    
+
     unknown_rows = c["other_adj_rows"]  or c["other_status_rows"]
     claimed_orders = c["claim_rows"]
     return_orders = c["return_rows"]
     rto_orders = c["rto_rows"]
     exchange_orders = c["exchange_rows"]
     delivered_orders = c["delivered_rows"]
+    shipped_orders = c["shipped_rows"]
     
     final_purchasing = 0
     # Packaging actually charged to this order, so the totals can report what
@@ -706,6 +718,18 @@ def compute_order_net(payment_rows, sku_final_price, sku_packaging_price, quanti
         final_purchasing =  purchase_cost + packaging_applied + tax_cost
         net = total_settlement - final_purchasing
         status = unique_statuses[-6]
+    elif shipped_orders:
+        # Not resolved yet — provisional. The item has already gone out, so
+        # its cost is charged now (packaging follows the DELIVERED policy,
+        # since that's the outcome a shipped order is expected to become,
+        # not a claim that it definitely will); the settlement itself is
+        # Meesho's advance and can still be reversed by a later return/RTO.
+        # This "net" is intentionally kept out of net_profit at the caller —
+        # see accumulate_sku_profit / profit_summary's revenue exclusion.
+        packaging_applied = packaging_for(BusinessCostSetting.DELIVERED)
+        final_purchasing = purchase_cost + packaging_applied + tax_cost
+        net = total_settlement - final_purchasing
+        status = "Shipped"
     else:
         final_purchasing = 0
         net = total_settlement - final_purchasing
@@ -724,6 +748,7 @@ def compute_order_net(payment_rows, sku_final_price, sku_packaging_price, quanti
         "quantity": qty,
         "sub_order_no": sub_order_no,
         "affiliate_fees": affiliate_fees,
+        "return_assurance_fees": return_assurance_fees,
         "return_shipping_fee" : return_shipping_fee,
         "claims": claims,
         "final_purchase_cost": final_purchasing
@@ -748,13 +773,18 @@ def _init_sku_bucket(key, loss_or_profit, sku):
 
 
 def _ensure_status_buckets(sku, _unique_statuses):
-    """Pre-initialise the five main buckets + other_net so no KeyError later."""
+    """Pre-initialise the six main buckets + other_net so no KeyError later."""
     _init_sku_bucket("delivered", "profit", sku)
     _init_sku_bucket("return",    "loss",   sku)
     _init_sku_bucket("rto",       "loss",   sku)
     _init_sku_bucket("exchange",  "net",    sku)
     _init_sku_bucket("claim",     "loss",   sku)
     _init_sku_bucket("unknown",     "loss",   sku)
+    # Provisional — not yet resolved. Kept in its own bucket rather than
+    # folded into "other" so it can be shown as its own labeled figure and
+    # deliberately excluded from net_profit (see profit_summary's revenue
+    # exclusion for the matching top-line half of this).
+    _init_sku_bucket("shipped",   "profit", sku)
     if sku.get("other_net") is None:
         sku["other_net"]   = 0
         sku["other_count"] = 0
@@ -770,10 +800,12 @@ def _inject_order_into_bucket(sku, result, net):
         _inc(sku, f"{raw}_loss",           net)
     elif status_upper in _DELIVERED_STATUSES:
         _inc(sku, "delivered_profit",         net)
+    elif raw == "shipped":
+        _inc(sku, "shipped_profit",       net)
     else:
         _inc(sku, "other_net",   net)
         _inc(sku, "other_count")
-        
+
     _inc(sku, f"{raw}_purchase_cost",  result["purchase_cost"])
     _inc(sku, f"{raw}_packaging_cost", result["packaging_cost"])
     _inc(sku, f"{raw}_count")
@@ -793,16 +825,14 @@ def accumulate_sku_profit(sku_id, obj, result, price_map, packaging_map, unique_
             "total_purchase_cost":  0,
             "settled_amount":       0,
             "affiliate_adj":        0,
-            "shipped_count":        0,
-            "shipped_settlement":   0,
-            "shipped_sale":         0,
-            "shipped_expected_profit": 0,
+            "return_assurance_adj": 0,
         }
 
     sku = obj[sku_id]
     net = result["net"]
 
     _inc(sku, "affiliate_adj", result["affiliate_fees"])
+    _inc(sku, "return_assurance_adj", result["return_assurance_fees"])
     _ensure_status_buckets(sku, unique_statuses)
     _inc(sku, "order_count")
     
@@ -1714,8 +1744,19 @@ def profit_summary(request, business_id):
 
         # Counted for every order, priced or not — revenue is money that moved,
         # independent of whether the SKU has a purchase price on file.
+        # Shipped-only orders are the exception: nothing has resolved yet, so
+        # their settlement is provisional (Meesho's advance, still reversible
+        # by a later return/RTO) and total_purchase_cost never counts their
+        # cost either — folding their settlement in here would inflate
+        # net_profit_loss with money that isn't confirmed. That money is
+        # surfaced separately via total_shipped_provisional_profit instead.
         _cls = _classify_rows(payments)
-        resolved_revenue += _resolve_settlement(_cls)
+        _is_shipped_only = bool(_cls["shipped_rows"]) and not (
+            _cls["delivered_rows"] or _cls["return_rows"] or _cls["rto_rows"]
+            or _cls["exchange_rows"] or _cls["claim_rows"]
+        )
+        if not _is_shipped_only:
+            resolved_revenue += _resolve_settlement(_cls)
 
         if not sku or sku not in price_map:
             missing_sku.append(sku)
@@ -1781,14 +1822,16 @@ def profit_summary(request, business_id):
     return_summary =  status_wise_summary(order_wise_profit, "return")
     claim_summary = status_wise_summary(order_wise_profit, "claim")
     unknown_summary = status_wise_summary(order_wise_profit, "unknown")
-    
+    shipped_summary = status_wise_summary(order_wise_profit, "shipped")
+
     order_status_summary = {
         "delivered_summary":delivered_summary,
         "exchanged_summary":exchanged_summary,
         "rto_summary": rto_summary,
         "return_summary":return_summary,
         "claim_summary":claim_summary,
-        "unknown_summary": unknown_summary
+        "unknown_summary": unknown_summary,
+        "shipped_summary": shipped_summary
     }
     
     
@@ -1804,6 +1847,12 @@ def profit_summary(request, business_id):
     total_return_pkg_cost      = sum(Decimal(str(v.get("return_packaging_cost",   0) or 0)) for v in order_wise_profit.values())
     total_rto_pkg_cost         = sum(Decimal(str(v.get("rto_packaging_cost",      0) or 0)) for v in order_wise_profit.values())
 
+    # Shipped/in-transit — provisional only, deliberately kept out of every
+    # confirmed total above (see the resolved_revenue exclusion in the main loop).
+    total_shipped_count             = sum(v.get("shipped_count", 0) for v in order_wise_profit.values())
+    total_shipped_settlement        = sum(Decimal(str(v.get("shipped_total_settlement", 0) or 0)) for v in order_wise_profit.values())
+    total_shipped_provisional_profit = sum(Decimal(str(v.get("shipped_profit", 0) or 0)) for v in order_wise_profit.values())
+
     # Aggregate affiliate fees — blank-status rows, forced negative (always a cost)
     adj_qs = qs.filter(
     (DQ(live_order_status__isnull=True) | DQ(live_order_status="")) &
@@ -1811,6 +1860,15 @@ def profit_summary(request, business_id):
     )
     raw_aff = adj_qs.aggregate(total=Sum("final_settlement_amount"))["total"] or Decimal("0")
     total_affiliate_fee = -abs(raw_aff)
+
+    # Aggregate Return Assurance Program fees — same shape as affiliate fees above,
+    # case-insensitive match since recovery_reason casing isn't guaranteed upstream.
+    adj_qs_ra = qs.filter(
+        (DQ(live_order_status__isnull=True) | DQ(live_order_status="")) &
+        DQ(recovery_reason__iexact="Return Assurance Program Fees")
+    )
+    raw_ra = adj_qs_ra.aggregate(total=Sum("final_settlement_amount"))["total"] or Decimal("0")
+    total_return_assurance_fee = -abs(raw_ra)
 
     # Approved claims (positive claims field = money credited to supplier)
     total_claims = (
@@ -1967,11 +2025,13 @@ def profit_summary(request, business_id):
         "net_settlement_revenue":       round(revenue, 2),
         "total_claims":                 round(total_claims, 2),
         "total_affiliate_fee":          round(total_affiliate_fee, 2),
+        "total_return_assurance_fee":   round(total_return_assurance_fee, 2),
         "total_pure_returns":           total_return_count,
         "total_other_count":            total_other_count,
         "total_claimed_orders":         qs.filter(claims__gt=0).values("sub_order_no").distinct().count(),
         "order_count":                  len(order_groups),
         "adjustment_count":             adj_qs.count(),
+        "return_assurance_adjustment_count": adj_qs_ra.count(),
         "ads_campaigns":                ads_qs.count(),
         "referral_count":               ref_qs.count(),
         "compensation_recovery_count":  comp_qs.count(),
@@ -1982,6 +2042,9 @@ def profit_summary(request, business_id):
         "total_claim_purchase_cost":   round(total_claim_purchase_cost, 2),
         "total_return_pkg_cost":       round(total_return_pkg_cost, 2),
         "total_rto_pkg_cost":          round(total_rto_pkg_cost, 2),
+        "total_shipped_count":              total_shipped_count,
+        "total_shipped_settlement":         round(total_shipped_settlement, 2),
+        "total_shipped_provisional_profit": round(total_shipped_provisional_profit, 2),
         "tax_summary": {
             "total_tax_withheld":       round(float(total_tax_withheld), 2),
             "tax_rate_pct":             tax_rate_pct,
@@ -7431,9 +7494,16 @@ def customer_insights(request, business_id):
     date_from = request.GET.get("date_from", "").strip()
     date_to   = request.GET.get("date_to", "").strip()
     min_orders = int(request.GET.get("min_orders", 2))
+    # Presence, not truthiness — a customer can genuinely have a blank pincode
+    # on file (confirmed common in real data), so requiring it non-empty would
+    # silently fall through to list mode for exactly those customers and leave
+    # their detail modal stuck loading forever. Detail mode is "the caller
+    # supplied both params, whatever their value", not "both happen to be
+    # non-empty" — customer_name itself still can't be blank, since every
+    # LabelOrder row this endpoint reads is already filtered to non-blank names.
+    detail_mode = request.GET.get("customer_name") is not None and request.GET.get("customer_pincode") is not None
     detail_name    = request.GET.get("customer_name", "").strip()
     detail_pincode = request.GET.get("customer_pincode", "").strip()
-    detail_mode = bool(detail_name and detail_pincode)
 
     empty_list_response = {
         "results": [], "summary": {}, "segment_counts": {}, "monthly_trend": [],
@@ -7446,7 +7516,7 @@ def customer_insights(request, business_id):
     all_label_rows = list(label_qs.values(
         "order_id", "customer_name", "customer_pincode",
         "customer_address", "customer_city", "customer_state",
-        "sku", "qty", "order_date",
+        "sku", "qty", "order_date", "uploaded_date",
     ))
     if not all_label_rows:
         return Response({"customer": None} if detail_mode else empty_list_response)
@@ -7455,9 +7525,16 @@ def customer_insights(request, business_id):
     all_order_ids = []
     for lo in all_label_rows:
         key = (lo["customer_name"], lo["customer_pincode"])
+        # order_date comes from parsing the label PDF's invoice section, and is
+        # NULL whenever that parse didn't find one (confirmed against real
+        # data: entirely absent for some businesses) — uploaded_date is always
+        # set, so falling back to it keeps every order usable for sorting/
+        # trend-grouping instead of silently dropping out of "recent"/monthly
+        # views with a blank date.
+        best_date = lo["order_date"] or lo["uploaded_date"]
         customer_orders.setdefault(key, []).append({
             "order_id":   lo["order_id"], "sku": lo["sku"] or "", "qty": lo["qty"] or 1,
-            "order_date": str(lo["order_date"]) if lo["order_date"] else "",
+            "order_date": str(best_date) if best_date else "",
             "address":    lo["customer_address"] or "", "city": lo["customer_city"] or "",
             "state":      lo["customer_state"] or "",
         })
@@ -7467,16 +7544,46 @@ def customer_insights(request, business_id):
     for row in Order.objects.filter(business=business, sub_order_no__in=all_order_ids).values("sub_order_no", "reason_for_credit_entry"):
         outcome_map.setdefault(row["sub_order_no"], []).append(row["reason_for_credit_entry"])
 
+    # A business whose Orders export never carries a RETURN/RETURNED status
+    # and has never uploaded a Returns report has genuinely no way to tell
+    # "zero returns" from "returns aren't tracked here yet" — confirmed
+    # against real data where this silently produced a misleading 0% return
+    # rate. Surfaced as `return_data_available` so the UI can say so honestly
+    # instead of presenting an absence of data as a confirmed metric.
+    return_data_available = any(
+        "RETURN" in statuses or "RETURNED" in statuses for statuses in outcome_map.values()
+    ) or ReturnDelivery.objects.filter(business=business).exists()
+
     claimed_ids = set(
         OrderPayment.objects.filter(business=business, sub_order_no__in=all_order_ids, claims__isnull=False)
         .exclude(claims=0).values_list("sub_order_no", flat=True).distinct()
     )
 
+    # Meesho re-lists the same order on every payment-sheet row as it moves
+    # through statuses — a SHIPPED row and a later DELIVERED row for the same
+    # sub_order_no carry the *same* advance, not two separate payments (see
+    # _resolve_settlement's docstring). Blindly summing every row therefore
+    # double-counts any order that has both, inflating "shipping" amounts on
+    # top of the real settlement — exactly what this must not do. Reusing the
+    # same _classify_rows/_resolve_settlement the rest of the app's P&L goes
+    # through keeps this endpoint's numbers consistent with SKU Analysis and
+    # Overview instead of quietly disagreeing with them.
+    payment_groups = {}
+    for row in OrderPayment.objects.filter(business=business, sub_order_no__in=all_order_ids).only(
+        "sub_order_no", "live_order_status", "payment_date", "order_date",
+        "final_settlement_amount", "total_sale_amount", "claims", "recovery_reason",
+    ):
+        payment_groups.setdefault(row.sub_order_no, []).append(row)
+
     value_map, settled_map = {}, {}
-    for row in OrderPayment.objects.filter(business=business, sub_order_no__in=all_order_ids).values("sub_order_no", "total_sale_amount", "final_settlement_amount"):
-        sid = row["sub_order_no"]
-        value_map[sid]   = value_map.get(sid, Decimal("0"))   + (row["total_sale_amount"] or Decimal("0"))
-        settled_map[sid] = settled_map.get(sid, Decimal("0")) + (row["final_settlement_amount"] or Decimal("0"))
+    for sid, rows in payment_groups.items():
+        c = _classify_rows(rows)
+        settled_map[sid] = _resolve_settlement(c)
+        # Sale amount is a re-listed attribute of the order, not a distinct
+        # movement — one canonical value across whichever de-duplicated status
+        # rows carry it (already one row per status via _classify_rows), not
+        # a sum across them.
+        value_map[sid] = max((Decimal(r.total_sale_amount or 0) for r in c["main"]), default=Decimal("0"))
 
     return_reason_map = {
         row["suborder_no"]: row["return_reason"]
@@ -7680,7 +7787,7 @@ def customer_insights(request, business_id):
             "type": "danger",
             "text": f"{len(frequent)} repeat customer{'s' if len(frequent) != 1 else ''} return{'s' if len(frequent) == 1 else ''} ≥ 30% of their orders regardless of value — consider reviewing them in Fraud Watch.",
         })
-    if overall_total > 0:
+    if overall_total > 0 and return_data_available:
         if repeat_return_rate <= overall_return_rate:
             insights.append({
                 "type": "success",
@@ -7691,6 +7798,11 @@ def customer_insights(request, business_id):
                 "type": "warning",
                 "text": f"Repeat customers return {repeat_return_rate * 100:.1f}% of orders vs {overall_return_rate * 100:.1f}% overall — repeating doesn't currently mean more reliable here.",
             })
+    elif not return_data_available:
+        insights.append({
+            "type": "warning",
+            "text": "No return data on file for this business yet (no Returns export uploaded, and no order carries a RETURN status) — return rates below read as 0% because it's untracked, not because nothing is ever returned.",
+        })
     vip_count = segment_counts.get("vip", 0)
     if vip_count:
         vip_revenue = round(sum(r["total_order_value"] for r in per_customer if r["segment"] == "vip"), 2)
@@ -7712,6 +7824,7 @@ def customer_insights(request, business_id):
             "avg_orders_per_customer": round(total_repeat_orders / repeat_customer_count, 2) if repeat_customer_count else 0.0,
             "repeat_return_rate":  repeat_return_rate,
             "overall_return_rate": overall_return_rate,
+            "return_data_available": return_data_available,
         },
         "segment_counts": {CUSTOMER_SEGMENT_LABELS[k]: v for k, v in segment_counts.items()},
         "monthly_trend": monthly_trend,

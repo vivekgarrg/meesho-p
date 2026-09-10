@@ -207,6 +207,22 @@ def _resolve_options(rb, col_index, label, hint):
     return []
 
 
+# Fields where free text is not an acceptable fallback, but real Flipkart-
+# exported templates (checked against every sample on hand) never actually
+# carry a DropDownValuesForColumn/Index entry for them — Flipkart documents
+# the valid values only as prose in the Summary Sheet's own instructions,
+# never as structured dropdown data. "Instock"/"Express" here are copied
+# verbatim from that instructions text ("...for procurement type "Instock"
+# ... procurement type "Express"..."). Used only when _resolve_options
+# genuinely found nothing for the column — a future template that DOES
+# supply its own dropdown for one of these labels keeps using that instead
+# (see parse_template below). Keyed by label, same convention as
+# FORCED_/DEFAULT_ATTRIBUTE_VALUES below.
+FALLBACK_DROPDOWN_VALUES = {
+    "procurement type": ["Instock", "Express"],
+}
+
+
 def parse_template(rb):
     """
     Returns the same spec shape bulk_listing.parse_template does:
@@ -232,6 +248,8 @@ def parse_template(rb):
         options = _resolve_options(rb, col, label, hint)
         if not options and _TYPE_HINT_BOOLEAN.search(hint):
             options = ["Yes", "No"]
+        if not options:
+            options = FALLBACK_DROPDOWN_VALUES.get(label.strip().lower(), [])
         fields.append({
             "key": _field_key(label, seen_keys),
             "label": label,
@@ -271,9 +289,11 @@ FORCED_ATTRIBUTE_VALUES = {
 # A sane starting value for a field the seller can still freely change —
 # unlike FORCED_ATTRIBUTE_VALUES, this only fills in where the sheet's own
 # cell is blank, so it's shown (and editable) in the UI rather than hidden.
-# "express" is this business's usual procurement lane.
+# "Express" is this business's usual procurement lane — capitalised to match
+# FALLBACK_DROPDOWN_VALUES above verbatim, since a blank cell filled with
+# this default is validated against that same options list.
 DEFAULT_ATTRIBUTE_VALUES = {
-    "procurement type": "express",
+    "procurement type": "Express",
 }
 
 
