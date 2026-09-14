@@ -1,6 +1,6 @@
-import React from "react";
-import { useState, useEffect } from "react";
-import { Routes, Route, NavLink, useLocation, Navigate, useNavigate } from "react-router-dom";
+import React from 'react';
+import { useState, useEffect } from 'react';
+import { Routes, Route, NavLink, useLocation, Navigate, useNavigate } from 'react-router-dom';
 
 // ── Shared design tokens / formatters / API base ─────────────────────────────
 // IMPORTANT: this import must come BEFORE the Tab imports below. The tabs
@@ -8,111 +8,139 @@ import { Routes, Route, NavLink, useLocation, Navigate, useNavigate } from "reac
 // them at module scope (e.g. TaxCheckTab's STATUS_META). Importing ./shared
 // first guarantees it initializes before any tab module evaluates, avoiding a
 // "Cannot access 'C' before initialization" (TDZ) crash in the production build.
-import { API, fmt, C, CHART_COLORS, STATUS_COLORS, S, useIsMobile, useIsTablet } from "./shared";
+import { API, fmt, C, CHART_COLORS, STATUS_COLORS, S, useIsMobile, useIsTablet } from './shared';
 
 // ── Tab components ─────────────────────────────────────────────────────────────
-import { OverviewTab } from "./Components/Tabs/OverviewTab";
-import { UnsettledOrdersTab } from "./Components/Tabs/UnsettledOrdersTab";
-import { OrdersTab } from "./Components/Tabs/OrdersTab";
-import { PaymentsTab } from "./Components/Tabs/PaymentsTab";
-import { UnscheduledPaymentTab } from "./Components/Tabs/UnscheduledPaymentTab";
-import { ExpensesTab } from "./Components/Tabs/ExpensesTab";
-import { EmployeesTab } from "./Components/Tabs/EmployeesTab";
-import { PricingTab } from "./Components/Tabs/PricingTab";
-import { TaxCheckTab } from "./Components/Tabs/TaxCheckTab";
-import { UploadTab } from "./Components/Tabs/UploadTab";
-import { SKUAnalysisTab } from "./Components/Tabs/SKUProfitTab";
-import { EstimatedProfitTab } from "./Components/Tabs/EstimatedProfitTab";
-import { DailyProfitTab } from "./Components/Tabs/DailyProfitTab";
-import { LabelsTab } from "./Components/Tabs/LabelsTab";
-import { BulkLabelsTab } from "./Components/Tabs/BulkLabelsTab";
-import { PurchasesTab } from "./Components/Tabs/PurchasesTab";
-import { InventoryTab } from "./Components/Tabs/InventoryTab";
-import { InventoryLabelsTab } from "./Components/Tabs/InventoryLabelsTab";
-import { AdsAnalysisTab } from "./Components/Tabs/AdsAnalysisTab";
-import { MeeshoStockTab } from "./Components/Tabs/MeeshoStockTab";
-import { FraudCustomersTab } from "./Components/Tabs/FraudCustomersTab";
-import { ProductPhotosTab } from "./Components/Tabs/ProductPhotosTab";
-import { MismatchTab } from "./Components/Tabs/MismatchTab";
-import { MeeshoInventoryTab } from "./Components/Tabs/MeeshoInventoryTab";
-import { MeeshoPricingTab } from "./Components/Tabs/MeeshoPricingTab";
-import { ReturnScanTab } from "./Components/Tabs/ReturnScanTab";
-import { OrderScanTab } from "./Components/Tabs/OrderScanTab";
-import { ExtensionTab } from "./Components/Tabs/ExtensionTab";
-import { BulkListingTab } from "./Components/Tabs/BulkListingTab";
-import { ClaimSheetTab } from "./Components/Tabs/ClaimSheetTab";
-import { TeamTasksTab } from "./Components/Tabs/TeamTasksTab";
-import { ClaimVideoToolTab } from "./Components/Tabs/ClaimVideoToolTab";
-import { CustomerInsightsTab } from "./Components/Tabs/CustomerInsightsTab";
-import { GstTab } from "./Components/Tabs/GstTab";
-import { SKU_PAGE_SIZE as skuPageSize } from "./lib/helper";
-import TableData from "./Components/Table/TableData";
-import LoginPage from "./Components/Login/LoginPage";
-import LandingPage from "./Components/Landing/LandingPage";
-import BusinessProfilePage from "./Components/BusinessProfile/BusinessProfilePage";
-import BusinessSwitcher from "./Components/BusinessSwitcher";
-import { useBusiness } from "./contexts/BusinessContext";
-import { DateFilterProvider } from "./contexts/DateFilterContext";
-import { GlobalDateFilterBar } from "./Components/shared/GlobalDateFilterBar";
-import ChangePasswordModal from "./Components/ChangePasswordModal";
-import AdminPanel from "./Components/Admin/AdminPanel";
-import ErrorBoundary from "./Components/shared/ErrorBoundary";
-import { NAV_GROUPS, ALL_NAV } from "./navConfig";
-import { useAccess } from "./contexts/AccessContext";
-import { useAuth } from "./contexts/AuthContext";
+import { OverviewTab } from './Components/Tabs/OverviewTab';
+import { UnsettledOrdersTab } from './Components/Tabs/UnsettledOrdersTab';
+import { OrdersTab } from './Components/Tabs/OrdersTab';
+import { PaymentsTab } from './Components/Tabs/PaymentsTab';
+import { UnscheduledPaymentTab } from './Components/Tabs/UnscheduledPaymentTab';
+import { ExpensesTab } from './Components/Tabs/ExpensesTab';
+import { EmployeesTab } from './Components/Tabs/EmployeesTab';
+import { PricingTab } from './Components/Tabs/PricingTab';
+import { TaxCheckTab } from './Components/Tabs/TaxCheckTab';
+import { UploadTab } from './Components/Tabs/UploadTab';
+import { SKUAnalysisTab } from './Components/Tabs/SKUProfitTab';
+import { EstimatedProfitTab } from './Components/Tabs/EstimatedProfitTab';
+import { DailyProfitTab } from './Components/Tabs/DailyProfitTab';
+import { ReturnAnalysisTab } from './Components/Tabs/ReturnAnalysisTab';
+import { LabelsTab } from './Components/Tabs/LabelsTab';
+import { BulkLabelsTab } from './Components/Tabs/BulkLabelsTab';
+import { PurchasesTab } from './Components/Tabs/PurchasesTab';
+import { InventoryTab } from './Components/Tabs/InventoryTab';
+import { InventoryLabelsTab } from './Components/Tabs/InventoryLabelsTab';
+import { AdsAnalysisTab } from './Components/Tabs/AdsAnalysisTab';
+import { MeeshoStockTab } from './Components/Tabs/MeeshoStockTab';
+import { FraudCustomersTab } from './Components/Tabs/FraudCustomersTab';
+import { ProductPhotosTab } from './Components/Tabs/ProductPhotosTab';
+import { MismatchTab } from './Components/Tabs/MismatchTab';
+import { MeeshoInventoryTab } from './Components/Tabs/MeeshoInventoryTab';
+import { MeeshoPricingTab } from './Components/Tabs/MeeshoPricingTab';
+import { ReturnScanTab } from './Components/Tabs/ReturnScanTab';
+import { OrderScanTab } from './Components/Tabs/OrderScanTab';
+import { ExtensionTab } from './Components/Tabs/ExtensionTab';
+import { BulkListingTab } from './Components/Tabs/BulkListingTab';
+import { ClaimSheetTab } from './Components/Tabs/ClaimSheetTab';
+import { TeamTasksTab } from './Components/Tabs/TeamTasksTab';
+import { ClaimVideoToolTab } from './Components/Tabs/ClaimVideoToolTab';
+import { CustomerInsightsTab } from './Components/Tabs/CustomerInsightsTab';
+import { GstTab } from './Components/Tabs/GstTab';
+import { SKU_PAGE_SIZE as skuPageSize } from './lib/helper';
+import TableData from './Components/Table/TableData';
+import LoginPage from './Components/Login/LoginPage';
+import LandingPage from './Components/Landing/LandingPage';
+import BusinessProfilePage from './Components/BusinessProfile/BusinessProfilePage';
+import BusinessSwitcher from './Components/BusinessSwitcher';
+import { useBusiness } from './contexts/BusinessContext';
+import { DateFilterProvider } from './contexts/DateFilterContext';
+import { GlobalDateFilterBar } from './Components/shared/GlobalDateFilterBar';
+import ChangePasswordModal from './Components/ChangePasswordModal';
+import AdminPanel from './Components/Admin/AdminPanel';
+import ErrorBoundary from './Components/shared/ErrorBoundary';
+import { NAV_GROUPS, ALL_NAV } from './navConfig';
+import { useAccess } from './contexts/AccessContext';
+import { useAuth } from './contexts/AuthContext';
 
 // Re-export the shared tokens (imported at the top of this file) so existing
 // `import { C, fmt, ... } from "../App"` statements across the app keep working.
-export { API, fmt, C, CHART_COLORS, STATUS_COLORS, S, useIsMobile, useIsTablet, BP } from "./shared";
+export { API, fmt, C, CHART_COLORS, STATUS_COLORS, S, useIsMobile, useIsTablet, BP } from './shared';
 
-export function btn(variant = "primary", size = "md") {
+export function btn(variant = 'primary', size = 'md') {
   const sizes = {
-    sm: { padding: "5px 13px", fontSize: 12 },
-    md: { padding: "9px 20px", fontSize: 13 },
-    lg: { padding: "12px 28px", fontSize: 14 },
+    sm: { padding: '5px 13px', fontSize: 12 },
+    md: { padding: '9px 20px', fontSize: 13 },
+    lg: { padding: '12px 28px', fontSize: 14 },
   };
   const variants = {
-    primary: { background: C.orange, color: C.white, border: "none", boxShadow: "0 2px 6px rgba(109,40,217,0.3)" },
-    secondary: { background: C.blue, color: C.white, border: "none", boxShadow: "0 2px 6px rgba(37,99,235,0.25)" },
-    success: { background: C.green, color: C.white, border: "none", boxShadow: "0 2px 6px rgba(5,150,105,0.25)" },
-    danger: { background: C.red, color: C.white, border: "none", boxShadow: "0 2px 6px rgba(225,29,72,0.25)" },
-    ghost: { background: "transparent", color: C.gray600, border: `1.5px solid ${C.gray200}`, boxShadow: "none" },
-    ghostOrange: { background: C.orangeLight, color: C.orange, border: `1.5px solid ${C.orangeBorder}`, boxShadow: "none" },
+    primary: { background: C.orange, color: C.white, border: 'none', boxShadow: '0 2px 6px rgba(109,40,217,0.3)' },
+    secondary: { background: C.blue, color: C.white, border: 'none', boxShadow: '0 2px 6px rgba(37,99,235,0.25)' },
+    success: { background: C.green, color: C.white, border: 'none', boxShadow: '0 2px 6px rgba(5,150,105,0.25)' },
+    danger: { background: C.red, color: C.white, border: 'none', boxShadow: '0 2px 6px rgba(225,29,72,0.25)' },
+    ghost: { background: 'transparent', color: C.gray600, border: `1.5px solid ${C.gray200}`, boxShadow: 'none' },
+    ghostOrange: {
+      background: C.orangeLight,
+      color: C.orange,
+      border: `1.5px solid ${C.orangeBorder}`,
+      boxShadow: 'none',
+    },
   };
-  return { ...variants[variant], ...sizes[size], borderRadius: 10, cursor: "pointer", fontWeight: 600, fontFamily: "inherit", transition: "opacity 0.15s, box-shadow 0.15s" };
+  return {
+    ...variants[variant],
+    ...sizes[size],
+    borderRadius: 10,
+    cursor: 'pointer',
+    fontWeight: 600,
+    fontFamily: 'inherit',
+    transition: 'opacity 0.15s, box-shadow 0.15s',
+  };
 }
 
-const set = ["a", "b", "c", "d", "e", "f", "g"]
+const set = ['a', 'b', 'c', 'd', 'e', 'f', 'g'];
 
 // ── Shared components ─────────────────────────────────────────────────────────
-export function Tag({ children, variant = "gray", fontSize }) {
+export function Tag({ children, variant = 'gray', fontSize }) {
   const vars = {
     green: { bg: C.greenLight, color: C.green, border: C.greenBorder },
     red: { bg: C.redLight, color: C.red, border: C.redBorder },
     orange: { bg: C.orangeLight, color: C.orange, border: C.orangeBorder },
-    blue: { bg: C.blueLight, color: C.blue, border: "#BFDBFE" },
+    blue: { bg: C.blueLight, color: C.blue, border: '#BFDBFE' },
     gray: { bg: C.gray100, color: C.gray600, border: C.gray200 },
-    amber: { bg: C.amberLight, color: C.amber, border: "#FDE68A" },
+    amber: { bg: C.amberLight, color: C.amber, border: '#FDE68A' },
   };
   C.colorsSet.map((color, index) => {
-    vars[set[index]] = { bg: color, color: C.white, border: color }
+    vars[set[index]] = { bg: color, color: C.white, border: color };
   });
   const v = vars[variant] || vars.gray;
   return (
-    <span style={{
-      padding: "2px 8px", borderRadius: 20, fontSize: fontSize ?? 11, fontWeight: 600,
-      background: v.bg, color: v.color, border: `1px solid ${v.border}`, whiteSpace: "nowrap",
-    }}>{children}</span>
+    <span
+      style={{
+        padding: '2px 8px',
+        borderRadius: 20,
+        fontSize: fontSize ?? 11,
+        fontWeight: 600,
+        background: v.bg,
+        color: v.color,
+        border: `1px solid ${v.border}`,
+        whiteSpace: 'nowrap',
+      }}
+    >
+      {children}
+    </span>
   );
 }
 
 export function StatusTag({ status }) {
-  const s = (status || "").toUpperCase();
+  const s = (status || '').toUpperCase();
   const map = {
-    DELIVERED: "green", RTO: "red", RETURN: "orange",
-    PREMIUM_RETURN: "orange", PENDING: "blue", CANCELLED: "gray",
+    DELIVERED: 'green',
+    RTO: 'red',
+    RETURN: 'orange',
+    PREMIUM_RETURN: 'orange',
+    PENDING: 'blue',
+    CANCELLED: 'gray',
   };
-  return <Tag variant={map[s] || "gray"}>{status || "—"}</Tag>;
+  return <Tag variant={map[s] || 'gray'}>{status || '—'}</Tag>;
 }
 
 export function StatCard({ label, value, sub, accent = C.orange, icon }) {
@@ -120,25 +148,61 @@ export function StatCard({ label, value, sub, accent = C.orange, icon }) {
   const isNeg = !isNaN(num) && num < 0;
   const valColor = isNeg ? C.red : num > 0 ? C.green : C.gray800;
   return (
-    <div style={{
-      ...S.card,
-      position: "relative", overflow: "hidden",
-      borderTop: `3px solid ${accent}`, minWidth: "max-content",
-    }}>
+    <div
+      style={{
+        ...S.card,
+        position: 'relative',
+        overflow: 'hidden',
+        borderTop: `3px solid ${accent}`,
+        minWidth: 'max-content',
+      }}
+    >
       {/* Corner accent glow */}
-      <div style={{
-        position: "absolute", top: -10, right: -10,
-        width: 72, height: 72, borderRadius: "50%",
-        background: accent, opacity: 0.08, pointerEvents: "none",
-      }} />
-      <p style={{ fontSize: 11, fontWeight: 700, color: C.gray400, letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 10, whiteSpace: "nowrap", display: "flex", alignItems: "center", gap: 5 }}>
-        {icon && <span>{icon}</span>}{label}
+      <div
+        style={{
+          position: 'absolute',
+          top: -10,
+          right: -10,
+          width: 72,
+          height: 72,
+          borderRadius: '50%',
+          background: accent,
+          opacity: 0.08,
+          pointerEvents: 'none',
+        }}
+      />
+      <p
+        style={{
+          fontSize: 11,
+          fontWeight: 700,
+          color: C.gray400,
+          letterSpacing: '0.08em',
+          textTransform: 'uppercase',
+          marginBottom: 10,
+          whiteSpace: 'nowrap',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 5,
+        }}
+      >
+        {icon && <span>{icon}</span>}
+        {label}
       </p>
-      <p style={{ fontSize: 26, fontWeight: 800, color: valColor, fontFamily: "monospace", lineHeight: 1.1, whiteSpace: "nowrap", letterSpacing: "-0.02em" }}>
-        {value !== null && value !== undefined ? fmt(value) : sub || "—"}
+      <p
+        style={{
+          fontSize: 26,
+          fontWeight: 800,
+          color: valColor,
+          fontFamily: 'monospace',
+          lineHeight: 1.1,
+          whiteSpace: 'nowrap',
+          letterSpacing: '-0.02em',
+        }}
+      >
+        {value !== null && value !== undefined ? fmt(value) : sub || '—'}
       </p>
       {sub && value !== null && value !== undefined && (
-        <p style={{ fontSize: 11, color: C.gray400, marginTop: 6, whiteSpace: "nowrap" }}>{sub}</p>
+        <p style={{ fontSize: 11, color: C.gray400, marginTop: 6, whiteSpace: 'nowrap' }}>{sub}</p>
       )}
     </div>
   );
@@ -146,16 +210,35 @@ export function StatCard({ label, value, sub, accent = C.orange, icon }) {
 
 export function SectionHeader({ title, count, actions }) {
   return (
-    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16, flexWrap: "wrap", gap: 10 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        marginBottom: 16,
+        flexWrap: 'wrap',
+        gap: 10,
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
         <h2 style={{ fontSize: 15, fontWeight: 700, color: C.gray800 }}>{title}</h2>
         {count !== undefined && (
-          <span style={{ background: C.gray100, color: C.gray500, fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 20, border: `1px solid ${C.gray200}` }}>
+          <span
+            style={{
+              background: C.gray100,
+              color: C.gray500,
+              fontSize: 11,
+              fontWeight: 700,
+              padding: '2px 8px',
+              borderRadius: 20,
+              border: `1px solid ${C.gray200}`,
+            }}
+          >
             {count}
           </span>
         )}
       </div>
-      {actions && <div style={{ display: "flex", gap: 8 }}>{actions}</div>}
+      {actions && <div style={{ display: 'flex', gap: 8 }}>{actions}</div>}
     </div>
   );
 }
@@ -163,14 +246,37 @@ export function SectionHeader({ title, count, actions }) {
 export function Pagination({ page, total, pageSize, onChange }) {
   const totalPages = Math.ceil(total / pageSize);
   return (
-    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 14, padding: "10px 0 0", borderTop: `1px solid ${C.gray100}` }}>
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        marginTop: 14,
+        padding: '10px 0 0',
+        borderTop: `1px solid ${C.gray100}`,
+      }}
+    >
       <span style={{ fontSize: 12, color: C.gray400 }}>
         {Math.min((page - 1) * pageSize + 1, total)}–{Math.min(page * pageSize, total)} of {total}
       </span>
-      <div style={{ display: "flex", gap: 6 }}>
-        <button onClick={() => onChange(page - 1)} disabled={page === 1} style={{ ...btn("ghost", "sm"), opacity: page === 1 ? 0.4 : 1 }}>← Prev</button>
-        <span style={{ fontSize: 12, color: C.gray500, alignSelf: "center", padding: "0 4px" }}>Page {page} / {totalPages}</span>
-        <button onClick={() => onChange(page + 1)} disabled={page >= totalPages} style={{ ...btn("ghost", "sm"), opacity: page >= totalPages ? 0.4 : 1 }}>Next →</button>
+      <div style={{ display: 'flex', gap: 6 }}>
+        <button
+          onClick={() => onChange(page - 1)}
+          disabled={page === 1}
+          style={{ ...btn('ghost', 'sm'), opacity: page === 1 ? 0.4 : 1 }}
+        >
+          ← Prev
+        </button>
+        <span style={{ fontSize: 12, color: C.gray500, alignSelf: 'center', padding: '0 4px' }}>
+          Page {page} / {totalPages}
+        </span>
+        <button
+          onClick={() => onChange(page + 1)}
+          disabled={page >= totalPages}
+          style={{ ...btn('ghost', 'sm'), opacity: page >= totalPages ? 0.4 : 1 }}
+        >
+          Next →
+        </button>
       </div>
     </div>
   );
@@ -180,49 +286,54 @@ export function Pagination({ page, total, pageSize, onChange }) {
 const SKU_PAGE_SIZE = skuPageSize;
 
 export function SKUTable({ data, mode, onRowClick }) {
-  const [search, setSearch] = useState("");
+  const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
   const [showTotalData, setShowTotalData] = useState(false);
 
-  const filtered = data.filter(
-    (s) => !search || s.sku_id.toLowerCase().includes(search.toLowerCase())
-  );
+  const filtered = data.filter((s) => !search || s.sku_id.toLowerCase().includes(search.toLowerCase()));
 
-  useEffect(() => { setPage(1); }, [search, data]);
+  useEffect(() => {
+    setPage(1);
+  }, [search, data]);
 
   const visible = filtered.slice((page - 1) * SKU_PAGE_SIZE, page * SKU_PAGE_SIZE);
 
-  const modeLabel =
-    mode === "profit" ? "✅ Profitable SKUs" :
-      mode === "loss" ? "⚠️ Loss-making SKUs" :
-        "📊 All SKUs";
+  const modeLabel = mode === 'profit' ? '✅ Profitable SKUs' : mode === 'loss' ? '⚠️ Loss-making SKUs' : '📊 All SKUs';
 
-  const thR = { ...S.th, textAlign: "right" };
+  const thR = { ...S.th, textAlign: 'right' };
 
   return (
     <div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, flexWrap: "wrap", gap: 10 }}>
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          marginBottom: 6,
+          flexWrap: 'wrap',
+          gap: 10,
+        }}
+      >
         <p style={{ ...S.cardTitle, marginBottom: 0 }}>
           {modeLabel} — {filtered.length} items
         </p>
 
-        <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search SKU…"
-          style={{ ...S.inp, width: 220, fontSize: 12 }} />
+        <input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search SKU…"
+          style={{ ...S.inp, width: 220, fontSize: 12 }}
+        />
       </div>
-      <div style={{ display: "flex", alignItems: "center" }}>
-        <input checked={showTotalData} onClick={() => setShowTotalData(prev => !prev)} type="checkbox" /> &nbsp;
-        <span style={{ ...S.cardTitle, marginBottom: 0 }}>
-          Show Total Data on Mouse Hover
-        </span>
-
+      <div style={{ display: 'flex', alignItems: 'center' }}>
+        <input checked={showTotalData} onClick={() => setShowTotalData((prev) => !prev)} type="checkbox" /> &nbsp;
+        <span style={{ ...S.cardTitle, marginBottom: 0 }}>Show Total Data on Mouse Hover</span>
       </div>
       {onRowClick && (
-        <p style={{ fontSize: 11, color: C.gray400, marginBottom: 12 }}>
-          💡 Click any row to see monthly breakdown
-        </p>
+        <p style={{ fontSize: 11, color: C.gray400, marginBottom: 12 }}>💡 Click any row to see monthly breakdown</p>
       )}
-      <div style={{ overflowX: "auto" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
           <thead>
             <tr>
               <th style={S.th}>#</th>
@@ -246,59 +357,101 @@ export function SKUTable({ data, mode, onRowClick }) {
               const rtoCount = s.rto_count ?? 0;
               const claimCount = s.claims_count ?? 0;
               return (
-                <tr key={s.sku_id}
-                  style={{ background: rowBg, cursor: onRowClick ? "pointer" : "default" }}
+                <tr
+                  key={s.sku_id}
+                  style={{ background: rowBg, cursor: onRowClick ? 'pointer' : 'default' }}
                   onClick={() => onRowClick?.(s)}
-                  onMouseEnter={(e) => (e.currentTarget.style.background = "#F0F7FF")}
+                  onMouseEnter={(e) => (e.currentTarget.style.background = '#F0F7FF')}
                   onMouseLeave={(e) => (e.currentTarget.style.background = rowBg)}
                 >
                   <td style={{ ...S.td, color: C.gray400, fontSize: 11 }}>{globalIdx + 1}</td>
 
                   {/* SKU ID */}
                   <td style={S.td}>
-                    <span style={{ fontFamily: "monospace", fontSize: 12, color: C.orange, fontWeight: 600, background: C.orangeLight, padding: "2px 6px", borderRadius: 4 }}>
+                    <span
+                      style={{
+                        fontFamily: 'monospace',
+                        fontSize: 12,
+                        color: C.orange,
+                        fontWeight: 600,
+                        background: C.orangeLight,
+                        padding: '2px 6px',
+                        borderRadius: 4,
+                      }}
+                    >
                       {s.sku_id}
                     </span>
                   </td>
 
                   {/* Unit Price */}
-                  <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", fontWeight: 600 }}>
+                  <td style={{ ...S.td, textAlign: 'right', fontFamily: 'monospace', fontWeight: 600 }}>
                     {fmt(s.one_unit_price)}
                   </td>
 
                   {/* Avg Profit per piece */}
-                  <td style={{ ...S.td, textAlign: "right" }}>
-                    {s.avg_profit_per_piece != null
-                      ? <span style={{
-                        fontFamily: "monospace", fontWeight: 700, fontSize: 12,
-                        color: s.avg_profit_per_piece >= 0 ? C.green : C.red,
-                      }}>{s.avg_profit_per_piece >= 0 ? "+" : ""}{fmt(s.avg_profit_per_piece)}</span>
-                      : <span style={{ color: C.gray300 }}>—</span>}
+                  <td style={{ ...S.td, textAlign: 'right' }}>
+                    {s.avg_profit_per_piece != null ? (
+                      <span
+                        style={{
+                          fontFamily: 'monospace',
+                          fontWeight: 700,
+                          fontSize: 12,
+                          color: s.avg_profit_per_piece >= 0 ? C.green : C.red,
+                        }}
+                      >
+                        {s.avg_profit_per_piece >= 0 ? '+' : ''}
+                        {fmt(s.avg_profit_per_piece)}
+                      </span>
+                    ) : (
+                      <span style={{ color: C.gray300 }}>—</span>
+                    )}
                   </td>
 
-                  <TableData showTotalData={showTotalData} mainKey={delCount} data={s} dataKey="delivered" color="green" profit />
+                  <TableData
+                    showTotalData={showTotalData}
+                    mainKey={delCount}
+                    data={s}
+                    dataKey="delivered"
+                    color="green"
+                    profit
+                  />
                   <TableData showTotalData={showTotalData} mainKey={retCount} data={s} dataKey="return" color="red" />
                   <TableData showTotalData={showTotalData} mainKey={rtoCount} data={s} dataKey="rto" />
 
                   {/* Cancelled: count only (settlement is always 0) */}
-                  <td style={{ ...S.td, textAlign: "right" }}>
-                    {(s.cancelled_count || 0) > 0
-                      ? <Tag variant="gray">{s.cancelled_count} cancelled</Tag>
-                      : <span style={{ color: C.gray300 }}>—</span>
-                    }
+                  <td style={{ ...S.td, textAlign: 'right' }}>
+                    {(s.cancelled_count || 0) > 0 ? (
+                      <Tag variant="gray">{s.cancelled_count} cancelled</Tag>
+                    ) : (
+                      <span style={{ color: C.gray300 }}>—</span>
+                    )}
                   </td>
 
-                  <TableData showTotalData={showTotalData} mainKey={claimCount} data={s} dataKey="claims" color="blue" profit claims />
+                  <TableData
+                    showTotalData={showTotalData}
+                    mainKey={claimCount}
+                    data={s}
+                    dataKey="claims"
+                    color="blue"
+                    profit
+                    claims
+                  />
 
                   {/* Net P&L */}
-                  <td style={{ ...S.td, textAlign: "right" }}>
-                    <span style={{
-                      fontFamily: "monospace", fontWeight: 700, fontSize: 13,
-                      background: s.net_profit >= 0 ? C.greenLight : C.redLight,
-                      color: s.net_profit >= 0 ? C.green : C.red,
-                      border: `1px solid ${s.net_profit >= 0 ? C.greenBorder : C.redBorder}`,
-                      padding: "3px 10px", borderRadius: 6, display: "inline-block",
-                    }}>
+                  <td style={{ ...S.td, textAlign: 'right' }}>
+                    <span
+                      style={{
+                        fontFamily: 'monospace',
+                        fontWeight: 700,
+                        fontSize: 13,
+                        background: s.net_profit >= 0 ? C.greenLight : C.redLight,
+                        color: s.net_profit >= 0 ? C.green : C.red,
+                        border: `1px solid ${s.net_profit >= 0 ? C.greenBorder : C.redBorder}`,
+                        padding: '3px 10px',
+                        borderRadius: 6,
+                        display: 'inline-block',
+                      }}
+                    >
                       {fmt(s.net_profit)}
                     </span>
                   </td>
@@ -306,9 +459,13 @@ export function SKUTable({ data, mode, onRowClick }) {
               );
             })}
             {visible.length === 0 && (
-              <tr><td colSpan={10} style={{ ...S.td, textAlign: "center", padding: 40, color: C.gray400 }}>
-                {data.length === 0 ? "No data — upload Meesho report and add SKU pricing first" : "No results matching search"}
-              </td></tr>
+              <tr>
+                <td colSpan={10} style={{ ...S.td, textAlign: 'center', padding: 40, color: C.gray400 }}>
+                  {data.length === 0
+                    ? 'No data — upload Meesho report and add SKU pricing first'
+                    : 'No results matching search'}
+                </td>
+              </tr>
             )}
           </tbody>
         </table>
@@ -323,7 +480,7 @@ export function SKUTable({ data, mode, onRowClick }) {
 // ── Navigation config ─────────────────────────────────────────────────────────
 // Defined in navConfig.js (contexts need it too, and importing App from a
 // context would be a cycle). Re-exported here for existing importers.
-export { NAV_GROUPS, ALWAYS_VISIBLE_PATHS } from "./navConfig";
+export { NAV_GROUPS, ALWAYS_VISIBLE_PATHS } from './navConfig';
 
 // (NAV_GROUPS / ALL_NAV / ALWAYS_VISIBLE_PATHS all come from navConfig.)
 
@@ -332,22 +489,30 @@ function NavItem({ item, collapsed, onNavigate, touch }) {
   const [hovered, setHovered] = useState(false);
   return (
     <NavLink
-      to={item.path} end={item.end}
+      to={item.path}
+      end={item.end}
       title={collapsed ? item.label : undefined}
       onClick={onNavigate}
-      onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
       style={({ isActive }) => ({
-        display: "flex", alignItems: "center", gap: 11, textDecoration: "none",
+        display: 'flex',
+        alignItems: 'center',
+        gap: 11,
+        textDecoration: 'none',
         // Roomier rows on touch, where a 30px target is a miss risk.
-        padding: collapsed ? "10px 0" : touch ? "12px 14px" : "9px 12px",
-        justifyContent: collapsed ? "center" : "flex-start",
-        margin: "1px 8px", borderRadius: 10,
-        transition: "background 0.14s, color 0.14s",
+        padding: collapsed ? '10px 0' : touch ? '12px 14px' : '9px 12px',
+        justifyContent: collapsed ? 'center' : 'flex-start',
+        margin: '1px 8px',
+        borderRadius: 10,
+        transition: 'background 0.14s, color 0.14s',
         background: isActive
-          ? "linear-gradient(90deg, rgba(167,139,250,0.22), rgba(167,139,250,0.08))"
-          : hovered ? "rgba(255,255,255,0.07)" : "transparent",
-        color: isActive ? "#F3E8FF" : hovered ? "rgba(255,255,255,0.88)" : "rgba(255,255,255,0.5)",
-        position: "relative",
+          ? 'linear-gradient(90deg, rgba(167,139,250,0.22), rgba(167,139,250,0.08))'
+          : hovered
+            ? 'rgba(255,255,255,0.07)'
+            : 'transparent',
+        color: isActive ? '#F3E8FF' : hovered ? 'rgba(255,255,255,0.88)' : 'rgba(255,255,255,0.5)',
+        position: 'relative',
       })}
     >
       {({ isActive }) => (
@@ -356,24 +521,42 @@ function NavItem({ item, collapsed, onNavigate, touch }) {
               actually showed which page you were on — only the row tint did,
               which is easy to miss on a long sidebar. */}
           {!collapsed && (
-            <span style={{
-              position: "absolute", left: 0, top: "22%", bottom: "22%", width: 3,
-              borderRadius: "0 3px 3px 0",
-              background: isActive ? "#C4B5FD" : "transparent",
-              transition: "background 0.14s",
-            }} />
+            <span
+              style={{
+                position: 'absolute',
+                left: 0,
+                top: '22%',
+                bottom: '22%',
+                width: 3,
+                borderRadius: '0 3px 3px 0',
+                background: isActive ? '#C4B5FD' : 'transparent',
+                transition: 'background 0.14s',
+              }}
+            />
           )}
-          <span style={{
-            fontSize: 15, lineHeight: 1, flexShrink: 0,
-            fontWeight: isActive ? 700 : 500,
-            fontFamily: "system-ui, sans-serif",
-            opacity: isActive ? 1 : 0.9,
-          }}>{item.icon}</span>
+          <span
+            style={{
+              fontSize: 15,
+              lineHeight: 1,
+              flexShrink: 0,
+              fontWeight: isActive ? 700 : 500,
+              fontFamily: 'system-ui, sans-serif',
+              opacity: isActive ? 1 : 0.9,
+            }}
+          >
+            {item.icon}
+          </span>
           {!collapsed && (
-            <span style={{
-              fontSize: touch ? 14 : 13, fontWeight: isActive ? 700 : 500,
-              whiteSpace: "nowrap", letterSpacing: "0.005em",
-            }}>{item.label}</span>
+            <span
+              style={{
+                fontSize: touch ? 14 : 13,
+                fontWeight: isActive ? 700 : 500,
+                whiteSpace: 'nowrap',
+                letterSpacing: '0.005em',
+              }}
+            >
+              {item.label}
+            </span>
           )}
         </>
       )}
@@ -382,9 +565,9 @@ function NavItem({ item, collapsed, onNavigate, touch }) {
 }
 
 // ── Sidebar ───────────────────────────────────────────────────────────────────
-const SIDEBAR_BG = "#13111C";
-const SIDEBAR_BG2 = "#0E0C18";
-const DIVIDER = "rgba(255,255,255,0.07)";
+const SIDEBAR_BG = '#13111C';
+const SIDEBAR_BG2 = '#0E0C18';
+const DIVIDER = 'rgba(255,255,255,0.07)';
 
 function Sidebar({ collapsed, setCollapsed, compact, mobileOpen, closeMobile }) {
   const [btnHovered, setBtnHovered] = useState(false);
@@ -393,8 +576,7 @@ function Sidebar({ collapsed, setCollapsed, compact, mobileOpen, closeMobile }) 
   // global default, else everything.
   const { isPathVisible } = useAccess();
 
-  const navGroups = NAV_GROUPS
-    .filter((g) => !g.adminOnly || isSuperAdmin)
+  const navGroups = NAV_GROUPS.filter((g) => !g.adminOnly || isSuperAdmin)
     .map((g) => ({ ...g, items: g.items.filter((item) => isPathVisible(item.path)) }))
     .filter((g) => g.items.length > 0);
   // Below desktop width (mobile + tablet) the sidebar is never collapsed-to-
@@ -407,51 +589,95 @@ function Sidebar({ collapsed, setCollapsed, compact, mobileOpen, closeMobile }) 
 
   const shellStyle = onMobile
     ? {
-        width: W, minWidth: W,
-        position: "fixed", top: 0, bottom: 0, left: 0,
-        transform: mobileOpen ? "translateX(0)" : "translateX(-100%)",
-        transition: "transform 0.24s cubic-bezier(.4,0,.2,1)",
-        boxShadow: mobileOpen ? "4px 0 28px rgba(0,0,0,0.4)" : "none",
+        width: W,
+        minWidth: W,
+        position: 'fixed',
+        top: 0,
+        bottom: 0,
+        left: 0,
+        transform: mobileOpen ? 'translateX(0)' : 'translateX(-100%)',
+        transition: 'transform 0.24s cubic-bezier(.4,0,.2,1)',
+        boxShadow: mobileOpen ? '4px 0 28px rgba(0,0,0,0.4)' : 'none',
         zIndex: 1200,
       }
     : {
-        width: W, minWidth: W, height: "100vh", position: "sticky", top: 0,
-        transition: "width 0.22s cubic-bezier(.4,0,.2,1), min-width 0.22s cubic-bezier(.4,0,.2,1)",
+        width: W,
+        minWidth: W,
+        height: '100vh',
+        position: 'sticky',
+        top: 0,
+        transition: 'width 0.22s cubic-bezier(.4,0,.2,1), min-width 0.22s cubic-bezier(.4,0,.2,1)',
         zIndex: 100,
       };
 
   return (
-    <div style={{
-      background: `linear-gradient(180deg, ${SIDEBAR_BG} 0%, ${SIDEBAR_BG2} 100%)`,
-      display: "flex", flexDirection: "column",
-      overflow: "hidden", flexShrink: 0,
-      borderRight: `1px solid ${DIVIDER}`,
-      ...shellStyle,
-    }}>
-
+    <div
+      style={{
+        background: `linear-gradient(180deg, ${SIDEBAR_BG} 0%, ${SIDEBAR_BG2} 100%)`,
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden',
+        flexShrink: 0,
+        borderRight: `1px solid ${DIVIDER}`,
+        ...shellStyle,
+      }}
+    >
       {/* Brand */}
-      <div style={{
-        height: 64, display: "flex", alignItems: "center", flexShrink: 0,
-        padding: iconsOnly ? "0" : "0 18px",
-        justifyContent: iconsOnly ? "center" : "flex-start", gap: 12,
-        borderBottom: `1px solid ${DIVIDER}`,
-      }}>
+      <div
+        style={{
+          height: 64,
+          display: 'flex',
+          alignItems: 'center',
+          flexShrink: 0,
+          padding: iconsOnly ? '0' : '0 18px',
+          justifyContent: iconsOnly ? 'center' : 'flex-start',
+          gap: 12,
+          borderBottom: `1px solid ${DIVIDER}`,
+        }}
+      >
         {/* Logo mark — "R" monogram */}
-        <div style={{
-          width: 34, height: 34, borderRadius: 10, flexShrink: 0,
-          background: "linear-gradient(135deg, #7C3AED 0%, #4F46E5 100%)",
-          display: "flex", alignItems: "center", justifyContent: "center",
-          fontSize: 16, fontWeight: 900, color: "#fff",
-          fontFamily: "system-ui, sans-serif",
-          boxShadow: "0 4px 12px rgba(124,58,237,0.4)",
-          letterSpacing: "-0.02em",
-        }}>R</div>
+        <div
+          style={{
+            width: 34,
+            height: 34,
+            borderRadius: 10,
+            flexShrink: 0,
+            background: 'linear-gradient(135deg, #7C3AED 0%, #4F46E5 100%)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            fontSize: 16,
+            fontWeight: 900,
+            color: '#fff',
+            fontFamily: 'system-ui, sans-serif',
+            boxShadow: '0 4px 12px rgba(124,58,237,0.4)',
+            letterSpacing: '-0.02em',
+          }}
+        >
+          R
+        </div>
         {!iconsOnly && (
-          <div style={{ overflow: "hidden", minWidth: 0 }}>
-            <div style={{ fontSize: 14, fontWeight: 800, color: "#F8F8FF", letterSpacing: "-0.02em", whiteSpace: "nowrap" }}>
+          <div style={{ overflow: 'hidden', minWidth: 0 }}>
+            <div
+              style={{
+                fontSize: 14,
+                fontWeight: 800,
+                color: '#F8F8FF',
+                letterSpacing: '-0.02em',
+                whiteSpace: 'nowrap',
+              }}
+            >
               Rudam
             </div>
-            <div style={{ fontSize: 10, color: "rgba(255,255,255,0.35)", fontWeight: 500, whiteSpace: "nowrap", letterSpacing: "0.02em" }}>
+            <div
+              style={{
+                fontSize: 10,
+                color: 'rgba(255,255,255,0.35)',
+                fontWeight: 500,
+                whiteSpace: 'nowrap',
+                letterSpacing: '0.02em',
+              }}
+            >
               Commerce OS
             </div>
           </div>
@@ -459,20 +685,28 @@ function Sidebar({ collapsed, setCollapsed, compact, mobileOpen, closeMobile }) 
       </div>
 
       {/* Nav */}
-      <div style={{ flex: 1, overflowY: "auto", padding: "16px 0 8px", scrollbarWidth: "none" }}>
+      <div style={{ flex: 1, overflowY: 'auto', padding: '16px 0 8px', scrollbarWidth: 'none' }}>
         {navGroups.map((group, gi) => (
           <div key={group.label} style={{ marginBottom: iconsOnly ? 4 : 8 }}>
             {iconsOnly ? (
-              <div style={{ height: 1, background: DIVIDER, margin: gi === 0 ? "0 10px 8px" : "8px 10px" }} />
+              <div style={{ height: 1, background: DIVIDER, margin: gi === 0 ? '0 10px 8px' : '8px 10px' }} />
             ) : (
-              <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "2px 18px 5px" }}>
-                <div style={{ width: 6, height: 6, borderRadius: "50%", background: group.color, flexShrink: 0 }} />
-                <span style={{ fontSize: 9, fontWeight: 700, color: "rgba(255,255,255,0.25)", letterSpacing: "0.12em", textTransform: "uppercase" }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '2px 18px 5px' }}>
+                <div style={{ width: 6, height: 6, borderRadius: '50%', background: group.color, flexShrink: 0 }} />
+                <span
+                  style={{
+                    fontSize: 9,
+                    fontWeight: 700,
+                    color: 'rgba(255,255,255,0.25)',
+                    letterSpacing: '0.12em',
+                    textTransform: 'uppercase',
+                  }}
+                >
                   {group.label}
                 </span>
               </div>
             )}
-            {group.items.map(item => (
+            {group.items.map((item) => (
               <NavItem
                 key={item.path}
                 item={item}
@@ -488,25 +722,32 @@ function Sidebar({ collapsed, setCollapsed, compact, mobileOpen, closeMobile }) 
       </div>
 
       {/* Collapse toggle (desktop) / close drawer (mobile) */}
-      <div style={{ borderTop: `1px solid ${DIVIDER}`, padding: "10px 8px" }}>
+      <div style={{ borderTop: `1px solid ${DIVIDER}`, padding: '10px 8px' }}>
         <button
-          onClick={() => (onMobile ? closeMobile() : setCollapsed(c => !c))}
-          onMouseEnter={() => setBtnHovered(true)} onMouseLeave={() => setBtnHovered(false)}
+          onClick={() => (onMobile ? closeMobile() : setCollapsed((c) => !c))}
+          onMouseEnter={() => setBtnHovered(true)}
+          onMouseLeave={() => setBtnHovered(false)}
           style={{
-            display: "flex", alignItems: "center", justifyContent: iconsOnly ? "center" : "space-between",
-            padding: iconsOnly ? "8px 0" : "8px 12px", width: "100%",
-            background: btnHovered ? "rgba(255,255,255,0.06)" : "transparent",
-            border: "none", borderRadius: 10, cursor: "pointer", fontFamily: "inherit",
-            color: btnHovered ? "rgba(255,255,255,0.65)" : "rgba(255,255,255,0.3)",
-            transition: "background 0.15s, color 0.15s",
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: iconsOnly ? 'center' : 'space-between',
+            padding: iconsOnly ? '8px 0' : '8px 12px',
+            width: '100%',
+            background: btnHovered ? 'rgba(255,255,255,0.06)' : 'transparent',
+            border: 'none',
+            borderRadius: 10,
+            cursor: 'pointer',
+            fontFamily: 'inherit',
+            color: btnHovered ? 'rgba(255,255,255,0.65)' : 'rgba(255,255,255,0.3)',
+            transition: 'background 0.15s, color 0.15s',
           }}
         >
           {!iconsOnly && (
-            <span style={{ fontSize: 11, fontWeight: 600, letterSpacing: "0.04em" }}>
-              {onMobile ? "Close menu" : "Collapse"}
+            <span style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.04em' }}>
+              {onMobile ? 'Close menu' : 'Collapse'}
             </span>
           )}
-          <span style={{ fontSize: 13 }}>{onMobile ? "✕" : iconsOnly ? "›" : "‹"}</span>
+          <span style={{ fontSize: 13 }}>{onMobile ? '✕' : iconsOnly ? '›' : '‹'}</span>
         </button>
       </div>
     </div>
@@ -522,40 +763,55 @@ function UserMenu({ onChangePassword, compact }) {
   useEffect(() => {
     if (!open) return;
     const close = () => setOpen(false);
-    window.addEventListener("click", close);
-    return () => window.removeEventListener("click", close);
+    window.addEventListener('click', close);
+    return () => window.removeEventListener('click', close);
   }, [open]);
 
   const handleLogout = () => {
     logout();
-    navigate("/login", { replace: true });
+    navigate('/login', { replace: true });
   };
 
-  const initial = (user?.username || "?").charAt(0).toUpperCase();
+  const initial = (user?.username || '?').charAt(0).toUpperCase();
 
   return (
-    <div style={{ position: "relative" }} onClick={(e) => e.stopPropagation()}>
+    <div style={{ position: 'relative' }} onClick={(e) => e.stopPropagation()}>
       <button
         onClick={() => setOpen((o) => !o)}
         style={{
-          display: "flex", alignItems: "center", gap: 8, cursor: "pointer",
-          background: "transparent", border: "none", fontFamily: "inherit",
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          cursor: 'pointer',
+          background: 'transparent',
+          border: 'none',
+          fontFamily: 'inherit',
         }}
       >
-        <div style={{
-          width: 30, height: 30, borderRadius: "50%",
-          background: "linear-gradient(135deg, #7C3AED 0%, #4F46E5 100%)",
-          display: "flex", alignItems: "center", justifyContent: "center",
-          fontSize: 13, fontWeight: 800, color: "#fff",
-        }}>{initial}</div>
+        <div
+          style={{
+            width: 30,
+            height: 30,
+            borderRadius: '50%',
+            background: 'linear-gradient(135deg, #7C3AED 0%, #4F46E5 100%)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            fontSize: 13,
+            fontWeight: 800,
+            color: '#fff',
+          }}
+        >
+          {initial}
+        </div>
         {/* On mobile only the avatar shows — the name/role block is what pushed
             this row off the right edge of the screen. */}
         {!compact && (
           <>
-            <div style={{ textAlign: "left", lineHeight: 1.2 }}>
+            <div style={{ textAlign: 'left', lineHeight: 1.2 }}>
               <div style={{ fontSize: 12, fontWeight: 700, color: C.gray800 }}>{user?.username}</div>
               <div style={{ fontSize: 10, color: C.gray400 }}>
-                {user?.role === "super_admin" ? "Super Admin" : "Business User"}
+                {user?.role === 'super_admin' ? 'Super Admin' : 'Business User'}
               </div>
             </div>
             <span style={{ fontSize: 10, color: C.gray400 }}>▾</span>
@@ -564,32 +820,58 @@ function UserMenu({ onChangePassword, compact }) {
       </button>
 
       {open && (
-        <div style={{
-          position: "absolute", top: "calc(100% + 8px)", right: 0, minWidth: 180,
-          background: C.white, border: `1px solid ${C.border}`, borderRadius: 12,
-          boxShadow: "0 8px 28px rgba(0,0,0,0.14)", padding: 6, zIndex: 500,
-        }}>
+        <div
+          style={{
+            position: 'absolute',
+            top: 'calc(100% + 8px)',
+            right: 0,
+            minWidth: 180,
+            background: C.white,
+            border: `1px solid ${C.border}`,
+            borderRadius: 12,
+            boxShadow: '0 8px 28px rgba(0,0,0,0.14)',
+            padding: 6,
+            zIndex: 500,
+          }}
+        >
           <button
-            onClick={() => { setOpen(false); onChangePassword(); }}
+            onClick={() => {
+              setOpen(false);
+              onChangePassword();
+            }}
             style={{
-              width: "100%", textAlign: "left", padding: "9px 12px", borderRadius: 8,
-              background: "transparent", border: "none", cursor: "pointer",
-              fontFamily: "inherit", fontSize: 13, color: C.gray700,
+              width: '100%',
+              textAlign: 'left',
+              padding: '9px 12px',
+              borderRadius: 8,
+              background: 'transparent',
+              border: 'none',
+              cursor: 'pointer',
+              fontFamily: 'inherit',
+              fontSize: 13,
+              color: C.gray700,
             }}
             onMouseEnter={(e) => (e.currentTarget.style.background = C.gray100)}
-            onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+            onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
           >
             🔑 Change password
           </button>
           <button
             onClick={handleLogout}
             style={{
-              width: "100%", textAlign: "left", padding: "9px 12px", borderRadius: 8,
-              background: "transparent", border: "none", cursor: "pointer",
-              fontFamily: "inherit", fontSize: 13, color: C.red,
+              width: '100%',
+              textAlign: 'left',
+              padding: '9px 12px',
+              borderRadius: 8,
+              background: 'transparent',
+              border: 'none',
+              cursor: 'pointer',
+              fontFamily: 'inherit',
+              fontSize: 13,
+              color: C.red,
             }}
             onMouseEnter={(e) => (e.currentTarget.style.background = C.redLight)}
-            onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+            onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
           >
             ⎋ Logout
           </button>
@@ -603,35 +885,52 @@ function UserMenu({ onChangePassword, compact }) {
 function TopBar({ isMobile, showMenuButton, onOpenMenu }) {
   const loc = useLocation();
   const [showChangePassword, setShowChangePassword] = useState(false);
-  const current = ALL_NAV.find(item =>
-    item.end ? loc.pathname === item.path : loc.pathname.startsWith(item.path)
-  );
-  const dateStr = new Date().toLocaleDateString("en-IN", {
-    weekday: "short", day: "numeric", month: "long", year: "numeric",
+  const current = ALL_NAV.find((item) => (item.end ? loc.pathname === item.path : loc.pathname.startsWith(item.path)));
+  const dateStr = new Date().toLocaleDateString('en-IN', {
+    weekday: 'short',
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
   });
 
   return (
-    <div style={{
-      background: C.white, borderBottom: `1px solid ${C.border}`,
-      padding: isMobile ? "0 12px" : "0 28px", height: 56, flexShrink: 0,
-      display: "flex", alignItems: "center", justifyContent: "space-between",
-      gap: 8, boxShadow: "0 1px 0 rgba(0,0,0,0.06)",
-    }}>
+    <div
+      style={{
+        background: C.white,
+        borderBottom: `1px solid ${C.border}`,
+        padding: isMobile ? '0 12px' : '0 28px',
+        height: 56,
+        flexShrink: 0,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: 8,
+        boxShadow: '0 1px 0 rgba(0,0,0,0.06)',
+      }}
+    >
       {/* Left section — hamburger (mobile) + business selector + breadcrumb */}
-      <div style={{ display: "flex", alignItems: "center", gap: isMobile ? 8 : 16, minWidth: 0 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: isMobile ? 8 : 16, minWidth: 0 }}>
         {showMenuButton && (
           <button
             onClick={onOpenMenu}
             aria-label="Open menu"
             style={{
-              display: "flex", flexDirection: "column", justifyContent: "center", gap: 4,
-              width: 38, height: 38, flexShrink: 0, padding: 9,
-              background: C.gray100, border: `1px solid ${C.border}`,
-              borderRadius: 10, cursor: "pointer",
+              display: 'flex',
+              flexDirection: 'column',
+              justifyContent: 'center',
+              gap: 4,
+              width: 38,
+              height: 38,
+              flexShrink: 0,
+              padding: 9,
+              background: C.gray100,
+              border: `1px solid ${C.border}`,
+              borderRadius: 10,
+              cursor: 'pointer',
             }}
           >
-            {[0, 1, 2].map(i => (
-              <span key={i} style={{ display: "block", height: 2, borderRadius: 2, background: C.gray700 }} />
+            {[0, 1, 2].map((i) => (
+              <span key={i} style={{ display: 'block', height: 2, borderRadius: 2, background: C.gray700 }} />
             ))}
           </button>
         )}
@@ -639,20 +938,16 @@ function TopBar({ isMobile, showMenuButton, onOpenMenu }) {
         {/* The breadcrumb duplicates the page's own <h1> — drop it on mobile
             where the row has no room to spare. */}
         {!isMobile && (
-          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <span style={{ fontSize: 12, color: C.gray300 }}>/</span>
-            <span style={{ fontSize: 14, fontWeight: 700, color: C.gray800 }}>
-              {current?.label ?? "Dashboard"}
-            </span>
+            <span style={{ fontSize: 14, fontWeight: 700, color: C.gray800 }}>{current?.label ?? 'Dashboard'}</span>
           </div>
         )}
       </div>
 
       {/* Right section */}
-      <div style={{ display: "flex", alignItems: "center", gap: 16, flexShrink: 0 }}>
-        {!isMobile && (
-          <span style={{ fontSize: 12, color: C.gray400, fontWeight: 500 }}>{dateStr}</span>
-        )}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexShrink: 0 }}>
+        {!isMobile && <span style={{ fontSize: 12, color: C.gray400, fontWeight: 500 }}>{dateStr}</span>}
         <UserMenu onChangePassword={() => setShowChangePassword(true)} compact={isMobile} />
       </div>
 
@@ -672,38 +967,46 @@ function AppShell() {
   const isTablet = useIsTablet();
   const sidebarCompact = isTablet;
   const loc = useLocation();
-  const [collapsed, setCollapsed] = useState(() =>
-    localStorage.getItem("sidebar_collapsed") === "true"
-  );
+  const [collapsed, setCollapsed] = useState(() => localStorage.getItem('sidebar_collapsed') === 'true');
   const [drawerOpen, setDrawerOpen] = useState(false);
 
   useEffect(() => {
-    localStorage.setItem("sidebar_collapsed", String(collapsed));
+    localStorage.setItem('sidebar_collapsed', String(collapsed));
   }, [collapsed]);
 
   // Close the drawer on navigation, and whenever the viewport grows back to
   // desktop — otherwise a stale open drawer overlays the restored sidebar.
-  useEffect(() => { setDrawerOpen(false); }, [loc.pathname]);
-  useEffect(() => { if (!sidebarCompact) setDrawerOpen(false); }, [sidebarCompact]);
+  useEffect(() => {
+    setDrawerOpen(false);
+  }, [loc.pathname]);
+  useEffect(() => {
+    if (!sidebarCompact) setDrawerOpen(false);
+  }, [sidebarCompact]);
 
   // Don't let the page behind the drawer scroll under your finger.
   useEffect(() => {
     if (!drawerOpen) return;
     const prev = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => { document.body.style.overflow = prev; };
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = prev;
+    };
   }, [drawerOpen]);
 
   return (
-    <div style={{
-      display: "flex",
-      // 100dvh tracks the shrinking/growing mobile browser chrome; 100vh alone
-      // leaves the bottom of the app hidden under Safari's toolbar.
-      height: "100dvh", minHeight: "100vh",
-      background: C.bg, color: C.gray800,
-      fontFamily: "'Inter', 'Segoe UI', system-ui, sans-serif",
-      overflow: "hidden",
-    }}>
+    <div
+      style={{
+        display: 'flex',
+        // 100dvh tracks the shrinking/growing mobile browser chrome; 100vh alone
+        // leaves the bottom of the app hidden under Safari's toolbar.
+        height: '100dvh',
+        minHeight: '100vh',
+        background: C.bg,
+        color: C.gray800,
+        fontFamily: "'Inter', 'Segoe UI', system-ui, sans-serif",
+        overflow: 'hidden',
+      }}
+    >
       <Sidebar
         collapsed={collapsed}
         setCollapsed={setCollapsed}
@@ -717,13 +1020,15 @@ function AppShell() {
         <div
           onClick={() => setDrawerOpen(false)}
           style={{
-            position: "fixed", inset: 0, zIndex: 1100,
-            background: "rgba(0,0,0,0.5)",
+            position: 'fixed',
+            inset: 0,
+            zIndex: 1100,
+            background: 'rgba(0,0,0,0.5)',
           }}
         />
       )}
 
-      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+      <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
         <TopBar isMobile={isMobile} showMenuButton={sidebarCompact} onOpenMenu={() => setDrawerOpen(true)} />
         {/* Global period filter — stays mounted across route changes and
             business switches so it's never remounted, only its context value
@@ -732,52 +1037,58 @@ function AppShell() {
         {/* key by active business so switching businesses remounts the routed
             view, forcing every tab (dashboard included) to refetch fresh data
             against the newly-set business-scoped API base. */}
-        <div key={activeBusinessId ?? "none"} style={{
-          flex: 1, overflowY: "auto", overflowX: "hidden",
-          padding: isMobile ? "16px 12px 40px" : "28px 32px",
-          WebkitOverflowScrolling: "touch",
-        }}>
+        <div
+          key={activeBusinessId ?? 'none'}
+          style={{
+            flex: 1,
+            overflowY: 'auto',
+            overflowX: 'hidden',
+            padding: isMobile ? '16px 12px 40px' : '28px 32px',
+            WebkitOverflowScrolling: 'touch',
+          }}
+        >
           <ErrorBoundary resetKey={loc.pathname} label={loc.pathname}>
-          <RouteGuard>
-          <Routes>
-            <Route path="/" element={<OverviewTab />} />
-            <Route path="/orders" element={<OrdersTab />} />
-            <Route path="/order-scan" element={<OrderScanTab />} />
-            <Route path="/unsettled" element={<UnsettledOrdersTab />} />
-            <Route path="/payments" element={<PaymentsTab />} />
-            <Route path="/unscheduled" element={<UnscheduledPaymentTab />} />
-            <Route path="/mismatch" element={<MismatchTab />} />
-            <Route path="/sku-analysis" element={<SKUAnalysisTab />} />
-            <Route path="/ads-analysis" element={<AdsAnalysisTab />} />
-            <Route path="/estimated-profit" element={<EstimatedProfitTab />} />
-            <Route path="/daily-profit" element={<DailyProfitTab />} />
-            <Route path="/customer-insights" element={<CustomerInsightsTab />} />
-            <Route path="/pricing" element={<PricingTab />} />
-            <Route path="/tax-check" element={<TaxCheckTab />} />
-            <Route path="/gst" element={<GstTab />} />
-            <Route path="/upload" element={<UploadTab />} />
-            <Route path="/labels" element={<LabelsTab />} />
-            <Route path="/bulk-labels" element={<BulkLabelsTab />} />
-            <Route path="/returns" element={<ReturnScanTab />} />
-            <Route path="/claims" element={<ClaimSheetTab />} />
-            <Route path="/tasks" element={<TeamTasksTab />} />
-            <Route path="/employees" element={<EmployeesTab />} />
-            <Route path="/purchases" element={<PurchasesTab />} />
-            <Route path="/expenses" element={<ExpensesTab />} />
-            <Route path="/inventory" element={<InventoryTab />} />
-            <Route path="/inventory-labels" element={<InventoryLabelsTab />} />
-            <Route path="/meesho-inventory" element={<MeeshoInventoryTab />} />
-            <Route path="/meesho-pricing" element={<MeeshoPricingTab />} />
-            <Route path="/fraud" element={<FraudCustomersTab />} />
-            <Route path="/product-photos" element={<ProductPhotosTab />} />
-            <Route path="/extension" element={<ExtensionTab />} />
-            <Route path="/bulk-listing" element={<BulkListingTab />} />
-            <Route path="/claim-video-tool" element={<ClaimVideoToolTab />} />
-            <Route path="/business-profile" element={<BusinessProfilePage />} />
-            <Route path="/admin" element={<AdminPanel />} />
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
-          </RouteGuard>
+            <RouteGuard>
+              <Routes>
+                <Route path="/" element={<OverviewTab />} />
+                <Route path="/orders" element={<OrdersTab />} />
+                <Route path="/order-scan" element={<OrderScanTab />} />
+                <Route path="/unsettled" element={<UnsettledOrdersTab />} />
+                <Route path="/payments" element={<PaymentsTab />} />
+                <Route path="/unscheduled" element={<UnscheduledPaymentTab />} />
+                <Route path="/mismatch" element={<MismatchTab />} />
+                <Route path="/sku-analysis" element={<SKUAnalysisTab />} />
+                <Route path="/ads-analysis" element={<AdsAnalysisTab />} />
+                <Route path="/estimated-profit" element={<EstimatedProfitTab />} />
+                <Route path="/daily-profit" element={<DailyProfitTab />} />
+                <Route path="/return-analysis" element={<ReturnAnalysisTab />} />
+                <Route path="/customer-insights" element={<CustomerInsightsTab />} />
+                <Route path="/pricing" element={<PricingTab />} />
+                <Route path="/tax-check" element={<TaxCheckTab />} />
+                <Route path="/gst" element={<GstTab />} />
+                <Route path="/upload" element={<UploadTab />} />
+                <Route path="/labels" element={<LabelsTab />} />
+                <Route path="/bulk-labels" element={<BulkLabelsTab />} />
+                <Route path="/returns" element={<ReturnScanTab />} />
+                <Route path="/claims" element={<ClaimSheetTab />} />
+                <Route path="/tasks" element={<TeamTasksTab />} />
+                <Route path="/employees" element={<EmployeesTab />} />
+                <Route path="/purchases" element={<PurchasesTab />} />
+                <Route path="/expenses" element={<ExpensesTab />} />
+                <Route path="/inventory" element={<InventoryTab />} />
+                <Route path="/inventory-labels" element={<InventoryLabelsTab />} />
+                <Route path="/meesho-inventory" element={<MeeshoInventoryTab />} />
+                <Route path="/meesho-pricing" element={<MeeshoPricingTab />} />
+                <Route path="/fraud" element={<FraudCustomersTab />} />
+                <Route path="/product-photos" element={<ProductPhotosTab />} />
+                <Route path="/extension" element={<ExtensionTab />} />
+                <Route path="/bulk-listing" element={<BulkListingTab />} />
+                <Route path="/claim-video-tool" element={<ClaimVideoToolTab />} />
+                <Route path="/business-profile" element={<BusinessProfilePage />} />
+                <Route path="/admin" element={<AdminPanel />} />
+                <Route path="*" element={<Navigate to="/" replace />} />
+              </Routes>
+            </RouteGuard>
           </ErrorBoundary>
         </div>
       </div>
@@ -802,22 +1113,18 @@ function RouteGuard({ children }) {
 
   if (!hasAnyAccess) {
     return (
-      <div style={{ ...S.card, maxWidth: 520, margin: "40px auto", textAlign: "center" }}>
+      <div style={{ ...S.card, maxWidth: 520, margin: '40px auto', textAlign: 'center' }}>
         <div style={{ fontSize: 32, marginBottom: 10 }}>🔒</div>
-        <h2 style={{ fontSize: 16, fontWeight: 800, color: C.gray800, marginBottom: 8 }}>
-          No areas enabled
-        </h2>
+        <h2 style={{ fontSize: 16, fontWeight: 800, color: C.gray800, marginBottom: 8 }}>No areas enabled</h2>
         <p style={{ fontSize: 13, color: C.gray500, lineHeight: 1.6 }}>
-          Your account doesn't have access to any part of the app yet.
-          Ask an administrator to enable the areas you need.
+          Your account doesn't have access to any part of the app yet. Ask an administrator to enable the areas you
+          need.
         </p>
       </div>
     );
   }
 
-  const match = ALL_NAV.find(item =>
-    item.end ? loc.pathname === item.path : loc.pathname.startsWith(item.path)
-  );
+  const match = ALL_NAV.find((item) => (item.end ? loc.pathname === item.path : loc.pathname.startsWith(item.path)));
   // An unknown path falls through to the existing catch-all route.
   if (match && !isPathVisible(match.path) && landingPath) {
     return <Navigate to={landingPath} replace />;
@@ -828,11 +1135,19 @@ function RouteGuard({ children }) {
 
 function LoadingScreen() {
   return (
-    <div style={{
-      height: "100vh", display: "flex", alignItems: "center", justifyContent: "center",
-      background: C.bg, color: C.gray400, fontFamily: "'Inter', 'Segoe UI', system-ui, sans-serif",
-      fontSize: 13, fontWeight: 600,
-    }}>
+    <div
+      style={{
+        height: '100vh',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: C.bg,
+        color: C.gray400,
+        fontFamily: "'Inter', 'Segoe UI', system-ui, sans-serif",
+        fontSize: 13,
+        fontWeight: 600,
+      }}
+    >
       Loading…
     </div>
   );
@@ -845,7 +1160,7 @@ export default function App() {
 
   if (loading) return <LoadingScreen />;
 
-  if (loc.pathname === "/login") {
+  if (loc.pathname === '/login') {
     return user ? <Navigate to="/" replace /> : <LoginPage />;
   }
 

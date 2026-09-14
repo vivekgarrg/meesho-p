@@ -111,6 +111,7 @@ urlpatterns = [
     path("meesho-price-update/download/", views.meesho_price_update_download, name="meesho_price_update_download"),
     # Return deliveries (returns received back) + 7-day claim tracking
     path("returns/",                    views.return_deliveries_list,   name="return_deliveries_list"),
+    path("returns/analysis/",           views.return_analysis,          name="return_analysis"),
     path("returns/upload/",             views.return_deliveries_upload, name="return_deliveries_upload"),
     path("returns/lookup/",             views.return_delivery_lookup,   name="return_delivery_lookup"),
     path("returns/<int:pk>/",           views.return_delivery_detail,   name="return_delivery_detail"),

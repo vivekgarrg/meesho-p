@@ -19,6 +19,7 @@ NAV_CATALOG = [
     {"path": "/ads-analysis",      "label": "Ads Analysis",      "group": "Analytics"},
     {"path": "/estimated-profit",  "label": "Estimated Profit",  "group": "Analytics"},
     {"path": "/daily-profit",      "label": "Daily Profit",      "group": "Analytics"},
+    {"path": "/return-analysis",   "label": "Return Analysis",   "group": "Analytics"},
     {"path": "/customer-insights", "label": "Customer Insights", "group": "Analytics"},
 
     {"path": "/orders",            "label": "Orders",            "group": "Operations"},
@@ -87,6 +88,9 @@ API_OWNERSHIP = {
     # sub-order's AWB/packet id without needing separate Returns & Claims
     # page access.
     "returns/lookup/":       ["/tasks", "/returns", "/claim-video-tool"],
+    # Read-only aggregate of the returns table; its own Analytics tab, but the
+    # Returns & Claims screen legitimately shows the same numbers too.
+    "returns/analysis/":     ["/return-analysis", "/returns"],
     "returns/":              ["/returns"],
     # The claim sheet writes back onto returns, so either screen may reach it.
     "claims/":               ["/claims", "/returns"],

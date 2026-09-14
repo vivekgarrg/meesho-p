@@ -9436,6 +9436,220 @@ def return_deliveries_list(request, business_id):
 
 
 @api_view(["GET"])
+def return_analysis(request, business_id):
+    """
+    Analytics over returned orders, driven by the payment/order data so every
+    month that has payments is covered — not just the ones with a Returns CSV
+    uploaded. An order counts as a return when any of its OrderPayment rows
+    carries a RETURN / RTO status; RTO_COMPLETE and RETURNED are folded in.
+
+    Shows which products come back most, how often (return rate vs orders sold),
+    why (reason from the Returns sheet where present, else the payment sheet's
+    own recovery/claims reason), the customer-return vs RTO split, and the net
+    settlement each returned product landed at — so a loss-making SKU stands out.
+
+    Business-scoped; the date range applies to order_date, matching the other
+    returns/claims screens.
+    """
+    business = get_authorized_business(request, business_id)
+
+    date_from = request.GET.get("date_from", "").strip()
+    date_to   = request.GET.get("date_to", "").strip()
+    try:
+        limit = min(100, max(1, int(request.GET.get("limit", 20))))
+    except (TypeError, ValueError):
+        limit = 20
+
+    RETURN_STATUSES = ["RETURN", "RETURNED", "RTO", "RTO_COMPLETE"]
+    RTO_SET      = {"RTO", "RTO_COMPLETE"}
+
+    base = OrderPayment.objects.filter(business=business)
+    # Filter on the raw datetime, not order_date__date: this MySQL has no named
+    # timezone tables loaded, so a __date lookup compiles to CONVERT_TZ() which
+    # returns NULL there and silently matches zero rows. Aware day-bounds avoid
+    # CONVERT_TZ entirely and give an inclusive [from, to] range.
+    if date_from:
+        try:
+            base = base.filter(order_date__gte=timezone.make_aware(datetime.strptime(date_from, "%Y-%m-%d")))
+        except ValueError:
+            pass
+    if date_to:
+        try:
+            end = timezone.make_aware(datetime.strptime(date_to, "%Y-%m-%d") + timedelta(days=1))
+            base = base.filter(order_date__lt=end)
+        except ValueError:
+            pass
+
+    total_orders = base.values("sub_order_no").distinct().count()
+
+    # Case-insensitive: the sheet writes "Return"/"RTO", older data "RETURN".
+    status_q = DQ()
+    for st_name in RETURN_STATUSES:
+        status_q |= DQ(live_order_status__iexact=st_name)
+    ret_sub_orders = list(
+        base.filter(status_q).values_list("sub_order_no", flat=True).distinct()
+    )
+
+    # Real return reasons live in the Returns CSV; use them where uploaded.
+    rd_reason = {}
+    for so, reason in (ReturnDelivery.objects
+                       .filter(business=business, suborder_no__in=ret_sub_orders)
+                       .exclude(return_reason="")
+                       .values_list("suborder_no", "return_reason")):
+        rd_reason.setdefault(so, reason)
+
+    # Orders sold per SKU in the period, so each product's return rate is
+    # "returns ÷ orders", not just a raw count that punishes bestsellers.
+    orders_per_sku = {
+        (r["supplier_sku"] or ""): r["n"]
+        for r in base.values("supplier_sku").annotate(n=Count("sub_order_no", distinct=True))
+    }
+
+    rows = OrderPayment.objects.filter(
+        business=business, sub_order_no__in=ret_sub_orders
+    ).values(
+        "sub_order_no", "supplier_sku", "product_name", "live_order_status", "order_date",
+        "final_settlement_amount", "total_sale_return_amount", "return_shipping_charge",
+        "claims", "quantity", "claims_reason", "recovery_reason",
+    )
+
+    # Collapse each returned order's payment rows into one record. Settlement
+    # and claims sum over every row (a claim credit often lands on its own
+    # blank-status row); product/qty/reason come off the return leg.
+    orders = {}
+    for r in rows:
+        so = r["sub_order_no"]
+        o = orders.get(so)
+        if o is None:
+            o = orders[so] = {
+                "sku": "", "product_name": "", "statuses": set(), "order_date": None,
+                "qty": 0, "net_settlement": 0.0, "return_shipping": 0.0,
+                "refunded": 0.0, "claims": 0.0, "reason": "",
+            }
+        st = (r["live_order_status"] or "").upper()
+        o["statuses"].add(st)
+        o["net_settlement"] += float(r["final_settlement_amount"] or 0)
+        o["claims"]         += float(r["claims"] or 0)
+        if st in RETURN_STATUSES:
+            if not o["sku"] and r["supplier_sku"]:
+                o["sku"] = r["supplier_sku"]
+            if not o["product_name"] and r["product_name"]:
+                o["product_name"] = r["product_name"]
+            o["return_shipping"] += float(r["return_shipping_charge"] or 0)
+            o["refunded"]        += float(r["total_sale_return_amount"] or 0)
+            o["qty"] = max(o["qty"], int(r["quantity"] or 0))
+        if r["order_date"] and (o["order_date"] is None or r["order_date"] < o["order_date"]):
+            o["order_date"] = r["order_date"]
+        if not o["reason"]:
+            o["reason"] = (r["recovery_reason"] or r["claims_reason"] or "").strip()
+
+    for so, o in orders.items():
+        o["type"]   = "rto" if (o["statuses"] & RTO_SET) else "customer"
+        o["reason"] = rd_reason.get(so) or o["reason"] or "Not specified"
+
+    total_returns    = len(orders)
+    customer_returns = sum(1 for o in orders.values() if o["type"] == "customer")
+    rto_returns      = sum(1 for o in orders.values() if o["type"] == "rto")
+    total_qty        = sum(o["qty"] for o in orders.values())
+
+    net_return_settlement  = round(sum(o["net_settlement"] for o in orders.values()), 2)
+    return_shipping_cost   = round(sum(o["return_shipping"] for o in orders.values()), 2)
+    refunded_amount        = round(sum(o["refunded"] for o in orders.values()), 2)
+    claims_recovered       = round(sum(o["claims"] for o in orders.values()), 2)
+    claims_recovered_count = sum(1 for o in orders.values() if o["claims"] > 0)
+
+    # ── Aggregate to product ──────────────────────────────────────────────
+    prod = {}
+    for o in orders.values():
+        key = o["sku"] or "—"
+        p = prod.get(key)
+        if p is None:
+            p = prod[key] = {
+                "sku": o["sku"], "product_name": o["product_name"],
+                "returns": 0, "qty": 0, "customer": 0, "rto": 0,
+                "net_settlement": 0.0, "return_shipping": 0.0, "claims": 0.0,
+                "reasons": {},
+            }
+        p["returns"]        += 1
+        p["qty"]            += o["qty"]
+        p["customer"]       += 1 if o["type"] == "customer" else 0
+        p["rto"]            += 1 if o["type"] == "rto" else 0
+        p["net_settlement"] += o["net_settlement"]
+        p["return_shipping"] += o["return_shipping"]
+        p["claims"]         += o["claims"]
+        if not p["product_name"] and o["product_name"]:
+            p["product_name"] = o["product_name"]
+        p["reasons"][o["reason"]] = p["reasons"].get(o["reason"], 0) + 1
+
+    top_products = []
+    for key, p in sorted(prod.items(), key=lambda kv: kv[1]["returns"], reverse=True)[:limit]:
+        orders_total = orders_per_sku.get(p["sku"], 0)
+        top_reason   = max(p["reasons"].items(), key=lambda kv: kv[1])[0] if p["reasons"] else ""
+        top_products.append({
+            "sku": p["sku"] or "—",
+            "product_name": p["product_name"] or "",
+            "returns": p["returns"],
+            "qty": p["qty"],
+            "customer": p["customer"],
+            "rto": p["rto"],
+            "orders_total": orders_total,
+            "return_rate": round(p["returns"] * 100.0 / orders_total, 1) if orders_total else None,
+            "top_reason": top_reason,
+            "net_settlement": round(p["net_settlement"], 2),
+            "return_shipping_cost": round(p["return_shipping"], 2),
+            "claim_recovered": round(p["claims"], 2),
+        })
+
+    # ── Reasons ───────────────────────────────────────────────────────────
+    reason_counts = {}
+    for o in orders.values():
+        reason_counts[o["reason"]] = reason_counts.get(o["reason"], 0) + 1
+    top_reasons = [
+        {"reason": k, "count": v, "pct": round(v * 100.0 / total_returns, 1) if total_returns else 0}
+        for k, v in sorted(reason_counts.items(), key=lambda kv: kv[1], reverse=True)[:15]
+    ]
+
+    # ── Trend by month (order_date) ───────────────────────────────────────
+    month_map = {}
+    for o in orders.values():
+        if not o["order_date"]:
+            continue
+        m = o["order_date"].date().replace(day=1).isoformat()
+        b = month_map.setdefault(m, {"returns": 0, "customer": 0, "rto": 0})
+        b["returns"] += 1
+        b[o["type"]] += 1
+    trend = [{"month": m, **month_map[m]} for m in sorted(month_map)]
+
+    return Response({
+        "period": {"date_from": date_from, "date_to": date_to},
+        "summary": {
+            "total_orders": total_orders,
+            "total_returns": total_returns,
+            "total_qty": total_qty,
+            "return_rate": round(total_returns * 100.0 / total_orders, 1) if total_orders else 0,
+            "customer_returns": customer_returns,
+            "rto_returns": rto_returns,
+            "customer_pct": round(customer_returns * 100.0 / total_returns, 1) if total_returns else 0,
+            "rto_pct": round(rto_returns * 100.0 / total_returns, 1) if total_returns else 0,
+            "distinct_products": len(prod),
+            "distinct_reasons": len([k for k in reason_counts if k and k != "Not specified"]),
+            "net_return_settlement": net_return_settlement,
+            "return_shipping_cost": return_shipping_cost,
+            "refunded_amount": refunded_amount,
+            "claim_recovered_amount": claims_recovered,
+            "claim_recovered_count": claims_recovered_count,
+        },
+        "top_products": top_products,
+        "top_reasons": top_reasons,
+        "type_breakdown": [
+            {"label": "Customer Return", "count": customer_returns},
+            {"label": "Courier Return (RTO)", "count": rto_returns},
+        ],
+        "trend": trend,
+    })
+
+
+@api_view(["GET"])
 def return_delivery_lookup(request, business_id):
     """
     Barcode-scanner endpoint: resolve a scanned AWB / sub-order / order number
