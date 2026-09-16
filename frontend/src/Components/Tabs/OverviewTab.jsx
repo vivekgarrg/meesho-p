@@ -135,17 +135,24 @@ function FormulaStep({ sign, label, value, color, note, bold, divider }) {
 }
 
 /** Status outcome card — shows count + net for one order type */
-function OutcomeCard({ icon, label, count, rate, rateColor, netLabel, net, netColor, subStats }) {
+function OutcomeCard({ icon, label, count, rate, rateColor, netLabel, net, netColor, subStats, onClick }) {
   // Layout note: this used to be a single flex row with the status name on the
   // left and the net profit on the right. Once the cards narrowed, neither side
   // could shrink and they overlapped — "DELIVERED" ran straight into the amount.
   // Now the two labels share a header row of their own and the two figures sit
   // on the row beneath, so they can never collide at any card width.
   return (
-    <div style={{
-      ...T.card, flex: "1 1 210px", minWidth: 0, padding: "14px 16px",
-      borderLeft: `4px solid ${rateColor}`,
-    }}>
+    <div
+      onClick={onClick}
+      style={{
+        ...T.card, flex: "1 1 210px", minWidth: 0, padding: "14px 16px",
+        borderLeft: `4px solid ${rateColor}`,
+        cursor: onClick ? "pointer" : "default",
+        transition: "box-shadow 0.12s, transform 0.12s",
+      }}
+      onMouseEnter={onClick ? (e) => { e.currentTarget.style.boxShadow = "0 4px 14px rgba(0,0,0,0.09)"; e.currentTarget.style.transform = "translateY(-1px)"; } : undefined}
+      onMouseLeave={onClick ? (e) => { e.currentTarget.style.boxShadow = ""; e.currentTarget.style.transform = ""; } : undefined}
+    >
       {/* Row 1 — the two captions */}
       <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 6 }}>
         <p style={{
@@ -584,6 +591,18 @@ export function OverviewTab() {
   }
 
   const orders_summary_cards_data = profit?.order_summary;
+  // Maps each order_summary bucket to the status value Payments' filter pills
+  // use (see PaymentsTab's ALL_STATUSES), so a card click deep-links straight
+  // into the matching filtered list instead of just displaying a number.
+  const BUCKET_TO_PAYMENT_STATUS = {
+    delivered_summary: "DELIVERED",
+    return_summary: "RETURN",
+    rto_summary: "RTO",
+    exchanged_summary: "EXCHANGE",
+    claim_summary: "CLAIM",
+    unknown_summary: "UNKNOWN",
+    shipped_summary: "SHIPPED",
+  };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
@@ -679,6 +698,7 @@ export function OverviewTab() {
                   key={key}
                   icon={row?.icon} label={isShipped ? `${title} (provisional)` : title} count={data.order_count} rate={row?.rate} rateColor={cardColor}
                   netLabel={isShipped ? "Provisional Profit" : "Net Profit"} net={Number(data.net_profit_loss || 0)} netColor={color}
+                  onClick={BUCKET_TO_PAYMENT_STATUS[key] ? () => navigate(`/payments?status=${BUCKET_TO_PAYMENT_STATUS[key]}`) : undefined}
                   subStats={[
                     { label: "Gross settlement", value: fmt(data.total_settlement ?? 0) },
                     { label: "Item cost (all-in)", value: fmt(data.final_item_cost ?? 0), color: C.red },

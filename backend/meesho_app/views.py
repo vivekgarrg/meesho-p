@@ -927,7 +927,6 @@ def available_months(request, business_id):
         }
         return Response(sorted(months, reverse=True))
     return Response([d.strftime("%Y-%m") for d in dates])
-    return Response([d.strftime("%Y-%m") for d in dates])
 
 
 @api_view(["GET"])
@@ -4838,7 +4837,16 @@ def dashboard_analytics(request, business_id):
         })
 
     # ── Unsettled orders summary (latest status per order, no payment row) ────
-    unsettled_qs  = order_qs.exclude(sub_order_no__in=payment_nos)
+    # Same exclusions as unsettled_orders (the dedicated tab): a cancelled order
+    # was never going to be paid, and an RTO settles through the return flow
+    # rather than an OrderPayment row, so neither is really "unsettled" — without
+    # these this card over-counted against the tab it links to.
+    unsettled_qs  = (
+        order_qs
+        .exclude(sub_order_no__in=payment_nos)
+        .exclude(reason_for_credit_entry__iexact="cancelled")
+        .exclude(reason_for_credit_entry__in=_CUST_RTO_STATUSES)
+    )
     unsettled_agg = unsettled_qs.aggregate(total_value=Sum("supplier_discounted_price"))
 
     return Response({

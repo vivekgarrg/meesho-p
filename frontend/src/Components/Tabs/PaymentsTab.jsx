@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { API, C, S, btn, Tag } from "../../App";
 import { useDateFilter } from "../../contexts/DateFilterContext";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
@@ -106,8 +107,12 @@ function ExpandedRows({ rows }) {
 // ── Main ──────────────────────────────────────────────────────────────────────
 export function PaymentsTab() {
   const { range, label: periodLabel } = useDateFilter();
+  // Deep-linkable from Overview's outcome cards (e.g. /payments?status=UNKNOWN),
+  // so clicking "Unknown" or "Shipped" there lands here pre-filtered.
+  const [searchParams] = useSearchParams();
+  const initialStatus = ALL_STATUSES.includes(searchParams.get("status")) ? searchParams.get("status") : "";
   // All filter+pagination in ONE object — changes are atomic, no stale page issues
-  const [query, setQuery] = useState({ status: "", search: "", page: 1 });
+  const [query, setQuery] = useState({ status: initialStatus, search: "", page: 1 });
 
   const [groups, setGroups] = useState([]);
   const [total, setTotal] = useState(0);
