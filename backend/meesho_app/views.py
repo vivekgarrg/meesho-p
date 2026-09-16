@@ -624,6 +624,35 @@ def _cost_setting(business):
     return setting
 
 
+def _aware_day_bounds(date_from, date_to):
+    """
+    (start, end) as aware datetimes for an inclusive [date_from, date_to] range
+    — start is midnight of date_from, end is midnight of the day *after*
+    date_to (use with __gte / __lt).
+
+    Deliberately not a `__date__gte` / `__date__lte` lookup on a DateTimeField:
+    in MySQL that compiles to CONVERT_TZ(field, 'UTC', 'Asia/Kolkata'), which
+    silently returns NULL — and so matches zero rows — on a server that hasn't
+    had its named-timezone tables loaded (mysql_tzinfo_to_sql). That's true of
+    some managed MySQL instances (seen on prod) but not necessarily a local
+    dev database, so the same upload can show a different month's numbers on
+    each without any error being raised. Aware day-bounds compare the stored
+    UTC datetime directly and never invoke CONVERT_TZ.
+    """
+    start = end = None
+    if date_from:
+        try:
+            start = timezone.make_aware(datetime.strptime(date_from, "%Y-%m-%d"))
+        except ValueError:
+            pass
+    if date_to:
+        try:
+            end = timezone.make_aware(datetime.strptime(date_to, "%Y-%m-%d") + timedelta(days=1))
+        except ValueError:
+            pass
+    return start, end
+
+
 def _affiliate_total(adj_rows):
     raw = sum(Decimal(r.final_settlement_amount or 0)
               for r in adj_rows if r.recovery_reason == "Affiliate Fee")
@@ -882,12 +911,22 @@ def available_months(request, business_id):
     business = get_authorized_business(request, business_id)
     dates = list(Order.objects.filter(business=business).dates("order_date", "month", order="DESC"))
     if not dates:
-        dates = list(
+        # Not .dates() on this DateTimeField: on MySQL that truncates via
+        # CONVERT_TZ(), which returns NULL (so every row collapses to month
+        # None) on a server without named-timezone tables loaded — see
+        # _aware_day_bounds. Bucketing by localtime() in Python sidesteps it.
+        raw = (
             OrderPayment.objects
             .filter(business=business)
             .exclude(order_date=None)
-            .dates("order_date", "month", order="DESC")
+            .values_list("order_date", flat=True)
         )
+        months = {
+            (timezone.localtime(d) if timezone.is_aware(d) else d).strftime("%Y-%m")
+            for d in raw
+        }
+        return Response(sorted(months, reverse=True))
+    return Response([d.strftime("%Y-%m") for d in dates])
     return Response([d.strftime("%Y-%m") for d in dates])
 
 
@@ -1127,10 +1166,11 @@ def payment_mismatch(request, business_id):
 
     # ── Payments with no order ────────────────────────────────────────────────
     pay_qs = OrderPayment.objects.filter(business=business)
-    if date_from:
-        pay_qs = pay_qs.filter(order_date__date__gte=date_from)
-    if date_to:
-        pay_qs = pay_qs.filter(order_date__date__lte=date_to)
+    _start, _end = _aware_day_bounds(date_from, date_to)
+    if _start:
+        pay_qs = pay_qs.filter(order_date__gte=_start)
+    if _end:
+        pay_qs = pay_qs.filter(order_date__lt=_end)
 
     order_sub_nos = set(Order.objects.filter(business=business).values_list("sub_order_no", flat=True).distinct())
     orphan_pays   = pay_qs.exclude(sub_order_no__in=order_sub_nos).order_by("-order_date")
@@ -1189,10 +1229,11 @@ def return_claims_detail(request, business_id):
     RETURN_STATUSES = ["RETURN", "RETURNED", "RTO", "RTO_COMPLETE"]
 
     base_qs = OrderPayment.objects.filter(business=business)
-    if date_from:
-        base_qs = base_qs.filter(order_date__date__gte=date_from)
-    if date_to:
-        base_qs = base_qs.filter(order_date__date__lte=date_to)
+    _start, _end = _aware_day_bounds(date_from, date_to)
+    if _start:
+        base_qs = base_qs.filter(order_date__gte=_start)
+    if _end:
+        base_qs = base_qs.filter(order_date__lt=_end)
 
     # Find qualifying sub_order_nos (have a return/RTO status OR a claims row)
     qualifying_ids = (
@@ -1337,10 +1378,11 @@ def claimed_orders(request, business_id):
     RETURN_STATUSES = ["RETURN", "RETURNED", "RTO", "RTO_COMPLETE", "PREMIUM_RETURN"]
 
     base_qs = OrderPayment.objects.filter(business=business)
-    if date_from:
-        base_qs = base_qs.filter(order_date__date__gte=date_from)
-    if date_to:
-        base_qs = base_qs.filter(order_date__date__lte=date_to)
+    _start, _end = _aware_day_bounds(date_from, date_to)
+    if _start:
+        base_qs = base_qs.filter(order_date__gte=_start)
+    if _end:
+        base_qs = base_qs.filter(order_date__lt=_end)
 
     # All sub_order_nos that have at least one claims > 0 row
     claimed_qs = base_qs.filter(claims__gt=0).values_list("sub_order_no", flat=True).distinct()
@@ -1613,11 +1655,13 @@ def profit_summary(request, business_id):
         if ord_qs.exists():
             qs = qs.filter(sub_order_no__in=ord_qs.values("sub_order_no"))
         else:
-            # Fallback: filter OrderPayment.order_date directly (DateTimeField)
-            if date_from:
-                qs = qs.filter(order_date__date__gte=date_from)
-            if date_to:
-                qs = qs.filter(order_date__date__lte=date_to)
+            # Fallback: filter OrderPayment.order_date directly (DateTimeField) —
+            # via aware day-bounds, not __date, see _aware_day_bounds.
+            _start, _end = _aware_day_bounds(date_from, date_to)
+            if _start:
+                qs = qs.filter(order_date__gte=_start)
+            if _end:
+                qs = qs.filter(order_date__lt=_end)
 
     # Load pricing once (include item_price + tax_percent for tax cost calculation)
     _fp_all        = list(FinalPrice.objects.filter(business=business).only("sku_id", "final_price", "packaging_cost", "parent_id", "item_price", "tax_percent"))
@@ -2700,10 +2744,12 @@ def ads_sku_analysis(request, business_id):
         if ord_qs.exists():
             qs = qs.filter(sub_order_no__in=ord_qs.values("sub_order_no"))
         else:
-            if date_from:
-                qs = qs.filter(order_date__date__gte=date_from)
-            if date_to:
-                qs = qs.filter(order_date__date__lte=date_to)
+            # Aware day-bounds, not __date — see _aware_day_bounds.
+            _start, _end = _aware_day_bounds(date_from, date_to)
+            if _start:
+                qs = qs.filter(order_date__gte=_start)
+            if _end:
+                qs = qs.filter(order_date__lt=_end)
 
     # sub_order_nos where any row is flagged as coming through ads
     ad_sub_orders = set(qs.filter(order_source="Ad order").values_list("sub_order_no", flat=True))
