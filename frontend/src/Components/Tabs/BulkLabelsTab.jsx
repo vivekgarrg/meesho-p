@@ -10,13 +10,14 @@ import { C, API, useIsMobile } from "../../App";
 import { ParentSkuCell } from "./ParentLinkInline";
 
 /*
- * BULK LABELS
+ * BULK LABELS (shown to the user simply as "Labels")
  *
- * A separate tab from Labels, for the case the single-file Batch view
+ * A separate tab from the single-file Labels view, for the case that one
  * doesn't cover: several exported label PDFs (e.g. one per Meesho supplier
  * account) that need to become one merged, business-sorted batch instead of
  * several separate uploads. Calls its own endpoint (bulk-labels/parse/) —
- * the existing Labels tab and its endpoint are untouched by this file.
+ * the existing Labels tab and its endpoint are untouched by this file; that
+ * route just isn't linked from the sidebar any more (see navConfig.js).
  *
  * The response shape here is almost identical to the single-file endpoint's
  * (same per_business / ambiguous_skus / sku_table fields), since the backend
@@ -26,7 +27,19 @@ import { ParentSkuCell } from "./ParentLinkInline";
  * is meant to go straight to print exactly as Meesho generated each page.
  */
 
-const todayISO = () => new Date().toISOString().slice(0, 10);
+function pad2(n) { return String(n).padStart(2, "0"); }
+function toLocalISO(d) { return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; }
+
+// A "processing day" runs noon-to-noon, not midnight-to-midnight: labels
+// downloaded late at night and the rest packed the next morning before noon
+// are one night's work, so both should default to the same batch date. Only
+// once it's past noon does the default roll over to the new calendar day.
+function businessDateISO() {
+  const now = new Date();
+  if (now.getHours() < 12) now.setDate(now.getDate() - 1);
+  return toLocalISO(now);
+}
+
 
 function downloadSortedPDF(b64, label) {
   const bin = atob(b64);
@@ -74,7 +87,7 @@ export function BulkLabelsTab() {
   const fileRef = useRef(null);
 
   const [pending, setPending] = useState([]); // File[] picked, not yet uploaded
-  const [batchDate, setBatchDate] = useState(todayISO());
+  const [batchDate, setBatchDate] = useState(businessDateISO());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState(null);
@@ -248,13 +261,37 @@ export function BulkLabelsTab() {
       <Box>
         <Box sx={{ display: "flex", alignItems: "center", gap: "9px" }}>
           <UploadFileIcon sx={{ color: C.orange, fontSize: 21 }} />
-          <Typography sx={{ fontSize: 19, fontWeight: 800, color: C.gray800 }}>Bulk Labels</Typography>
+          <Typography sx={{ fontSize: 19, fontWeight: 800, color: C.gray800 }}>Labels</Typography>
         </Box>
         <Typography sx={{ fontSize: 12, color: C.gray400, mt: "3px" }}>
           Upload several labels PDFs at once (e.g. one export per Meesho account) — they're merged
           into one batch and sorted by business the same way a single upload already is.
         </Typography>
       </Box>
+
+      {/* Always-visible KPI — the numbers "Processing history" tracks in
+          detail, surfaced here so they don't need a tab click to check. */}
+      <Paper elevation={0} sx={{
+        border: `1px solid ${C.orangeBorder}`, borderRadius: "12px", p: "16px 18px",
+        bgcolor: C.orangeLight, display: "flex", alignItems: "center", gap: "24px", flexWrap: "wrap",
+      }}>
+        <Box>
+          <Typography sx={{ fontSize: 10, fontWeight: 700, color: C.orange, letterSpacing: "0.07em", textTransform: "uppercase" }}>
+            Total labels processed
+          </Typography>
+          <Typography sx={{ fontFamily: "monospace", fontWeight: 900, fontSize: 32, color: C.orange, lineHeight: 1.1 }}>
+            {historyLoading && !history ? "…" : (history?.total_labels ?? 0).toLocaleString()}
+          </Typography>
+        </Box>
+        {!!history?.courier_totals?.length && (
+          <Box sx={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+            {history.courier_totals.map((c) => (
+              <Chip key={c.courier_name} label={`${c.courier_name}: ${c.count.toLocaleString()}`} size="small"
+                sx={{ bgcolor: "#fff", color: C.gray700, fontWeight: 800, fontSize: 12.5, border: `1px solid ${C.orangeBorder}` }} />
+            ))}
+          </Box>
+        )}
+      </Paper>
 
       <input
         ref={fileRef} type="file" accept="application/pdf" multiple style={{ display: "none" }}

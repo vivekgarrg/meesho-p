@@ -17,6 +17,7 @@ export const NAV_GROUPS = [
       { path: '/sku-analysis', label: 'SKU Analysis', icon: '↗' },
       { path: '/ads-analysis', label: 'Ads Analysis', icon: '◬' },
       { path: '/estimated-profit', label: 'Estimated Profit', icon: '🧮' },
+      { path: '/flipkart-profit', label: 'Flipkart Profit', icon: '🛍️' },
       { path: '/daily-profit', label: 'Daily Profit', icon: '📅' },
       { path: '/return-analysis', label: 'Return Analysis', icon: '⤺' },
       { path: '/customer-insights', label: 'Customer Insights', icon: '👥' },
@@ -32,8 +33,10 @@ export const NAV_GROUPS = [
       { path: '/unscheduled', label: 'Unscheduled Pay', icon: '◷' },
       { path: '/unsettled', label: 'Unsettled', icon: '⚡' },
       { path: '/mismatch', label: 'Pay Mismatch', icon: '⊝' },
-      { path: '/labels', label: 'Labels', icon: '⊟' },
-      { path: '/bulk-labels', label: 'Bulk Labels', icon: '▤' },
+      // '/labels' (single-file Labels) is intentionally not listed here — the
+      // route still works if linked to directly, but Bulk Labels (now just
+      // "Labels" below) covers the same job and is the one the sidebar shows.
+      { path: '/bulk-labels', label: 'Labels', icon: '⊟' },
       { path: '/returns', label: 'Returns & Claims', icon: '⟲' },
       { path: '/claims', label: 'Claim Sheet', icon: '₹' },
       { path: '/tasks', label: 'Team Tasks', icon: '☑' },

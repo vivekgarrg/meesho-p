@@ -29,7 +29,7 @@ NAV_CATALOG = [
     {"path": "/unsettled",         "label": "Unsettled",         "group": "Operations"},
     {"path": "/mismatch",          "label": "Pay Mismatch",      "group": "Operations"},
     {"path": "/labels",            "label": "Labels",            "group": "Operations"},
-    {"path": "/bulk-labels",       "label": "Bulk Labels",       "group": "Operations"},
+    {"path": "/bulk-labels",       "label": "Labels (Bulk)",     "group": "Operations"},
     {"path": "/returns",           "label": "Returns & Claims",  "group": "Operations"},
     {"path": "/claims",            "label": "Claim Sheet",       "group": "Operations"},
     {"path": "/tasks",             "label": "Team Tasks",        "group": "Operations"},
