@@ -582,6 +582,28 @@ class LabelOrder(models.Model):
         return f"{self.order_id} | {self.courier_name} | {self.sku}"
 
 
+class LabelDayReset(models.Model):
+    """
+    Manual checkpoint for the Labels page's "today" KPI: "everything up to now
+    has been handed to the courier — start counting from zero again for the
+    rest of this business day." Doesn't touch any LabelOrder row; it only
+    moves where label_today_summary starts counting from for this
+    (business, business_date) pair, so a second pickup later the same day
+    doesn't get lumped in with one already collected.
+    """
+    business      = models.ForeignKey("accounts.Business", on_delete=models.CASCADE)
+    business_date = models.DateField(db_index=True)
+    reset_at      = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "label_day_resets"
+        unique_together = [("business", "business_date")]
+        ordering = ["-business_date"]
+
+    def __str__(self):
+        return f"{self.business_id} reset for {self.business_date} at {self.reset_at}"
+
+
 class MeeshoInventory(models.Model):
     """
     Mirrors the Meesho inventory sheet (catalog/product/variation level).

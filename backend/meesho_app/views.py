@@ -21,7 +21,7 @@ from accounts.models import Business, User
 from .permissions import get_authorized_business, accessible_businesses
 from .helpers.label_pdf import extract_all_pages
 
-from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, PurchaseBill, PurchaseItem, BlockedCustomer, InventoryAdjustment, ConsumableItem, ConsumablePurchase, ConsumableUsage, InventoryLog, MeeshoInventory, MeeshoPriceUpdate, ExpenseInvoice, ExpenseInvoiceItem, TransportCharge, PackedStockEvent, EstimatedProfitOrder, ReturnDelivery, GstTransaction, GstInvoiceDetail, ScannedOrder, ListingTemplate, ClaimTicket, WorkerTask, WalletEntry, WalletSettlement, TaskListing, PlatformRate, TaskDocument, BusinessCostSetting, Employee, EmployeePayment, BusinessOwner, Product, BulkListingBatch, ReturnVideoBatch
+from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, LabelDayReset, PurchaseBill, PurchaseItem, BlockedCustomer, InventoryAdjustment, ConsumableItem, ConsumablePurchase, ConsumableUsage, InventoryLog, MeeshoInventory, MeeshoPriceUpdate, ExpenseInvoice, ExpenseInvoiceItem, TransportCharge, PackedStockEvent, EstimatedProfitOrder, ReturnDelivery, GstTransaction, GstInvoiceDetail, ScannedOrder, ListingTemplate, ClaimTicket, WorkerTask, WalletEntry, WalletSettlement, TaskListing, PlatformRate, TaskDocument, BusinessCostSetting, Employee, EmployeePayment, BusinessOwner, Product, BulkListingBatch, ReturnVideoBatch
 from .serializers import (
     OrderPaymentSerializer, AdsCostSerializer,
     ReferralPaymentSerializer, CompensationRecoverySerializer,
@@ -5296,7 +5296,12 @@ def _process_labels_upload(request, business, pdf_bytes, upload_date_str, crop_l
                     if oid in existing_ids:
                         # uploaded_date deliberately absent: an order keeps the day
                         # it first arrived and must not move to a later batch.
-                        to_update.append(LabelOrder(order_id=oid, business=owner, **data))
+                        obj = LabelOrder(order_id=oid, business=owner, **data)
+                        # bulk_update bypasses auto_now, so it has to be set here —
+                        # otherwise a re-processed label never looks "touched" to
+                        # anything keyed off updated_at (see label_today_reset).
+                        obj.updated_at = timezone.now()
+                        to_update.append(obj)
                     else:
                         to_create.append(LabelOrder(
                             order_id=oid, business=owner,
@@ -5313,7 +5318,7 @@ def _process_labels_upload(request, business, pdf_bytes, upload_date_str, crop_l
                             "customer_name", "customer_address", "customer_city",
                             "customer_state", "customer_pincode", "courier_name",
                             "awb_number", "payment_type", "pickup_date",
-                            "sku", "size", "qty", "color", "order_date",
+                            "sku", "size", "qty", "color", "order_date", "updated_at",
                         ],
                         batch_size=500,
                     )
@@ -5931,45 +5936,52 @@ def label_batch_history(request, business_id):
     })
 
 
-@api_view(["GET"])
-def label_today_summary(request, business_id):
+def _current_business_date():
     """
-    Labels processed for the CURRENT business day — for the Overview
-    dashboard's "how many will the courier pick up today" quick-check, not the
-    lifetime total (that's label_batch_history / the Labels page).
-
-    A business day runs noon-to-noon, not midnight-to-midnight, matching
-    BulkLabelsTab's date-picker default: before 12pm, "today" is still
-    yesterday's date, since a batch processed late at night and topped up the
-    next morning before noon is one night's work.
-
-    That gives a candidate date, not necessarily the one shown: if nothing has
-    been uploaded for it yet (no batch today after noon, or the day was simply
-    skipped), falling back to the most recent date that actually has rows —
-    however many separate batches make it up — means the card keeps showing
-    yesterday's real total instead of dropping to a misleading 0 the moment
-    the clock crosses into a new business day with nothing in it yet.
+    Noon-to-noon "business day", not midnight-to-midnight: before 12pm,
+    "today" is still yesterday's date, since a batch processed late at night
+    and topped up the next morning before noon is one night's work. Shared by
+    label_today_summary / label_today_reset and BulkLabelsTab's date-picker
+    default (see businessDateISO() there) so both sides agree on which date
+    "today" means at any given moment.
     """
-    business = get_authorized_business(request, business_id)
     now = timezone.localtime()
-    business_date = now.date() if now.hour >= 12 else now.date() - timedelta(days=1)
+    return now.date() if now.hour >= 12 else now.date() - timedelta(days=1)
 
-    target_date = (
-        LabelOrder.objects
-        .filter(business=business, uploaded_date__lte=business_date)
-        .aggregate(d=Max("uploaded_date"))["d"]
-    )
-    if target_date is None:
-        return Response({"business_date": business_date.isoformat(), "total": 0, "total_items": 0, "couriers": []})
 
-    qs = LabelOrder.objects.filter(business=business, uploaded_date=target_date)
+def _compute_label_today_summary(business, business_date):
+    """
+    Labels processed for `business_date`, honouring a manual reset checkpoint
+    if one was set for that date (see label_today_reset) — in that case only
+    rows touched since the reset count, and 0 is a real answer, not "nothing
+    happened yet, fall back". Without a reset, falls back to the most recent
+    date at or before `business_date` that actually has rows — however many
+    separate batches make it up — so the KPI doesn't drop to a misleading 0
+    the moment the clock crosses into a new business day with nothing in it.
+    """
+    reset = LabelDayReset.objects.filter(business=business, business_date=business_date).first()
+    if reset:
+        target_date = business_date
+        qs = LabelOrder.objects.filter(
+            business=business, uploaded_date=business_date, updated_at__gte=reset.reset_at,
+        )
+    else:
+        target_date = (
+            LabelOrder.objects
+            .filter(business=business, uploaded_date__lte=business_date)
+            .aggregate(d=Max("uploaded_date"))["d"]
+        )
+        if target_date is None:
+            return {"business_date": business_date.isoformat(), "total": 0, "total_items": 0, "couriers": [], "reset_at": None}
+        qs = LabelOrder.objects.filter(business=business, uploaded_date=target_date)
+
     courier_rows = list(
         qs.values("courier_name")
         .annotate(count=Count("order_id"), total_items=Sum("qty"))
         .order_by("-count")
     )
 
-    return Response({
+    return {
         "business_date": target_date.isoformat(),
         "total":         qs.count(),
         "total_items":   qs.aggregate(v=Sum("qty"))["v"] or 0,
@@ -5981,7 +5993,36 @@ def label_today_summary(request, business_id):
             }
             for r in courier_rows
         ],
-    })
+        "reset_at": reset.reset_at.isoformat() if reset else None,
+    }
+
+
+@api_view(["GET"])
+def label_today_summary(request, business_id):
+    """
+    Labels processed for the CURRENT business day — for the Overview
+    dashboard's "how many will the courier pick up today" quick-check, not the
+    lifetime total (that's label_batch_history / the Labels page). See
+    _current_business_date / _compute_label_today_summary for the rules.
+    """
+    business = get_authorized_business(request, business_id)
+    return Response(_compute_label_today_summary(business, _current_business_date()))
+
+
+@api_view(["POST"])
+def label_today_reset(request, business_id):
+    """
+    Manual checkpoint: "everything processed so far today has been handed to
+    the courier — start counting from zero again for the rest of this
+    business day." Doesn't touch any LabelOrder row, just records when the
+    reset happened for today's business date; label_today_summary then only
+    counts rows saved/updated after that moment. Returns the (now fresh)
+    summary so the caller can update its display immediately.
+    """
+    business = get_authorized_business(request, business_id)
+    business_date = _current_business_date()
+    LabelDayReset.objects.update_or_create(business=business, business_date=business_date)
+    return Response(_compute_label_today_summary(business, business_date))
 
 
 @api_view(["GET"])
