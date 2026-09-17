@@ -1,13 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  Alert, Box, Button, Collapse, LinearProgress, Paper, Table, TableBody, TableCell,
-  TableHead, TableRow, TextField, Tooltip, Typography, Chip, IconButton,
+  Alert, Box, Button, LinearProgress, Paper, Table, TableBody, TableCell,
+  TableHead, TableRow, TextField, Tooltip, Typography, Chip, IconButton, Tabs, Tab,
 } from "@mui/material";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
 import DownloadIcon from "@mui/icons-material/Download";
 import DeleteIcon from "@mui/icons-material/Delete";
-import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
-import KeyboardArrowUpIcon from "@mui/icons-material/KeyboardArrowUp";
 import { C, API, useIsMobile } from "../../App";
 import { ParentSkuCell } from "./ParentLinkInline";
 
@@ -58,31 +56,6 @@ async function extractAndDownload(pdfB64, pages, filename) {
   downloadSortedPDF(data.pdf_b64, filename);
 }
 
-function Panel({ title, count, hint, defaultOpen = false, right, children }) {
-  const [open, setOpen] = useState(defaultOpen);
-  return (
-    <Paper elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: "12px", overflow: "hidden" }}>
-      <Box onClick={() => setOpen((o) => !o)}
-        sx={{ px: "16px", py: "12px", display: "flex", alignItems: "center", gap: "10px",
-              cursor: "pointer", userSelect: "none", flexWrap: "wrap",
-              "&:hover": { bgcolor: C.gray50 } }}>
-        {open ? <KeyboardArrowUpIcon sx={{ fontSize: 18, color: C.gray400 }} />
-              : <KeyboardArrowDownIcon sx={{ fontSize: 18, color: C.gray400 }} />}
-        <Typography sx={{ fontSize: 13, fontWeight: 700, color: C.gray800 }}>{title}</Typography>
-        {count != null && (
-          <Chip label={count} size="small"
-            sx={{ height: 19, fontSize: 11, fontWeight: 700, bgcolor: C.gray100, color: C.gray600 }} />
-        )}
-        {hint && <Typography sx={{ fontSize: 11, color: C.gray400 }}>{hint}</Typography>}
-        {right && <Box sx={{ ml: "auto" }} onClick={(e) => e.stopPropagation()}>{right}</Box>}
-      </Box>
-      <Collapse in={open} unmountOnExit>
-        <Box sx={{ borderTop: `1px solid ${C.gray100}` }}>{children}</Box>
-      </Collapse>
-    </Paper>
-  );
-}
-
 function Stat({ label, value, tone = C.gray800 }) {
   return (
     <Box sx={{ minWidth: 0 }}>
@@ -108,6 +81,10 @@ export function BulkLabelsTab() {
   const [extracting, setExtracting] = useState(null); // key of the group/row currently downloading
   const [extractError, setExtractError] = useState("");
   const [awbSearch, setAwbSearch] = useState("");
+  // Which section of the results is showing — replaces the old stacked-panel
+  // layout so a large batch's SKU table, courier table and full label list
+  // don't all have to render (and scroll) at once.
+  const [activeTab, setActiveTab] = useState("overview");
   // Persisted "how many orders on which date, via which courier" record —
   // computed live from every LabelOrder saved so far (see label_batch_history),
   // not just the batch currently on screen, so it survives across sessions.
@@ -163,14 +140,6 @@ export function BulkLabelsTab() {
   const rawSkuTable = result?.sku_table || [];
   const pageDetails = result?.page_details || [];
   const labels = result?.total_labels ?? 0;
-
-  // This batch's own courier split, straight from page_details — a live view
-  // of "today's" run, separate from the persisted day-by-day history below.
-  const courierBreakdown = useMemo(() => {
-    const m = {};
-    pageDetails.forEach((pd) => { const c = pd.courier || "Unknown"; m[c] = (m[c] || 0) + 1; });
-    return Object.entries(m).sort((a, b) => b[1] - a[1]);
-  }, [pageDetails]);
 
   // A SKU linked from inside this view (see onParentAdded) overrides what the
   // upload itself found, the same way LabelsTab applies parentOverride.
@@ -240,6 +209,33 @@ export function BulkLabelsTab() {
     }
   };
 
+  // Same idea as skuGroups, grouped by delivery partner instead of product —
+  // backs both the "By Delivery Partner" tab and its per-courier download.
+  const courierGroups = useMemo(() => {
+    const m = {};
+    (orderedDetails.length ? orderedDetails : pageDetails).forEach((pd) => {
+      const courier = pd.courier || "Unknown";
+      (m[courier] = m[courier] || { courier, count: 0, units: 0 });
+      m[courier].count += 1;
+      m[courier].units += pd.qty || 1;
+    });
+    return Object.values(m).sort((a, b) => b.count - a.count);
+  }, [orderedDetails, pageDetails]);
+
+  const downloadCourier = async (courierName) => {
+    const key = `courier-${courierName}`;
+    setExtractError(""); setExtracting(key);
+    try {
+      const pages = orderedDetails.filter((pd) => (pd.courier || "Unknown") === courierName).map((pd) => pd.sortedIndex);
+      if (!pages.length) throw new Error("No pages found for this delivery partner.");
+      await extractAndDownload(result.sorted_pdf_b64, pages, `${courierName}_${batchDate}`);
+    } catch (e) {
+      setExtractError(e.message || "Could not download that delivery partner's labels.");
+    } finally {
+      setExtracting(null);
+    }
+  };
+
   const filteredDetails = useMemo(() => {
     const q = awbSearch.trim().toLowerCase();
     const rows = orderedDetails.length ? orderedDetails : pageDetails.map((pd, i) => ({ ...pd, sortedIndex: i }));
@@ -259,57 +255,6 @@ export function BulkLabelsTab() {
           into one batch and sorted by business the same way a single upload already is.
         </Typography>
       </Box>
-
-      <Panel
-        title="Processing history"
-        count={history?.total_labels ?? undefined}
-        hint="every order processed so far, by date and delivery partner"
-        defaultOpen
-      >
-        <Box sx={{ p: "12px 16px" }}>
-          {historyLoading && !history ? (
-            <Typography sx={{ fontSize: 12, color: C.gray400 }}>Loading…</Typography>
-          ) : !history?.days?.length ? (
-            <Typography sx={{ fontSize: 12, color: C.gray400 }}>No labels processed yet.</Typography>
-          ) : (
-            <>
-              <Box sx={{ display: "flex", gap: "8px", flexWrap: "wrap", mb: "14px" }}>
-                {history.courier_totals.map((c) => (
-                  <Chip key={c.courier_name} label={`${c.courier_name}: ${c.count}`} size="small"
-                    sx={{ bgcolor: C.gray100, color: C.gray700, fontWeight: 700, fontSize: 12 }} />
-                ))}
-              </Box>
-              <Box sx={{ overflowX: "auto", maxHeight: 360 }}>
-                <Table size="small" stickyHeader>
-                  <TableHead>
-                    <TableRow>
-                      <TableCell>Date</TableCell>
-                      <TableCell align="right">Orders processed</TableCell>
-                      <TableCell>By delivery partner</TableCell>
-                    </TableRow>
-                  </TableHead>
-                  <TableBody>
-                    {history.days.map((d) => (
-                      <TableRow key={d.date}>
-                        <TableCell sx={{ fontFamily: "monospace", whiteSpace: "nowrap" }}>{d.date}</TableCell>
-                        <TableCell align="right" sx={{ fontFamily: "monospace", fontWeight: 800 }}>{d.total}</TableCell>
-                        <TableCell>
-                          <Box sx={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
-                            {d.couriers.map((c) => (
-                              <Chip key={c.courier_name} label={`${c.courier_name} · ${c.count}`} size="small"
-                                sx={{ bgcolor: C.orangeLight, color: C.orange, fontWeight: 700, fontSize: 11, height: 22 }} />
-                            ))}
-                          </Box>
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </Box>
-            </>
-          )}
-        </Box>
-      </Panel>
 
       <input
         ref={fileRef} type="file" accept="application/pdf" multiple style={{ display: "none" }}
@@ -380,84 +325,77 @@ export function BulkLabelsTab() {
         </Paper>
       )}
 
-      {result && !loading && (
-        <>
-          {Object.keys(result.per_business || {}).length > 1 && (
-            <Alert severity="info" sx={{ borderRadius: "10px" }}>
-              <Typography sx={{ fontSize: 13, fontWeight: 800, mb: "4px" }}>
-                This batch covers {Object.keys(result.per_business).length} businesses
-              </Typography>
-              {Object.entries(result.per_business).map(([name, n]) => (
-                <Typography key={name} sx={{ fontSize: 12.5 }}>
-                  <strong>{name}</strong> — {n} label{n === 1 ? "" : "s"}
-                </Typography>
-              ))}
-              <Typography sx={{ fontSize: 11.5, mt: "5px", opacity: 0.85 }}>
-                Each label was filed against the business whose catalogue prices its SKU.
-              </Typography>
-            </Alert>
+      {!loading && (
+        <Paper elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: "12px", overflow: "hidden" }}>
+          <Tabs value={activeTab} onChange={(_, v) => setActiveTab(v)} variant="scrollable" scrollButtons="auto"
+            sx={{ borderBottom: `1px solid ${C.gray100}`, minHeight: 42,
+                  "& .MuiTab-root": { textTransform: "none", fontWeight: 700, fontSize: 12.5, minHeight: 42, py: "8px" } }}>
+            <Tab value="overview" label="Overview" />
+            <Tab value="sku" label={`By SKU${skuGroups.length ? ` (${skuGroups.length})` : ""}`} />
+            <Tab value="courier" label={`By Delivery Partner${courierGroups.length ? ` (${courierGroups.length})` : ""}`} />
+            <Tab value="all" label={`All Labels${pageDetails.length ? ` (${pageDetails.length})` : ""}`} />
+            <Tab value="history" label="Processing History" />
+          </Tabs>
+
+          {/* ── Overview ─────────────────────────────────────────────────── */}
+          {activeTab === "overview" && (
+            <Box sx={{ p: "16px 18px", display: "flex", flexDirection: "column", gap: "14px" }}>
+              {!result ? (
+                <Typography sx={{ fontSize: 12, color: C.gray400 }}>Upload a batch to see its stats here.</Typography>
+              ) : (
+                <>
+                  {Object.keys(result.per_business || {}).length > 1 && (
+                    <Alert severity="info" sx={{ borderRadius: "10px" }}>
+                      <Typography sx={{ fontSize: 13, fontWeight: 800, mb: "4px" }}>
+                        This batch covers {Object.keys(result.per_business).length} businesses
+                      </Typography>
+                      {Object.entries(result.per_business).map(([name, n]) => (
+                        <Typography key={name} sx={{ fontSize: 12.5 }}>
+                          <strong>{name}</strong> — {n} label{n === 1 ? "" : "s"}
+                        </Typography>
+                      ))}
+                      <Typography sx={{ fontSize: 11.5, mt: "5px", opacity: 0.85 }}>
+                        Each label was filed against the business whose catalogue prices its SKU.
+                      </Typography>
+                    </Alert>
+                  )}
+
+                  {(result.ambiguous_skus || []).length > 0 && (
+                    <Alert severity="warning" sx={{ borderRadius: "10px" }}>
+                      <Typography sx={{ fontSize: 13, fontWeight: 800, mb: "4px" }}>
+                        {result.ambiguous_skus.length} SKU{result.ambiguous_skus.length > 1 ? "s are" : " is"} priced
+                        by more than one business
+                      </Typography>
+                      {result.ambiguous_skus.map((a) => (
+                        <Typography key={a.sku} sx={{ fontSize: 12.5, fontFamily: "monospace" }}>
+                          {a.sku} — {a.businesses.join(" · ")}
+                        </Typography>
+                      ))}
+                      <Typography sx={{ fontSize: 11.5, mt: "5px", opacity: 0.85 }}>
+                        There's no way to tell which one these belong to, so they were filed under the business
+                        you have selected.
+                      </Typography>
+                    </Alert>
+                  )}
+
+                  <Box sx={{ display: "flex", gap: "30px", flexWrap: "wrap" }}>
+                    <Stat label="Files merged" value={result.files_merged ?? "—"} tone={C.orange} />
+                    <Stat label="Pages" value={result.total_pages ?? 0} />
+                    <Stat label="Labels" value={labels} />
+                    <Stat label="Products" value={result.total_unique_skus ?? skuTable.length} />
+                    <Stat label="Units" value={units} />
+                    {multiQty > 0 && <Stat label="Multi-qty" value={multiQty} tone={C.amber} />}
+                    <Stat label="Saved / Updated" value={`${result.db_saved ?? 0} / ${result.db_updated ?? 0}`} />
+                  </Box>
+
+                  {extractError && <Alert severity="error" sx={{ borderRadius: "10px" }} onClose={() => setExtractError("")}>{extractError}</Alert>}
+                </>
+              )}
+            </Box>
           )}
 
-          {(result.ambiguous_skus || []).length > 0 && (
-            <Alert severity="warning" sx={{ borderRadius: "10px" }}>
-              <Typography sx={{ fontSize: 13, fontWeight: 800, mb: "4px" }}>
-                {result.ambiguous_skus.length} SKU{result.ambiguous_skus.length > 1 ? "s are" : " is"} priced
-                by more than one business
-              </Typography>
-              {result.ambiguous_skus.map((a) => (
-                <Typography key={a.sku} sx={{ fontSize: 12.5, fontFamily: "monospace" }}>
-                  {a.sku} — {a.businesses.join(" · ")}
-                </Typography>
-              ))}
-              <Typography sx={{ fontSize: 11.5, mt: "5px", opacity: 0.85 }}>
-                There's no way to tell which one these belong to, so they were filed under the business
-                you have selected.
-              </Typography>
-            </Alert>
-          )}
-
-          <Paper elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: "12px", p: "14px 18px" }}>
-            <Box sx={{ display: "flex", gap: "30px", flexWrap: "wrap" }}>
-              <Stat label="Files merged" value={result.files_merged ?? "—"} tone={C.orange} />
-              <Stat label="Pages" value={result.total_pages ?? 0} />
-              <Stat label="Labels" value={labels} />
-              <Stat label="Products" value={result.total_unique_skus ?? skuTable.length} />
-              <Stat label="Units" value={units} />
-              {multiQty > 0 && <Stat label="Multi-qty" value={multiQty} tone={C.amber} />}
-              <Stat label="Saved / Updated" value={`${result.db_saved ?? 0} / ${result.db_updated ?? 0}`} />
-            </Box>
-          </Paper>
-
-          {extractError && <Alert severity="error" sx={{ borderRadius: "10px" }} onClose={() => setExtractError("")}>{extractError}</Alert>}
-
-          <Panel title="Courier breakdown for this batch" count={courierBreakdown.length}>
-            <Box sx={{ overflowX: "auto" }}>
-              <Table size="small">
-                <TableHead>
-                  <TableRow>
-                    <TableCell>Delivery partner</TableCell>
-                    <TableCell align="right">Labels</TableCell>
-                    <TableCell align="right">% of batch</TableCell>
-                  </TableRow>
-                </TableHead>
-                <TableBody>
-                  {courierBreakdown.length === 0 ? (
-                    <TableRow><TableCell colSpan={3} align="center" sx={{ color: C.gray400, py: 3 }}>No courier data found.</TableCell></TableRow>
-                  ) : courierBreakdown.map(([courier, count]) => (
-                    <TableRow key={courier}>
-                      <TableCell>{courier}</TableCell>
-                      <TableCell align="right" sx={{ fontFamily: "monospace", fontWeight: 700 }}>{count}</TableCell>
-                      <TableCell align="right" sx={{ fontFamily: "monospace", color: C.gray400 }}>
-                        {pageDetails.length ? ((count / pageDetails.length) * 100).toFixed(0) : 0}%
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </Box>
-          </Panel>
-
-          <Panel title="Products in this batch" count={skuGroups.length} hint="grouped by parent — download just this group's labels">
+          {/* ── By SKU ───────────────────────────────────────────────────── */}
+          {activeTab === "sku" && (
             <Box sx={{ overflowX: "auto" }}>
               <Table size="small">
                 <TableHead>
@@ -471,7 +409,7 @@ export function BulkLabelsTab() {
                 </TableHead>
                 <TableBody>
                   {skuGroups.length === 0 ? (
-                    <TableRow><TableCell colSpan={5} align="center" sx={{ color: C.gray400, py: 3 }}>No products found.</TableCell></TableRow>
+                    <TableRow><TableCell colSpan={5} align="center" sx={{ color: C.gray400, py: 3 }}>Upload a batch to see products here.</TableCell></TableRow>
                   ) : skuGroups.map((g) => {
                     const firstSku = g.children[0]?.sku;
                     const key = g.parent || firstSku;
@@ -519,54 +457,39 @@ export function BulkLabelsTab() {
                 </TableBody>
               </Table>
             </Box>
-          </Panel>
+          )}
 
-          <Paper elevation={0} sx={{ border: `1px solid ${C.border}`, borderRadius: "12px", overflow: "hidden" }}>
-            <Box sx={{ p: "12px 16px", borderBottom: `1px solid ${C.gray100}`, display: "flex", alignItems: "center",
-                       gap: "12px", flexWrap: "wrap" }}>
-              <Typography sx={{ fontWeight: 700, fontSize: 13, color: C.gray800 }}>
-                Every label in this batch ({filteredDetails.length}{filteredDetails.length !== pageDetails.length ? ` of ${pageDetails.length}` : ""})
-              </Typography>
-              <TextField size="small" placeholder="Search AWB or order ID" value={awbSearch}
-                onChange={(e) => setAwbSearch(e.target.value)}
-                sx={{ ml: "auto", minWidth: 220, "& input": { fontSize: 13, py: "7px" } }} />
-            </Box>
-            <Box sx={{ overflowX: "auto", maxHeight: 420 }}>
-              <Table size="small" stickyHeader>
+          {/* ── By Delivery Partner ──────────────────────────────────────── */}
+          {activeTab === "courier" && (
+            <Box sx={{ overflowX: "auto" }}>
+              <Table size="small">
                 <TableHead>
                   <TableRow>
-                    <TableCell>Page</TableCell>
-                    <TableCell>SKU</TableCell>
-                    <TableCell align="right">Qty</TableCell>
-                    <TableCell>Order ID</TableCell>
-                    <TableCell>AWB</TableCell>
-                    <TableCell>Courier</TableCell>
-                    <TableCell>Business</TableCell>
+                    <TableCell>Delivery partner</TableCell>
+                    <TableCell align="right">Labels</TableCell>
+                    <TableCell align="right">Units</TableCell>
+                    <TableCell align="right">% of batch</TableCell>
                     <TableCell align="right">Download</TableCell>
                   </TableRow>
                 </TableHead>
                 <TableBody>
-                  {filteredDetails.length === 0 ? (
-                    <TableRow><TableCell colSpan={8} align="center" sx={{ color: C.gray400, py: 4 }}>No labels found.</TableCell></TableRow>
-                  ) : filteredDetails.map((pd) => {
-                    const rowKey = `awb-${pd.sortedIndex}`;
+                  {courierGroups.length === 0 ? (
+                    <TableRow><TableCell colSpan={5} align="center" sx={{ color: C.gray400, py: 3 }}>Upload a batch to see delivery partners here.</TableCell></TableRow>
+                  ) : courierGroups.map((c) => {
+                    const key = `courier-${c.courier}`;
                     return (
-                      <TableRow key={`${pd.page}-${pd.sortedIndex}`}>
-                        <TableCell>{pd.page}</TableCell>
-                        <TableCell sx={{ fontFamily: "monospace" }}>{pd.sku || "—"}</TableCell>
-                        <TableCell align="right" sx={{ fontFamily: "monospace", fontWeight: (pd.qty || 1) > 1 ? 800 : 400,
-                          color: (pd.qty || 1) > 1 ? C.amber : C.gray700 }}>
-                          {pd.qty || 1}
+                      <TableRow key={c.courier}>
+                        <TableCell sx={{ fontWeight: 700 }}>{c.courier}</TableCell>
+                        <TableCell align="right" sx={{ fontFamily: "monospace", fontWeight: 700 }}>{c.count}</TableCell>
+                        <TableCell align="right" sx={{ fontFamily: "monospace" }}>{c.units}</TableCell>
+                        <TableCell align="right" sx={{ fontFamily: "monospace", color: C.gray400 }}>
+                          {pageDetails.length ? ((c.count / pageDetails.length) * 100).toFixed(0) : 0}%
                         </TableCell>
-                        <TableCell>{pd.order_id || "—"}</TableCell>
-                        <TableCell sx={{ fontFamily: "monospace" }}>{pd.awb || "—"}</TableCell>
-                        <TableCell>{pd.courier || "—"}</TableCell>
-                        <TableCell>{pd.business_name || ""}</TableCell>
                         <TableCell align="right">
-                          <Tooltip title={canDownloadSubsets ? "Download just this one label" : "Not available for this batch"}>
+                          <Tooltip title={canDownloadSubsets ? "Download just this delivery partner's labels, sorted" : "Not available for this batch"}>
                             <span>
-                              <IconButton size="small" disabled={!canDownloadSubsets || extracting === rowKey}
-                                onClick={() => downloadSingle(pd)}>
+                              <IconButton size="small" disabled={!canDownloadSubsets || extracting === key}
+                                onClick={() => downloadCourier(c.courier)}>
                                 <DownloadIcon fontSize="inherit" />
                               </IconButton>
                             </span>
@@ -578,9 +501,122 @@ export function BulkLabelsTab() {
                 </TableBody>
               </Table>
             </Box>
-          </Paper>
-        </>
+          )}
+
+          {/* ── All Labels ───────────────────────────────────────────────── */}
+          {activeTab === "all" && (
+            <Box>
+              <Box sx={{ p: "12px 16px", borderBottom: `1px solid ${C.gray100}`, display: "flex", alignItems: "center",
+                         gap: "12px", flexWrap: "wrap" }}>
+                <Typography sx={{ fontWeight: 700, fontSize: 13, color: C.gray800 }}>
+                  {filteredDetails.length}{filteredDetails.length !== pageDetails.length ? ` of ${pageDetails.length}` : ""} label{filteredDetails.length === 1 ? "" : "s"}
+                </Typography>
+                <TextField size="small" placeholder="Search AWB or order ID" value={awbSearch}
+                  onChange={(e) => setAwbSearch(e.target.value)}
+                  sx={{ ml: "auto", minWidth: 220, "& input": { fontSize: 13, py: "7px" } }} />
+              </Box>
+              <Box sx={{ overflowX: "auto", maxHeight: 480 }}>
+                <Table size="small" stickyHeader>
+                  <TableHead>
+                    <TableRow>
+                      <TableCell>Page</TableCell>
+                      <TableCell>SKU</TableCell>
+                      <TableCell align="right">Qty</TableCell>
+                      <TableCell>Order ID</TableCell>
+                      <TableCell>AWB</TableCell>
+                      <TableCell>Courier</TableCell>
+                      <TableCell>Business</TableCell>
+                      <TableCell align="right">Download</TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {filteredDetails.length === 0 ? (
+                      <TableRow><TableCell colSpan={8} align="center" sx={{ color: C.gray400, py: 4 }}>No labels found.</TableCell></TableRow>
+                    ) : filteredDetails.map((pd) => {
+                      const rowKey = `awb-${pd.sortedIndex}`;
+                      return (
+                        <TableRow key={`${pd.page}-${pd.sortedIndex}`}>
+                          <TableCell>{pd.page}</TableCell>
+                          <TableCell sx={{ fontFamily: "monospace" }}>{pd.sku || "—"}</TableCell>
+                          <TableCell align="right" sx={{ fontFamily: "monospace", fontWeight: (pd.qty || 1) > 1 ? 800 : 400,
+                            color: (pd.qty || 1) > 1 ? C.amber : C.gray700 }}>
+                            {pd.qty || 1}
+                          </TableCell>
+                          <TableCell>{pd.order_id || "—"}</TableCell>
+                          <TableCell sx={{ fontFamily: "monospace" }}>{pd.awb || "—"}</TableCell>
+                          <TableCell>{pd.courier || "—"}</TableCell>
+                          <TableCell>{pd.business_name || ""}</TableCell>
+                          <TableCell align="right">
+                            <Tooltip title={canDownloadSubsets ? "Download just this one label" : "Not available for this batch"}>
+                              <span>
+                                <IconButton size="small" disabled={!canDownloadSubsets || extracting === rowKey}
+                                  onClick={() => downloadSingle(pd)}>
+                                  <DownloadIcon fontSize="inherit" />
+                                </IconButton>
+                              </span>
+                            </Tooltip>
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
+                  </TableBody>
+                </Table>
+              </Box>
+            </Box>
+          )}
+
+          {/* ── Processing History ───────────────────────────────────────── */}
+          {activeTab === "history" && (
+            <Box sx={{ p: "12px 16px" }}>
+              {historyLoading && !history ? (
+                <Typography sx={{ fontSize: 12, color: C.gray400 }}>Loading…</Typography>
+              ) : !history?.days?.length ? (
+                <Typography sx={{ fontSize: 12, color: C.gray400 }}>No labels processed yet.</Typography>
+              ) : (
+                <>
+                  <Typography sx={{ fontSize: 11, color: C.gray400, mb: "10px" }}>
+                    Every order processed so far, by date and delivery partner — {history.total_labels} labels total.
+                  </Typography>
+                  <Box sx={{ display: "flex", gap: "8px", flexWrap: "wrap", mb: "14px" }}>
+                    {history.courier_totals.map((c) => (
+                      <Chip key={c.courier_name} label={`${c.courier_name}: ${c.count}`} size="small"
+                        sx={{ bgcolor: C.gray100, color: C.gray700, fontWeight: 700, fontSize: 12 }} />
+                    ))}
+                  </Box>
+                  <Box sx={{ overflowX: "auto", maxHeight: 420 }}>
+                    <Table size="small" stickyHeader>
+                      <TableHead>
+                        <TableRow>
+                          <TableCell>Date</TableCell>
+                          <TableCell align="right">Orders processed</TableCell>
+                          <TableCell>By delivery partner</TableCell>
+                        </TableRow>
+                      </TableHead>
+                      <TableBody>
+                        {history.days.map((d) => (
+                          <TableRow key={d.date}>
+                            <TableCell sx={{ fontFamily: "monospace", whiteSpace: "nowrap" }}>{d.date}</TableCell>
+                            <TableCell align="right" sx={{ fontFamily: "monospace", fontWeight: 800 }}>{d.total}</TableCell>
+                            <TableCell>
+                              <Box sx={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
+                                {d.couriers.map((c) => (
+                                  <Chip key={c.courier_name} label={`${c.courier_name} · ${c.count}`} size="small"
+                                    sx={{ bgcolor: C.orangeLight, color: C.orange, fontWeight: 700, fontSize: 11, height: 22 }} />
+                                ))}
+                              </Box>
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </Box>
+                </>
+              )}
+            </Box>
+          )}
+        </Paper>
       )}
     </Box>
   );
 }
+
