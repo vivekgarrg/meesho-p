@@ -5880,6 +5880,58 @@ def label_couriers_summary(request, business_id):
 
 
 @api_view(["GET"])
+def label_batch_history(request, business_id):
+    """
+    Day-by-day record of labels processed, broken down by delivery partner —
+    "on this date we processed N orders, this many via each courier". Computed
+    live from LabelOrder (uploaded_date + courier_name are already stored and
+    indexed per label), not a separate snapshot table, so it can never drift
+    from what's actually on file — re-processing a date's labels just updates
+    the same rows and the history reflects that automatically.
+
+    Query params: date_from, date_to (both optional; unfiltered = full history).
+    """
+    business = get_authorized_business(request, business_id)
+    date_from = request.GET.get("date_from", "")
+    date_to   = request.GET.get("date_to", "")
+
+    qs = LabelOrder.objects.filter(business=business)
+    if date_from:
+        qs = qs.filter(uploaded_date__gte=date_from)
+    if date_to:
+        qs = qs.filter(uploaded_date__lte=date_to)
+
+    rows = (
+        qs.values("uploaded_date", "courier_name")
+        .annotate(count=Count("order_id"), total_items=Sum("qty"))
+    )
+
+    days: dict = {}
+    courier_totals: dict = {}
+    for r in rows:
+        d = r["uploaded_date"].isoformat() if r["uploaded_date"] else "unknown"
+        courier = r["courier_name"] or "Unknown"
+        count = r["count"]
+        day = days.setdefault(d, {"date": d, "total": 0, "total_items": 0, "couriers": []})
+        day["couriers"].append({"courier_name": courier, "count": count, "total_items": r["total_items"] or 0})
+        day["total"] += count
+        day["total_items"] += r["total_items"] or 0
+        courier_totals[courier] = courier_totals.get(courier, 0) + count
+
+    for day in days.values():
+        day["couriers"].sort(key=lambda c: -c["count"])
+
+    return Response({
+        "days": sorted(days.values(), key=lambda d: d["date"], reverse=True),
+        "courier_totals": sorted(
+            [{"courier_name": c, "count": n} for c, n in courier_totals.items()],
+            key=lambda x: -x["count"],
+        ),
+        "total_labels": sum(courier_totals.values()),
+    })
+
+
+@api_view(["GET"])
 def label_duplicate_customers(request, business_id):
     """
     Find repeat customers by ADDRESS (city + state + pincode) — NOT by name.

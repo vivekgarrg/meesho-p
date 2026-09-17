@@ -51,6 +51,7 @@ urlpatterns = [
     path("labels/parse/",            views.upload_labels_pdf,         name="upload_labels_pdf"),
     path("bulk-labels/parse/",       views.upload_bulk_labels_pdf,    name="upload_bulk_labels_pdf"),
     path("bulk-labels/extract/",     views.extract_label_pages,       name="extract_label_pages"),
+    path("bulk-labels/history/",     views.label_batch_history,       name="label_batch_history"),
     path("labels/orders/",           views.label_orders_list,         name="label_orders_list"),
     path("labels/summary/",          views.label_couriers_summary,    name="label_couriers_summary"),
     path("labels/duplicates/",       views.label_duplicate_customers, name="label_duplicate_customers"),

@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert, Box, Button, Collapse, LinearProgress, Paper, Table, TableBody, TableCell,
   TableHead, TableRow, TextField, Tooltip, Typography, Chip, IconButton,
@@ -108,6 +108,11 @@ export function BulkLabelsTab() {
   const [extracting, setExtracting] = useState(null); // key of the group/row currently downloading
   const [extractError, setExtractError] = useState("");
   const [awbSearch, setAwbSearch] = useState("");
+  // Persisted "how many orders on which date, via which courier" record —
+  // computed live from every LabelOrder saved so far (see label_batch_history),
+  // not just the batch currently on screen, so it survives across sessions.
+  const [history, setHistory] = useState(null);
+  const [historyLoading, setHistoryLoading] = useState(true);
   // Parents linked from inside this view, same pattern as LabelsTab — keyed
   // by sku so a just-linked SKU regroups immediately without a re-upload.
   const [parentOverride, setParentOverride] = useState({});
@@ -119,6 +124,19 @@ export function BulkLabelsTab() {
     if (picked.length) setPending((prev) => [...prev, ...picked]);
   };
   const removePending = (i) => setPending((prev) => prev.filter((_, j) => j !== i));
+
+  const loadHistory = useCallback(async () => {
+    setHistoryLoading(true);
+    try {
+      const res = await fetch(`${API}/bulk-labels/history/`);
+      if (res.ok) setHistory(await res.json());
+    } catch {
+      // silent — the current-batch view still works without history
+    }
+    setHistoryLoading(false);
+  }, []);
+
+  useEffect(() => { loadHistory(); }, [loadHistory]);
 
   const upload = async () => {
     if (!pending.length) return;
@@ -134,6 +152,7 @@ export function BulkLabelsTab() {
       } else {
         setResult(data);
         setPending([]);
+        loadHistory(); // this batch just added to the persisted record
       }
     } catch {
       setError("Could not reach the server — is the backend running?");
@@ -144,6 +163,14 @@ export function BulkLabelsTab() {
   const rawSkuTable = result?.sku_table || [];
   const pageDetails = result?.page_details || [];
   const labels = result?.total_labels ?? 0;
+
+  // This batch's own courier split, straight from page_details — a live view
+  // of "today's" run, separate from the persisted day-by-day history below.
+  const courierBreakdown = useMemo(() => {
+    const m = {};
+    pageDetails.forEach((pd) => { const c = pd.courier || "Unknown"; m[c] = (m[c] || 0) + 1; });
+    return Object.entries(m).sort((a, b) => b[1] - a[1]);
+  }, [pageDetails]);
 
   // A SKU linked from inside this view (see onParentAdded) overrides what the
   // upload itself found, the same way LabelsTab applies parentOverride.
@@ -232,6 +259,57 @@ export function BulkLabelsTab() {
           into one batch and sorted by business the same way a single upload already is.
         </Typography>
       </Box>
+
+      <Panel
+        title="Processing history"
+        count={history?.total_labels ?? undefined}
+        hint="every order processed so far, by date and delivery partner"
+        defaultOpen
+      >
+        <Box sx={{ p: "12px 16px" }}>
+          {historyLoading && !history ? (
+            <Typography sx={{ fontSize: 12, color: C.gray400 }}>Loading…</Typography>
+          ) : !history?.days?.length ? (
+            <Typography sx={{ fontSize: 12, color: C.gray400 }}>No labels processed yet.</Typography>
+          ) : (
+            <>
+              <Box sx={{ display: "flex", gap: "8px", flexWrap: "wrap", mb: "14px" }}>
+                {history.courier_totals.map((c) => (
+                  <Chip key={c.courier_name} label={`${c.courier_name}: ${c.count}`} size="small"
+                    sx={{ bgcolor: C.gray100, color: C.gray700, fontWeight: 700, fontSize: 12 }} />
+                ))}
+              </Box>
+              <Box sx={{ overflowX: "auto", maxHeight: 360 }}>
+                <Table size="small" stickyHeader>
+                  <TableHead>
+                    <TableRow>
+                      <TableCell>Date</TableCell>
+                      <TableCell align="right">Orders processed</TableCell>
+                      <TableCell>By delivery partner</TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {history.days.map((d) => (
+                      <TableRow key={d.date}>
+                        <TableCell sx={{ fontFamily: "monospace", whiteSpace: "nowrap" }}>{d.date}</TableCell>
+                        <TableCell align="right" sx={{ fontFamily: "monospace", fontWeight: 800 }}>{d.total}</TableCell>
+                        <TableCell>
+                          <Box sx={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
+                            {d.couriers.map((c) => (
+                              <Chip key={c.courier_name} label={`${c.courier_name} · ${c.count}`} size="small"
+                                sx={{ bgcolor: C.orangeLight, color: C.orange, fontWeight: 700, fontSize: 11, height: 22 }} />
+                            ))}
+                          </Box>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </Box>
+            </>
+          )}
+        </Box>
+      </Panel>
 
       <input
         ref={fileRef} type="file" accept="application/pdf" multiple style={{ display: "none" }}
@@ -351,6 +429,33 @@ export function BulkLabelsTab() {
           </Paper>
 
           {extractError && <Alert severity="error" sx={{ borderRadius: "10px" }} onClose={() => setExtractError("")}>{extractError}</Alert>}
+
+          <Panel title="Courier breakdown for this batch" count={courierBreakdown.length}>
+            <Box sx={{ overflowX: "auto" }}>
+              <Table size="small">
+                <TableHead>
+                  <TableRow>
+                    <TableCell>Delivery partner</TableCell>
+                    <TableCell align="right">Labels</TableCell>
+                    <TableCell align="right">% of batch</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {courierBreakdown.length === 0 ? (
+                    <TableRow><TableCell colSpan={3} align="center" sx={{ color: C.gray400, py: 3 }}>No courier data found.</TableCell></TableRow>
+                  ) : courierBreakdown.map(([courier, count]) => (
+                    <TableRow key={courier}>
+                      <TableCell>{courier}</TableCell>
+                      <TableCell align="right" sx={{ fontFamily: "monospace", fontWeight: 700 }}>{count}</TableCell>
+                      <TableCell align="right" sx={{ fontFamily: "monospace", color: C.gray400 }}>
+                        {pageDetails.length ? ((count / pageDetails.length) * 100).toFixed(0) : 0}%
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </Box>
+          </Panel>
 
           <Panel title="Products in this batch" count={skuGroups.length} hint="grouped by parent — download just this group's labels">
             <Box sx={{ overflowX: "auto" }}>
