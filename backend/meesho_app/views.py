@@ -5934,21 +5934,35 @@ def label_batch_history(request, business_id):
 @api_view(["GET"])
 def label_today_summary(request, business_id):
     """
-    Labels processed for the CURRENT business day only — for the Overview
+    Labels processed for the CURRENT business day — for the Overview
     dashboard's "how many will the courier pick up today" quick-check, not the
     lifetime total (that's label_batch_history / the Labels page).
 
     A business day runs noon-to-noon, not midnight-to-midnight, matching
     BulkLabelsTab's date-picker default: before 12pm, "today" is still
     yesterday's date, since a batch processed late at night and topped up the
-    next morning before noon is one night's work. From noon on, it rolls to
-    the new calendar date and starts counting again from zero.
+    next morning before noon is one night's work.
+
+    That gives a candidate date, not necessarily the one shown: if nothing has
+    been uploaded for it yet (no batch today after noon, or the day was simply
+    skipped), falling back to the most recent date that actually has rows —
+    however many separate batches make it up — means the card keeps showing
+    yesterday's real total instead of dropping to a misleading 0 the moment
+    the clock crosses into a new business day with nothing in it yet.
     """
     business = get_authorized_business(request, business_id)
     now = timezone.localtime()
     business_date = now.date() if now.hour >= 12 else now.date() - timedelta(days=1)
 
-    qs = LabelOrder.objects.filter(business=business, uploaded_date=business_date)
+    target_date = (
+        LabelOrder.objects
+        .filter(business=business, uploaded_date__lte=business_date)
+        .aggregate(d=Max("uploaded_date"))["d"]
+    )
+    if target_date is None:
+        return Response({"business_date": business_date.isoformat(), "total": 0, "total_items": 0, "couriers": []})
+
+    qs = LabelOrder.objects.filter(business=business, uploaded_date=target_date)
     courier_rows = list(
         qs.values("courier_name")
         .annotate(count=Count("order_id"), total_items=Sum("qty"))
@@ -5956,7 +5970,7 @@ def label_today_summary(request, business_id):
     )
 
     return Response({
-        "business_date": business_date.isoformat(),
+        "business_date": target_date.isoformat(),
         "total":         qs.count(),
         "total_items":   qs.aggregate(v=Sum("qty"))["v"] or 0,
         "couriers": [
