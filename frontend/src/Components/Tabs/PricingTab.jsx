@@ -251,7 +251,8 @@ function ParentCard({ parent, onRefresh, notify, onLink, dragging, unlinked = []
   const [open, setOpen] = useState(false);
   const [panel, setPanel] = useState(null); // null | "history" | "link" | "create" | "edit" | "suggest"
   const [dragOver, setDragOver] = useState(false);
-  const [editForm, setEditForm] = useState({ item_price: String(parent.item_price || ""), tax_percent: String(parent.tax_percent || "0"), packaging_cost: String(parent.packaging_cost || "0") });
+  const [editForm, setEditForm] = useState({ item_price: String(parent.item_price || ""), tax_percent: String(parent.tax_percent || "0"), packaging_cost: String(parent.packaging_cost || "0"), image_url: parent.image_url || "" });
+  const [imageBroken, setImageBroken] = useState(false);
   const [renameValue, setRenameValue] = useState(parent.item_id);
   const [renameErr, setRenameErr] = useState("");
   const [renaming, setRenaming] = useState(false);
@@ -297,6 +298,10 @@ function ParentCard({ parent, onRefresh, notify, onLink, dragging, unlinked = []
   useEffect(() => {
     if (open && children === null && !detailErr) loadDetail();
   }, [open, children, detailErr, loadDetail]);
+
+  // A refresh may bring a new (or newly-working) image_url — give it another
+  // chance instead of staying stuck on the "didn't load" badge forever.
+  useEffect(() => { setImageBroken(false); }, [parent.image_url]);
 
   // Re-pull this card only — a link or unlink here shouldn't redraw the page.
   const reloadDetail = useCallback(() => {
@@ -428,7 +433,7 @@ function ParentCard({ parent, onRefresh, notify, onLink, dragging, unlinked = []
     const preview = calcFinal(editForm.item_price, editForm.tax_percent, editForm.packaging_cost);
     const r = await fetch(`${API}/parent-prices/${encodeURIComponent(parent.item_id)}/`, {
       method: "PATCH", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...editForm, final_price: preview.toFixed(2) }),
+      body: JSON.stringify({ ...editForm, image_url: editForm.image_url.trim(), final_price: preview.toFixed(2) }),
     });
     if (r.ok) { notify("ok", "Parent updated."); setPanel(null); onRefresh(); }
     else notify("err", "Update failed.");
@@ -485,6 +490,23 @@ function ParentCard({ parent, onRefresh, notify, onLink, dragging, unlinked = []
 
         {/* Chevron */}
         <span style={{ fontSize: 12, color: C.gray400, minWidth: 14 }}>{open ? "▼" : "▶"}</span>
+
+        {/* Photo — pasted Meesho catalog image, or a badge saying there isn't one */}
+        {parent.image_url && !imageBroken ? (
+          <img
+            src={parent.image_url}
+            alt=""
+            onError={() => setImageBroken(true)}
+            style={{ width: 30, height: 30, borderRadius: 7, objectFit: "cover", border: `1px solid ${C.border}`, flexShrink: 0 }}
+          />
+        ) : (
+          <span
+            title={imageBroken ? "Image URL didn't load" : "No photo added yet"}
+            style={{ background: C.gray100, color: C.gray400, border: `1px solid ${C.gray200}`, padding: "3px 8px", borderRadius: 20, fontSize: 11, whiteSpace: "nowrap", flexShrink: 0 }}
+          >
+            📷 no image
+          </span>
+        )}
 
         {/* Parent ID */}
         <span style={{ fontFamily: "monospace", fontSize: 13, fontWeight: 700, color: C.orange, background: C.orangeLight, border: `1px solid ${C.orangeBorder}`, padding: "3px 10px", borderRadius: 6, whiteSpace: "nowrap" }}>
@@ -749,6 +771,19 @@ function ParentCard({ parent, onRefresh, notify, onLink, dragging, unlinked = []
                       </div>
                     ))}
                   </div>
+                  <div style={{ display: "flex", gap: 10, alignItems: "flex-end", marginTop: 10 }}>
+                    <div style={{ flex: 1 }}>
+                      <label style={{ ...S.label, fontSize: 10 }}>Photo — Meesho catalog image URL</label>
+                      <input value={editForm.image_url} onChange={e => setEditForm(f => ({ ...f, image_url: e.target.value }))}
+                        placeholder="https://images.meesho.com/images/products/..."
+                        style={{ ...S.inp, fontSize: 12, fontFamily: "monospace" }} />
+                      <p style={{ fontSize: 10.5, color: C.gray500, marginTop: 4 }}>
+                        Paste the image URL from the product's Meesho listing — nothing is uploaded or stored
+                        beyond the link. Leave blank to show the "no image" badge instead.
+                      </p>
+                    </div>
+                    <EditImagePreview url={editForm.image_url} />
+                  </div>
                 </div>
               )}
             </div>
@@ -829,9 +864,33 @@ function ParentCard({ parent, onRefresh, notify, onLink, dragging, unlinked = []
   );
 }
 
+// ── live thumbnail preview for a pasted image URL ───────────────────────────
+function EditImagePreview({ url }) {
+  const [broken, setBroken] = useState(false);
+  useEffect(() => setBroken(false), [url]);
+  const trimmed = (url || "").trim();
+
+  return (
+    <div style={{
+      width: 52, height: 52, borderRadius: 8, flexShrink: 0, overflow: "hidden",
+      border: `1px solid ${C.gray200}`, background: C.white,
+      display: "flex", alignItems: "center", justifyContent: "center",
+    }}>
+      {trimmed && !broken ? (
+        <img src={trimmed} alt="Preview" onError={() => setBroken(true)}
+          style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+      ) : (
+        <span style={{ fontSize: 18, color: C.gray300 }} title={trimmed ? "Couldn't load this URL" : "No URL yet"}>
+          📷
+        </span>
+      )}
+    </div>
+  );
+}
+
 // ── add parent form ───────────────────────────────────────────────────────────
 function AddParentForm({ onSaved, onCancel, notify }) {
-  const [form, setForm] = useState({ item_id: "", item_price: "", tax_percent: "0", packaging_cost: "0" });
+  const [form, setForm] = useState({ item_id: "", item_price: "", tax_percent: "0", packaging_cost: "0", image_url: "" });
   const [saving, setSaving] = useState(false); const [err, setErr] = useState(null);
   const preview = calcFinal(form.item_price, form.tax_percent, form.packaging_cost);
 
@@ -841,7 +900,7 @@ function AddParentForm({ onSaved, onCancel, notify }) {
     setSaving(true); setErr(null);
     const res = await fetch(`${API}/parent-prices/`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...form, final_price: preview.toFixed(2) }),
+      body: JSON.stringify({ ...form, image_url: form.image_url.trim(), final_price: preview.toFixed(2) }),
     });
     setSaving(false);
     if (res.ok) { notify("ok", `"${form.item_id}" created.`); onSaved(); }
@@ -870,6 +929,15 @@ function AddParentForm({ onSaved, onCancel, notify }) {
             <input type="number" step="0.01" value={form[key]} onChange={e => setForm(f => ({ ...f, [key]: e.target.value }))} style={S.inp} />
           </div>
         ))}
+      </div>
+      <div style={{ display: "flex", gap: 10, alignItems: "flex-end", marginTop: 12 }}>
+        <div style={{ flex: 1 }}>
+          <label style={S.label}>Photo — Meesho catalog image URL</label>
+          <input value={form.image_url} onChange={e => setForm(f => ({ ...f, image_url: e.target.value }))}
+            placeholder="https://images.meesho.com/images/products/... (optional)"
+            style={{ ...S.inp, fontFamily: "monospace" }} />
+        </div>
+        <EditImagePreview url={form.image_url} />
       </div>
       {err && <p style={{ color: C.red, fontSize: 12, marginTop: 8 }}>{err}</p>}
     </div>

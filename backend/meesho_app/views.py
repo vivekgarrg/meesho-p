@@ -3321,7 +3321,7 @@ def parent_price_list(request, business_id):
             qs.annotate(sku_count=Count("sku_prices", distinct=True),
                         history_count=Count("price_history", distinct=True))
               .values("id", "item_id", "item_price", "tax_percent", "packaging_cost",
-                      "final_price", "sku_count", "history_count")
+                      "final_price", "image_url", "sku_count", "history_count")
               .order_by("item_id")
         )
         return Response({"results": list(rows), "slim": True})

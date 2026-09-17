@@ -11,6 +11,10 @@ class ParentItemPrice(models.Model):
     tax_percent = models.IntegerField(null=True, blank=True)
     packaging_cost = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     final_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    # A pasted Meesho catalog image URL — not an upload, so there's nothing to
+    # store or serve ourselves. Left blank, the parent just has no photo yet;
+    # the frontend shows a "no image" badge instead of a broken thumbnail.
+    image_url = models.URLField(max_length=1000, null=True, blank=True)
     business = models.ForeignKey(
         "accounts.Business", on_delete=models.PROTECT,
     )
