@@ -83,6 +83,10 @@ API_OWNERSHIP = {
 
     "labels/":               ["/labels"],
     "bulk-labels/":          ["/bulk-labels"],
+    # Overview shows a "labels processed today" quick-check card, so it also
+    # needs this one specific sub-path — more specific than "bulk-labels/"
+    # above, so it wins on longest-prefix-first.
+    "bulk-labels/today/":    ["/bulk-labels", "/"],
     # More specific than "returns/" below, so it wins on longest-prefix-first —
     # a worker on Team Tasks or the standalone Claim Video Tool can look up a
     # sub-order's AWB/packet id without needing separate Returns & Claims

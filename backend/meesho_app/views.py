@@ -5932,6 +5932,45 @@ def label_batch_history(request, business_id):
 
 
 @api_view(["GET"])
+def label_today_summary(request, business_id):
+    """
+    Labels processed for the CURRENT business day only — for the Overview
+    dashboard's "how many will the courier pick up today" quick-check, not the
+    lifetime total (that's label_batch_history / the Labels page).
+
+    A business day runs noon-to-noon, not midnight-to-midnight, matching
+    BulkLabelsTab's date-picker default: before 12pm, "today" is still
+    yesterday's date, since a batch processed late at night and topped up the
+    next morning before noon is one night's work. From noon on, it rolls to
+    the new calendar date and starts counting again from zero.
+    """
+    business = get_authorized_business(request, business_id)
+    now = timezone.localtime()
+    business_date = now.date() if now.hour >= 12 else now.date() - timedelta(days=1)
+
+    qs = LabelOrder.objects.filter(business=business, uploaded_date=business_date)
+    courier_rows = list(
+        qs.values("courier_name")
+        .annotate(count=Count("order_id"), total_items=Sum("qty"))
+        .order_by("-count")
+    )
+
+    return Response({
+        "business_date": business_date.isoformat(),
+        "total":         qs.count(),
+        "total_items":   qs.aggregate(v=Sum("qty"))["v"] or 0,
+        "couriers": [
+            {
+                "courier_name": r["courier_name"] or "Unknown",
+                "count":        r["count"],
+                "total_items":  r["total_items"] or 0,
+            }
+            for r in courier_rows
+        ],
+    })
+
+
+@api_view(["GET"])
 def label_duplicate_customers(request, business_id):
     """
     Find repeat customers by ADDRESS (city + state + pincode) — NOT by name.

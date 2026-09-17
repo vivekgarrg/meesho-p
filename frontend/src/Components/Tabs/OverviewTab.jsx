@@ -418,6 +418,17 @@ export function OverviewTab() {
   const [savingSettings, setSavingSettings] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
   const [loading, setLoading] = useState(true);
+  // Today's (business-day, noon cutoff) labels count — independent of the
+  // page's date-range filter above, since "how many will the courier pick up
+  // today" is always about right now, not whatever period is selected.
+  const [labelsToday, setLabelsToday] = useState(null);
+
+  useEffect(() => {
+    const ctrl = new AbortController();
+    fetch(`${API}/bulk-labels/today/`, { signal: ctrl.signal }).then(r => r.ok ? r.json() : null)
+      .then(setLabelsToday).catch(() => {});
+    return () => ctrl.abort();
+  }, []);
 
   useEffect(() => {
     const ctrl = new AbortController();
@@ -1134,6 +1145,36 @@ export function OverviewTab() {
               </p>
             </div>
             <span style={{ fontSize: 13, fontWeight: 700, color: C.red }}>View details →</span>
+          </div>
+        )}
+
+        {/* ── 10b. Labels processed today (business day, noon cutoff) ─────── */}
+        {labelsToday && labelsToday.total > 0 && (
+          <div
+            onClick={() => navigate("/bulk-labels")}
+            style={{
+              ...T.card, display: "flex", alignItems: "center", gap: 20, cursor: "pointer",
+              background: "#EFF6FF", border: "1.5px solid #BFDBFE", padding: "16px 22px",
+              flexWrap: "wrap",
+            }}
+          >
+            <span style={{ fontSize: 28 }}>🚚</span>
+            <div style={{ flex: 1, minWidth: 200 }}>
+              <p style={{ fontSize: 13, fontWeight: 700, color: C.blue, marginBottom: 3 }}>
+                {labelsToday.total.toLocaleString()} labels processed today — ready for pickup
+              </p>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {labelsToday.couriers.map((c) => (
+                  <span key={c.courier_name} style={{
+                    fontSize: 11.5, fontWeight: 700, color: C.gray700, background: "#fff",
+                    border: "1px solid #BFDBFE", borderRadius: 20, padding: "2px 10px",
+                  }}>
+                    {c.courier_name}: {c.count}
+                  </span>
+                ))}
+              </div>
+            </div>
+            <span style={{ fontSize: 13, fontWeight: 700, color: C.blue }}>Cross-check →</span>
           </div>
         )}
 
