@@ -34,6 +34,7 @@ import { AdsAnalysisTab } from './Components/Tabs/AdsAnalysisTab';
 import { MeeshoStockTab } from './Components/Tabs/MeeshoStockTab';
 import { FraudCustomersTab } from './Components/Tabs/FraudCustomersTab';
 import { ProductPhotosTab } from './Components/Tabs/ProductPhotosTab';
+import { QuadrantCropperTab } from './Components/Tabs/QuadrantCropperTab';
 import { MismatchTab } from './Components/Tabs/MismatchTab';
 import { MeeshoInventoryTab } from './Components/Tabs/MeeshoInventoryTab';
 import { MeeshoPricingTab } from './Components/Tabs/MeeshoPricingTab';
@@ -1081,6 +1082,7 @@ function AppShell() {
                 <Route path="/meesho-pricing" element={<MeeshoPricingTab />} />
                 <Route path="/fraud" element={<FraudCustomersTab />} />
                 <Route path="/product-photos" element={<ProductPhotosTab />} />
+                <Route path="/quadrant-cropper" element={<QuadrantCropperTab />} />
                 <Route path="/extension" element={<ExtensionTab />} />
                 <Route path="/bulk-listing" element={<BulkListingTab />} />
                 <Route path="/claim-video-tool" element={<ClaimVideoToolTab />} />

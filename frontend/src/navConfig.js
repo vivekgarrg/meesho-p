@@ -64,6 +64,7 @@ export const NAV_GROUPS = [
     items: [
       { path: '/upload', label: 'Upload Data', icon: '⇧' },
       { path: '/product-photos', label: 'AI Photos', icon: '✦' },
+      { path: '/quadrant-cropper', label: 'Quadrant Cropper', icon: '✂️' },
       { path: '/extension', label: 'Browser Extension', icon: '⧉' },
       { path: '/bulk-listing', label: 'Bulk Listing', icon: '🧾' },
       { path: '/claim-video-tool', label: 'Claim Video Tool', icon: '🎬' },

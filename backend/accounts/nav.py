@@ -47,6 +47,7 @@ NAV_CATALOG = [
 
     {"path": "/upload",            "label": "Upload Data",       "group": "Tools"},
     {"path": "/product-photos",    "label": "AI Photos",         "group": "Tools"},
+    {"path": "/quadrant-cropper",  "label": "Quadrant Cropper",  "group": "Tools"},
     {"path": "/extension",         "label": "Browser Extension", "group": "Tools"},
     {"path": "/bulk-listing",      "label": "Bulk Listing",      "group": "Tools"},
     {"path": "/claim-video-tool",  "label": "Claim Video Tool",  "group": "Tools"},
