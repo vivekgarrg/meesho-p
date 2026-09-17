@@ -103,6 +103,13 @@ export function BulkLabelsTab() {
   // not just the batch currently on screen, so it survives across sessions.
   const [history, setHistory] = useState(null);
   const [historyLoading, setHistoryLoading] = useState(true);
+  // The highlighted KPI banner is the CURRENT business day only (noon
+  // cutoff, falls back to the last non-empty day) — not the lifetime total
+  // `history` holds. That's what answers "how many will the courier collect
+  // today", which is what the banner is for; the lifetime figures live in
+  // the Processing History tab instead.
+  const [todaySummary, setTodaySummary] = useState(null);
+  const [todayLoading, setTodayLoading] = useState(true);
   // Parents linked from inside this view, same pattern as LabelsTab — keyed
   // by sku so a just-linked SKU regroups immediately without a re-upload.
   const [parentOverride, setParentOverride] = useState({});
@@ -126,7 +133,18 @@ export function BulkLabelsTab() {
     setHistoryLoading(false);
   }, []);
 
-  useEffect(() => { loadHistory(); }, [loadHistory]);
+  const loadTodaySummary = useCallback(async () => {
+    setTodayLoading(true);
+    try {
+      const res = await fetch(`${API}/bulk-labels/today/`);
+      if (res.ok) setTodaySummary(await res.json());
+    } catch {
+      // silent — banner just stays blank
+    }
+    setTodayLoading(false);
+  }, []);
+
+  useEffect(() => { loadHistory(); loadTodaySummary(); }, [loadHistory, loadTodaySummary]);
 
   const upload = async () => {
     if (!pending.length) return;
@@ -143,6 +161,7 @@ export function BulkLabelsTab() {
         setResult(data);
         setPending([]);
         loadHistory(); // this batch just added to the persisted record
+        loadTodaySummary();
       }
     } catch {
       setError("Could not reach the server — is the backend running?");
@@ -269,23 +288,25 @@ export function BulkLabelsTab() {
         </Typography>
       </Box>
 
-      {/* Always-visible KPI — the numbers "Processing history" tracks in
-          detail, surfaced here so they don't need a tab click to check. */}
+      {/* Always-visible KPI — the CURRENT business day only (noon cutoff,
+          falls back to the last non-empty day), not the lifetime total —
+          "how many will the courier collect today". Lifetime figures live
+          in the Processing History tab instead. */}
       <Paper elevation={0} sx={{
         border: `1px solid ${C.orangeBorder}`, borderRadius: "12px", p: "16px 18px",
         bgcolor: C.orangeLight, display: "flex", alignItems: "center", gap: "24px", flexWrap: "wrap",
       }}>
         <Box>
           <Typography sx={{ fontSize: 10, fontWeight: 700, color: C.orange, letterSpacing: "0.07em", textTransform: "uppercase" }}>
-            Total labels processed
+            Labels processed today{todaySummary?.business_date ? ` (${todaySummary.business_date})` : ""}
           </Typography>
           <Typography sx={{ fontFamily: "monospace", fontWeight: 900, fontSize: 32, color: C.orange, lineHeight: 1.1 }}>
-            {historyLoading && !history ? "…" : (history?.total_labels ?? 0).toLocaleString()}
+            {todayLoading && !todaySummary ? "…" : (todaySummary?.total ?? 0).toLocaleString()}
           </Typography>
         </Box>
-        {!!history?.courier_totals?.length && (
+        {!!todaySummary?.couriers?.length && (
           <Box sx={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-            {history.courier_totals.map((c) => (
+            {todaySummary.couriers.map((c) => (
               <Chip key={c.courier_name} label={`${c.courier_name}: ${c.count.toLocaleString()}`} size="small"
                 sx={{ bgcolor: "#fff", color: C.gray700, fontWeight: 800, fontSize: 12.5, border: `1px solid ${C.orangeBorder}` }} />
             ))}
