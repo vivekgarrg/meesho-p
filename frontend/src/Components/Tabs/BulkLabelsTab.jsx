@@ -21,6 +21,8 @@ import {
 import UploadFileIcon from '@mui/icons-material/UploadFile';
 import DownloadIcon from '@mui/icons-material/Download';
 import DeleteIcon from '@mui/icons-material/Delete';
+import WhatsAppIcon from '@mui/icons-material/WhatsApp';
+import LocalPrintshopIcon from '@mui/icons-material/LocalPrintshop';
 import { C, API, useIsMobile } from '../../App';
 import { ParentSkuCell } from './ParentLinkInline';
 
@@ -85,6 +87,155 @@ async function extractAndDownload(pdfB64, pages, filename) {
   const data = await res.json().catch(() => ({}));
   if (!res.ok || !data.pdf_b64) throw new Error(data.error || 'Could not extract those pages.');
   downloadSortedPDF(data.pdf_b64, filename);
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+
+/**
+ * Draws today's KPI summary as a 4×6in dispatch label (300dpi -> 1200x1800px,
+ * the same physical size as the shipping labels this tab already prints) so
+ * it can be stuck on the outgoing bag or shared as a quick end-of-day count.
+ * Pure canvas — no PDF/image library needed for something this simple, and
+ * a PNG prints true-to-size at "actual size" / 100% scale on any printer.
+ */
+function drawDispatchLabelCanvas(todaySummary) {
+  const DPI = 300;
+  const W = 4 * DPI;
+  const H = 6 * DPI;
+  const canvas = document.createElement('canvas');
+  canvas.width = W;
+  canvas.height = H;
+  const ctx = canvas.getContext('2d');
+
+  const orange = '#6D28D9';
+  const gray800 = '#1E293B';
+  const gray500 = '#64748B';
+  const gray300 = '#CBD5E1';
+  const orangeLight = '#F5F3FF';
+
+  ctx.fillStyle = '#FFFFFF';
+  ctx.fillRect(0, 0, W, H);
+
+  const M = 60; // print margin
+
+  // Cut-line border, like a real shipping label
+  ctx.strokeStyle = gray300;
+  ctx.setLineDash([10, 8]);
+  ctx.lineWidth = 3;
+  ctx.strokeRect(M / 2, M / 2, W - M, H - M);
+  ctx.setLineDash([]);
+
+  let y = M + 60;
+
+  ctx.fillStyle = orange;
+  ctx.font = '900 64px system-ui, Helvetica, Arial, sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillText('RUDAM', M, y);
+
+  ctx.fillStyle = gray500;
+  ctx.font = '700 26px system-ui, Helvetica, Arial, sans-serif';
+  ctx.fillText('DISPATCH SUMMARY', M, y + 42);
+
+  y += 90;
+  ctx.strokeStyle = orange;
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.moveTo(M, y);
+  ctx.lineTo(W - M, y);
+  ctx.stroke();
+
+  y += 60;
+  const dateLabel = todaySummary?.business_date
+    ? new Date(todaySummary.business_date).toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })
+    : new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+  ctx.fillStyle = gray800;
+  ctx.font = '600 32px system-ui, Helvetica, Arial, sans-serif';
+  ctx.fillText(dateLabel, M, y);
+
+  // Big total, centered
+  y += 130;
+  ctx.fillStyle = gray500;
+  ctx.font = '700 24px system-ui, Helvetica, Arial, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('LABELS PROCESSED TODAY', W / 2, y);
+
+  y += 150;
+  ctx.fillStyle = orange;
+  ctx.font = '900 220px monospace';
+  ctx.fillText(String((todaySummary?.total ?? 0).toLocaleString('en-IN')), W / 2, y);
+
+  if (todaySummary?.reset_at) {
+    y += 44;
+    ctx.fillStyle = gray500;
+    ctx.font = '500 22px system-ui, Helvetica, Arial, sans-serif';
+    const resetTime = new Date(todaySummary.reset_at).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
+    ctx.fillText(`counting fresh since ${resetTime}`, W / 2, y);
+  }
+
+  // Per-courier breakdown
+  const couriers = todaySummary?.couriers || [];
+  if (couriers.length) {
+    y += 70;
+    ctx.strokeStyle = gray300;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(M, y);
+    ctx.lineTo(W - M, y);
+    ctx.stroke();
+
+    y += 56;
+    ctx.textAlign = 'left';
+    ctx.fillStyle = gray500;
+    ctx.font = '700 22px system-ui, Helvetica, Arial, sans-serif';
+    ctx.fillText('BY DELIVERY PARTNER', M, y);
+    y += 20;
+
+    const rowH = 64;
+    couriers.forEach((c, i) => {
+      const rowY = y + 30 + i * rowH;
+      if (rowY > H - M - 120) return; // stop before running into the footer
+      if (i % 2 === 0) {
+        ctx.fillStyle = orangeLight;
+        ctx.fillRect(M, rowY - 34, W - 2 * M, rowH - 10);
+      }
+      ctx.fillStyle = gray800;
+      ctx.font = '700 30px system-ui, Helvetica, Arial, sans-serif';
+      ctx.textAlign = 'left';
+      ctx.fillText(c.courier_name, M + 24, rowY);
+      ctx.font = '900 30px monospace';
+      ctx.textAlign = 'right';
+      ctx.fillText(c.count.toLocaleString('en-IN'), W - M - 24, rowY);
+    });
+  }
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = gray500;
+  ctx.font = '500 20px system-ui, Helvetica, Arial, sans-serif';
+  ctx.fillText(`Generated ${new Date().toLocaleString('en-IN', { hour: '2-digit', minute: '2-digit', day: 'numeric', month: 'short' })} · via Rudam`, W / 2, H - M - 20);
+
+  return canvas;
+}
+
+function labelCanvasToBlob(canvas) {
+  return new Promise((resolve) => canvas.toBlob(resolve, 'image/png', 0.98));
+}
+
+function whatsappSummaryText(todaySummary) {
+  const total = (todaySummary?.total ?? 0).toLocaleString('en-IN');
+  const dateLabel = todaySummary?.business_date || new Date().toLocaleDateString('en-IN');
+  const lines = [`📦 Labels processed today (${dateLabel}): *${total}*`];
+  (todaySummary?.couriers || []).forEach((c) => lines.push(`• ${c.courier_name}: ${c.count.toLocaleString('en-IN')}`));
+  lines.push('— via Rudam');
+  return lines.join('\n');
 }
 
 function Stat({ label, value, tone = C.gray800 }) {
@@ -178,6 +329,39 @@ export function BulkLabelsTab() {
       // silent — banner keeps its last known value
     }
     setResetting(false);
+  };
+
+  // ── Dispatch label: today's KPI count as a 4×6in printable, or a WhatsApp share ──
+  const [labelBusy, setLabelBusy] = useState(false);
+  const downloadDispatchLabel = async () => {
+    setLabelBusy(true);
+    try {
+      const canvas = drawDispatchLabelCanvas(todaySummary);
+      const blob = await labelCanvasToBlob(canvas);
+      const dateTag = (todaySummary?.business_date || businessDateISO()).replace(/[^0-9-]/g, '');
+      downloadBlob(blob, `dispatch_summary_${dateTag}.png`);
+    } finally {
+      setLabelBusy(false);
+    }
+  };
+
+  const shareOnWhatsApp = async () => {
+    const text = whatsappSummaryText(todaySummary);
+    // Native share sheet (mobile) can attach the actual label image and still
+    // let the user pick WhatsApp from it; wa.me only ever supports prefilled
+    // text, so that's the fallback everywhere the file share isn't available.
+    try {
+      const canvas = drawDispatchLabelCanvas(todaySummary);
+      const blob = await labelCanvasToBlob(canvas);
+      const file = new File([blob], 'dispatch_summary.png', { type: 'image/png' });
+      if (navigator.canShare?.({ files: [file] })) {
+        await navigator.share({ files: [file], text, title: 'Dispatch summary' });
+        return;
+      }
+    } catch (e) {
+      if (e?.name === 'AbortError') return; // user cancelled the share sheet
+    }
+    window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, '_blank', 'noopener');
   };
 
   const upload = async () => {
@@ -386,23 +570,57 @@ export function BulkLabelsTab() {
             ))}
           </Box>
         )}
-        <Tooltip title="Mark everything processed so far as handed to the courier — the count above starts fresh from 0 for the rest of today">
-          <span style={{ marginLeft: 'auto' }}>
-            <Button
-              onClick={() => {
-                if (window.confirm('Reset today\u2019s label count to 0? Already-processed labels stay saved — this only resets the counter.')) resetTodayCount();
-              }}
-              disabled={resetting}
-              sx={{
-                textTransform: 'none', fontWeight: 700, fontSize: 12.5, color: C.orange,
-                border: `1px solid ${C.orangeBorder}`, bgcolor: '#fff', borderRadius: '9px', px: '12px',
-                '&.Mui-disabled': { opacity: 0.6 },
-              }}
-            >
-              {resetting ? 'Resetting…' : 'Reset count'}
-            </Button>
-          </span>
-        </Tooltip>
+        <Box sx={{ display: 'flex', gap: '8px', flexWrap: 'wrap', ml: 'auto' }}>
+          <Tooltip title="Share today's count as a WhatsApp message — with the label image attached where your device supports it">
+            <span>
+              <Button
+                onClick={shareOnWhatsApp}
+                disabled={labelBusy || todayLoading}
+                startIcon={<WhatsAppIcon sx={{ fontSize: 17 }} />}
+                sx={{
+                  textTransform: 'none', fontWeight: 700, fontSize: 12.5, color: '#25D366',
+                  border: '1px solid #25D366', bgcolor: '#fff', borderRadius: '9px', px: '12px',
+                  '&.Mui-disabled': { opacity: 0.6 },
+                }}
+              >
+                Share
+              </Button>
+            </span>
+          </Tooltip>
+          <Tooltip title="Download today's count as a 4×6in label, sized to print on the same media as your shipping labels">
+            <span>
+              <Button
+                onClick={downloadDispatchLabel}
+                disabled={labelBusy || todayLoading}
+                startIcon={<LocalPrintshopIcon sx={{ fontSize: 17 }} />}
+                sx={{
+                  textTransform: 'none', fontWeight: 700, fontSize: 12.5, color: C.orange,
+                  border: `1px solid ${C.orangeBorder}`, bgcolor: '#fff', borderRadius: '9px', px: '12px',
+                  '&.Mui-disabled': { opacity: 0.6 },
+                }}
+              >
+                {labelBusy ? 'Preparing…' : '4×6 label'}
+              </Button>
+            </span>
+          </Tooltip>
+          <Tooltip title="Mark everything processed so far as handed to the courier — the count above starts fresh from 0 for the rest of today">
+            <span>
+              <Button
+                onClick={() => {
+                  if (window.confirm('Reset today\u2019s label count to 0? Already-processed labels stay saved — this only resets the counter.')) resetTodayCount();
+                }}
+                disabled={resetting}
+                sx={{
+                  textTransform: 'none', fontWeight: 700, fontSize: 12.5, color: C.orange,
+                  border: `1px solid ${C.orangeBorder}`, bgcolor: '#fff', borderRadius: '9px', px: '12px',
+                  '&.Mui-disabled': { opacity: 0.6 },
+                }}
+              >
+                {resetting ? 'Resetting…' : 'Reset count'}
+              </Button>
+            </span>
+          </Tooltip>
+        </Box>
       </Paper>
 
       <input
