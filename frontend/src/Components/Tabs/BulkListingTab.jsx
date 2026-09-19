@@ -7,6 +7,8 @@ import ErrorOutlineIcon from "@mui/icons-material/ErrorOutlineOutlined";
 import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import SaveIcon from "@mui/icons-material/Save";
 import ChangeCircleIcon from "@mui/icons-material/ChangeCircle";
+import TipsAndUpdatesIcon from "@mui/icons-material/TipsAndUpdates";
+import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import { CircularProgress } from "@mui/material";
 import { BulkListingBatchesPanel } from "./BulkListingBatchesPanel";
 import { useAuth } from "../../contexts/AuthContext";
@@ -65,6 +67,21 @@ const LISTING_TYPES = [
 
 function parseImageUrls(text) {
   return (text || "").split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
+}
+
+/**
+ * Titles are wrapped in brackets — [Title one] [Title two] — instead of
+ * comma-separated, because a real title routinely has its own commas
+ * ("Cotton Kurti, Size M, Pack of 2") that would otherwise get sliced into
+ * extra "titles". Bracket pairs are pulled out wherever they appear, so
+ * titles can be on one line or several. Plain newline-separated text (no
+ * brackets at all) still works as a fallback for anything pasted the old way.
+ */
+function parseTitlesPaste(text) {
+  const raw = text || "";
+  const bracketed = [...raw.matchAll(/\[([^[\]]*)\]/g)].map((m) => m[1].trim()).filter(Boolean);
+  if (bracketed.length) return bracketed;
+  return raw.split(/\n+/).map((s) => s.trim()).filter(Boolean);
 }
 
 function emptyRow() {
@@ -212,6 +229,60 @@ function MsgBanner({ msg, onClose }) {
       {msg.type === "success" ? <CheckCircleIcon style={{ fontSize: 17 }} /> : <ErrorOutlineIcon style={{ fontSize: 17 }} />}
       <span style={{ flex: 1 }}>{msg.text}</span>
       <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: "inherit", fontSize: 16 }}>×</button>
+    </div>
+  );
+}
+
+/**
+ * A ready-to-copy prompt for whatever AI tool a seller generates titles
+ * with (ChatGPT, etc.) — asks it to reply in the same [title] [title]
+ * format the paste box parses, so the reply can be pasted in as-is instead
+ * of needing to be cleaned up first.
+ */
+const TITLE_PROMPT_EXAMPLE =
+  "Write 15 SEO-friendly Meesho product titles for [describe your product — material, style, use]. " +
+  "Reply with ONLY the titles, each one wrapped in square brackets right after the last, like this: " +
+  "[Title one] [Title two] [Title three]. No numbering, no extra text before or after.";
+
+function TitleFormatHint() {
+  const [copied, setCopied] = useState(false);
+
+  const copyPrompt = async () => {
+    try {
+      await navigator.clipboard.writeText(TITLE_PROMPT_EXAMPLE);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // clipboard access can be blocked (permissions, non-HTTPS) — the
+      // prompt text is still right there to select and copy by hand.
+    }
+  };
+
+  return (
+    <div style={{ marginTop: 8, padding: "10px 12px", borderRadius: 10,
+      background: C.amberLight, border: "1px solid #FDE68A" }}>
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+        <TipsAndUpdatesIcon style={{ fontSize: 16, color: C.amber, marginTop: 1, flexShrink: 0 }} />
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 11.5, fontWeight: 700, color: C.amber, marginBottom: 4 }}>
+            Titles go in brackets — one after another: [Title one] [Title two] [Title three]
+          </div>
+          <div style={{ fontSize: 11, color: C.gray600, lineHeight: 1.5 }}>
+            That way a title can have its own commas or sizes without breaking the split. Generating
+            titles with an AI tool? Ask it to reply in this exact format and paste its answer straight in:
+          </div>
+          <div style={{ display: "flex", alignItems: "flex-start", gap: 8, marginTop: 6 }}>
+            <div style={{ flex: 1, fontSize: 11, fontFamily: "monospace", color: C.gray700,
+              background: C.white, border: `1px solid ${C.border}`, borderRadius: 7, padding: "7px 9px" }}>
+              {TITLE_PROMPT_EXAMPLE}
+            </div>
+            <button onClick={copyPrompt} title="Copy this prompt"
+              style={{ ...btn("ghost", "sm"), flexShrink: 0, padding: "6px 9px" }}>
+              <ContentCopyIcon style={{ fontSize: 14, verticalAlign: "-2px" }} />&nbsp;{copied ? "Copied" : "Copy"}
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1084,7 +1155,7 @@ export function BulkListingTab() {
   };
 
   const applyTitles = () => {
-    const titles = titlesPaste.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
+    const titles = parseTitlesPaste(titlesPaste);
     if (!titles.length) return;
     setRows((rs) => rs.map((r, i) => (titles[i] ? { ...r, title: titles[i] } : r)));
   };
@@ -1505,17 +1576,18 @@ export function BulkListingTab() {
                   <>
                     {titleField && (
                       <div style={{ marginBottom: 14 }}>
-                        <label style={S.label}>Paste titles (comma-separated) — fills the Title column for every row</label>
+                        <label style={S.label}>Paste titles ([title] [title] format) — fills the Title column for every row</label>
                         <div style={{ display: "flex", alignItems: "flex-end", gap: 8, flexWrap: "wrap" }}>
                           <textarea value={titlesPaste} onChange={(e) => setTitlesPaste(e.target.value)} rows={2}
-                            placeholder="Red Cotton Kurti, Blue Cotton Kurti, Green Cotton Kurti, …"
+                            placeholder="[Red Cotton Kurti, Size M] [Blue Cotton Kurti, Pack of 2] [Green Cotton Kurti] …"
                             style={{ ...S.inp, resize: "vertical", flex: "1 1 260px", minWidth: 220 }} />
                           <button onClick={applyTitles} disabled={!titlesPaste.trim()} style={btn("secondary", "sm")}>
                             <AutoAwesomeIcon style={{ fontSize: 15, verticalAlign: "-3px" }} />&nbsp;Fill titles for all {rowCount}
                           </button>
                         </div>
+                        <TitleFormatHint />
                         {titlesPaste.trim() && (() => {
-                          const n = titlesPaste.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean).length;
+                          const n = parseTitlesPaste(titlesPaste).length;
                           return (
                             <div style={{ fontSize: 11, color: n === rowCount ? C.gray400 : C.amber, marginTop: 6 }}>
                               {n} title{n === 1 ? "" : "s"} pasted
