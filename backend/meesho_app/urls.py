@@ -103,6 +103,14 @@ urlpatterns = [
     path("employees/<int:employee_id>/",      views.employee_detail,          name="employee_detail"),
     path("employees/<int:employee_id>/payments/", views.employee_payments_list, name="employee_payments_list"),
     path("employees/payments/<int:payment_id>/",  views.employee_payment_detail, name="employee_payment_detail"),
+    # Payroll: attendance, per-employee holidays, and the monthly salary run.
+    path("employees/salary-due/",             views.salary_due,          name="salary_due"),
+    path("employees/payroll/",                views.payroll_register,    name="payroll_register"),
+    path("employees/attendance/",             views.attendance_list,     name="attendance_list"),
+    path("employees/attendance/<int:attendance_id>/", views.attendance_detail, name="attendance_detail"),
+    path("employees/holidays/",               views.holidays_list,       name="holidays_list"),
+    path("employees/holidays/<int:holiday_id>/", views.holiday_detail,   name="holiday_detail"),
+    path("employees/<int:employee_id>/payroll/", views.employee_payroll, name="employee_payroll"),
     path("owners/",              views.owners_list,  name="owners_list"),
     path("owners/<int:owner_id>/", views.owner_detail, name="owner_detail"),
     # Product Photography AI

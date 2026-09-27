@@ -113,6 +113,9 @@ API_OWNERSHIP = {
     "legacy-listings/":      ["/tasks"],
     "return-claim-batches/": ["/tasks"],
     "order-scan/":           ["/order-scan"],
+    # Overview carries a "salary due" reminder, so it needs this one sub-path —
+    # more specific than "employees/" below, so it wins on longest-prefix-first.
+    "employees/salary-due/": ["/employees", "/"],
     "employees/":            ["/employees"],
     "owners/":               ["/employees"],
 

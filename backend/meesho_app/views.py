@@ -9,7 +9,8 @@ from rest_framework import status
 from rest_framework.decorators import api_view, parser_classes
 from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, date as date_cls
+import calendar
 import requests as http_requests
 import base64
 import io
@@ -23,7 +24,9 @@ from .permissions import get_authorized_business, accessible_businesses
 from .helpers.label_pdf import extract_all_pages
 from . import pricing_sync
 
-from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, LabelDayReset, PurchaseBill, PurchaseItem, BlockedCustomer, InventoryAdjustment, ConsumableItem, ConsumablePurchase, ConsumableUsage, InventoryLog, MeeshoInventory, MeeshoPriceUpdate, ExpenseInvoice, ExpenseInvoiceItem, TransportCharge, PackedStockEvent, EstimatedProfitOrder, ReturnDelivery, GstTransaction, GstInvoiceDetail, ScannedOrder, ListingTemplate, ClaimTicket, WorkerTask, WalletEntry, WalletSettlement, TaskListing, PlatformRate, TaskDocument, BusinessCostSetting, Employee, EmployeePayment, BusinessOwner, Product, BulkListingBatch, ReturnVideoBatch, FlipkartOrderPayment
+from .helpers.label_pdf import extract_all_pages
+
+from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, LabelDayReset, PurchaseBill, PurchaseItem, BlockedCustomer, InventoryAdjustment, ConsumableItem, ConsumablePurchase, ConsumableUsage, InventoryLog, MeeshoInventory, MeeshoPriceUpdate, ExpenseInvoice, ExpenseInvoiceItem, TransportCharge, PackedStockEvent, EstimatedProfitOrder, ReturnDelivery, GstTransaction, GstInvoiceDetail, ScannedOrder, ListingTemplate, ClaimTicket, WorkerTask, WalletEntry, WalletSettlement, TaskListing, PlatformRate, TaskDocument, BusinessCostSetting, Employee, EmployeePayment, EmployeeAttendance, EmployeeHoliday, BusinessOwner, Product, BulkListingBatch, ReturnVideoBatch, FlipkartOrderPayment
 from .serializers import (
     OrderPaymentSerializer, AdsCostSerializer,
     ReferralPaymentSerializer, CompensationRecoverySerializer,
@@ -9109,6 +9112,9 @@ def _employee_to_dict(emp):
         "date_of_leaving": str(emp.date_of_leaving) if emp.date_of_leaving else None,
         "status": emp.status,
         "salary_type": emp.salary_type,
+        "monthly_salary": str(emp.monthly_salary),
+        "weekly_off_day": emp.weekly_off_day,
+        "paid_leave_per_month": str(emp.paid_leave_per_month),
         "address_line1": emp.address_line1,
         "address_line2": emp.address_line2,
         "city": emp.city,
@@ -9138,6 +9144,7 @@ def _employee_payment_to_dict(p):
         "method": p.method,
         "reference": p.reference,
         "note": p.note,
+        "salary_month": p.salary_month.strftime("%Y-%m") if p.salary_month else None,
         "created_at": p.created_at.isoformat(),
     }
 
@@ -9171,6 +9178,22 @@ _EMPLOYEE_FIELDS = [
     "account_holder_name", "bank_name", "account_number", "ifsc_code", "upi_id",
     "emergency_contact_name", "emergency_contact_phone", "notes",
 ]
+# Payroll terms are typed, so they can't ride along with the plain-text fields
+# above — an empty string would fail to coerce on the DecimalField.
+_EMPLOYEE_NUMERIC_FIELDS = ["monthly_salary", "paid_leave_per_month"]
+
+
+def _apply_employee_payroll_fields(emp, data):
+    """Coerce the typed payroll terms off a request body onto an Employee."""
+    for k in _EMPLOYEE_NUMERIC_FIELDS:
+        if k in data:
+            raw = data.get(k)
+            setattr(emp, k, Decimal(str(raw)) if raw not in (None, "") else Decimal("0"))
+    if "weekly_off_day" in data:
+        raw = data.get("weekly_off_day")
+        # "" / null both mean "no weekly off", which is a real answer, not a blank.
+        emp.weekly_off_day = int(raw) if raw not in (None, "") else None
+
 _OWNER_FIELDS = [
     "name", "phone", "email", "pan",
     "address_line1", "address_line2", "city", "state", "pincode",
@@ -9206,7 +9229,9 @@ def employees_list(request, business_id):
     for k in ("date_of_joining", "date_of_leaving"):
         if data.get(k):
             fields[k] = data[k]
-    emp = Employee.objects.create(business=business, created_by=request.user, **fields)
+    emp = Employee(business=business, created_by=request.user, **fields)
+    _apply_employee_payroll_fields(emp, data)
+    emp.save()
     return Response(_employee_to_dict(emp), status=status.HTTP_201_CREATED)
 
 
@@ -9242,6 +9267,7 @@ def employee_detail(request, business_id, employee_id):
     for k in ("date_of_joining", "date_of_leaving"):
         if k in data:
             setattr(emp, k, data[k] or None)
+    _apply_employee_payroll_fields(emp, data)
     emp.save()
     return Response(_employee_to_dict(emp))
 
@@ -9268,6 +9294,12 @@ def employee_payments_list(request, business_id, employee_id):
     amount = Decimal(str(data.get("amount") or 0))
     if amount <= 0:
         return Response({"error": "amount must be greater than 0."}, status=400)
+    paid_on = data.get("paid_on") or timezone.localdate()
+    payment_type = data.get("payment_type", "salary")
+    try:
+        salary_month = _resolve_salary_month(data.get("salary_month"), paid_on, payment_type)
+    except ValueError as e:
+        return Response({"error": str(e)}, status=400)
     p = EmployeePayment.objects.create(
         business=business,
         employee=emp,
@@ -9278,6 +9310,7 @@ def employee_payments_list(request, business_id, employee_id):
         method=data.get("method", "cash"),
         reference=data.get("reference", ""),
         note=data.get("note", ""),
+        salary_month=salary_month,
     )
     return Response(_employee_payment_to_dict(p), status=status.HTTP_201_CREATED)
 
@@ -9306,6 +9339,11 @@ def employee_payment_detail(request, business_id, payment_id):
     for k in ("paid_on", "payment_type", "method", "reference", "note"):
         if k in data:
             setattr(p, k, data[k])
+    if "salary_month" in data:
+        try:
+            p.salary_month = _resolve_salary_month(data.get("salary_month"), p.paid_on, p.payment_type)
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
     p.save()
     return Response(_employee_payment_to_dict(p))
 
@@ -9331,6 +9369,525 @@ def employees_summary(request, business_id):
         "total_paid_all_time": str(all_time),
         "by_payment_type": by_type,
     })
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Payroll: attendance, per-employee holidays, and the monthly salary run.
+#
+# The model of the world here is deliberately small, because the people using
+# it run a warehouse, not an HR department:
+#
+#   · Salary is quoted per month. The day rate is monthly_salary ÷ the calendar
+#     days in that month, so a 30-day and a 31-day month both pay the quoted
+#     figure when nobody is absent — which is what "monthly salary" means to
+#     the person receiving it.
+#   · Weekly offs and holidays are paid. They're days off, not deductions.
+#   · A day with no attendance row is a day worked. Only exceptions get typed
+#     in, so an empty register means a full month, not an unpaid one.
+#   · Salary is paid in arrears — the money that moves on 1 October settles
+#     September — so a month becomes due the moment it ends.
+# ══════════════════════════════════════════════════════════════════════════════
+
+_PAYROLL_LOOKBACK_MONTHS = 6                        # how far back "due" reaches
+_PAISE = Decimal("0.01")
+
+
+def _days(value):
+    """Day counts as a clean string — '30' not '30.0', but '26.5' kept.
+
+    Decimal arithmetic carries the scale of its widest operand, so a month with
+    one half-day would otherwise report every other month's days to one decimal
+    place too. Normalising here keeps the payslip readable.
+    """
+    d = Decimal(value)
+    return str(d.quantize(Decimal("1")) if d == d.to_integral_value() else d.normalize())
+
+
+def _to_date(value):
+    """Accept a date or an ISO 'YYYY-MM-DD' string; raise ValueError otherwise."""
+    if isinstance(value, date_cls):
+        return value
+    return datetime.strptime(str(value), "%Y-%m-%d").date()
+
+
+def _month_start(d):
+    return d.replace(day=1)
+
+
+def _shift_month(d, n):
+    """First of the month n months away from d's month (n may be negative)."""
+    total = (d.year * 12 + d.month - 1) + n
+    return date_cls(total // 12, total % 12 + 1, 1)
+
+
+def _parse_month_start(raw):
+    """'YYYY-MM' (or 'YYYY-MM-DD') -> first of that month."""
+    s = str(raw).strip()
+    parts = s.split("-")
+    if len(parts) < 2:
+        raise ValueError("month must look like YYYY-MM.")
+    try:
+        return date_cls(int(parts[0]), int(parts[1]), 1)
+    except ValueError:
+        raise ValueError("month must look like YYYY-MM.")
+
+
+def _resolve_salary_month(raw, paid_on, payment_type):
+    """Which month a payment settles.
+
+    Only salary and advance rows carry a month — a bonus or a reimbursement is
+    money on top, not a wage being cleared, and tagging it to a month would
+    silently cancel out real salary owed. When the month isn't given for a
+    salary row we assume the previous one, since that is what paying on the 1st
+    means in practice; the caller can always override.
+    """
+    if payment_type not in ("salary", "advance"):
+        return None
+    if raw not in (None, ""):
+        return _parse_month_start(raw)
+    if payment_type == "advance":
+        # An advance is drawn against the month you're standing in.
+        return _month_start(_to_date(paid_on))
+    return _shift_month(_month_start(_to_date(paid_on)), -1)
+
+
+def _employment_window(emp, month_start, month_end):
+    """The slice of [month_start, month_end] this employee was actually employed for.
+
+    Returns (start, end) or None when they hadn't joined yet / had already left,
+    so a mid-month joiner is paid from their joining date rather than the 1st.
+    """
+    start = month_start
+    end = month_end
+    if emp.date_of_joining and emp.date_of_joining > start:
+        start = emp.date_of_joining
+    if emp.date_of_leaving and emp.date_of_leaving < end:
+        end = emp.date_of_leaving
+    return (start, end) if start <= end else None
+
+
+def _compute_payroll(emp, month_start, attendance, holiday_dates, payments):
+    """Build one employee's payslip for one month.
+
+    `attendance` is {date: EmployeeAttendance}, `holiday_dates` a set of dates
+    that count as holidays for this employee, and `payments` the EmployeePayment
+    rows already tagged to this month. All three are passed in rather than
+    queried here so the monthly register can load them once for everybody.
+    """
+    days_in_month = calendar.monthrange(month_start.year, month_start.month)[1]
+    month_end = month_start.replace(day=days_in_month)
+    ym = month_start.strftime("%Y-%m")
+
+    day_rate = (emp.monthly_salary / Decimal(days_in_month)) if emp.monthly_salary else Decimal("0")
+
+    window = _employment_window(emp, month_start, month_end)
+    if window is None:
+        return {
+            "month": ym, "employee_id": emp.id, "employee_name": emp.full_name,
+            "employed": False, "monthly_salary": str(emp.monthly_salary),
+            "days_in_month": days_in_month, "eligible_days": 0,
+            "present_days": 0, "half_days": 0, "paid_leave_days": "0.0",
+            "unpaid_leave_days": "0.0", "absent_days": 0,
+            "week_off_days": 0, "holiday_days": 0,
+            "lop_days": "0.0", "payable_days": "0.0",
+            "day_rate": str(day_rate.quantize(_PAISE)),
+            "earned_salary": "0.00", "extra_pay": "0.00", "overtime_hours": "0.00",
+            "net_payable": "0.00", "settled": "0.00", "due": "0.00",
+            "advances": "0.00", "bonus": "0.00",
+        }
+
+    start, end = window
+    eligible_days = (end - start).days + 1
+
+    present = half = absent = 0
+    paid_leave = unpaid_leave = 0
+    week_offs = holidays = 0
+    extra_pay = Decimal("0")
+    overtime_hours = Decimal("0")
+
+    day = start
+    while day <= end:
+        row = attendance.get(day)
+        if row:
+            extra_pay += row.extra_pay
+            overtime_hours += row.overtime_hours
+
+        # A holiday outranks a weekly off (they can coincide), and both outrank
+        # attendance: you can't be marked absent on a day you weren't due in.
+        if day in holiday_dates:
+            holidays += 1
+        elif emp.weekly_off_day is not None and day.weekday() == emp.weekly_off_day:
+            week_offs += 1
+        else:
+            status_ = row.status if row else "present"
+            if status_ == "half_day":
+                half += 1
+            elif status_ == "paid_leave":
+                paid_leave += 1
+            elif status_ == "unpaid_leave":
+                unpaid_leave += 1
+            elif status_ == "absent":
+                absent += 1
+            else:
+                present += 1
+        day += timedelta(days=1)
+
+    # Paid leave is only paid up to the monthly quota; the rest falls to LOP.
+    quota = emp.paid_leave_per_month or Decimal("0")
+    paid_leave_honoured = min(Decimal(paid_leave), quota)
+    excess_leave = Decimal(paid_leave) - paid_leave_honoured
+
+    lop_days = Decimal(unpaid_leave) + Decimal(absent) + excess_leave + (Decimal(half) * Decimal("0.5"))
+    payable_days = Decimal(eligible_days) - lop_days
+    if payable_days < 0:
+        payable_days = Decimal("0")
+
+    earned = (day_rate * payable_days).quantize(_PAISE)
+    net_payable = (earned + extra_pay).quantize(_PAISE)
+
+    settled = Decimal("0")
+    advances = Decimal("0")
+    bonus = Decimal("0")
+    for p in payments:
+        if p.payment_type in ("salary", "advance"):
+            settled += p.amount
+            if p.payment_type == "advance":
+                advances += p.amount
+        elif p.payment_type == "bonus":
+            bonus += p.amount
+
+    return {
+        "month": ym,
+        "employee_id": emp.id,
+        "employee_name": emp.full_name,
+        "designation": emp.designation,
+        "employed": True,
+        "monthly_salary": str(emp.monthly_salary),
+        "days_in_month": days_in_month,
+        "eligible_days": eligible_days,
+        "present_days": present,
+        "half_days": half,
+        "paid_leave_days": _days(paid_leave),
+        "paid_leave_honoured": _days(paid_leave_honoured),
+        "unpaid_leave_days": _days(Decimal(unpaid_leave) + excess_leave),
+        "absent_days": absent,
+        "week_off_days": week_offs,
+        "holiday_days": holidays,
+        "lop_days": _days(lop_days),
+        "payable_days": _days(payable_days),
+        "day_rate": str(day_rate.quantize(_PAISE)),
+        "earned_salary": str(earned),
+        "extra_pay": str(extra_pay.quantize(_PAISE)),
+        "overtime_hours": _days(overtime_hours),
+        "net_payable": str(net_payable),
+        "settled": str(settled.quantize(_PAISE)),
+        "advances": str(advances.quantize(_PAISE)),
+        "bonus": str(bonus.quantize(_PAISE)),
+        "due": str((net_payable - settled).quantize(_PAISE)),
+    }
+
+
+def _holiday_dates_for(emp, rows):
+    """Dates off for one employee: the business-wide holidays plus their own."""
+    return {r.date for r in rows if r.employee_id is None or r.employee_id == emp.id}
+
+
+def _payroll_register(business, month_start, employees=None):
+    """Payslips for every employee for one month, with one query per table."""
+    days_in_month = calendar.monthrange(month_start.year, month_start.month)[1]
+    month_end = month_start.replace(day=days_in_month)
+
+    if employees is None:
+        employees = list(Employee.objects.filter(business=business))
+    emp_ids = [e.id for e in employees]
+
+    att_rows = EmployeeAttendance.objects.filter(
+        business=business, employee_id__in=emp_ids, date__gte=month_start, date__lte=month_end
+    )
+    by_emp_att = {}
+    for r in att_rows:
+        by_emp_att.setdefault(r.employee_id, {})[r.date] = r
+
+    holiday_rows = list(EmployeeHoliday.objects.filter(
+        business=business, date__gte=month_start, date__lte=month_end
+    ))
+
+    pay_rows = EmployeePayment.objects.filter(
+        business=business, employee_id__in=emp_ids, salary_month=month_start
+    )
+    by_emp_pay = {}
+    for p in pay_rows:
+        by_emp_pay.setdefault(p.employee_id, []).append(p)
+
+    return [
+        _compute_payroll(
+            emp, month_start,
+            by_emp_att.get(emp.id, {}),
+            _holiday_dates_for(emp, holiday_rows),
+            by_emp_pay.get(emp.id, []),
+        )
+        for emp in employees
+    ]
+
+
+def _attendance_to_dict(a):
+    return {
+        "id": a.id,
+        "employee_id": a.employee_id,
+        "date": str(a.date),
+        "status": a.status,
+        "overtime_hours": str(a.overtime_hours),
+        "extra_pay": str(a.extra_pay),
+        "note": a.note,
+    }
+
+
+def _holiday_to_dict(h):
+    return {
+        "id": h.id,
+        "date": str(h.date),
+        "name": h.name,
+        "employee_id": h.employee_id,
+        "employee_name": h.employee.full_name if h.employee_id else None,
+        "scope": "employee" if h.employee_id else "business",
+    }
+
+
+@api_view(["GET"])
+def employee_payroll(request, business_id, employee_id):
+    """One employee's payslip for ?month=YYYY-MM (defaults to last month)."""
+    business = get_authorized_business(request, business_id)
+    try:
+        emp = Employee.objects.get(pk=employee_id, business=business)
+    except Employee.DoesNotExist:
+        return Response({"error": "Not found"}, status=404)
+
+    raw_month = request.GET.get("month")
+    try:
+        month_start = (_parse_month_start(raw_month) if raw_month
+                       else _shift_month(_month_start(timezone.localdate()), -1))
+    except ValueError as e:
+        return Response({"error": str(e)}, status=400)
+
+    slip = _payroll_register(business, month_start, employees=[emp])[0]
+
+    days_in_month = calendar.monthrange(month_start.year, month_start.month)[1]
+    att = EmployeeAttendance.objects.filter(
+        employee=emp, date__gte=month_start, date__lte=month_start.replace(day=days_in_month)
+    )
+    holidays = EmployeeHoliday.objects.filter(
+        business=business, date__gte=month_start, date__lte=month_start.replace(day=days_in_month)
+    ).select_related("employee")
+
+    slip["attendance"] = [_attendance_to_dict(a) for a in att]
+    slip["holidays"] = [_holiday_to_dict(h) for h in holidays
+                        if h.employee_id in (None, emp.id)]
+    return Response(slip)
+
+
+@api_view(["GET"])
+def payroll_register(request, business_id):
+    """The whole month's salary run — one row per employee."""
+    business = get_authorized_business(request, business_id)
+
+    raw_month = request.GET.get("month")
+    try:
+        month_start = (_parse_month_start(raw_month) if raw_month
+                       else _shift_month(_month_start(timezone.localdate()), -1))
+    except ValueError as e:
+        return Response({"error": str(e)}, status=400)
+
+    employees = list(Employee.objects.filter(business=business))
+    rows = [r for r in _payroll_register(business, month_start, employees) if r["employed"]]
+
+    totals = {
+        "earned_salary": sum((Decimal(r["earned_salary"]) for r in rows), Decimal("0")),
+        "extra_pay": sum((Decimal(r["extra_pay"]) for r in rows), Decimal("0")),
+        "net_payable": sum((Decimal(r["net_payable"]) for r in rows), Decimal("0")),
+        "settled": sum((Decimal(r["settled"]) for r in rows), Decimal("0")),
+        "due": sum((Decimal(r["due"]) for r in rows), Decimal("0")),
+    }
+    return Response({
+        "month": month_start.strftime("%Y-%m"),
+        "results": rows,
+        "totals": {k: str(v.quantize(_PAISE)) for k, v in totals.items()},
+        # The month can only be paid out once it's over — that's the arrears rule.
+        "is_closed": month_start < _month_start(timezone.localdate()),
+    })
+
+
+@api_view(["GET"])
+def salary_due(request, business_id):
+    """Outstanding salary across the recent closed months — the Overview reminder.
+
+    Only closed months count: this month's wage isn't late, it isn't owed yet.
+    """
+    business = get_authorized_business(request, business_id)
+    today = timezone.localdate()
+    this_month = _month_start(today)
+
+    employees = [e for e in Employee.objects.filter(business=business)
+                 if e.monthly_salary and e.monthly_salary > 0]
+    if not employees:
+        return Response({"total_due": "0.00", "months": [], "employees": [],
+                         "employee_count": 0, "oldest_month": None})
+
+    months = [_shift_month(this_month, -n) for n in range(1, _PAYROLL_LOOKBACK_MONTHS + 1)]
+
+    per_employee = {}
+    month_totals = []
+    total_due = Decimal("0")
+
+    for month_start in months:
+        rows = _payroll_register(business, month_start, employees)
+        month_due = Decimal("0")
+        for r in rows:
+            due = Decimal(r["due"])
+            if due <= 0:
+                continue
+            month_due += due
+            slot = per_employee.setdefault(
+                r["employee_id"], {"employee_id": r["employee_id"], "employee_name": r["employee_name"],
+                                   "due": Decimal("0"), "months": []})
+            slot["due"] += due
+            slot["months"].append({"month": r["month"], "due": str(due)})
+        if month_due > 0:
+            month_totals.append({"month": month_start.strftime("%Y-%m"), "due": str(month_due.quantize(_PAISE))})
+            total_due += month_due
+
+    people = sorted(per_employee.values(), key=lambda x: -x["due"])
+    for p in people:
+        p["due"] = str(p["due"].quantize(_PAISE))
+
+    month_totals.sort(key=lambda m: m["month"])
+    return Response({
+        "total_due": str(total_due.quantize(_PAISE)),
+        "employee_count": len(people),
+        "employees": people,
+        "months": month_totals,
+        "oldest_month": month_totals[0]["month"] if month_totals else None,
+    })
+
+
+@api_view(["GET", "POST"])
+def attendance_list(request, business_id):
+    """Read a month of attendance, or mark a day.
+
+    POST is an upsert on (employee, date) — marking the same day twice corrects
+    it rather than stacking a second row, which the unique constraint forbids
+    anyway.
+    """
+    business = get_authorized_business(request, business_id)
+
+    if request.method == "GET":
+        qs = EmployeeAttendance.objects.filter(business=business)
+        raw_month = request.GET.get("month")
+        if raw_month:
+            try:
+                month_start = _parse_month_start(raw_month)
+            except ValueError as e:
+                return Response({"error": str(e)}, status=400)
+            last = calendar.monthrange(month_start.year, month_start.month)[1]
+            qs = qs.filter(date__gte=month_start, date__lte=month_start.replace(day=last))
+        if request.GET.get("employee_id"):
+            qs = qs.filter(employee_id=request.GET["employee_id"])
+        return Response({"results": [_attendance_to_dict(a) for a in qs]})
+
+    if not _is_admin(request.user):
+        return Response({"error": "Only an admin can mark attendance."}, status=403)
+
+    data = request.data
+    try:
+        emp = Employee.objects.get(pk=data.get("employee_id"), business=business)
+    except (Employee.DoesNotExist, ValueError, TypeError):
+        return Response({"error": "employee_id is required and must belong to this business."}, status=400)
+    try:
+        day = _to_date(data.get("date"))
+    except (ValueError, TypeError):
+        return Response({"error": "date is required, as YYYY-MM-DD."}, status=400)
+
+    status_ = data.get("status", "present")
+    if status_ not in dict(EmployeeAttendance.STATUS_CHOICES):
+        return Response({"error": f"Unknown status '{status_}'."}, status=400)
+
+    row, _created = EmployeeAttendance.objects.update_or_create(
+        employee=emp, date=day,
+        defaults={
+            "business": business,
+            "status": status_,
+            "overtime_hours": Decimal(str(data.get("overtime_hours") or 0)),
+            "extra_pay": Decimal(str(data.get("extra_pay") or 0)),
+            "note": data.get("note", ""),
+            "created_by": request.user,
+        },
+    )
+    return Response(_attendance_to_dict(row), status=status.HTTP_201_CREATED)
+
+
+@api_view(["DELETE"])
+def attendance_detail(request, business_id, attendance_id):
+    """Clear a marked day, returning it to the default 'worked'."""
+    business = get_authorized_business(request, business_id)
+    if not _is_admin(request.user):
+        return Response({"error": "Only an admin can edit attendance."}, status=403)
+    deleted, _ = EmployeeAttendance.objects.filter(pk=attendance_id, business=business).delete()
+    if not deleted:
+        return Response({"error": "Not found"}, status=404)
+    return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+@api_view(["GET", "POST"])
+def holidays_list(request, business_id):
+    business = get_authorized_business(request, business_id)
+
+    if request.method == "GET":
+        qs = EmployeeHoliday.objects.filter(business=business).select_related("employee")
+        raw_month = request.GET.get("month")
+        if raw_month:
+            try:
+                month_start = _parse_month_start(raw_month)
+            except ValueError as e:
+                return Response({"error": str(e)}, status=400)
+            last = calendar.monthrange(month_start.year, month_start.month)[1]
+            qs = qs.filter(date__gte=month_start, date__lte=month_start.replace(day=last))
+        if request.GET.get("year"):
+            qs = qs.filter(date__year=request.GET["year"])
+        return Response({"results": [_holiday_to_dict(h) for h in qs]})
+
+    if not _is_admin(request.user):
+        return Response({"error": "Only an admin can add holidays."}, status=403)
+
+    data = request.data
+    try:
+        day = _to_date(data.get("date"))
+    except (ValueError, TypeError):
+        return Response({"error": "date is required, as YYYY-MM-DD."}, status=400)
+    name = (data.get("name") or "").strip()
+    if not name:
+        return Response({"error": "name is required."}, status=400)
+
+    emp = None
+    if data.get("employee_id"):
+        try:
+            emp = Employee.objects.get(pk=data["employee_id"], business=business)
+        except (Employee.DoesNotExist, ValueError, TypeError):
+            return Response({"error": "That employee doesn't belong to this business."}, status=400)
+
+    row, _created = EmployeeHoliday.objects.update_or_create(
+        business=business, employee=emp, date=day, defaults={"name": name},
+    )
+    return Response(_holiday_to_dict(row), status=status.HTTP_201_CREATED)
+
+
+@api_view(["DELETE"])
+def holiday_detail(request, business_id, holiday_id):
+    business = get_authorized_business(request, business_id)
+    if not _is_admin(request.user):
+        return Response({"error": "Only an admin can delete holidays."}, status=403)
+    deleted, _ = EmployeeHoliday.objects.filter(pk=holiday_id, business=business).delete()
+    if not deleted:
+        return Response({"error": "Not found"}, status=404)
+    return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 @api_view(["GET", "POST"])

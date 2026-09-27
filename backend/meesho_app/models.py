@@ -776,6 +776,12 @@ class Employee(models.Model):
         ("daily_wage", "Daily Wage"),
         ("other", "Other"),
     ]
+    # Python's date.weekday(): Monday is 0. Stored the same way so the payroll
+    # maths can compare against weekday() directly with no translation table.
+    WEEKDAY_CHOICES = [
+        (0, "Monday"), (1, "Tuesday"), (2, "Wednesday"), (3, "Thursday"),
+        (4, "Friday"), (5, "Saturday"), (6, "Sunday"),
+    ]
 
     full_name = models.CharField(max_length=255)
     phone     = models.CharField(max_length=20, blank=True)
@@ -787,6 +793,23 @@ class Employee(models.Model):
     date_of_leaving  = models.DateField(null=True, blank=True)
     status           = models.CharField(max_length=10, choices=STATUS_CHOICES, default="active", db_index=True)
     salary_type      = models.CharField(max_length=20, choices=SALARY_TYPE_CHOICES, default="fixed_monthly")
+
+    # ── Payroll terms ────────────────────────────────────────────────────────
+    monthly_salary = models.DecimalField(
+        max_digits=12, decimal_places=2, default=Decimal("0"),
+        help_text="Gross salary for a full month. Day rate is derived from this.",
+    )
+    # A per-employee weekly off, because in a warehouse not everyone rests on
+    # the same day — the packer may be off Sunday while the lister is off
+    # Tuesday. Null means the employee has no fixed weekly off.
+    weekly_off_day = models.IntegerField(
+        choices=WEEKDAY_CHOICES, null=True, blank=True,
+        help_text="Recurring weekly holiday for this employee (paid, not deducted).",
+    )
+    paid_leave_per_month = models.DecimalField(
+        max_digits=4, decimal_places=1, default=Decimal("0"),
+        help_text="Leave days per month that are still paid. Leave beyond this is deducted.",
+    )
 
     address_line1 = models.CharField(max_length=255, blank=True)
     address_line2 = models.CharField(max_length=255, blank=True)
@@ -849,6 +872,15 @@ class EmployeePayment(models.Model):
     reference    = models.CharField(max_length=150, blank=True, help_text="UTR, cheque no., or transaction id")
     note         = models.TextField(blank=True)
 
+    # Salary is paid in arrears: the money that moves on the 1st of October is
+    # September's wage. Without this the ledger can't tell a late September
+    # payment from an early October one, so "what is still due" is unanswerable.
+    # Stored as the first of the month being settled; null for non-salary rows.
+    salary_month = models.DateField(
+        null=True, blank=True, db_index=True,
+        help_text="First day of the month this payment settles (salary/advance only).",
+    )
+
     created_by = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True,
                                    blank=True, related_name="employee_payments_created")
     created_at = models.DateTimeField(auto_now_add=True)
@@ -860,6 +892,83 @@ class EmployeePayment(models.Model):
 
     def __str__(self):
         return f"{self.employee_id} paid ₹{self.amount} on {self.paid_on}"
+
+
+class EmployeeHoliday(models.Model):
+    """A non-working day that is still paid — Diwali, Holi, a shop closure.
+
+    `employee` null means the holiday applies to everyone in the business;
+    setting it narrows the holiday to one person, which is how two employees
+    end up with different holiday calendars.
+    """
+    date = models.DateField(db_index=True)
+    name = models.CharField(max_length=120)
+
+    employee = models.ForeignKey(Employee, on_delete=models.CASCADE, null=True, blank=True,
+                                 related_name="holidays")
+    business = models.ForeignKey("accounts.Business", on_delete=models.PROTECT, related_name="employee_holidays")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "employee_holidays"
+        ordering = ["-date"]
+        indexes = [models.Index(fields=["business", "date"])]
+        # One row per (scope, date): a business-wide holiday and a personal one
+        # on the same date would otherwise double-count as two paid days off.
+        constraints = [
+            models.UniqueConstraint(fields=["business", "employee", "date"], name="uniq_holiday_emp_date"),
+        ]
+
+    def __str__(self):
+        return f"{self.date} {self.name}"
+
+
+class EmployeeAttendance(models.Model):
+    """One employee-day. Only exceptions need a row.
+
+    A day with no row is treated as worked, which is what actually happens in
+    a small warehouse: nobody marks a register every morning, they only note
+    the day someone didn't turn up or stayed late. Weekly offs and holidays
+    are derived from Employee.weekly_off_day and EmployeeHoliday, so they also
+    need no rows.
+    """
+    STATUS_CHOICES = [
+        ("present",      "Present"),
+        ("half_day",     "Half Day"),
+        ("paid_leave",   "Paid Leave"),
+        ("unpaid_leave", "Unpaid Leave"),
+        ("absent",       "Absent"),
+    ]
+
+    employee = models.ForeignKey(Employee, on_delete=models.CASCADE, related_name="attendance")
+    business = models.ForeignKey("accounts.Business", on_delete=models.PROTECT, related_name="employee_attendance")
+
+    date   = models.DateField(db_index=True)
+    status = models.CharField(max_length=15, choices=STATUS_CHOICES, default="present")
+
+    # Extra work done beyond the normal day. Hours are recorded for the log;
+    # the rupee figure is what actually reaches the payslip, because overtime
+    # here is settled at an agreed rate per stint rather than a formula.
+    overtime_hours = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("0"))
+    extra_pay      = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0"))
+
+    note = models.CharField(max_length=255, blank=True)
+
+    created_by = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True,
+                                   blank=True, related_name="attendance_marked")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "employee_attendance"
+        ordering = ["-date"]
+        indexes = [models.Index(fields=["business", "date"]), models.Index(fields=["employee", "date"])]
+        constraints = [
+            models.UniqueConstraint(fields=["employee", "date"], name="uniq_attendance_emp_date"),
+        ]
+
+    def __str__(self):
+        return f"{self.employee_id} {self.date} {self.status}"
 
 
 class BusinessOwner(models.Model):

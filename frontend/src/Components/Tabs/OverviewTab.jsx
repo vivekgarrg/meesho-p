@@ -718,11 +718,22 @@ export function OverviewTab() {
   // page's date-range filter above, since "how many will the courier pick up
   // today" is always about right now, not whatever period is selected.
   const [labelsToday, setLabelsToday] = useState(null);
+  // Salary owed for months that have already closed. Like the labels card it
+  // ignores the page's date filter — wages are late or they aren't, regardless
+  // of which period you happen to be looking at. Silently absent for users
+  // whose nav rules don't grant them the Employees section.
+  const [salaryDue, setSalaryDue] = useState(null);
 
   useEffect(() => {
     const ctrl = new AbortController();
-    fetch(`${API}/bulk-labels/today/`, { signal: ctrl.signal }).then(r => r.ok ? r.json() : null)
-      .then(setLabelsToday).catch(() => {});
+    fetch(`${API}/bulk-labels/today/`, { signal: ctrl.signal })
+      .then((r) => (r.ok ? r.json() : null))
+      .then(setLabelsToday)
+      .catch(() => {});
+    fetch(`${API}/employees/salary-due/`, { signal: ctrl.signal })
+      .then((r) => (r.ok ? r.json() : null))
+      .then(setSalaryDue)
+      .catch(() => {});
     return () => ctrl.abort();
   }, []);
 
@@ -2047,22 +2058,51 @@ export function OverviewTab() {
               <span style={{ fontSize: 13, fontWeight: 700, color: C.blue }}>Cross-check →</span>
             </div>
           )}
-          {timelineData.length > 0 && (
-            <SectionCard title="Daily Settlement Activity" style={{ flex: "1 1 320px", minWidth: 0 }}>
-              <p style={{ fontSize: 11, color: C.gray400, marginBottom: 10 }}>
-                Settlements per day vs orders placed. Gap = pending settlement.
-              </p>
-              <AppLineChart
-                dataset={timelineData}
-                indexKey="date"
-                series={[
-                  { dataKey: "settlements", label: "Settlements", color: C.green },
-                  { dataKey: "orders", label: "Orders Placed", color: C.blue },
-                ]}
-                maxTicks={15}
-                height={230}
-              />
-            </SectionCard>
+
+          {/* ── 10c. Salary due reminder (closed months only) ────────────────── */}
+          {salaryDue && Number(salaryDue.total_due) > 0 && (
+            <div
+              onClick={() => navigate('/employees')}
+              style={{
+                ...T.card,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 20,
+                cursor: 'pointer',
+                background: '#FFF7ED',
+                border: '1.5px solid #FED7AA',
+                padding: '16px 22px',
+                flexWrap: 'wrap',
+              }}
+            >
+              <span style={{ fontSize: 28 }}>💰</span>
+              <div style={{ flex: 1, minWidth: 220 }}>
+                <p style={{ fontSize: 13, fontWeight: 700, color: '#C2410C', marginBottom: 3 }}>
+                  {fmt(salaryDue.total_due)} salary due to {salaryDue.employee_count}{' '}
+                  {salaryDue.employee_count === 1 ? 'employee' : 'employees'}
+                  {salaryDue.months.length > 1 ? ` across ${salaryDue.months.length} months` : ''}
+                </p>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 4 }}>
+                  {salaryDue.months.map((m) => (
+                    <span
+                      key={m.month}
+                      style={{
+                        fontSize: 11.5,
+                        fontWeight: 700,
+                        color: C.gray700,
+                        background: '#fff',
+                        border: '1px solid #FED7AA',
+                        borderRadius: 20,
+                        padding: '2px 10px',
+                      }}
+                    >
+                      {fmtShort(m.month)}: {fmt(m.due)}
+                    </span>
+                  ))}
+                </div>
+              </div>
+              <span style={{ fontSize: 13, fontWeight: 700, color: '#C2410C' }}>Run payroll →</span>
+            </div>
           )}
 
           {/* ── 11. Deduction pie + Daily activity chart ─────────────────────── */}
