@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+import openpyxl
 from decimal import Decimal, InvalidOperation
 from django.db import transaction, IntegrityError
 from django.db.models import Sum, Count, Min, Max, ExpressionWrapper, F, DecimalField as DjDecimalField, Q as DQ, Prefetch, ProtectedError
@@ -22,7 +23,7 @@ from .permissions import get_authorized_business, accessible_businesses
 from .helpers.label_pdf import extract_all_pages
 from . import pricing_sync
 
-from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, LabelDayReset, PurchaseBill, PurchaseItem, BlockedCustomer, InventoryAdjustment, ConsumableItem, ConsumablePurchase, ConsumableUsage, InventoryLog, MeeshoInventory, MeeshoPriceUpdate, ExpenseInvoice, ExpenseInvoiceItem, TransportCharge, PackedStockEvent, EstimatedProfitOrder, ReturnDelivery, GstTransaction, GstInvoiceDetail, ScannedOrder, ListingTemplate, ClaimTicket, WorkerTask, WalletEntry, WalletSettlement, TaskListing, PlatformRate, TaskDocument, BusinessCostSetting, Employee, EmployeePayment, BusinessOwner, Product, BulkListingBatch, ReturnVideoBatch
+from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, LabelDayReset, PurchaseBill, PurchaseItem, BlockedCustomer, InventoryAdjustment, ConsumableItem, ConsumablePurchase, ConsumableUsage, InventoryLog, MeeshoInventory, MeeshoPriceUpdate, ExpenseInvoice, ExpenseInvoiceItem, TransportCharge, PackedStockEvent, EstimatedProfitOrder, ReturnDelivery, GstTransaction, GstInvoiceDetail, ScannedOrder, ListingTemplate, ClaimTicket, WorkerTask, WalletEntry, WalletSettlement, TaskListing, PlatformRate, TaskDocument, BusinessCostSetting, Employee, EmployeePayment, BusinessOwner, Product, BulkListingBatch, ReturnVideoBatch, FlipkartOrderPayment
 from .serializers import (
     OrderPaymentSerializer, AdsCostSerializer,
     ReferralPaymentSerializer, CompensationRecoverySerializer,
@@ -2716,6 +2717,283 @@ def estimated_profit_upload(request, business_id):
         "updated":        updated,
     })
     return Response(summary)
+
+
+# ── Flipkart Profit from an uploaded Settlement Report (xlsx) ─────────────────
+
+def _flipkart_orders_header(ws):
+    """
+    Locate the real header row of the "Orders" sheet and map normalised column
+    names to their 0-based index. Flipkart's export puts a grouping row above
+    the header row and a blank separator row below it, and several header
+    cells wrap onto a second line (a formula note) — normalising to the first
+    line, stripped and lower-cased, keeps the lookup stable without depending
+    on exact whitespace/newlines.
+    """
+    for row in ws.iter_rows(min_row=1, max_row=5):
+        values = [c.value for c in row]
+        if any(v == "Order item ID" for v in values):
+            index = {}
+            for i, v in enumerate(values):
+                if v is None:
+                    continue
+                norm = str(v).split("\n")[0].strip().lower()
+                if norm not in index:
+                    index[norm] = i
+            return row[0].row, index
+    return None, None
+
+
+@api_view(["POST"])
+@parser_classes([MultiPartParser])
+def flipkart_profit_upload(request, business_id):
+    """
+    Upload a Flipkart Settlement Report (.xlsx) and save every order-item row
+    from its "Orders" sheet to FlipkartOrderPayment, keyed by (business,
+    order_item_id, neft_id) — re-uploading the same (or an updated) report
+    refreshes those rows in place instead of duplicating them. Returns the
+    live profit summary computed against current SKU pricing (see
+    _compute_flipkart_profit_summary).
+    """
+    business = get_authorized_business(request, business_id)
+    file = request.FILES.get("file")
+    if not file:
+        return Response({"error": "No file provided"}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        # Not read_only: some Flipkart exports declare an incorrect per-row
+        # column span, which truncates rows to a single cell in read_only mode.
+        wb = openpyxl.load_workbook(file, data_only=True)
+    except Exception as e:
+        return Response({"error": f"Unable to read Excel file: {str(e)}"}, status=status.HTTP_400_BAD_REQUEST)
+
+    if "Orders" not in wb.sheetnames:
+        return Response(
+            {"error": "This file has no 'Orders' sheet — is it a Flipkart settlement report?"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    ws = wb["Orders"]
+    header_row_num, col = _flipkart_orders_header(ws)
+    required = {"order id", "order item id", "seller sku", "bank settlement value (rs.)"}
+    if header_row_num is None or not required.issubset(col.keys()):
+        return Response(
+            {"error": "Could not find the expected columns in the 'Orders' sheet"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    def get(row, key):
+        i = col.get(key)
+        return row[i] if i is not None and i < len(row) else None
+
+    total_rows = 0
+    invalid_rows = 0
+    created = 0
+    updated = 0
+
+    with transaction.atomic():
+        for row in ws.iter_rows(min_row=header_row_num + 1, values_only=True):
+            order_item_id = safe_str(get(row, "order item id"))
+            if not order_item_id:
+                continue
+            total_rows += 1
+
+            seller_sku = safe_str(get(row, "seller sku"))
+            if not seller_sku:
+                invalid_rows += 1
+                continue
+
+            try:
+                qty = int(float(get(row, "quantity")))
+            except (TypeError, ValueError):
+                qty = 1
+
+            _, was_created = FlipkartOrderPayment.objects.update_or_create(
+                business=business,
+                order_item_id=order_item_id,
+                neft_id=safe_str(get(row, "neft id")) or "",
+                defaults={
+                    "payment_date":         safe_date(get(row, "payment date")),
+                    "order_id":             safe_str(get(row, "order id")) or "",
+                    "order_date":           safe_date(get(row, "order date")),
+                    "dispatch_date":        safe_date(get(row, "dispatch date")),
+                    "seller_sku":           seller_sku,
+                    "quantity":             qty or 1,
+                    "fulfilment_type":      safe_str(get(row, "fulfilment type")),
+                    "product_sub_category": safe_str(get(row, "product sub category")),
+                    "sale_amount":          safe_decimal(get(row, "sale amount (rs.)")),
+                    "total_offer_amount":   safe_decimal(get(row, "total offer amount (rs.)")),
+                    "my_share":             safe_decimal(get(row, "my share (rs.)")),
+                    "marketplace_fee":      safe_decimal(get(row, "marketplace fee (rs.)")),
+                    "taxes":                safe_decimal(get(row, "taxes (rs.)")),
+                    "offer_adjustments":    safe_decimal(get(row, "offer adjustments (rs.)")),
+                    "protection_fund":      safe_decimal(get(row, "protection fund (rs.)")),
+                    "refund":               safe_decimal(get(row, "refund (rs.)")),
+                    "settlement_value":     safe_decimal(get(row, "bank settlement value (rs.)")) or Decimal("0"),
+                    "tcs":                  safe_decimal(get(row, "tcs (rs.)")),
+                    "tds":                  safe_decimal(get(row, "tds (rs.)")),
+                    "gst_on_mp_fees":       safe_decimal(get(row, "gst on mp fees (rs.)")),
+                    "return_type":          safe_str(get(row, "return type")),
+                    "item_return_status":  safe_str(get(row, "item return status")),
+                    "invoice_id":           safe_str(get(row, "invoice id")),
+                    "invoice_date":         safe_date(get(row, "invoice date")),
+                },
+            )
+            if was_created:
+                created += 1
+            else:
+                updated += 1
+
+    summary = _compute_flipkart_profit_summary(business)
+    summary.update({
+        "total_rows":   total_rows,
+        "invalid_rows": invalid_rows,
+        "created":      created,
+        "updated":      updated,
+    })
+    return Response(summary)
+
+
+@api_view(["GET"])
+def flipkart_profit_summary(request, business_id):
+    """Current live P&L over every previously-uploaded Flipkart settlement row for this business."""
+    business = get_authorized_business(request, business_id)
+    date_from = request.GET.get("date_from", "") or None
+    date_to = request.GET.get("date_to", "") or None
+    return Response(_compute_flipkart_profit_summary(business, date_from, date_to))
+
+
+def _compute_flipkart_profit_summary(business, date_from=None, date_to=None):
+    """
+    Live P&L over every saved FlipkartOrderPayment row, using the same SKU
+    pricing (FinalPrice / ParentItemPrice) and packaging policy
+    (BusinessCostSetting) as the Meesho profit engines — the cost of goods is
+    the same regardless of which marketplace sold it.
+
+    Revenue is `settlement_value` — Flipkart's own "Bank Settlement Value",
+    the actual net payout for that order item. A normal (non-returned) row
+    deducts item cost×qty + tax + packaging, the same as a Delivered Meesho
+    order. A returned row (return_type not "NA") deducts nothing, and only
+    counts when the settlement itself is negative — a real loss — mirroring
+    the "non-loss payout excluded" rule used for Meesho Returns/RTO.
+    """
+    get_price, known_skus, canonical_sku = _estimated_profit_pricing_lookup(business)
+    cost_setting = _cost_setting(business)
+
+    qs = FlipkartOrderPayment.objects.filter(business=business)
+    if date_from:
+        qs = qs.filter(order_date__gte=date_from)
+    if date_to:
+        qs = qs.filter(order_date__lte=date_to)
+
+    missing_price_skus_seen = []
+    missing_price_settlement = Decimal("0")
+    missing_price_count = 0
+    non_loss_excluded_count = 0
+    non_loss_excluded_sum = Decimal("0")
+    processed_count = 0
+    total_gross = Decimal("0")
+    total_cost = Decimal("0")
+    total_net = Decimal("0")
+
+    bucket_totals = {
+        b: {"count": 0, "gross": Decimal("0"), "cost": Decimal("0"), "net": Decimal("0")}
+        for b in ("delivered", "return")
+    }
+    sku_agg = {}
+
+    for row in qs.only("seller_sku", "quantity", "settlement_value", "return_type", "order_date").iterator():
+        sku_id = row.seller_sku or ""
+        settlement = row.settlement_value or Decimal("0")
+        returned = bool(row.return_type) and row.return_type.strip().upper() != "NA"
+        bucket = "return" if returned else "delivered"
+
+        if returned:
+            if settlement >= 0:
+                non_loss_excluded_count += 1
+                non_loss_excluded_sum += settlement
+                continue
+            gross, cost, net = settlement, Decimal("0"), settlement
+        else:
+            if _sku_key(sku_id) not in known_skus:
+                missing_price_skus_seen.append(sku_id or "(blank SKU)")
+                missing_price_settlement += settlement
+                missing_price_count += 1
+                continue
+
+            item_price, packaging_cost, tax_pct = get_price(sku_id, row.order_date)
+            item_price = Decimal(str(item_price or 0))
+            packaging_cost = Decimal(str(packaging_cost or 0))
+            tax_pct = Decimal(str(tax_pct or 0))
+            qty_d = Decimal(str(row.quantity or 1))
+
+            purchase_cost = item_price * qty_d
+            tax_cost = purchase_cost * tax_pct / Decimal("100")
+            packaging = _packaging_charge(BusinessCostSetting.DELIVERED, packaging_cost, cost_setting)
+            cost = purchase_cost + tax_cost + packaging
+            gross, net = settlement, settlement - cost
+
+        processed_count += 1
+        total_gross += gross
+        total_cost += cost
+        total_net += net
+
+        bt = bucket_totals[bucket]
+        bt["count"] += 1
+        bt["gross"] += gross
+        bt["cost"] += cost
+        bt["net"] += net
+
+        display_sku = canonical_sku.get(sku_id, sku_id) or "(blank SKU)"
+        agg = sku_agg.setdefault(display_sku, {
+            "sku_id": display_sku, "order_count": 0, "delivered_count": 0, "return_count": 0,
+            "gross_payout": Decimal("0"), "total_cost": Decimal("0"), "net_profit": Decimal("0"),
+        })
+        agg["order_count"] += 1
+        agg[f"{bucket}_count"] += 1
+        agg["gross_payout"] += gross
+        agg["total_cost"] += cost
+        agg["net_profit"] += net
+
+    sku_list = list(sku_agg.values())
+    for r in sku_list:
+        r["gross_payout"] = _to_num(r["gross_payout"])
+        r["total_cost"]   = _to_num(r["total_cost"])
+        r["net_profit"]   = _to_num(r["net_profit"])
+    sku_list.sort(key=lambda r: r["net_profit"], reverse=True)
+
+    status_breakdown = [
+        {
+            "status": "Delivered" if b == "delivered" else "Returned",
+            "count":  bucket_totals[b]["count"],
+            "gross":  _to_num(bucket_totals[b]["gross"]),
+            "cost":   _to_num(bucket_totals[b]["cost"]),
+            "net":    _to_num(bucket_totals[b]["net"]),
+        }
+        for b in ("delivered", "return")
+    ]
+
+    missing_price_sku_list = sorted(set(missing_price_skus_seen))
+
+    return {
+        "saved_order_count": qs.count(),
+        "processed_count": processed_count,
+        "missing_price_count": missing_price_count,
+        "missing_price_skus": missing_price_sku_list,
+        "missing_price_settlement_sum": _to_num(missing_price_settlement),
+        "non_loss_excluded_count": non_loss_excluded_count,
+        "non_loss_excluded_sum": _to_num(non_loss_excluded_sum),
+        "totals": {
+            "order_count":  processed_count,
+            "gross_payout": _to_num(total_gross),
+            "total_cost":   _to_num(total_cost),
+            "net_profit":   _to_num(total_net),
+        },
+        "status_breakdown": status_breakdown,
+        "sku_wise":        sku_list,
+        "top_profit_skus": [r for r in sku_list[:10] if r["net_profit"] > 0],
+        "top_loss_skus":   [r for r in sku_list[::-1][:10] if r["net_profit"] < 0],
+    }
 
 
 @api_view(["GET"])
@@ -8995,8 +9273,8 @@ def employee_payments_list(request, business_id, employee_id):
         employee=emp,
         created_by=request.user,
         amount=amount,
-        paid_on=data.get("paid_on") or timezone.localdate(),
-        payment_type=data.get("payment_type", "salary"),
+        paid_on=paid_on,
+        payment_type=payment_type,
         method=data.get("method", "cash"),
         reference=data.get("reference", ""),
         note=data.get("note", ""),
@@ -9643,6 +9921,45 @@ def return_deliveries_list(request, business_id):
     })
 
 
+def _return_action(row):
+    """
+    Turn one parent-SKU's return numbers into a plain-English "what to do next".
+    Returns {level, text}; level drives the colour on the card (high | warn | ok).
+    """
+    rate      = row.get("return_rate") or 0
+    rto_share = row.get("rto_share") or 0
+    parts, level = [], "ok"
+
+    if rate >= 30 and row["orders_total"] >= 10:
+        parts.append(f"Return rate {rate}% on {row['orders_total']} orders — review quality/sizing, fix the listing photos & description, or pause ads on this product.")
+        level = "high"
+    elif rate >= 15 and row["orders_total"] >= 10:
+        parts.append(f"Return rate {rate}% is above a healthy level — check the top reason and tighten the listing.")
+        level = "warn"
+
+    if rto_share >= 50 and row["returns"] >= 5:
+        parts.append(f"{rto_share:.0f}% are RTO (never delivered) — verify pincode serviceability and consider prepaid-only or address confirmation.")
+        level = "high"
+
+    if row["net_settlement"] < 0:
+        parts.append(f"Losing ₹{abs(row['net_settlement']):,.0f} net on these returns.")
+        if level == "ok":
+            level = "warn"
+
+    if row["return_shipping_cost"] and row["claim_recovered"] <= 0:
+        parts.append(f"₹{abs(row['return_shipping_cost']):,.0f} spent on return shipping with nothing recovered — raise claims within 7 days of delivery.")
+        if level == "ok":
+            level = "warn"
+
+    tr = row.get("top_reason") or ""
+    if tr and tr != "Not specified":
+        parts.append(f"Most common reason: “{tr}”.")
+
+    if not parts:
+        parts.append("Returns are within a normal range — keep monitoring.")
+    return {"level": level, "text": " ".join(parts)}
+
+
 @api_view(["GET"])
 def return_analysis(request, business_id):
     """
@@ -9766,7 +10083,7 @@ def return_analysis(request, business_id):
     claims_recovered       = round(sum(o["claims"] for o in orders.values()), 2)
     claims_recovered_count = sum(1 for o in orders.values() if o["claims"] > 0)
 
-    # ── Aggregate to product ──────────────────────────────────────────────
+    # ── Per-SKU aggregation (period-scoped) ───────────────────────────────
     prod = {}
     for o in orders.values():
         key = o["sku"] or "—"
@@ -9789,24 +10106,146 @@ def return_analysis(request, business_id):
             p["product_name"] = o["product_name"]
         p["reasons"][o["reason"]] = p["reasons"].get(o["reason"], 0) + 1
 
-    top_products = []
-    for key, p in sorted(prod.items(), key=lambda kv: kv[1]["returns"], reverse=True)[:limit]:
-        orders_total = orders_per_sku.get(p["sku"], 0)
-        top_reason   = max(p["reasons"].items(), key=lambda kv: kv[1])[0] if p["reasons"] else ""
-        top_products.append({
-            "sku": p["sku"] or "—",
+    # ── SKU → parent resolution (same maps the profit screen uses) ────────
+    _fp = list(FinalPrice.objects.filter(business=business).only("sku_id", "parent_id"))
+    sku_parent_map = _SkuMap((fp.sku_id, fp.parent_id) for fp in _fp if fp.parent_id)
+    parent_item_id = {pp.id: pp.item_id for pp in ParentItemPrice.objects.filter(business=business).only("item_id")}
+
+    def _group_of(sku):
+        """(group key, is_real_parent): a linked parent's item_id, else the SKU alone."""
+        pk = sku_parent_map.get(sku or "")
+        if pk and pk in parent_item_id:
+            return parent_item_id[pk], True
+        return (sku or "—"), False
+
+    _iso = lambda d: d.date().isoformat() if d else None
+
+    # ── All-time lifecycle: first/last order date + full monthly history ──
+    # Deliberately NOT date-filtered — "first/last order" and "monthly history"
+    # are lifecycle facts, so a single-month period filter shouldn't hide them.
+    sku_list  = [p["sku"] for p in prod.values() if p["sku"]]
+    sku_first = _SkuMap()
+    sku_last  = _SkuMap()
+    sku_month = {}   # canonical sku -> { "YYYY-MM": {returns, customer, rto} }
+    if sku_list:
+        for r in (OrderPayment.objects.filter(business=business, supplier_sku__in=sku_list)
+                  .exclude(order_date__isnull=True)
+                  .values("supplier_sku").annotate(first=Min("order_date"), last=Max("order_date"))):
+            sku_first[r["supplier_sku"]] = r["first"]
+            sku_last[r["supplier_sku"]]  = r["last"]
+
+        # One return = one sub-order; fold its rows together (an RTO can show as
+        # RTO then RTO_COMPLETE) before bucketing into the month it was ordered.
+        agg = {}   # (canonical sku, sub_order) -> {date, rto}
+        for r in (OrderPayment.objects.filter(business=business, supplier_sku__in=sku_list)
+                  .filter(status_q)
+                  .exclude(order_date__isnull=True)
+                  .values("supplier_sku", "sub_order_no", "order_date", "live_order_status")):
+            ck   = _sku_key(r["supplier_sku"] or "")
+            k    = (ck, r["sub_order_no"])
+            isr  = (r["live_order_status"] or "").upper() in RTO_SET
+            a = agg.get(k)
+            if a is None:
+                agg[k] = {"date": r["order_date"], "rto": isr, "ck": ck}
+            else:
+                a["rto"] = a["rto"] or isr
+                if r["order_date"] < a["date"]:
+                    a["date"] = r["order_date"]
+        for a in agg.values():
+            m = a["date"].date().replace(day=1).isoformat()
+            bucket = sku_month.setdefault(a["ck"], {}).setdefault(m, {"returns": 0, "customer": 0, "rto": 0})
+            bucket["returns"] += 1
+            bucket["rto" if a["rto"] else "customer"] += 1
+
+    # ── Group SKUs into parents, carrying their children ──────────────────
+    parents = {}
+    for p in prod.values():
+        gkey, is_parent = _group_of(p["sku"])
+        pg = parents.get(gkey)
+        if pg is None:
+            pg = parents[gkey] = {
+                "parent": gkey, "is_grouped": is_parent, "product_name": "",
+                "returns": 0, "qty": 0, "customer": 0, "rto": 0,
+                "net_settlement": 0.0, "return_shipping": 0.0, "claims": 0.0,
+                "orders_total": 0, "reasons": {}, "children": [],
+                "first": None, "last": None, "month": {},
+            }
+        pg["returns"]        += p["returns"]
+        pg["qty"]            += p["qty"]
+        pg["customer"]       += p["customer"]
+        pg["rto"]            += p["rto"]
+        pg["net_settlement"] += p["net_settlement"]
+        pg["return_shipping"] += p["return_shipping"]
+        pg["claims"]         += p["claims"]
+        for rk, rv in p["reasons"].items():
+            pg["reasons"][rk] = pg["reasons"].get(rk, 0) + rv
+        if not pg["product_name"] and p["product_name"]:
+            pg["product_name"] = p["product_name"]
+
+        sku = p["sku"]
+        c_orders_total = orders_per_sku.get(sku, 0)
+        pg["orders_total"] += c_orders_total
+        c_first = sku_first.get(sku)
+        c_last  = sku_last.get(sku)
+        if c_first and (pg["first"] is None or c_first < pg["first"]):
+            pg["first"] = c_first
+        if c_last and (pg["last"] is None or c_last > pg["last"]):
+            pg["last"] = c_last
+        for m, mv in sku_month.get(_sku_key(sku or ""), {}).items():
+            b = pg["month"].setdefault(m, {"returns": 0, "customer": 0, "rto": 0})
+            b["returns"]  += mv["returns"]
+            b["customer"] += mv["customer"]
+            b["rto"]      += mv["rto"]
+
+        c_reason = max(p["reasons"].items(), key=lambda kv: kv[1])[0] if p["reasons"] else ""
+        pg["children"].append({
+            "sku": sku or "—",
             "product_name": p["product_name"] or "",
-            "returns": p["returns"],
-            "qty": p["qty"],
-            "customer": p["customer"],
-            "rto": p["rto"],
-            "orders_total": orders_total,
-            "return_rate": round(p["returns"] * 100.0 / orders_total, 1) if orders_total else None,
-            "top_reason": top_reason,
+            "returns": p["returns"], "qty": p["qty"],
+            "customer": p["customer"], "rto": p["rto"],
+            "orders_total": c_orders_total,
+            "return_rate": round(p["returns"] * 100.0 / c_orders_total, 1) if c_orders_total else None,
+            "top_reason": c_reason,
             "net_settlement": round(p["net_settlement"], 2),
             "return_shipping_cost": round(p["return_shipping"], 2),
             "claim_recovered": round(p["claims"], 2),
+            "first_order_date": _iso(c_first),
+            "last_order_date": _iso(c_last),
         })
+
+    parent_list = []
+    for gkey, pg in sorted(parents.items(), key=lambda kv: kv[1]["returns"], reverse=True)[:limit]:
+        rate       = round(pg["returns"] * 100.0 / pg["orders_total"], 1) if pg["orders_total"] else None
+        rto_share  = round(pg["rto"] * 100.0 / pg["returns"], 1) if pg["returns"] else 0
+        top_reason = max(pg["reasons"].items(), key=lambda kv: kv[1])[0] if pg["reasons"] else ""
+        row = {
+            "parent": gkey,
+            "is_grouped": pg["is_grouped"],
+            "child_count": len(pg["children"]),
+            "product_name": pg["product_name"] or "",
+            "returns": pg["returns"], "qty": pg["qty"],
+            "customer": pg["customer"], "rto": pg["rto"],
+            "rto_share": rto_share,
+            "orders_total": pg["orders_total"],
+            "return_rate": rate,
+            "top_reason": top_reason,
+            "net_settlement": round(pg["net_settlement"], 2),
+            "return_shipping_cost": round(pg["return_shipping"], 2),
+            "claim_recovered": round(pg["claims"], 2),
+            "first_order_date": _iso(pg["first"]),
+            "last_order_date": _iso(pg["last"]),
+            "monthly": [{"month": m, **pg["month"][m]} for m in sorted(pg["month"])],
+            "children": sorted(pg["children"], key=lambda c: c["returns"], reverse=True),
+        }
+        row["action"] = _return_action(row)
+        parent_list.append(row)
+
+    # Prioritised, plain-English to-do list across the worst parents.
+    insights = [
+        {"parent": r["parent"], "returns": r["returns"], "return_rate": r["return_rate"],
+         "net_settlement": r["net_settlement"], "level": r["action"]["level"], "text": r["action"]["text"]}
+        for r in parent_list if r["action"]["level"] in ("high", "warn")
+    ][:6]
 
     # ── Reasons ───────────────────────────────────────────────────────────
     reason_counts = {}
@@ -9817,7 +10256,7 @@ def return_analysis(request, business_id):
         for k, v in sorted(reason_counts.items(), key=lambda kv: kv[1], reverse=True)[:15]
     ]
 
-    # ── Trend by month (order_date) ───────────────────────────────────────
+    # ── Trend by month (order_date, within the selected period) ───────────
     month_map = {}
     for o in orders.values():
         if not o["order_date"]:
@@ -9839,7 +10278,7 @@ def return_analysis(request, business_id):
             "rto_returns": rto_returns,
             "customer_pct": round(customer_returns * 100.0 / total_returns, 1) if total_returns else 0,
             "rto_pct": round(rto_returns * 100.0 / total_returns, 1) if total_returns else 0,
-            "distinct_products": len(prod),
+            "distinct_products": len(parents),
             "distinct_reasons": len([k for k in reason_counts if k and k != "Not specified"]),
             "net_return_settlement": net_return_settlement,
             "return_shipping_cost": return_shipping_cost,
@@ -9847,7 +10286,8 @@ def return_analysis(request, business_id):
             "claim_recovered_amount": claims_recovered,
             "claim_recovered_count": claims_recovered_count,
         },
-        "top_products": top_products,
+        "insights": insights,
+        "parents": parent_list,
         "top_reasons": top_reasons,
         "type_breakdown": [
             {"label": "Customer Return", "count": customer_returns},

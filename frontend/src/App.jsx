@@ -24,6 +24,7 @@ import { TaxCheckTab } from './Components/Tabs/TaxCheckTab';
 import { UploadTab } from './Components/Tabs/UploadTab';
 import { SKUAnalysisTab } from './Components/Tabs/SKUProfitTab';
 import { EstimatedProfitTab } from './Components/Tabs/EstimatedProfitTab';
+import { FlipkartProfitTab } from './Components/Tabs/FlipkartProfitTab';
 import { DailyProfitTab } from './Components/Tabs/DailyProfitTab';
 import { ReturnAnalysisTab } from './Components/Tabs/ReturnAnalysisTab';
 import { LabelsTab } from './Components/Tabs/LabelsTab';
@@ -1221,6 +1222,7 @@ function AppShell() {
                 <Route path="/sku-analysis" element={<SKUAnalysisTab />} />
                 <Route path="/ads-analysis" element={<AdsAnalysisTab />} />
                 <Route path="/estimated-profit" element={<EstimatedProfitTab />} />
+                <Route path="/flipkart-profit" element={<FlipkartProfitTab />} />
                 <Route path="/daily-profit" element={<DailyProfitTab />} />
                 <Route path="/return-analysis" element={<ReturnAnalysisTab />} />
                 <Route path="/customer-insights" element={<CustomerInsightsTab />} />
@@ -1228,7 +1230,7 @@ function AppShell() {
                 <Route path="/tax-check" element={<TaxCheckTab />} />
                 <Route path="/gst" element={<GstTab />} />
                 <Route path="/upload" element={<UploadTab />} />
-                <Route path="/labels" element={<LabelsTab />} />
+                {/* <Route path="/labels" element={<LabelsTab />} /> */}
                 <Route path="/bulk-labels" element={<BulkLabelsTab />} />
                 <Route path="/returns" element={<ReturnScanTab />} />
                 <Route path="/claims" element={<ClaimSheetTab />} />

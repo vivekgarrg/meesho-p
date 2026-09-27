@@ -1,4 +1,5 @@
 from datetime import timedelta
+from decimal import Decimal
 
 from django.db import models
 from django.utils import timezone
@@ -2473,3 +2474,73 @@ class BusinessCostSetting(models.Model):
     def charges_packaging_for(self, status_key):
         """Whether an order that ended in `status_key` carries its packaging cost."""
         return (status_key or "").upper() in set(self.packaging_statuses or [])
+
+
+class FlipkartOrderPayment(models.Model):
+    """
+    One line item from the "Orders" sheet of a Flipkart Settlement Report
+    (xlsx). Each row is one order-item's settlement — `settlement_value` is the
+    actual net amount paid for that item (Sale Amount + Total Offer Amount +
+    My Share + Marketplace Fee + Taxes + Offer Adjustments + Protection Fund +
+    Refund, i.e. column "Bank Settlement Value" in the sheet), used as the
+    revenue side of the profit formula the same way Meesho's
+    final_settlement_amount / payout_value are used elsewhere.
+
+    The same order item can reappear in a later settlement file (e.g. an
+    adjustment or return recovery paid out under a different NEFT batch), so
+    the natural key is (business, order_item_id, neft_id) rather than just
+    order_item_id — re-uploading the same report updates those rows in place.
+    """
+
+    neft_id       = models.CharField(max_length=100, null=True, blank=True)
+    payment_date  = models.DateField(null=True, blank=True)
+
+    order_id      = models.CharField(max_length=100, db_index=True)
+    order_item_id = models.CharField(max_length=100, db_index=True)
+    order_date    = models.DateField(null=True, blank=True)
+    dispatch_date = models.DateField(null=True, blank=True)
+
+    seller_sku    = models.CharField(max_length=200, null=True, blank=True, db_index=True)
+    quantity      = models.PositiveIntegerField(default=1)
+    fulfilment_type = models.CharField(max_length=100, null=True, blank=True)
+    product_sub_category = models.CharField(max_length=200, null=True, blank=True)
+
+    sale_amount         = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    total_offer_amount  = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    my_share            = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    marketplace_fee     = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    taxes               = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    offer_adjustments   = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    protection_fund     = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    refund              = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    settlement_value    = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+
+    tcs               = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    tds               = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    gst_on_mp_fees    = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+
+    return_type        = models.CharField(max_length=100, null=True, blank=True)
+    item_return_status = models.CharField(max_length=100, null=True, blank=True)
+
+    invoice_id   = models.CharField(max_length=100, null=True, blank=True)
+    invoice_date = models.DateField(null=True, blank=True)
+
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+    updated_at  = models.DateTimeField(auto_now=True)
+
+    business = models.ForeignKey(
+        "accounts.Business", on_delete=models.PROTECT,
+    )
+
+    class Meta:
+        db_table = "flipkart_order_payments"
+        ordering = ["-order_date"]
+        unique_together = [("business", "order_item_id", "neft_id")]
+
+    def __str__(self):
+        return self.order_item_id
+
+    @property
+    def is_returned(self):
+        rt = (self.return_type or "").strip().upper()
+        return bool(rt) and rt != "NA"
