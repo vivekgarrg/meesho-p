@@ -23,6 +23,28 @@ class User(AbstractUser):
         return self.username
 
 
+class PricingGroup(models.Model):
+    """
+    Businesses in the same group share one SKU/parent pricing catalogue —
+    everything else about each business (orders, inventory, price sheets, SKU
+    analysis) stays entirely separate and business-scoped exactly as before.
+
+    The sync itself lives in meesho_app.pricing_sync (Django signals on
+    ParentItemPrice/FinalPrice), not here — this model is just the "which
+    businesses are linked" record. A business with no pricing_group behaves
+    identically to today; linking is opt-in per business, never automatic.
+    """
+
+    name = models.CharField(max_length=255, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "pricing_groups"
+
+    def __str__(self):
+        return self.name or f"Pricing group #{self.pk}"
+
+
 class Business(models.Model):
     name = models.CharField(max_length=255)
     is_active = models.BooleanField(default=True)
@@ -30,6 +52,12 @@ class Business(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     created_by = models.ForeignKey(
         User, null=True, blank=True, on_delete=models.SET_NULL, related_name="businesses_created"
+    )
+    # See PricingGroup's docstring. Nullable + SET_NULL: a business is never
+    # forced into sharing pricing, and deleting the group just un-links its
+    # members rather than touching their (now independent again) pricing rows.
+    pricing_group = models.ForeignKey(
+        PricingGroup, null=True, blank=True, on_delete=models.SET_NULL, related_name="businesses",
     )
 
     class Meta:

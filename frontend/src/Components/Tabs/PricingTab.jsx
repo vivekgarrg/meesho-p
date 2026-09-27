@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { API, btn, C, S, fmt, useIsMobile } from "../../App";
+import { useBusiness } from "../../contexts/BusinessContext";
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 const calcFinal = (ip, tax, pkg) => {
@@ -1140,6 +1141,8 @@ function CreateParentFromSkuModal({ sku, onSaved, onCancel }) {
 // ── main tab ──────────────────────────────────────────────────────────────────
 export function PricingTab() {
   const isMobile = useIsMobile();
+  const { activeBusiness } = useBusiness();
+  const pricingPartners = activeBusiness?.pricing_partners || [];
   const [parents, setParents] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
@@ -1366,6 +1369,15 @@ export function PricingTab() {
             <p style={{ fontSize: 13, color: C.gray600 }}>
               Modern parent-SKU workspace: quick linking, clean pricing control, and visual grouping.
             </p>
+            {pricingPartners.length > 0 && (
+              <div style={{
+                display: "inline-flex", alignItems: "center", gap: 6, marginTop: 8,
+                background: C.blueLight, border: "1px solid #BFDBFE", color: C.blue,
+                fontSize: 11.5, fontWeight: 700, padding: "4px 10px", borderRadius: 20,
+              }}>
+                🔗 Shared pricing with {pricingPartners.join(", ")} — editing a price here updates it there too.
+              </div>
+            )}
           </div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <button onClick={handleDownload} style={btn("ghost", "md")} title="Export parents and SKUs together as a two-sheet Excel workbook">

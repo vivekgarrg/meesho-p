@@ -91,11 +91,25 @@ class BusinessSerializer(serializers.ModelSerializer):
     rather than null, so the client never has to special-case a new business.
     """
     profile = BusinessProfileSerializer(required=False)
+    # Other businesses this one shares a SKU/parent pricing catalogue with —
+    # see PricingGroup's docstring and meesho_app/pricing_sync.py. Read-only:
+    # linking happens via the link_business_pricing management command, not
+    # through this serializer.
+    pricing_partners = serializers.SerializerMethodField()
 
     class Meta:
         model = Business
-        fields = ["id", "name", "is_active", "created_at", "updated_at", "profile"]
+        fields = ["id", "name", "is_active", "created_at", "updated_at", "profile", "pricing_partners"]
         read_only_fields = ["id", "created_at", "updated_at"]
+
+    def get_pricing_partners(self, obj):
+        if not obj.pricing_group_id:
+            return []
+        return list(
+            Business.objects.filter(pricing_group_id=obj.pricing_group_id, is_active=True)
+            .exclude(pk=obj.pk)
+            .values_list("name", flat=True)
+        )
 
     def to_representation(self, instance):
         data = super().to_representation(instance)

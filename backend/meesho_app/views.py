@@ -20,6 +20,7 @@ from .helpers.helper import status_wise_summary, strip_html
 from accounts.models import Business, User
 from .permissions import get_authorized_business, accessible_businesses
 from .helpers.label_pdf import extract_all_pages
+from . import pricing_sync
 
 from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, LabelDayReset, PurchaseBill, PurchaseItem, BlockedCustomer, InventoryAdjustment, ConsumableItem, ConsumablePurchase, ConsumableUsage, InventoryLog, MeeshoInventory, MeeshoPriceUpdate, ExpenseInvoice, ExpenseInvoiceItem, TransportCharge, PackedStockEvent, EstimatedProfitOrder, ReturnDelivery, GstTransaction, GstInvoiceDetail, ScannedOrder, ListingTemplate, ClaimTicket, WorkerTask, WalletEntry, WalletSettlement, TaskListing, PlatformRate, TaskDocument, BusinessCostSetting, Employee, EmployeePayment, BusinessOwner, Product, BulkListingBatch, ReturnVideoBatch
 from .serializers import (
@@ -3436,6 +3437,9 @@ def parent_linking_to_sku(request, business_id):
             packaging_cost=parent.packaging_cost,
             final_price=parent.final_price,
         )
+        # Same reason as _sync_parent_current_price: QuerySet.update() above
+        # never fires post_save, so a linked sibling business needs telling.
+        pricing_sync.sync_parent_and_children(business, parent.item_id)
 
         return Response(
             {
@@ -3477,6 +3481,10 @@ def _sync_parent_current_price(item_id, business):
         packaging_cost=history.packaging_cost,
         final_price=history.final_price,
     )
+    # QuerySet.update() never sends post_save, so a business sharing a
+    # pricing_group with another needs this told explicitly — see
+    # pricing_sync.sync_parent_and_children's docstring.
+    pricing_sync.sync_parent_and_children(business, item_id)
 
 
 @api_view(["GET", "POST"])
