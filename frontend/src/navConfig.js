@@ -14,6 +14,7 @@ export const NAV_GROUPS = [
     color: '#A78BFA',
     items: [
       { path: '/', label: 'Overview', icon: '◈', end: true },
+      { path: '/combined-dashboard', label: 'Combined Dashboard', icon: '🧩' },
       { path: '/sku-analysis', label: 'SKU Analysis', icon: '↗' },
       { path: '/ads-analysis', label: 'Ads Analysis', icon: '◬' },
       { path: '/estimated-profit', label: 'Estimated Profit', icon: '🧮' },

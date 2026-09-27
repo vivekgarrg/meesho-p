@@ -12,6 +12,7 @@ import { API, fmt, C, CHART_COLORS, STATUS_COLORS, S, useIsMobile, useIsTablet }
 
 // ── Tab components ─────────────────────────────────────────────────────────────
 import { OverviewTab } from './Components/Tabs/OverviewTab';
+import { CombinedDashboardTab } from './Components/Tabs/CombinedDashboardTab';
 import { UnsettledOrdersTab } from './Components/Tabs/UnsettledOrdersTab';
 import { OrdersTab } from './Components/Tabs/OrdersTab';
 import { PaymentsTab } from './Components/Tabs/PaymentsTab';
@@ -486,7 +487,67 @@ export { NAV_GROUPS, ALWAYS_VISIBLE_PATHS } from './navConfig';
 // (NAV_GROUPS / ALL_NAV / ALWAYS_VISIBLE_PATHS all come from navConfig.)
 
 // ── Sidebar nav item ──────────────────────────────────────────────────────────
-function NavItem({ item, collapsed, onNavigate, touch }) {
+/** Wraps the part of `text` matching `query` (case-insensitive) in a <mark>,
+ * so a sidebar search result shows *why* it matched, not just that it did. */
+function HighlightMatch({ text, query }) {
+  if (!query) return text;
+  const idx = text.toLowerCase().indexOf(query);
+  if (idx === -1) return text;
+  return (
+    <>
+      {text.slice(0, idx)}
+      <mark style={{ background: 'rgba(196,181,253,0.4)', color: '#F3E8FF', borderRadius: 3, padding: '0 1px' }}>
+        {text.slice(idx, idx + query.length)}
+      </mark>
+      {text.slice(idx + query.length)}
+    </>
+  );
+}
+
+/** A collapsible sidebar group header (Analytics, Operations, …) — its own
+ * component (rather than inline in Sidebar's .map()) so it can hold its own
+ * hover state, the same way NavItem does. */
+function GroupHeader({ group, open, isSearching, query, onToggle }) {
+  const [hovered, setHovered] = useState(false);
+  return (
+    <button
+      onClick={isSearching ? undefined : onToggle}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        display: 'flex', alignItems: 'center', gap: 6, width: '100%',
+        padding: '7px 14px 7px 18px', margin: '0 4px 0 0',
+        background: !isSearching && hovered ? 'rgba(255,255,255,0.05)' : 'none',
+        border: 'none', borderRadius: 8,
+        cursor: isSearching ? 'default' : 'pointer', fontFamily: 'inherit',
+        textAlign: 'left', transition: 'background 0.14s',
+      }}
+    >
+      <div style={{ width: 6, height: 6, borderRadius: '50%', background: group.color, flexShrink: 0 }} />
+      <span
+        style={{
+          flex: 1, fontSize: 9, fontWeight: 700, color: 'rgba(255,255,255,0.25)',
+          letterSpacing: '0.12em', textTransform: 'uppercase',
+        }}
+      >
+        <HighlightMatch text={group.label} query={query} />
+      </span>
+      {!isSearching && (
+        <span
+          style={{
+            fontSize: 10, color: 'rgba(255,255,255,0.25)',
+            transform: open ? 'rotate(0deg)' : 'rotate(-90deg)',
+            transition: 'transform 0.15s',
+          }}
+        >
+          ▾
+        </span>
+      )}
+    </button>
+  );
+}
+
+function NavItem({ item, collapsed, onNavigate, touch, query }) {
   const [hovered, setHovered] = useState(false);
   return (
     <NavLink
@@ -556,7 +617,7 @@ function NavItem({ item, collapsed, onNavigate, touch }) {
                 letterSpacing: '0.005em',
               }}
             >
-              {item.label}
+              <HighlightMatch text={item.label} query={query} />
             </span>
           )}
         </>
@@ -570,22 +631,65 @@ const SIDEBAR_BG = '#13111C';
 const SIDEBAR_BG2 = '#0E0C18';
 const DIVIDER = 'rgba(255,255,255,0.07)';
 
+// Which sidebar groups (Analytics, Operations, …) a user has manually
+// collapsed, so a folded-away section stays folded across reloads instead of
+// resetting to fully open every time. Groups default open — absence from
+// this map, not an explicit `true`, is what "open" means — so adding a new
+// group to navConfig.js never needs a matching entry here.
+const GROUP_STATE_KEY = 'sidebar_group_state';
+function readGroupState() {
+  try {
+    return JSON.parse(localStorage.getItem(GROUP_STATE_KEY) || '{}');
+  } catch {
+    return {};
+  }
+}
+
 function Sidebar({ collapsed, setCollapsed, compact, mobileOpen, closeMobile }) {
   const [btnHovered, setBtnHovered] = useState(false);
   const { isSuperAdmin } = useAuth();
   // Resolved server-side: this user's own rule, else their business's, else the
   // global default, else everything.
   const { isPathVisible } = useAccess();
-
-  const navGroups = NAV_GROUPS.filter((g) => !g.adminOnly || isSuperAdmin)
-    .map((g) => ({ ...g, items: g.items.filter((item) => isPathVisible(item.path)) }))
-    .filter((g) => g.items.length > 0);
+  const loc = useLocation();
   // Below desktop width (mobile + tablet) the sidebar is never collapsed-to-
   // icons — it's an off-canvas drawer, hidden by default and fully shown or
   // fully hidden, because a squeezed icon rail still eats space a phone or
   // tablet can't spare. Icon-only collapse is a big-screen-only affordance.
   const onMobile = compact;
   const iconsOnly = !onMobile && collapsed;
+
+  const [search, setSearch] = useState('');
+  const [groupState, setGroupState] = useState(readGroupState);
+  useEffect(() => {
+    localStorage.setItem(GROUP_STATE_KEY, JSON.stringify(groupState));
+  }, [groupState]);
+  const toggleGroup = (label) =>
+    setGroupState((s) => ({ ...s, [label]: s[label] === false ? true : false }));
+
+  const navGroups = NAV_GROUPS.filter((g) => !g.adminOnly || isSuperAdmin)
+    .map((g) => ({ ...g, items: g.items.filter((item) => isPathVisible(item.path)) }))
+    .filter((g) => g.items.length > 0);
+
+  // Search matches a group's own name (e.g. "Operations") as well as any of
+  // its tabs — matching the group name surfaces every tab in it, matching a
+  // tab surfaces just that one, both under their group so it's still clear
+  // where each result lives.
+  // Search is a no-op in the icon-only rail — the box itself is hidden there,
+  // but a leftover query from before collapsing shouldn't silently keep
+  // filtering icons the user can no longer see the reason for.
+  const q = iconsOnly ? '' : search.trim().toLowerCase();
+  const isSearching = q.length > 0;
+  const visibleGroups = navGroups
+    .map((group) => {
+      const groupMatches = isSearching && group.label.toLowerCase().includes(q);
+      const items = isSearching && !groupMatches
+        ? group.items.filter((item) => item.label.toLowerCase().includes(q))
+        : group.items;
+      return { group, items };
+    })
+    .filter(({ items }) => !isSearching || items.length > 0);
+
   const W = onMobile ? 268 : collapsed ? 60 : 232;
 
   const shellStyle = onMobile
@@ -685,41 +789,96 @@ function Sidebar({ collapsed, setCollapsed, compact, mobileOpen, closeMobile }) 
         )}
       </div>
 
-      {/* Nav */}
-      <div style={{ flex: 1, overflowY: 'auto', padding: '16px 0 8px', scrollbarWidth: 'none' }}>
-        {navGroups.map((group, gi) => (
-          <div key={group.label} style={{ marginBottom: iconsOnly ? 4 : 8 }}>
-            {iconsOnly ? (
-              <div style={{ height: 1, background: DIVIDER, margin: gi === 0 ? '0 10px 8px' : '8px 10px' }} />
-            ) : (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '2px 18px 5px' }}>
-                <div style={{ width: 6, height: 6, borderRadius: '50%', background: group.color, flexShrink: 0 }} />
-                <span
-                  style={{
-                    fontSize: 9,
-                    fontWeight: 700,
-                    color: 'rgba(255,255,255,0.25)',
-                    letterSpacing: '0.12em',
-                    textTransform: 'uppercase',
-                  }}
-                >
-                  {group.label}
-                </span>
-              </div>
+      {/* Search — hidden in the icon-only rail, where there's no room for it */}
+      {!iconsOnly && (
+        <div style={{ padding: '12px 12px 4px', flexShrink: 0 }}>
+          <div style={{ position: 'relative' }}>
+            <span
+              style={{
+                position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)',
+                fontSize: 12, color: 'rgba(255,255,255,0.3)', pointerEvents: 'none',
+              }}
+            >
+              🔍
+            </span>
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Escape') setSearch(''); }}
+              placeholder="Search tabs…"
+              style={{
+                width: '100%', boxSizing: 'border-box',
+                background: 'rgba(255,255,255,0.06)',
+                border: '1px solid rgba(255,255,255,0.1)',
+                borderRadius: 9,
+                padding: search ? '8px 28px 8px 30px' : '8px 10px 8px 30px',
+                fontSize: 12.5,
+                color: '#F3EEFF',
+                fontFamily: 'inherit',
+                outline: 'none',
+              }}
+            />
+            {search && (
+              <button
+                onClick={() => setSearch('')}
+                aria-label="Clear search"
+                style={{
+                  position: 'absolute', right: 5, top: '50%', transform: 'translateY(-50%)',
+                  background: 'none', border: 'none', color: 'rgba(255,255,255,0.4)',
+                  cursor: 'pointer', fontSize: 15, lineHeight: 1, padding: 5,
+                }}
+              >
+                ×
+              </button>
             )}
-            {group.items.map((item) => (
-              <NavItem
-                key={item.path}
-                item={item}
-                collapsed={iconsOnly}
-                // Tapping a link on mobile should navigate *and* get the drawer
-                // out of the way, which is what every drawer nav does.
-                onNavigate={onMobile ? closeMobile : undefined}
-                touch={onMobile}
-              />
-            ))}
           </div>
-        ))}
+        </div>
+      )}
+
+      {/* Nav */}
+      <div style={{ flex: 1, overflowY: 'auto', padding: '8px 0 8px', scrollbarWidth: 'none' }}>
+        {isSearching && visibleGroups.length === 0 && (
+          <div style={{ padding: '10px 18px', fontSize: 12, color: 'rgba(255,255,255,0.35)' }}>
+            No tabs match "{search.trim()}".
+          </div>
+        )}
+        {visibleGroups.map(({ group, items }, gi) => {
+          // A group stays visibly open while searching (so its matches show),
+          // and while it holds the page you're currently on (so the sidebar
+          // never hides where you are) — otherwise it's whatever the user
+          // last chose, remembered in groupState.
+          const isActiveGroup = group.items.some((item) =>
+            item.end ? loc.pathname === item.path : loc.pathname.startsWith(item.path));
+          const open = isSearching || isActiveGroup || groupState[group.label] !== false;
+          return (
+            <div key={group.label} style={{ marginBottom: iconsOnly ? 4 : 2 }}>
+              {iconsOnly ? (
+                <div style={{ height: 1, background: DIVIDER, margin: gi === 0 ? '0 10px 8px' : '8px 10px' }} />
+              ) : (
+                <GroupHeader
+                  group={group}
+                  open={open}
+                  isSearching={isSearching}
+                  query={q}
+                  onToggle={() => toggleGroup(group.label)}
+                />
+              )}
+              {(iconsOnly || open) && items.map((item) => (
+                <NavItem
+                  key={item.path}
+                  item={item}
+                  collapsed={iconsOnly}
+                  query={q}
+                  // Tapping a link on mobile should navigate *and* get the drawer
+                  // out of the way, which is what every drawer nav does; either
+                  // way, a search that led here has done its job.
+                  onNavigate={() => { setSearch(''); if (onMobile) closeMobile(); }}
+                  touch={onMobile}
+                />
+              ))}
+            </div>
+          );
+        })}
       </div>
 
       {/* Collapse toggle (desktop) / close drawer (mobile) */}
@@ -1052,6 +1211,7 @@ function AppShell() {
             <RouteGuard>
               <Routes>
                 <Route path="/" element={<OverviewTab />} />
+                <Route path="/combined-dashboard" element={<CombinedDashboardTab />} />
                 <Route path="/orders" element={<OrdersTab />} />
                 <Route path="/order-scan" element={<OrderScanTab />} />
                 <Route path="/unsettled" element={<UnsettledOrdersTab />} />

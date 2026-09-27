@@ -15,6 +15,7 @@ server-side check, a restricted user could still call the endpoint directly, so
 # group is only used to lay the admin screen out in the same shape as the sidebar.
 NAV_CATALOG = [
     {"path": "/",                  "label": "Overview",          "group": "Analytics"},
+    {"path": "/combined-dashboard", "label": "Combined Dashboard", "group": "Analytics"},
     {"path": "/sku-analysis",      "label": "SKU Analysis",      "group": "Analytics"},
     {"path": "/ads-analysis",      "label": "Ads Analysis",      "group": "Analytics"},
     {"path": "/estimated-profit",  "label": "Estimated Profit",  "group": "Analytics"},
