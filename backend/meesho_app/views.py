@@ -1631,6 +1631,207 @@ def _build_payout_breakdown(qs):
 
 
 
+_PROFIT_STATUSES = ("Claim", "Cancelled", "Delivered", "Return", "RTO", "Shipped", "Exchange", "Unknown")
+
+_PROFIT_FIELDS = (
+    "sub_order_no", "supplier_sku", "quantity",
+    "final_settlement_amount", "live_order_status",
+    "recovery_reason", "claims", "return_shipping_charge",
+    "order_date", "payment_date",
+)
+
+
+def _profit_payments_qs(business, date_from, date_to):
+    """
+    The payment rows the settled-profit figures are computed over. Shared by
+    profit_summary and sku_order_payments so a SKU's order list always adds up
+    to the totals shown for it.
+
+    Filters via the Order.order_date join; falls back to
+    OrderPayment.order_date if the Order table has no records for the range.
+    """
+    qs = OrderPayment.objects.filter(business=business)
+    if date_from or date_to:
+        ord_qs = Order.objects.filter(business=business)
+        if date_from:
+            ord_qs = ord_qs.filter(order_date__gte=date_from)
+        if date_to:
+            ord_qs = ord_qs.filter(order_date__lte=date_to)
+        # Use a DB subquery — avoids loading thousands of IDs into Python memory
+        if ord_qs.exists():
+            qs = qs.filter(sub_order_no__in=ord_qs.values("sub_order_no"))
+        else:
+            # Fallback: filter OrderPayment.order_date directly (DateTimeField) —
+            # via aware day-bounds, not __date, see _aware_day_bounds.
+            _start, _end = _aware_day_bounds(date_from, date_to)
+            if _start:
+                qs = qs.filter(order_date__gte=_start)
+            if _end:
+                qs = qs.filter(order_date__lt=_end)
+    return qs
+
+
+class _PriceResolver:
+    """Pricing for one business, loaded once, as used by the settled-profit engine."""
+
+    def __init__(self, business):
+        from collections import defaultdict
+
+        # Load pricing once (include item_price + tax_percent for tax cost calculation)
+        _fp_all = list(FinalPrice.objects.filter(business=business).only("sku_id", "final_price", "packaging_cost", "parent_id", "item_price", "tax_percent"))
+        self.price_map      = _SkuMap((fp.sku_id, fp.final_price    or Decimal("0")) for fp in _fp_all)
+        self.packaging_map  = _SkuMap((fp.sku_id, fp.packaging_cost or Decimal("0")) for fp in _fp_all)
+        self.item_price_map = _SkuMap((fp.sku_id, fp.item_price     or Decimal("0")) for fp in _fp_all)
+        self.tax_map        = _SkuMap((fp.sku_id, fp.tax_percent    or 0)            for fp in _fp_all)
+        self.sku_parent_map = _SkuMap((fp.sku_id, fp.parent_id) for fp in _fp_all if fp.parent_id)
+        # Any casing of a SKU -> the spelling stored in pricing, so orders that spell
+        # the same SKU differently accumulate into one row instead of two.
+        self.canonical_sku  = _SkuMap((fp.sku_id, fp.sku_id) for fp in _fp_all)
+
+        # Key parent maps by the parent's surrogate id, matching FinalPrice.parent_id
+        # and ParentPriceHistory.parent_id (both now store the integer id).
+        self.parent_rows = list(ParentItemPrice.objects.filter(business=business).only("item_id", "item_price", "tax_percent", "packaging_cost", "final_price"))
+        self.parent_price_map      = {fp.id: fp.final_price    or Decimal("0") for fp in self.parent_rows}
+        self.parent_packaging_map  = {fp.id: fp.packaging_cost or Decimal("0") for fp in self.parent_rows}
+        self.parent_item_price_map = {fp.id: fp.item_price     or Decimal("0") for fp in self.parent_rows}
+        self.parent_tax_map        = {fp.id: fp.tax_percent    or 0            for fp in self.parent_rows}
+
+        # Date-effective price history: {parent_id: [(effective_from, final_price, packaging_cost, item_price, tax_percent), ...]}
+        _hist = (
+            ParentPriceHistory.objects
+            .filter(business=business)
+            .values("parent_id", "effective_from", "final_price", "packaging_cost", "item_price", "tax_percent")
+            .order_by("effective_from")
+        )
+        self.parent_histories = defaultdict(list)
+        for h in _hist:
+            self.parent_histories[h["parent_id"]].append((
+                h["effective_from"],
+                h["final_price"]    or Decimal("0"),
+                h["packaging_cost"] or Decimal("0"),
+                h["item_price"]     or Decimal("0"),
+                h["tax_percent"]    or 0,
+            ))
+
+    def effective_price(self, sku_id, order_date):
+        """
+        (final_price, packaging_cost, item_price, tax_percent) for a SKU.
+
+        Priority is the parent's price, then the SKU's own — in that order and
+        regardless of whether an order date is known. Previously the parent was
+        only consulted when an order_date was present, so any order without one
+        silently fell back to SKU pricing even when a parent existed.
+
+        A parent counts as "priced" only if it actually carries an item price;
+        an empty parent record falls through to the SKU so a missing parent
+        price can't zero out a cost.
+        """
+        pid = self.sku_parent_map.get(sku_id)
+
+        if pid:
+            # Dated parent price history wins when we know when the order was placed.
+            if order_date:
+                od = order_date.date() if hasattr(order_date, "date") else order_date
+                applicable = [
+                    (d, fp, pkg, ip, tax)
+                    for d, fp, pkg, ip, tax in self.parent_histories[pid] if d <= od
+                ]
+                if applicable:
+                    _, fp, pkg, ip, tax = applicable[-1]
+                    if ip:
+                        return fp, pkg, ip, tax
+
+            # Otherwise the parent's current price.
+            p_item = self.parent_item_price_map.get(pid, Decimal("0"))
+            if p_item:
+                return (
+                    self.parent_price_map.get(pid,      Decimal("0")),
+                    self.parent_packaging_map.get(pid,  Decimal("0")),
+                    p_item,
+                    self.parent_tax_map.get(pid, 0),
+                )
+
+        # No parent, or the parent has no price of its own — use the SKU.
+        return (
+            self.price_map.get(sku_id,      Decimal("0")),
+            self.packaging_map.get(sku_id,  Decimal("0")),
+            self.item_price_map.get(sku_id, Decimal("0")),
+            self.tax_map.get(sku_id, 0),
+        )
+
+
+@api_view(["GET"])
+def sku_order_payments(request, business_id):
+    """
+    Every settled order of one SKU with all of its payment rows, for the SKU
+    Analysis detail view. Selection and per-order P&L go through the same code
+    as profit_summary, so these orders sum to that SKU's row there.
+    Params: sku (required), date_from / date_to (YYYY-MM-DD).
+    """
+    business = get_authorized_business(request, business_id)
+    sku_param = (request.GET.get("sku") or "").strip()
+    if not sku_param:
+        return Response({"error": "sku is required"}, status=status.HTTP_400_BAD_REQUEST)
+    cost_setting = _cost_setting(business)
+    date_from = request.GET.get("date_from", "")
+    date_to   = request.GET.get("date_to", "")
+    target = _sku_key(sku_param)
+
+    qs = _profit_payments_qs(business, date_from, date_to)
+    # Candidate orders: anything that names this SKU in either table. The exact
+    # SKU per order is then resolved below the same way profit_summary does it
+    # (Order.sku wins over the payment sheet's supplier_sku).
+    candidates = qs.filter(
+        DQ(supplier_sku__iexact=sku_param)
+        | DQ(sub_order_no__in=Order.objects.filter(business=business, sku__iexact=sku_param).values("sub_order_no"))
+    ).values("sub_order_no")
+    rows = list(qs.filter(sub_order_no__in=candidates).order_by("-payment_date"))
+
+    from collections import defaultdict
+    order_groups = defaultdict(list)
+    for r in rows:
+        order_groups[r.sub_order_no].append(r)
+    order_map = {
+        o["sub_order_no"]: o
+        for o in Order.objects.filter(business=business, sub_order_no__in=list(order_groups))
+        .values("sub_order_no", "sku", "quantity", "order_date", "size")
+    }
+
+    pricing = _PriceResolver(business)
+    unique_statuses = list(_PROFIT_STATUSES)
+    serialized = {r.pk: d for r, d in zip(rows, OrderPaymentSerializer(rows, many=True).data)}
+
+    orders = []
+    for sub_no, payments in order_groups.items():
+        order = order_map.get(sub_no) or {}
+        primary = next((p for p in payments if p.live_order_status), payments[0])
+        sku = order.get("sku") or primary.supplier_sku
+        if _sku_key(sku) != target or sku not in pricing.price_map:
+            continue
+        qty = order.get("quantity") or primary.quantity
+        eff_price, eff_pkg, eff_item_price, eff_tax_pct = pricing.effective_price(sku, primary.order_date)
+        result = compute_order_net(payments, eff_price, eff_pkg, qty, unique_statuses,
+                                   eff_item_price, eff_tax_pct, cost_setting=cost_setting)
+        order_date = order.get("order_date") or (primary.order_date.date() if primary.order_date else None)
+        orders.append({
+            "sub_order_no":        sub_no,
+            "order_date":          str(order_date) if order_date else None,
+            "size":                order.get("size"),
+            "quantity":            int(result["quantity"]),
+            "status":              result["status"],
+            "total_settlement":    round(Decimal(result["total_settlement"]), 2),
+            "purchase_cost":       round(Decimal(result["purchase_cost"]), 2),
+            "packaging_cost":      round(Decimal(result["packaging_cost"]), 2),
+            "tax_cost":            round(Decimal(result["tax_cost"]), 2),
+            "final_purchase_cost": round(Decimal(result["final_purchase_cost"]), 2),
+            "net":                 round(Decimal(result["net"]), 2),
+            "payments":            [serialized[p.pk] for p in payments],
+        })
+
+    orders.sort(key=lambda o: (o["order_date"] or "", o["sub_order_no"]), reverse=True)
+    return Response({"sku": sku_param, "count": len(orders), "orders": orders})
+
+
 @api_view(["GET"])
 def profit_summary(request, business_id):
     """
@@ -1644,125 +1845,23 @@ def profit_summary(request, business_id):
     date_from = request.GET.get("date_from", "")
     date_to   = request.GET.get("date_to", "")
 
-    qs = OrderPayment.objects.filter(business=business)
-
-
-    if date_from or date_to:
-        ord_qs = Order.objects.filter(business=business)
-        if date_from:
-            # qs = qs.filter(order_date__gte=date_from)
-            ord_qs = ord_qs.filter(order_date__gte=date_from)
-        if date_to:
-            # qs = qs.filter(order_date__lte=date_to)
-            ord_qs = ord_qs.filter(order_date__lte=date_to)
-        # Use a DB subquery — avoids loading thousands of IDs into Python memory
-        if ord_qs.exists():
-            qs = qs.filter(sub_order_no__in=ord_qs.values("sub_order_no"))
-        else:
-            # Fallback: filter OrderPayment.order_date directly (DateTimeField) —
-            # via aware day-bounds, not __date, see _aware_day_bounds.
-            _start, _end = _aware_day_bounds(date_from, date_to)
-            if _start:
-                qs = qs.filter(order_date__gte=_start)
-            if _end:
-                qs = qs.filter(order_date__lt=_end)
-
-    # Load pricing once (include item_price + tax_percent for tax cost calculation)
-    _fp_all        = list(FinalPrice.objects.filter(business=business).only("sku_id", "final_price", "packaging_cost", "parent_id", "item_price", "tax_percent"))
-    price_map      = _SkuMap((fp.sku_id, fp.final_price    or Decimal("0")) for fp in _fp_all)
-    packaging_map  = _SkuMap((fp.sku_id, fp.packaging_cost or Decimal("0")) for fp in _fp_all)
-    item_price_map = _SkuMap((fp.sku_id, fp.item_price     or Decimal("0")) for fp in _fp_all)
-    tax_map        = _SkuMap((fp.sku_id, fp.tax_percent    or 0)            for fp in _fp_all)
-    sku_parent_map = _SkuMap((fp.sku_id, fp.parent_id) for fp in _fp_all if fp.parent_id)
-    # Any casing of a SKU -> the spelling stored in pricing, so orders that spell
-    # the same SKU differently accumulate into one row instead of two.
-    canonical_sku  = _SkuMap((fp.sku_id, fp.sku_id) for fp in _fp_all)
-    
-    # Key parent maps by the parent's surrogate id, matching FinalPrice.parent_id
-    # and ParentPriceHistory.parent_id (both now store the integer id).
-    _fp_parent     = list(ParentItemPrice.objects.filter(business=business).only("item_id", "item_price", "tax_percent", "packaging_cost", "final_price"))
-    parent_price_map      = {fp.id: fp.final_price    or Decimal("0") for fp in _fp_parent}
-    parent_packaging_map  = {fp.id: fp.packaging_cost or Decimal("0") for fp in _fp_parent}
-    parent_item_price_map = {fp.id: fp.item_price     or Decimal("0") for fp in _fp_parent}
-    parent_tax_map        = {fp.id: fp.tax_percent    or 0            for fp in _fp_parent}
-
-    # Build date-effective price history: {parent_id: [(effective_from, final_price, packaging_cost, item_price, tax_percent), ...]}
     from collections import defaultdict
-    _hist = list(
-        ParentPriceHistory.objects
-        .filter(business=business)
-        .values("parent_id", "effective_from", "final_price", "packaging_cost", "item_price", "tax_percent")
-        .order_by("effective_from")
-    )
-    _parent_histories = defaultdict(list)
-    for h in _hist:
-        _parent_histories[h["parent_id"]].append((
-            h["effective_from"],
-            h["final_price"]    or Decimal("0"),
-            h["packaging_cost"] or Decimal("0"),
-            h["item_price"]     or Decimal("0"),
-            h["tax_percent"]    or 0,
-        ))
+    qs = _profit_payments_qs(business, date_from, date_to)
 
-    def get_eff_price(sku_id, order_date):
-        """
-        (final_price, packaging_cost, item_price, tax_percent) for a SKU.
-
-        Priority is the parent's price, then the SKU's own — in that order and
-        regardless of whether an order date is known. Previously the parent was
-        only consulted when an order_date was present, so any order without one
-        silently fell back to SKU pricing even when a parent existed.
-
-        A parent counts as "priced" only if it actually carries an item price;
-        an empty parent record falls through to the SKU so a missing parent
-        price can't zero out a cost.
-        """
-        pid = sku_parent_map.get(sku_id)
-
-        if pid:
-            # Dated parent price history wins when we know when the order was placed.
-            if order_date:
-                od = order_date.date() if hasattr(order_date, "date") else order_date
-                applicable = [
-                    (d, fp, pkg, ip, tax)
-                    for d, fp, pkg, ip, tax in _parent_histories[pid] if d <= od
-                ]
-                if applicable:
-                    _, fp, pkg, ip, tax = applicable[-1]
-                    if ip:
-                        return fp, pkg, ip, tax
-
-            # Otherwise the parent's current price.
-            p_item = parent_item_price_map.get(pid, Decimal("0"))
-            if p_item:
-                return (
-                    parent_price_map.get(pid,      Decimal("0")),
-                    parent_packaging_map.get(pid,  Decimal("0")),
-                    p_item,
-                    parent_tax_map.get(pid, 0),
-                )
-
-        # No parent, or the parent has no price of its own — use the SKU.
-        return (
-            price_map.get(sku_id,      Decimal("0")),
-            packaging_map.get(sku_id,  Decimal("0")),
-            item_price_map.get(sku_id, Decimal("0")),
-            tax_map.get(sku_id, 0),
-        )
+    pricing        = _PriceResolver(business)
+    price_map      = pricing.price_map
+    packaging_map  = pricing.packaging_map
+    sku_parent_map = pricing.sku_parent_map
+    canonical_sku  = pricing.canonical_sku
+    _fp_parent     = pricing.parent_rows
+    get_eff_price  = pricing.effective_price
 
     # Pre-fetch distinct statuses ONCE so _ensure_status_buckets can pre-initialise keys
-    unique_statuses = list(["Claim","Cancelled", "Delivered", "Return", "RTO", "Shipped", "Exchange", "Unknown"])
-
-    _FIELDS = (
-        "sub_order_no", "supplier_sku", "quantity",
-        "final_settlement_amount", "live_order_status",
-        "recovery_reason", "claims", "return_shipping_charge",
-        "order_date", "payment_date",
-    )
+    unique_statuses = list(_PROFIT_STATUSES)
 
     # Group ALL payment rows by sub_order_no
     order_groups = defaultdict(list)
-    for payment in qs.only(*_FIELDS).order_by("-payment_date"):
+    for payment in qs.only(*_PROFIT_FIELDS).order_by("-payment_date"):
         order_groups[payment.sub_order_no].append(payment)
 
     order_wise_profit   = {}

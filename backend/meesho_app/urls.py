@@ -7,6 +7,7 @@ urlpatterns = [
     path("profit/available-months/", views.available_months, name="available_months"),
     path("profit/daily/", views.profit_daily_summary, name="profit_daily_summary"),
     path("profit/", views.profit_summary, name="profit_summary"),
+    path("profit/sku-orders/", views.sku_order_payments, name="sku_order_payments"),
     path("estimated-profit/", views.estimated_profit_summary, name="estimated_profit_summary"),
     path("estimated-profit/upload/", views.estimated_profit_upload, name="estimated_profit_upload"),
     path("flipkart-profit/", views.flipkart_profit_summary, name="flipkart_profit_summary"),

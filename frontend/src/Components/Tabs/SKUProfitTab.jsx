@@ -418,6 +418,187 @@ function SKUDataTable({ data, onRowClick, mode = "sku" }) {
   );
 }
 
+// ── SKU Payments panel ────────────────────────────────────────────────────────
+// Every order of the SKU with all of its Meesho payment rows. One order can
+// carry several rows (e.g. Shipped then Delivered, or a Return plus a claim),
+// so each order gets its own table rather than being flattened into a list.
+
+// Money columns shown in the per-order payment tables. A column is hidden when
+// it is zero on every row of this SKU, so the tables stay readable.
+const PAYMENT_COLS = [
+  { key: "total_sale_amount", label: "Sale Amount" },
+  { key: "total_sale_return_amount", label: "Sale Return" },
+  { key: "meesho_commission_incl_gst", label: "Commission" },
+  { key: "fixed_fee_deduction", label: "Fixed Fee" },
+  { key: "meesho_gold_platform_fee", label: "Gold Fee" },
+  { key: "meesho_mall_platform_fee", label: "Mall Fee" },
+  { key: "warehousing_fee_deduction", label: "Warehousing" },
+  { key: "shipping_charge_incl_gst", label: "Shipping" },
+  { key: "return_shipping_charge", label: "Return Ship." },
+  { key: "gst_compensation_prp_shipping", label: "GST Comp." },
+  { key: "net_other_support_service_charges", label: "Support Svc" },
+  { key: "gst_on_net_other_support_service_charges", label: "GST on Svc" },
+  { key: "tcs", label: "TCS" },
+  { key: "tds", label: "TDS" },
+  { key: "compensation", label: "Compensation" },
+  { key: "claims", label: "Claims" },
+  { key: "recovery", label: "Recovery" },
+];
+
+const statusStyle = (s) => {
+  const k = (s || "").toLowerCase();
+  if (k === "delivered") return STATUS.delivered;
+  if (k === "return") return STATUS.return;
+  if (k === "rto") return STATUS.rto;
+  if (k === "exchange") return STATUS.exchange;
+  if (k === "claim") return STATUS.claim;
+  if (k === "shipped") return STATUS.shipped;
+  return STATUS.other;
+};
+
+const num = (v) => Number(v || 0);
+const moneyCell = (v) => (num(v) === 0 ? "—" : fmt(num(v)));
+
+function SKUPaymentsPanel({ skuId, range, label }) {
+  const [data, setData] = useState(null);
+  const [error, setError] = useState("");
+  const [statusFilter, setStatusFilter] = useState("all");
+
+  useEffect(() => {
+    const ctrl = new AbortController();
+    setData(null); setError("");
+    const params = new URLSearchParams({ sku: skuId });
+    if (range.date_from) params.set("date_from", range.date_from);
+    if (range.date_to) params.set("date_to", range.date_to);
+    fetch(`${API}/profit/sku-orders/?${params}`, { signal: ctrl.signal })
+      .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+      .then(setData)
+      .catch(e => { if (e.name !== "AbortError") setError(e.message || "Failed to load payments"); });
+    return () => ctrl.abort();
+  }, [skuId, JSON.stringify(range)]); // eslint-disable-line
+
+  const orders = data?.orders || [];
+  const statusCounts = useMemo(() => {
+    const c = {};
+    for (const o of orders) c[o.status] = (c[o.status] || 0) + 1;
+    return c;
+  }, [orders]);
+  const shown = statusFilter === "all" ? orders : orders.filter(o => o.status === statusFilter);
+  const visibleCols = useMemo(
+    () => PAYMENT_COLS.filter(c => orders.some(o => o.payments.some(p => num(p[c.key]) !== 0))),
+    [orders]
+  );
+
+  if (error) return <Alert severity="error">Couldn't load payments: {error}</Alert>;
+  if (!data) {
+    return (
+      <Box sx={{ textAlign: "center", py: 6 }}>
+        <CircularProgress size={28} />
+        <Typography sx={{ color: "#94A3B8", fontSize: 13, mt: 1.5 }}>Loading payments for {label}…</Typography>
+      </Box>
+    );
+  }
+  if (orders.length === 0) {
+    return <Typography sx={{ color: "#94A3B8", textAlign: "center", py: 6 }}>No settled orders for {label}.</Typography>;
+  }
+
+  const totSettle = shown.reduce((s, o) => s + num(o.total_settlement), 0);
+  const totCost = shown.reduce((s, o) => s + num(o.final_purchase_cost), 0);
+  const totNet = shown.reduce((s, o) => s + num(o.net), 0);
+  const headCell = { fontWeight: 700, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.05em", color: "#94A3B8", whiteSpace: "nowrap", py: 1 };
+  const bodyCell = { fontFamily: "monospace", fontSize: 12, whiteSpace: "nowrap", py: 0.75 };
+
+  return (
+    <Box sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
+      {/* Status filter + totals for what's shown */}
+      <Box sx={{ display: "flex", alignItems: "center", gap: 1, flexWrap: "wrap" }}>
+        {[["all", orders.length], ...Object.entries(statusCounts)].map(([s, n]) => {
+          const active = statusFilter === s;
+          const st = s === "all" ? { color: "#1E3A5F", bg: "#EFF6FF", border: "#BFDBFE", label: "All" } : statusStyle(s);
+          return (
+            <Chip key={s} label={`${s === "all" ? "All" : s} · ${n}`} size="small" onClick={() => setStatusFilter(s)}
+              sx={{
+                fontWeight: 700, cursor: "pointer",
+                bgcolor: active ? st.color : st.bg, color: active ? "#fff" : st.color,
+                border: `1px solid ${active ? st.color : st.border}`,
+                "&:hover": { bgcolor: active ? st.color : st.bg },
+              }} />
+          );
+        })}
+        <Box sx={{ flex: 1 }} />
+        <Typography sx={{ fontSize: 12, color: "#64748B" }}>
+          Settlement <b style={{ fontFamily: "monospace", color: "#334155" }}>{fmt(totSettle)}</b>
+          {" · "}Cost <b style={{ fontFamily: "monospace", color: "#DC2626" }}>{fmt(-totCost)}</b>
+          {" · "}Net <b style={{ fontFamily: "monospace", color: totNet >= 0 ? "#059669" : "#E11D48" }}>{fmt(totNet)}</b>
+        </Typography>
+      </Box>
+
+      {shown.map(o => {
+        const st = statusStyle(o.status);
+        return (
+          <Box key={o.sub_order_no} sx={{ ...DS.card, overflow: "hidden", borderLeft: `4px solid ${st.color}` }}>
+            {/* Order header */}
+            <Box sx={{ px: 2, py: 1.25, display: "flex", alignItems: "center", gap: 2, flexWrap: "wrap", bgcolor: "#F8FAFC", borderBottom: "1px solid #E8EDF3" }}>
+              <Typography sx={{ fontFamily: "monospace", fontWeight: 800, fontSize: 13, color: "#0F172A" }}>{o.sub_order_no}</Typography>
+              <Chip label={`${st.icon} ${o.status}`} size="small"
+                sx={{ fontWeight: 700, fontSize: 11, bgcolor: st.bg, color: st.color, border: `1px solid ${st.border}` }} />
+              <Typography sx={{ fontSize: 12, color: "#64748B" }}>
+                Ordered {o.order_date || "—"} · Qty {o.quantity}{o.size ? ` · Size ${o.size}` : ""} · {o.payments.length} payment row{o.payments.length === 1 ? "" : "s"}
+              </Typography>
+              <Box sx={{ flex: 1 }} />
+              <Typography sx={{ fontSize: 12, color: "#64748B" }}>
+                Settled <b style={{ fontFamily: "monospace", color: "#334155" }}>{fmt(num(o.total_settlement))}</b>
+                {num(o.final_purchase_cost) !== 0 && (
+                  <Tooltip title={`Item ${fmt(num(o.purchase_cost))} + packaging ${fmt(num(o.packaging_cost))} + GST ${fmt(num(o.tax_cost))}`}>
+                    <span> · Cost <b style={{ fontFamily: "monospace", color: "#DC2626" }}>{fmt(-num(o.final_purchase_cost))}</b></span>
+                  </Tooltip>
+                )}
+              </Typography>
+              <PLChip value={num(o.net)} />
+            </Box>
+            {/* Every payment row for this order */}
+            <Box sx={{ overflowX: "auto" }}>
+              <Table size="small">
+                <TableHead>
+                  <TableRow>
+                    {["Payment Date", "Status", "Transaction ID", ...visibleCols.map(c => c.label), "Final Settlement", "Note"].map((h, i) => (
+                      <TableCell key={h} sx={{ ...headCell, textAlign: i >= 3 && h !== "Note" ? "right" : "left" }}>{h}</TableCell>
+                    ))}
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {o.payments.map(p => {
+                    const note = [p.recovery_reason, p.claims_reason, p.compensation_reason].filter(Boolean).join(" · ");
+                    const settle = num(p.final_settlement_amount);
+                    return (
+                      <TableRow key={p.id} sx={{ "&:hover": { bgcolor: "#FAFBFF" } }}>
+                        <TableCell sx={bodyCell}>{p.payment_date || "—"}</TableCell>
+                        <TableCell sx={{ ...bodyCell, fontFamily: "inherit", fontWeight: 600, color: p.live_order_status ? statusStyle(p.live_order_status).color : "#94A3B8" }}>
+                          {p.live_order_status || "Adjustment"}
+                        </TableCell>
+                        <TableCell sx={{ ...bodyCell, color: "#64748B" }}>{p.transaction_id || "—"}</TableCell>
+                        {visibleCols.map(c => (
+                          <TableCell key={c.key} sx={{ ...bodyCell, textAlign: "right", color: num(p[c.key]) < 0 ? "#DC2626" : "#334155" }}>
+                            {moneyCell(p[c.key])}
+                          </TableCell>
+                        ))}
+                        <TableCell sx={{ ...bodyCell, textAlign: "right", fontWeight: 800, color: settle >= 0 ? "#059669" : "#E11D48" }}>
+                          {fmt(settle)}
+                        </TableCell>
+                        <TableCell sx={{ fontSize: 11, color: "#64748B", py: 0.75, minWidth: 120 }}>{note || "—"}</TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+            </Box>
+          </Box>
+        );
+      })}
+    </Box>
+  );
+}
+
 // ── SKU Detail Modal ──────────────────────────────────────────────────────────
 function SKUDetailModal({ sku, months, initialRange, initialMonth, onClose }) {
   const [selMonth, setSelMonth] = useState(initialMonth);
@@ -428,6 +609,7 @@ function SKUDetailModal({ sku, months, initialRange, initialMonth, onClose }) {
         : fmtMonth(initialMonth)
   );
   const [activeTab, setActiveTab] = useState("overview");
+  const [fullView, setFullView] = useState(false);
   const [periodData, setPeriodData] = useState(null);
   const [periodLoading, setPeriodLoading] = useState(true);
   const [monthly, setMonthly] = useState([]);
@@ -543,6 +725,7 @@ function SKUDetailModal({ sku, months, initialRange, initialMonth, onClose }) {
   const TABS = [
     { id: "overview", label: "Overview" },
     { id: "settlement", label: "Settlement" },
+    { id: "payments", label: nTotal > 0 ? `Payments (${nTotal})` : "Payments" },
     { id: "charts", label: "Charts" },
     { id: "history", label: "Monthly History" },
   ];
@@ -550,8 +733,8 @@ function SKUDetailModal({ sku, months, initialRange, initialMonth, onClose }) {
   const accentColor = pos ? "#059669" : "#E11D48";
 
   return (
-    <Dialog open maxWidth="lg" fullWidth onClose={onClose}
-      PaperProps={{ sx: { borderRadius: "20px", maxHeight: "94vh", overflow: "hidden", display: "flex", flexDirection: "column" } }}>
+    <Dialog open maxWidth="lg" fullWidth fullScreen={fullView} onClose={onClose}
+      PaperProps={{ sx: { borderRadius: fullView ? 0 : "20px", maxHeight: fullView ? "none" : "94vh", overflow: "hidden", display: "flex", flexDirection: "column" } }}>
 
       {/* ── Gradient header ────────────────────────────────────────────────── */}
       <Box sx={{
@@ -584,6 +767,11 @@ function SKUDetailModal({ sku, months, initialRange, initialMonth, onClose }) {
               </Box>
             )}
           </Box>
+          <Tooltip title={fullView ? "Exit full view" : "Full view"}>
+            <IconButton onClick={() => setFullView(v => !v)} sx={{ color: "#64748B", fontSize: 18, "&:hover": { bgcolor: "rgba(0,0,0,0.06)" } }}>
+              {fullView ? "⤡" : "⤢"}
+            </IconButton>
+          </Tooltip>
           <IconButton onClick={onClose} sx={{ color: "#64748B", "&:hover": { bgcolor: "rgba(0,0,0,0.06)" } }}>✕</IconButton>
         </Box>
 
@@ -741,6 +929,11 @@ function SKUDetailModal({ sku, months, initialRange, initialMonth, onClose }) {
                   </Table>
                 </Box>
               </Box>
+            )}
+
+            {/* ── PAYMENTS ───────────────────────────────────────────────── */}
+            {activeTab === "payments" && (
+              <SKUPaymentsPanel skuId={sku.sku_id} range={range} label={label} />
             )}
 
             {/* ── CHARTS ─────────────────────────────────────────────────── */}
