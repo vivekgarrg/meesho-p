@@ -6,7 +6,7 @@ import django.db.models.deletion
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("meesho_app", "0051_merge_master_pricing_and_employees"),
+        ("meesho_app", "0051_merge_20261001_1752"),
     ]
 
     operations = [
