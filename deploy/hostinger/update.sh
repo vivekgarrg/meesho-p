@@ -7,14 +7,22 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
-echo "==> Pulling latest code"
-# reset --hard rather than pull --ff-only: this checkout only ever holds
-# deployed code, never unique local work, so it's safe to force it to match
-# origin exactly. That also makes it resilient to origin/main being rewritten
-# (e.g. a force-push) — a plain --ff-only pull refuses in that case with
-# "Not possible to fast-forward" even though "match origin" is unambiguous.
-git fetch origin main
-git reset --hard origin/main
+if [ "${UPDATE_SH_PULLED:-}" != 1 ]; then
+    echo "==> Pulling latest code"
+    # reset --hard rather than pull --ff-only: this checkout only ever holds
+    # deployed code, never unique local work, so it's safe to force it to match
+    # origin exactly. That also makes it resilient to origin/main being rewritten
+    # (e.g. a force-push) — a plain --ff-only pull refuses in that case with
+    # "Not possible to fast-forward" even though "match origin" is unambiguous.
+    git fetch origin main
+    git reset --hard origin/main
+    # The reset can rewrite this very file, but bash is still executing the
+    # copy it started with — so a fix to the steps below would only take
+    # effect one deploy late (exactly what happened to the node_modules fix).
+    # Start over on the freshly pulled script instead.
+    export UPDATE_SH_PULLED=1
+    exec bash "$REPO_ROOT/deploy/hostinger/update.sh"
+fi
 
 echo "==> Reclaiming build directories owned by another user"
 # frontend/node_modules picked up files owned by another user (root — an
