@@ -61,6 +61,42 @@ class MasterItem(models.Model):
         return self.name
 
 
+class MasterItemPriceHistory(models.Model):
+    """One unit-price change for a master item — "Katori went from ₹30 to ₹35
+    on 1 Oct".
+
+    The same idea as ParentPriceHistory, one level further up the chain: a
+    master item's price is the thing that actually moves (the supplier raised
+    it), and every parent built from it is supposed to follow. Without a trail
+    there is no answer to "when did Katori go up, and by how much" — the old
+    number is simply overwritten, and so is the reason for every downstream
+    parent price being what it is.
+
+    The latest entry by effective_from IS the master item's current
+    unit_price: adding, editing or removing an entry writes that back onto
+    MasterItem.unit_price, whose post_save then cascades to every parent built
+    from it exactly as a hand edit does (see master_pricing.py).
+    """
+
+    master_item = models.ForeignKey(
+        MasterItem, on_delete=models.CASCADE, related_name="price_history",
+    )
+    effective_from = models.DateField()
+    unit_price = models.DecimalField(max_digits=12, decimal_places=2)
+    notes = models.CharField(max_length=500, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "master_item_price_history"
+        # One price per day per item — a correction on the same day replaces
+        # that day's entry instead of stacking a second one beside it.
+        unique_together = [("master_item", "effective_from")]
+        ordering = ["effective_from"]
+
+    def __str__(self):
+        return f"{self.master_item_id} from {self.effective_from}: ₹{self.unit_price}"
+
+
 class MasterItemComponent(models.Model):
     """One line of a parent SKU's bill of materials: `quantity` units of
     `master_item` go into one unit of `parent`. Whenever a parent has any

@@ -331,12 +331,23 @@ function ParentCard({ parent, notify, onLink, dragging, unlinked = [], onOptOut,
   const [open, setOpen] = useState(false);
   const [panel, setPanel] = useState(null); // null | "history" | "link" | "create" | "edit" | "suggest" | "sheet" | "rename" | "bom"
   const [dragOver, setDragOver] = useState(false);
-  const [editForm, setEditForm] = useState({
-    item_price: String(parent.item_price || ""), tax_percent: String(parent.tax_percent || "0"),
-    packaging_cost: String(parent.packaging_cost || "0"), image_url: parent.image_url || "",
-  });
+  // Seeded from the parent, and re-seeded every time the Edit panel is opened
+  // (see `toggle` below). Seeding only at mount meant a card that had been on
+  // screen while its price moved — a master-list cascade, a price-history
+  // entry, a teammate's edit, the 20s poll — still showed the price from
+  // first render, and Save wrote that stale number straight back, silently
+  // undoing the newer one. `?? ""` rather than `|| ""` so a genuine 0 shows
+  // as 0 instead of blank.
+  const formFromParent = useCallback(() => ({
+    item_price: parent.item_price != null ? String(parent.item_price) : "",
+    tax_percent: parent.tax_percent != null ? String(parent.tax_percent) : "0",
+    packaging_cost: parent.packaging_cost != null ? String(parent.packaging_cost) : "0",
+    image_url: parent.image_url || "",
+  }), [parent.item_price, parent.tax_percent, parent.packaging_cost, parent.image_url]);
+  const [editForm, setEditForm] = useState(formFromParent);
   const [imageBroken, setImageBroken] = useState(false);
   const [renameValue, setRenameValue] = useState(parent.item_id);
+  const [savingEdit, setSavingEdit] = useState(false);
   const [renameErr, setRenameErr] = useState("");
   const [renaming, setRenaming] = useState(false);
 
@@ -403,7 +414,14 @@ function ParentCard({ parent, notify, onLink, dragging, unlinked = [], onOptOut,
     ? histories.map(h => fmt(h.final_price)).join(" → ")
     : null;
 
-  const toggle = (p) => setPanel(prev => prev === p ? null : p);
+  const toggle = (p) => setPanel(prev => {
+    const next = prev === p ? null : p;
+    // Opening the Edit panel always starts from the price as it is right now,
+    // not as it was when this card mounted.
+    if (next === "edit") setEditForm(formFromParent());
+    if (next === "rename") setRenameValue(parent.item_id);
+    return next;
+  });
 
   const deleteHistory = async pk => {
     if (!window.confirm("Remove this price entry?")) return;
@@ -572,13 +590,31 @@ function ParentCard({ parent, notify, onLink, dragging, unlinked = [], onOptOut,
     // recipe (see the Bill of Materials panel) — the backend puts it straight
     // back even if this request sends one, so there's nothing to compute here
     // for that case; this field is disabled in that state anyway (below).
-    const preview = calcFinal(editForm.item_price, editForm.tax_percent, editForm.packaging_cost);
-    const r = await fetch(`${API}/parent-prices/${idPath}/`, {
-      method: "PATCH", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...editForm, image_url: editForm.image_url.trim(), final_price: preview.toFixed(2) }),
-    });
-    if (r.ok) { notify("ok", "Parent updated."); setPanel(null); invalidatePricing(); }
-    else { const e = await r.json().catch(() => ({})); notify("err", e.item_id?.[0] || "Update failed."); }
+    if (savingEdit) return;
+    setSavingEdit(true);
+    try {
+      const preview = calcFinal(editForm.item_price, editForm.tax_percent, editForm.packaging_cost);
+      const r = await fetch(`${API}/parent-prices/${idPath}/`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...editForm, image_url: editForm.image_url.trim(), final_price: preview.toFixed(2) }),
+      });
+      const e = await r.json().catch(() => ({}));
+      if (r.ok) {
+        notify("ok", childCount
+          ? `Parent updated — ${childCount} child SKU${childCount === 1 ? "" : "s"} repriced too.`
+          : "Parent updated.");
+        setPanel(null);
+        invalidatePricing();
+      } else {
+        // Surface what the server actually said — a silent "Update failed."
+        // on a validation error or a permission denial is indistinguishable
+        // from the button not working at all.
+        notify("err", e.item_id?.[0] || e.item_price?.[0] || e.image_url?.[0]
+          || e.detail || e.error || `Update failed (${r.status}).`);
+      }
+    } catch {
+      notify("err", "Update failed — network error.");
+    } finally { setSavingEdit(false); }
   };
 
   const saveRename = async () => {
@@ -944,7 +980,9 @@ function ParentCard({ parent, notify, onLink, dragging, unlinked = [], onOptOut,
                 <ActionPanel accent={C.amber} icon="✏️" title="Direct Price Override" right={
                   <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
                     <span style={{ fontSize: 12, color: C.gray500 }}>Preview: <strong style={{ fontFamily: "monospace", color: C.orange }}>{fmt(calcFinal(editForm.item_price, editForm.tax_percent, editForm.packaging_cost))}</strong></span>
-                    <button onClick={saveEdit} style={btn("success", "sm")}>Save</button>
+                    <button onClick={saveEdit} disabled={savingEdit} style={btn("success", "sm")}>
+                      {savingEdit ? "Saving…" : "Save"}
+                    </button>
                   </div>
                 }>
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>

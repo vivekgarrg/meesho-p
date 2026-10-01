@@ -59,7 +59,7 @@ def reprice_parent(parent):
     parent.item_price = new_item_price
     parent.final_price = new_final_price
     parent.save(update_fields=["item_price", "final_price"])
-    _push_children_and_mirror(parent)
+    push_children_and_mirror(parent)
     return True
 
 
@@ -73,12 +73,18 @@ def reprice_parents_using(master_item):
         reprice_parent(parent)
 
 
-def _push_children_and_mirror(parent):
-    """A parent's current price just changed outside the normal request-body
-    save path — push it to that parent's own FinalPrice children (same rule
-    linking a SKU, or adding a price-history entry, already follows) via a
-    bulk update, then tell pricing_sync explicitly since a bulk update never
-    fires the signal that would otherwise mirror it cross-business."""
+def push_children_and_mirror(parent):
+    """A parent's current price just changed — push it to that parent's own
+    FinalPrice children (the same rule linking a SKU, or adding a
+    price-history entry, already follows) via a bulk update, then tell
+    pricing_sync explicitly since a bulk update never fires the signal that
+    would otherwise mirror it cross-business.
+
+    Called both from reprice_parent (a recipe-driven change) and from
+    parent_price_detail in views.py (a hand edit) — a child FinalPrice
+    mirroring its parent's pricing is the invariant every other write path
+    maintains, so the one-off Edit panel has to maintain it too.
+    """
     from . import pricing_sync
     from .models import FinalPrice
 

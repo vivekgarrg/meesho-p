@@ -26,13 +26,14 @@ from . import master_pricing, pricing_sync
 
 from .helpers.label_pdf import extract_all_pages
 
-from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, LabelDayReset, PurchaseBill, PurchaseItem, BlockedCustomer, InventoryAdjustment, ConsumableItem, ConsumablePurchase, ConsumableUsage, InventoryLog, MeeshoInventory, MeeshoPriceUpdate, ExpenseInvoice, ExpenseInvoiceItem, TransportCharge, PackedStockEvent, EstimatedProfitOrder, ReturnDelivery, GstTransaction, GstInvoiceDetail, ScannedOrder, ListingTemplate, ClaimTicket, WorkerTask, WalletEntry, WalletSettlement, TaskListing, PlatformRate, TaskDocument, BusinessCostSetting, Employee, EmployeePayment, EmployeeAttendance, EmployeeHoliday, BusinessOwner, Product, BulkListingBatch, ReturnVideoBatch, FlipkartOrderPayment
+from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, MasterItem, MasterItemComponent, MasterItemPriceHistory, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, LabelDayReset, PurchaseBill, PurchaseItem, BlockedCustomer, InventoryAdjustment, ConsumableItem, ConsumablePurchase, ConsumableUsage, InventoryLog, MeeshoInventory, MeeshoPriceUpdate, ExpenseInvoice, ExpenseInvoiceItem, TransportCharge, PackedStockEvent, EstimatedProfitOrder, ReturnDelivery, GstTransaction, GstInvoiceDetail, ScannedOrder, ListingTemplate, ClaimTicket, WorkerTask, WalletEntry, WalletSettlement, TaskListing, PlatformRate, TaskDocument, BusinessCostSetting, Employee, EmployeePayment, EmployeeAttendance, EmployeeHoliday, BusinessOwner, Product, BulkListingBatch, ReturnVideoBatch, FlipkartOrderPayment
 from .serializers import (
     OrderPaymentSerializer, AdsCostSerializer,
     ReferralPaymentSerializer, CompensationRecoverySerializer,
     FinalPriceSerializer,
     MasterItemSerializer,
     MasterItemComponentSerializer,
+    MasterItemPriceHistorySerializer,
     ParentItemPriceSerializer,
     ParentPriceHistorySerializer,
     OrderSerializer,
@@ -3786,7 +3787,15 @@ def parent_price_detail(request, business_id, item_id):
     if obj.master_components.exists():
         master_pricing.reprice_parent(obj)
         obj.refresh_from_db()
+        master_pricing.push_children_and_mirror(obj)
         return Response(ParentItemPriceSerializer(obj).data)
+    # A child FinalPrice mirrors its parent's pricing — linking a SKU, adding
+    # a price-history entry and a master-list cascade all maintain that. A
+    # hand edit here has to as well, or the children (which are what profit
+    # is actually computed from) keep the old price until some unrelated
+    # write happens to refresh them.
+    obj.refresh_from_db()
+    master_pricing.push_children_and_mirror(obj)
     return Response(serializer.data)
 
 @api_view(["POST", "PUT"])
@@ -3874,14 +3883,16 @@ def _sync_parent_current_price(item_id, business):
     )
     # QuerySet.update() never sends post_save, so a business sharing a
     # pricing_group with another needs this told explicitly — see
-    # pricing_sync.sync_parent_and_children's docstring. Same reason this
-    # parent's own derived items (see master_pricing) need telling too: a
-    # price history entry IS a legitimate way to change a master's price,
-    # and the signal that would normally cascade it never fires here.
+    # pricing_sync.sync_parent_and_children's docstring. And if this parent
+    # is built from the master list, its item_price belongs to that recipe
+    # (see master_pricing.py) — the bulk update above just overwrote it with
+    # the history entry's, so put the computed one straight back, exactly as
+    # parent_price_detail does after a hand edit. A parent with no
+    # components is a no-op here.
     pricing_sync.sync_parent_and_children(business, item_id)
     refreshed = ParentItemPrice.objects.filter(item_id=item_id, business=business).first()
     if refreshed:
-        master_pricing.handle_parent_saved(refreshed)
+        master_pricing.reprice_parent(refreshed)
 
 
 @api_view(["GET", "POST"])
@@ -3924,12 +3935,32 @@ def parent_price_history_detail(request, business_id, item_id, pk):
 
 # ── Master price list (bill-of-materials pricing, meesho_app/master_pricing.py) ──
 
+def _sync_master_item_current_price(item):
+    """A master item's current unit_price IS its latest price-history entry.
+
+    Mirrors _sync_parent_current_price one level up the chain: the write to
+    MasterItem.unit_price goes through .save(), so the existing post_save
+    signal cascades it to every parent built from this item (and on to their
+    FinalPrice children, and across linked businesses) with no extra wiring —
+    see master_pricing.py. With no entries left, the price is left exactly as
+    it is rather than cleared: deleting the trail is not the same as saying
+    "this item has no price".
+    """
+    latest = item.price_history.order_by("-effective_from").first()
+    if not latest or item.unit_price == latest.unit_price:
+        return
+    item.unit_price = latest.unit_price
+    item.save(update_fields=["unit_price", "updated_at"])
+
+
 @api_view(["GET", "POST"])
 def master_item_list(request, business_id):
     business = get_authorized_business(request, business_id)
     if request.method == "GET":
         search = request.GET.get("search", "")
-        qs = MasterItem.objects.filter(business=business)
+        qs = MasterItem.objects.filter(business=business).prefetch_related(
+            "price_history", "used_in__parent",
+        )
         if search:
             qs = qs.filter(name__icontains=search)
         return Response({"results": MasterItemSerializer(qs, many=True).data})
@@ -3965,13 +3996,89 @@ def master_item_detail(request, business_id, pk):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     partial = request.method == "PATCH"
+    previous_price = obj.unit_price
     serializer = MasterItemSerializer(obj, data=request.data, partial=partial)
     serializer.is_valid(raise_exception=True)
     try:
         serializer.save()
     except IntegrityError:
         return Response({"name": ["A master item with that name already exists."]}, status=status.HTTP_400_BAD_REQUEST)
-    return Response(serializer.data)
+    # Editing the price inline IS a price update — log it against today so the
+    # trail is complete however the change was made, rather than only when
+    # someone remembers to use the price-update form. Same-day corrections
+    # overwrite today's entry instead of stacking (unique_together).
+    obj.refresh_from_db()
+    if obj.unit_price is not None and obj.unit_price != previous_price:
+        MasterItemPriceHistory.objects.update_or_create(
+            master_item=obj, effective_from=timezone.localdate(),
+            defaults={"unit_price": obj.unit_price, "notes": "Edited inline"},
+        )
+        # The trail is the single authority on what the price is, so that the
+        # two can never disagree — which also means a price already dated
+        # ahead of today still wins over an edit made today.
+        _sync_master_item_current_price(obj)
+        obj.refresh_from_db()
+    return Response(MasterItemSerializer(obj).data)
+
+
+@api_view(["GET", "POST"])
+def master_item_price_history_list(request, business_id, pk):
+    """A master item's price-update trail.
+
+    POST {"effective_from": "2026-10-01", "unit_price": "35", "notes": "..."}
+    records an update; the latest entry becomes the item's current price and
+    cascades to every parent built from it.
+    """
+    business = get_authorized_business(request, business_id)
+    try:
+        item = MasterItem.objects.get(pk=pk, business=business)
+    except MasterItem.DoesNotExist:
+        return Response({"error": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == "GET":
+        qs = item.price_history.all()
+        return Response({"results": MasterItemPriceHistorySerializer(qs, many=True).data})
+
+    data = request.data.copy()
+    data.setdefault("effective_from", str(timezone.localdate()))
+    serializer = MasterItemPriceHistorySerializer(data=data)
+    serializer.is_valid(raise_exception=True)
+    # A second entry for a date already recorded is a correction of that day's
+    # price, not a duplicate — so replace it rather than 400 on the
+    # unique_together.
+    entry, _created = MasterItemPriceHistory.objects.update_or_create(
+        master_item=item,
+        effective_from=serializer.validated_data["effective_from"],
+        defaults={
+            "unit_price": serializer.validated_data["unit_price"],
+            "notes": serializer.validated_data.get("notes", ""),
+        },
+    )
+    _sync_master_item_current_price(item)
+    item.refresh_from_db()
+    return Response(
+        {
+            "entry": MasterItemPriceHistorySerializer(entry).data,
+            "item": MasterItemSerializer(item).data,
+        },
+        status=status.HTTP_201_CREATED,
+    )
+
+
+@api_view(["DELETE"])
+def master_item_price_history_detail(request, business_id, pk, hid):
+    business = get_authorized_business(request, business_id)
+    try:
+        entry = MasterItemPriceHistory.objects.select_related("master_item").get(
+            pk=hid, master_item__pk=pk, master_item__business=business,
+        )
+    except MasterItemPriceHistory.DoesNotExist:
+        return Response({"error": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+    item = entry.master_item
+    entry.delete()
+    _sync_master_item_current_price(item)
+    item.refresh_from_db()
+    return Response({"deleted": True, "item": MasterItemSerializer(item).data})
 
 
 @api_view(["GET", "POST"])

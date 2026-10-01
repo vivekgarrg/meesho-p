@@ -2,7 +2,7 @@ from rest_framework import serializers
 from django.db.models import Sum
 
 from .helpers.helper import strip_html
-from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, MasterItem, MasterItemComponent, ParentItemPrice, ParentPriceHistory, Order, LabelOrder, ReturnDelivery, ScannedOrder, ListingTemplate, ClaimTicket, WorkerTask, WalletEntry, WalletSettlement, TaskListing, PlatformRate, TaskDocument, BulkListingFieldPreset, FlipkartBulkTemplate, FlipkartFieldPreset, BulkListingBatch, Product, ReturnVideoBatch
+from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, MasterItem, MasterItemComponent, MasterItemPriceHistory, ParentItemPrice, ParentPriceHistory, Order, LabelOrder, ReturnDelivery, ScannedOrder, ListingTemplate, ClaimTicket, WorkerTask, WalletEntry, WalletSettlement, TaskListing, PlatformRate, TaskDocument, BulkListingFieldPreset, FlipkartBulkTemplate, FlipkartFieldPreset, BulkListingBatch, Product, ReturnVideoBatch
 
 
 class OrderPaymentSerializer(serializers.ModelSerializer):
@@ -53,20 +53,45 @@ class ParentPriceHistorySerializer(serializers.ModelSerializer):
         read_only_fields = ["business"]
 
 
+class MasterItemPriceHistorySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = MasterItemPriceHistory
+        fields = ["id", "master_item", "effective_from", "unit_price", "notes", "created_at"]
+        read_only_fields = ["master_item", "created_at"]
+
+
 class MasterItemSerializer(serializers.ModelSerializer):
     # How many bill-of-materials lines (across every parent) use this master
     # item — the Master Pricing tab's "used by N parent(s)" column, and the
     # reason a delete can come back refused (MasterItemComponent.master_item
     # is PROTECT).
     used_in_count = serializers.SerializerMethodField()
+    # The price-update trail (MasterItemPriceHistory). Nested in full: a
+    # master list is tens of rows, not thousands, and the Master Pricing tab
+    # draws each row's timeline inline — a second request per row to fetch
+    # three dates each would cost more than sending them here.
+    price_history = MasterItemPriceHistorySerializer(many=True, read_only=True)
+    # Which parents are built from this item — so a price update can say what
+    # it is about to move before you commit to it.
+    used_in_parents = serializers.SerializerMethodField()
 
     class Meta:
         model = MasterItem
-        fields = ["id", "business", "name", "unit_price", "notes", "image_url", "created_at", "updated_at", "used_in_count"]
+        fields = [
+            "id", "business", "name", "unit_price", "notes", "image_url",
+            "created_at", "updated_at", "used_in_count", "used_in_parents",
+            "price_history",
+        ]
         read_only_fields = ["business", "created_at", "updated_at"]
 
     def get_used_in_count(self, obj):
         return obj.used_in.count()
+
+    def get_used_in_parents(self, obj):
+        return [
+            {"item_id": c.parent.item_id, "quantity": str(c.quantity)}
+            for c in obj.used_in.select_related("parent").all()
+        ]
 
 
 class MasterItemComponentSerializer(serializers.ModelSerializer):
