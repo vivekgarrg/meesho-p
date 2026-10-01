@@ -49,6 +49,7 @@ export const NAV_GROUPS = [
     color: '#60A5FA',
     items: [
       { path: '/pricing', label: 'SKU Pricing', icon: '⊞' },
+      { path: '/master-pricing', label: 'Master Pricing', icon: '🧱' },
       { path: '/tax-check', label: 'Tax Check', icon: '%' },
       { path: '/gst', label: 'GST', icon: '₹' },
       { path: '/inventory', label: 'Inventory', icon: '⊕' },

@@ -118,7 +118,7 @@ export DB_HOST=localhost
 export DB_PORT=3306
 
 # Run migrations
-python manage.py migrate
+python3 manage.py migrate
 
 # Start server
 python manage.py runserver 8000

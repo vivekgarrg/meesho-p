@@ -19,6 +19,11 @@ export function AppBarChart({
   dataset, indexKey, series, layout = "vertical", stacked = false,
   diverging = false, colorByIndex, colorful = false, onBarClick, height = 260, valueFormatter, margin,
   showLegend, maxTicks, indexFormatter,
+  // A unit-suffixed valueFormatter ("1,200 units") reads well in a tooltip but
+  // collides into mush when stamped on every tick of the value axis. These two
+  // let a caller keep the verbose tooltip and give the axis a compact format
+  // and a sane tick count. Both default to the previous behaviour.
+  axisValueFormatter, valueTicks,
 }) {
   const keys = useMemo(() => series.map((s) => s.dataKey), [series]);
   // Thin the axis down to at most maxTicks labels (every Nth) instead of
@@ -76,9 +81,17 @@ export function AppBarChart({
           tickSize: 0, tickPadding: 8,
           tickRotation: manyCategories ? -32 : 0,
           tickValues, format: indexFormatter,
-        } : { tickSize: 0, tickPadding: 8, format: valueFormatter }}
+        } : {
+          tickSize: 0, tickPadding: 8,
+          format: axisValueFormatter || valueFormatter,
+          ...(valueTicks ? { tickValues: valueTicks } : {}),
+        }}
         axisLeft={layout === "vertical"
-          ? { tickSize: 0, tickPadding: 8, format: valueFormatter }
+          ? {
+              tickSize: 0, tickPadding: 8,
+              format: axisValueFormatter || valueFormatter,
+              ...(valueTicks ? { tickValues: valueTicks } : {}),
+            }
           : { tickSize: 0, tickPadding: 8, format: indexFormatter }}
         onClick={onBarClick ? (bar) => onBarClick(bar.indexValue, bar) : undefined}
         isInteractive

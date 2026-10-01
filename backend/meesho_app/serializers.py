@@ -2,7 +2,7 @@ from rest_framework import serializers
 from django.db.models import Sum
 
 from .helpers.helper import strip_html
-from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, ParentItemPrice, ParentPriceHistory, Order, LabelOrder, ReturnDelivery, ScannedOrder, ListingTemplate, ClaimTicket, WorkerTask, WalletEntry, WalletSettlement, TaskListing, PlatformRate, TaskDocument, BulkListingFieldPreset, FlipkartBulkTemplate, FlipkartFieldPreset, BulkListingBatch, Product, ReturnVideoBatch
+from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, MasterItem, MasterItemComponent, ParentItemPrice, ParentPriceHistory, Order, LabelOrder, ReturnDelivery, ScannedOrder, ListingTemplate, ClaimTicket, WorkerTask, WalletEntry, WalletSettlement, TaskListing, PlatformRate, TaskDocument, BulkListingFieldPreset, FlipkartBulkTemplate, FlipkartFieldPreset, BulkListingBatch, Product, ReturnVideoBatch
 
 
 class OrderPaymentSerializer(serializers.ModelSerializer):
@@ -53,6 +53,46 @@ class ParentPriceHistorySerializer(serializers.ModelSerializer):
         read_only_fields = ["business"]
 
 
+class MasterItemSerializer(serializers.ModelSerializer):
+    # How many bill-of-materials lines (across every parent) use this master
+    # item — the Master Pricing tab's "used by N parent(s)" column, and the
+    # reason a delete can come back refused (MasterItemComponent.master_item
+    # is PROTECT).
+    used_in_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = MasterItem
+        fields = ["id", "business", "name", "unit_price", "notes", "image_url", "created_at", "updated_at", "used_in_count"]
+        read_only_fields = ["business", "created_at", "updated_at"]
+
+    def get_used_in_count(self, obj):
+        return obj.used_in.count()
+
+
+class MasterItemComponentSerializer(serializers.ModelSerializer):
+    # Convenience read-only fields so the Pricing tab doesn't need a second
+    # request to show what a component line actually is.
+    master_item_name = serializers.CharField(source="master_item.name", read_only=True)
+    master_item_unit_price = serializers.DecimalField(
+        source="master_item.unit_price", max_digits=12, decimal_places=2, read_only=True, allow_null=True,
+    )
+    master_item_image_url = serializers.CharField(source="master_item.image_url", read_only=True, allow_null=True)
+    parent_item_id = serializers.CharField(source="parent.item_id", read_only=True)
+    line_total = serializers.SerializerMethodField()
+
+    class Meta:
+        model = MasterItemComponent
+        fields = [
+            "id", "parent", "parent_item_id", "master_item", "master_item_name",
+            "master_item_unit_price", "master_item_image_url", "quantity", "line_total",
+        ]
+
+    def get_line_total(self, obj):
+        if obj.master_item.unit_price is None:
+            return None
+        return obj.quantity * obj.master_item.unit_price
+
+
 class ParentItemPriceSerializer(serializers.ModelSerializer):
     sku_ids = serializers.SlugRelatedField(
         source="sku_prices",
@@ -61,6 +101,11 @@ class ParentItemPriceSerializer(serializers.ModelSerializer):
         slug_field="sku_id",
     )
     price_history = ParentPriceHistorySerializer(many=True, read_only=True)
+    # This parent's bill of materials (meesho_app/master_pricing.py), if any
+    # — read-only here; lines are added/edited/removed through their own
+    # endpoint (parent-prices/<item_id>/components/), not through saving the
+    # parent itself.
+    master_components = MasterItemComponentSerializer(many=True, read_only=True)
 
     class Meta:
         model = ParentItemPrice

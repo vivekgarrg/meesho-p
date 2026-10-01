@@ -22,7 +22,7 @@ from .helpers.helper import status_wise_summary, strip_html
 from accounts.models import Business, User
 from .permissions import get_authorized_business, accessible_businesses
 from .helpers.label_pdf import extract_all_pages
-from . import pricing_sync
+from . import master_pricing, pricing_sync
 
 from .helpers.label_pdf import extract_all_pages
 
@@ -31,6 +31,8 @@ from .serializers import (
     OrderPaymentSerializer, AdsCostSerializer,
     ReferralPaymentSerializer, CompensationRecoverySerializer,
     FinalPriceSerializer,
+    MasterItemSerializer,
+    MasterItemComponentSerializer,
     ParentItemPriceSerializer,
     ParentPriceHistorySerializer,
     OrderSerializer,
@@ -3700,9 +3702,10 @@ def parent_price_list(request, business_id):
 
         rows = (
             qs.annotate(sku_count=Count("sku_prices", distinct=True),
-                        history_count=Count("price_history", distinct=True))
+                        history_count=Count("price_history", distinct=True),
+                        component_count=Count("master_components", distinct=True))
               .values("id", "item_id", "item_price", "tax_percent", "packaging_cost",
-                      "final_price", "image_url", "sku_count", "history_count")
+                      "final_price", "image_url", "sku_count", "history_count", "component_count")
               .order_by("item_id")
         )
         return Response({"results": list(rows), "slim": True})
@@ -3776,6 +3779,14 @@ def parent_price_detail(request, business_id, item_id):
         return Response(
             {"item_id": ["That name is already in use."]}, status=status.HTTP_400_BAD_REQUEST,
         )
+    # A parent built from the master list (see master_pricing.py) has its
+    # item_price owned by that recipe, not by hand — if this request tried
+    # to set one anyway (a stale UI, a raw API call), put it straight back
+    # rather than let the two drift until the next unrelated recompute.
+    if obj.master_components.exists():
+        master_pricing.reprice_parent(obj)
+        obj.refresh_from_db()
+        return Response(ParentItemPriceSerializer(obj).data)
     return Response(serializer.data)
 
 @api_view(["POST", "PUT"])
@@ -3863,8 +3874,14 @@ def _sync_parent_current_price(item_id, business):
     )
     # QuerySet.update() never sends post_save, so a business sharing a
     # pricing_group with another needs this told explicitly — see
-    # pricing_sync.sync_parent_and_children's docstring.
+    # pricing_sync.sync_parent_and_children's docstring. Same reason this
+    # parent's own derived items (see master_pricing) need telling too: a
+    # price history entry IS a legitimate way to change a master's price,
+    # and the signal that would normally cascade it never fires here.
     pricing_sync.sync_parent_and_children(business, item_id)
+    refreshed = ParentItemPrice.objects.filter(item_id=item_id, business=business).first()
+    if refreshed:
+        master_pricing.handle_parent_saved(refreshed)
 
 
 @api_view(["GET", "POST"])
@@ -3903,6 +3920,106 @@ def parent_price_history_detail(request, business_id, item_id, pk):
     obj.delete()
     _sync_parent_current_price(item_id, business)
     return Response({"deleted": True})
+
+
+# ── Master price list (bill-of-materials pricing, meesho_app/master_pricing.py) ──
+
+@api_view(["GET", "POST"])
+def master_item_list(request, business_id):
+    business = get_authorized_business(request, business_id)
+    if request.method == "GET":
+        search = request.GET.get("search", "")
+        qs = MasterItem.objects.filter(business=business)
+        if search:
+            qs = qs.filter(name__icontains=search)
+        return Response({"results": MasterItemSerializer(qs, many=True).data})
+
+    serializer = MasterItemSerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+    try:
+        serializer.save(business=business)
+    except IntegrityError:
+        return Response({"name": ["A master item with that name already exists."]}, status=status.HTTP_400_BAD_REQUEST)
+    return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+@api_view(["GET", "PUT", "PATCH", "DELETE"])
+def master_item_detail(request, business_id, pk):
+    business = get_authorized_business(request, business_id)
+    try:
+        obj = MasterItem.objects.get(pk=pk, business=business)
+    except MasterItem.DoesNotExist:
+        return Response({"error": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == "GET":
+        return Response(MasterItemSerializer(obj).data)
+
+    if request.method == "DELETE":
+        try:
+            obj.delete()
+        except ProtectedError:
+            return Response(
+                {"error": f"\"{obj.name}\" is used in one or more parent SKUs — remove it from their bill of materials first."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    partial = request.method == "PATCH"
+    serializer = MasterItemSerializer(obj, data=request.data, partial=partial)
+    serializer.is_valid(raise_exception=True)
+    try:
+        serializer.save()
+    except IntegrityError:
+        return Response({"name": ["A master item with that name already exists."]}, status=status.HTTP_400_BAD_REQUEST)
+    return Response(serializer.data)
+
+
+@api_view(["GET", "POST"])
+def master_item_component_list(request, business_id, item_id):
+    """A parent SKU's bill of materials — GET lists it, POST adds one line
+    ({"master_item_name": "...", "quantity": 2})."""
+    business = get_authorized_business(request, business_id)
+    try:
+        parent = ParentItemPrice.objects.get(item_id=item_id, business=business)
+    except ParentItemPrice.DoesNotExist:
+        return Response({"error": "Parent not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == "GET":
+        qs = MasterItemComponent.objects.filter(parent=parent).select_related("master_item")
+        return Response({"results": MasterItemComponentSerializer(qs, many=True).data})
+
+    master_item, err = master_pricing.resolve_master_item(request.data.get("master_item_name"), business)
+    if err:
+        return Response({"master_item_name": [err]}, status=status.HTTP_400_BAD_REQUEST)
+    quantity = request.data.get("quantity") or 1
+    obj, created = MasterItemComponent.objects.get_or_create(
+        parent=parent, master_item=master_item, defaults={"quantity": quantity},
+    )
+    if not created:
+        obj.quantity = quantity
+        obj.save()
+    return Response(
+        MasterItemComponentSerializer(obj).data,
+        status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+    )
+
+
+@api_view(["PATCH", "DELETE"])
+def master_item_component_detail(request, business_id, item_id, pk):
+    business = get_authorized_business(request, business_id)
+    try:
+        obj = MasterItemComponent.objects.get(pk=pk, parent__item_id=item_id, parent__business=business)
+    except MasterItemComponent.DoesNotExist:
+        return Response({"error": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == "DELETE":
+        obj.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    if "quantity" in request.data:
+        obj.quantity = request.data["quantity"]
+        obj.save()
+    return Response(MasterItemComponentSerializer(obj).data)
 
 
 @api_view(["GET"])
@@ -14927,10 +15044,24 @@ def parent_price_children(request, business_id, item_id):
 
     # How often each child actually sells — the reason to care about one child
     # over another when a parent has twenty.
+    sku_ids = [r["sku_id"] for r in rows]
     counts = dict(
-        Order.objects.filter(business=business, sku__in=[r["sku_id"] for r in rows])
+        Order.objects.filter(business=business, sku__in=sku_ids)
         .values_list("sku").annotate(n=Count("sku")).values_list("sku", "n")
     )
+
+    # Units actually delivered per child, on the same basis as
+    # /parent-prices/sales/ — deduplicated to one row per sub-order, DELIVERED
+    # only. order_count above counts every raw order row in any state; this is
+    # the number that represents real sales.
+    units_sold = _SkuMap()
+    delivered_rows = (
+        Order.latest_per_order(base_qs=Order.objects.filter(business=business, sku__in=sku_ids))
+        .filter(reason_for_credit_entry__iexact="DELIVERED")
+        .values_list("sku", "quantity")
+    )
+    for sku, qty in delivered_rows:
+        units_sold[sku] = units_sold.get(sku, 0) + (qty or 1)
 
     # The Meesho identifiers a price sheet needs. Carried here so the UI can
     # show, before anything is generated, which SKUs can actually be repriced
@@ -14949,12 +15080,85 @@ def parent_price_children(request, business_id, item_id):
 
     for r in rows:
         r["order_count"] = counts.get(r["sku_id"], 0)
+        r["units_sold"] = units_sold.get(r["sku_id"], 0)
         r["meesho"] = catalog.get(_sku_key(r["sku_id"]), [])
 
     return Response({
         "parent": parent.item_id,
         "results": rows,
         "sheet_ready": sum(1 for r in rows if r["meesho"]),
+    })
+
+
+@api_view(["GET"])
+def parent_price_sales(request, business_id):
+    """
+    What each parent group has actually SOLD — delivered units, revenue and
+    the last date anything moved.
+
+    Deliberately its own endpoint rather than extra columns on
+    /parent-prices/: that list is polled every few seconds and has to paint
+    immediately, while this walks the order history and only changes when a
+    new order report is uploaded. The Pricing tab fetches the two separately
+    and joins them by item_id, so a slow sales roll-up never delays the
+    catalogue.
+
+    "Sold" means DELIVERED and nothing else. Orders are deduplicated to one
+    row per sub-order first (Order.latest_per_order), so an order that went
+    SHIPPED -> DELIVERED is counted once, and one that went
+    DELIVERED -> RTO_COMPLETE is not counted at all — its latest state is no
+    longer a sale. Cancellations and returns never appear.
+    """
+    business = get_authorized_business(request, business_id)
+
+    # sku -> parent item_id. Keyed through _SkuMap because the order export's
+    # spelling of a SKU and the pricing row's spelling differ in case often
+    # enough to matter (see _sku_key).
+    parent_by_sku = _SkuMap(
+        FinalPrice.objects
+        .filter(business=business, parent__isnull=False)
+        .values_list("sku_id", "parent__item_id")
+    )
+    if not parent_by_sku:
+        return Response({"results": {}, "total_units": 0, "total_revenue": 0.0})
+
+    agg = {}
+    rows = (
+        Order.latest_per_order(base_qs=Order.objects.filter(business=business))
+        .filter(reason_for_credit_entry__iexact="DELIVERED")
+        .values_list("sku", "quantity", "supplier_discounted_price",
+                     "supplier_listed_price", "order_date")
+    )
+    for sku, qty, discounted, listed, order_date in rows.iterator():
+        item_id = parent_by_sku.get(sku)
+        if item_id is None:
+            continue
+        a = agg.setdefault(item_id, {
+            "units_sold": 0, "orders_delivered": 0,
+            "revenue": Decimal("0"), "last_sold": None,
+        })
+        units = qty or 1
+        a["units_sold"] += units
+        a["orders_delivered"] += 1
+        # Same revenue basis the profit screens use: what Meesho actually
+        # listed the item at, falling back to the pre-discount price.
+        a["revenue"] += (discounted or listed or Decimal("0")) * units
+        if order_date and (a["last_sold"] is None or order_date > a["last_sold"]):
+            a["last_sold"] = order_date
+
+    results = {
+        item_id: {
+            "units_sold": a["units_sold"],
+            "orders_delivered": a["orders_delivered"],
+            "revenue": float(a["revenue"]),
+            "last_sold": a["last_sold"].isoformat() if a["last_sold"] else None,
+        }
+        for item_id, a in agg.items()
+    }
+    return Response({
+        "results": results,
+        "total_units": sum(r["units_sold"] for r in results.values()),
+        "total_revenue": sum(r["revenue"] for r in results.values()),
     })
 
 

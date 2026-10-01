@@ -38,6 +38,7 @@ NAV_CATALOG = [
     {"path": "/employees",         "label": "Employees",         "group": "Operations"},
 
     {"path": "/pricing",           "label": "SKU Pricing",       "group": "Catalog"},
+    {"path": "/master-pricing",    "label": "Master Pricing",    "group": "Catalog"},
     {"path": "/tax-check",         "label": "Tax Check",         "group": "Catalog"},
     {"path": "/gst",               "label": "GST",               "group": "Catalog"},
     {"path": "/inventory",         "label": "Inventory",         "group": "Catalog"},
@@ -152,6 +153,9 @@ API_OWNERSHIP = {
     "parent-linking/":       ["/pricing", "/labels", "/inventory"],
     "link-sku/":             ["/pricing", "/labels", "/inventory"],
     "pricing/":              ["/pricing"],
+    # The Bill of Materials panel on a parent SKU (SKU Pricing) reads/writes
+    # master items too, so both pages need it.
+    "master-items/":         ["/master-pricing", "/pricing"],
 }
 
 # Longest first so the most specific rule wins.

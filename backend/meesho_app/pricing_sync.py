@@ -191,3 +191,111 @@ def sync_parent_and_children(business, item_id):
     sync_parent_saved(parent)
     for fp in FinalPrice.objects.filter(business=business, parent__item_id=item_id):
         sync_final_saved(fp)
+
+
+# ── Master price list (meesho_app/master_pricing.py) ───────────────────────
+_MASTER_ITEM_SYNCED_FIELDS = ("unit_price", "notes", "image_url")
+
+
+def sync_master_item_saved(item):
+    """A MasterItem was created or updated — mirror it to every linked
+    business, matched (and created if missing) by name."""
+    if _is_syncing():
+        return
+    siblings = linked_businesses(item.business)
+    if not siblings:
+        return
+    from .models import MasterItem
+
+    with _SyncGuard():
+        for biz in siblings:
+            sibling, _created = MasterItem.objects.get_or_create(business=biz, name=item.name)
+            changed = False
+            for field in _MASTER_ITEM_SYNCED_FIELDS:
+                val = getattr(item, field)
+                if getattr(sibling, field) != val:
+                    setattr(sibling, field, val)
+                    changed = True
+            if changed:
+                sibling.save()
+
+
+def sync_master_item_renamed(business, old_name, new_name):
+    if _is_syncing():
+        return
+    siblings = linked_businesses(business)
+    if not siblings:
+        return
+    from .models import MasterItem
+
+    with _SyncGuard():
+        for biz in siblings:
+            MasterItem.objects.filter(business=biz, name=old_name).update(name=new_name)
+
+
+def sync_master_item_deleted(business, name):
+    """Never raises: a sibling MasterItem still used by one of its own
+    parents (MasterItemComponent.master_item is PROTECT) is left in place,
+    same as sync_parent_deleted does for a PROTECTed parent."""
+    if _is_syncing():
+        return
+    siblings = linked_businesses(business)
+    if not siblings:
+        return
+    from django.db.models.deletion import ProtectedError
+
+    from .models import MasterItem
+
+    with _SyncGuard():
+        for biz in siblings:
+            try:
+                MasterItem.objects.filter(business=biz, name=name).delete()
+            except ProtectedError:
+                pass
+
+
+def sync_component_saved(component):
+    """A parent's bill-of-materials line was added or its quantity changed —
+    mirror it to every linked business, matched by the parent's item_id and
+    the master item's name (raw FK ids differ per business). A silent no-op
+    on a sibling that doesn't (yet) have a matching parent or master item —
+    nothing sensible to attach the line to there."""
+    if _is_syncing():
+        return
+    siblings = linked_businesses(component.parent.business)
+    if not siblings:
+        return
+    from .models import MasterItem, MasterItemComponent, ParentItemPrice
+
+    parent_item_id = component.parent.item_id
+    master_name = component.master_item.name
+
+    with _SyncGuard():
+        for biz in siblings:
+            sibling_parent = ParentItemPrice.objects.filter(business=biz, item_id=parent_item_id).first()
+            sibling_master = MasterItem.objects.filter(business=biz, name=master_name).first()
+            if not sibling_parent or not sibling_master:
+                continue
+            sibling_comp, created = MasterItemComponent.objects.get_or_create(
+                parent=sibling_parent, master_item=sibling_master,
+                defaults={"quantity": component.quantity},
+            )
+            if not created and sibling_comp.quantity != component.quantity:
+                sibling_comp.quantity = component.quantity
+                sibling_comp.save()
+
+
+def sync_component_deleted(business, parent_item_id, master_item_name):
+    if _is_syncing():
+        return
+    siblings = linked_businesses(business)
+    if not siblings:
+        return
+    from .models import MasterItemComponent
+
+    with _SyncGuard():
+        for biz in siblings:
+            MasterItemComponent.objects.filter(
+                parent__business=biz, parent__item_id=parent_item_id,
+                master_item__business=biz, master_item__name=master_item_name,
+            ).delete()

@@ -27,6 +27,60 @@ class ParentItemPrice(models.Model):
     def __str__(self):
         return self.item_id
 
+
+class MasterItem(models.Model):
+    """
+    A unique base product in this business's master price list — "Katori" at
+    ₹30, "Plate" at ₹110. A parent SKU is built from one or more of these
+    (see MasterItemComponent) instead of being priced by hand, so raising
+    "Katori" from ₹30 to ₹35 recomputes every parent that uses it, and every
+    FinalPrice child under each of those — see meesho_app/master_pricing.py.
+
+    Deliberately not chainable (a MasterItem can't itself be built from other
+    MasterItems, and a ParentItemPrice can never be used as a MasterItem) —
+    master -> parent is the one dependency direction that exists, so there's
+    no cycle to guard against by construction, not by convention.
+    """
+
+    business = models.ForeignKey("accounts.Business", on_delete=models.PROTECT, related_name="master_items")
+    name = models.CharField(max_length=200, db_index=True)
+    unit_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    notes = models.CharField(max_length=500, blank=True)
+    # A pasted catalog/product image URL — same convention as
+    # ParentItemPrice.image_url: nothing uploaded or stored, just the link.
+    image_url = models.URLField(max_length=1000, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "master_item"
+        ordering = ["name"]
+        unique_together = [("business", "name")]
+
+    def __str__(self):
+        return self.name
+
+
+class MasterItemComponent(models.Model):
+    """One line of a parent SKU's bill of materials: `quantity` units of
+    `master_item` go into one unit of `parent`. Whenever a parent has any
+    components, its item_price IS the sum of quantity * master_item.unit_price
+    across all of them — manual edits to that parent's own item_price are
+    recomputed away the next time anything in the sum changes."""
+
+    parent = models.ForeignKey(ParentItemPrice, on_delete=models.CASCADE, related_name="master_components")
+    master_item = models.ForeignKey(MasterItem, on_delete=models.PROTECT, related_name="used_in")
+    quantity = models.DecimalField(max_digits=10, decimal_places=3, default=1)
+
+    class Meta:
+        db_table = "master_item_component"
+        unique_together = [("parent", "master_item")]
+        ordering = ["id"]
+
+    def __str__(self):
+        return f"{self.quantity} x {self.master_item.name} -> {self.parent.item_id}"
+
+
 class FinalPrice(models.Model):
     """Purchase price per SKU — used to compute profit vs settlement amount."""
 

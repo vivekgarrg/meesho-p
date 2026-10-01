@@ -20,6 +20,7 @@ import { UnscheduledPaymentTab } from './Components/Tabs/UnscheduledPaymentTab';
 import { ExpensesTab } from './Components/Tabs/ExpensesTab';
 import { EmployeesTab } from './Components/Tabs/EmployeesTab';
 import { PricingTab } from './Components/Tabs/PricingTab';
+import { MasterPricingTab } from './Components/Tabs/MasterPricingTab';
 import { TaxCheckTab } from './Components/Tabs/TaxCheckTab';
 import { UploadTab } from './Components/Tabs/UploadTab';
 import { SKUAnalysisTab } from './Components/Tabs/SKUProfitTab';
@@ -1227,6 +1228,7 @@ function AppShell() {
                 <Route path="/return-analysis" element={<ReturnAnalysisTab />} />
                 <Route path="/customer-insights" element={<CustomerInsightsTab />} />
                 <Route path="/pricing" element={<PricingTab />} />
+                <Route path="/master-pricing" element={<MasterPricingTab />} />
                 <Route path="/tax-check" element={<TaxCheckTab />} />
                 <Route path="/gst" element={<GstTab />} />
                 <Route path="/upload" element={<UploadTab />} />
