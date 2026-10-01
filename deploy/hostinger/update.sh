@@ -16,6 +16,34 @@ echo "==> Pulling latest code"
 git fetch origin main
 git reset --hard origin/main
 
+echo "==> Reclaiming build directories owned by another user"
+# frontend/node_modules picked up files owned by another user (root — an
+# `npm install` run under sudo on the box), and `npm ci` can't delete them,
+# so every deploy since 2026-08-21 died at the frontend build with EACCES
+# before migrate ever ran. The same stray root run can leave the other
+# directories this script regenerates root-owned too, which would just move
+# the failure one step later. For each: chown it back if passwordless sudo
+# allows, otherwise rename it out of the way — a same-directory rename only
+# needs write access to the parent, which this user owns — and let the steps
+# below rebuild it. A no-op once ownership is right.
+reclaim_dir() {
+    local dir="$1"
+    [ -d "$dir" ] || return 0
+    [ -n "$(find "$dir" ! -user "$(id -u)" -print -quit 2>/dev/null)" ] || return 0
+    if sudo -n chown -R "$(id -un):$(id -gn)" "$dir" 2>/dev/null; then
+        echo "  reclaimed ownership of $dir"
+    else
+        local stale
+        stale="$(dirname "$dir")/.$(basename "$dir")_stale_$(date +%Y%m%d%H%M%S)"
+        mv "$dir" "$stale"
+        echo "  moved foreign-owned $dir aside to $stale (delete it with sudo when convenient)"
+    fi
+}
+reclaim_dir frontend/node_modules
+reclaim_dir backend/frontend_build
+reclaim_dir backend/staticfiles
+reclaim_dir backend/.venv
+
 echo "==> Building frontend"
 npm ci --prefix frontend
 npm run build --prefix frontend

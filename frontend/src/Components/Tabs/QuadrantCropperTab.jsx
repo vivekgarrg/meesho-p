@@ -16,10 +16,16 @@ import { C, S, btn, useIsMobile } from "../../App";
 
 const MAX_DIM = 6000; // sanity cap so a bad file can't wedge the canvas
 
-function sanitizeBase(name) {
-  const dot = name.lastIndexOf(".");
-  const base = dot > 0 ? name.slice(0, dot) : name;
-  return base.replace(/[^a-z0-9._-]+/gi, "-").replace(/^-+|-+$/g, "") || "image";
+/**
+ * The item name as typed, made safe to use as a filename: only characters no
+ * OS allows in a name are dropped, so spaces and casing survive as entered.
+ */
+function itemFileBase(name) {
+  return (name || "")
+    .replace(/[\\/:*?"<>|\u0000-\u001f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^\.+|\.+$/g, "");
 }
 
 function extFor(mime) {
@@ -113,6 +119,7 @@ export function QuadrantCropperTab() {
           mime: file.type === "image/png" ? "image/png" : "image/jpeg",
           objectUrl: url,
           img,
+          itemName: "",
           splitX: 0.5,
           splitY: 0.5,
         };
@@ -137,6 +144,12 @@ export function QuadrantCropperTab() {
     );
   };
 
+  const setItemName = (jobId, itemName) => {
+    setJobs((prev) => prev.map((j) => (j.id === jobId ? { ...j, itemName } : j)));
+  };
+
+  const missingNames = jobs.filter((j) => !itemFileBase(j.itemName)).length;
+
   const removeJob = (jobId) => {
     setJobs((prev) => {
       const job = prev.find((j) => j.id === jobId);
@@ -153,23 +166,28 @@ export function QuadrantCropperTab() {
 
   const downloadAll = async () => {
     if (!jobs.length) return;
+    if (missingNames) {
+      setStatus({ kind: "err", text: `Enter an item name for ${missingNames === 1 ? "the highlighted image" : `all ${missingNames} highlighted images`} before downloading.` });
+      return;
+    }
     setZipping(true);
     setStatus(null);
     try {
       const zip = new JSZip();
       const used = new Set();
       for (const job of jobs) {
-        const base = sanitizeBase(job.filename);
+        // Crops are named after the item: "<item name>-1.jpg" … "-4.jpg".
+        const base = itemFileBase(job.itemName);
         const ext = extFor(job.mime);
-        for (const quad of job.quads) {
+        for (const [i, quad] of job.quads.entries()) {
           const blob = await canvasToBlob(quad.canvas, job.mime);
           if (!blob) continue;
-          const name = uniqueName(used, `${base}-${quad.key}`, ext);
+          const name = uniqueName(used, `${base}-${i + 1}`, ext);
           zip.file(name, blob);
         }
       }
       const zipBlob = await zip.generateAsync({ type: "blob" });
-      const zipName = jobs.length === 1 ? `${sanitizeBase(jobs[0].filename)}-quadrants.zip` : "quadrant-crops.zip";
+      const zipName = jobs.length === 1 ? `${itemFileBase(jobs[0].itemName)}.zip` : "quadrant-crops.zip";
       downloadBlob(zipBlob, zipName);
       setStatus({ kind: "ok", text: `Saved ${used.size} images in one zip — ${zipName}` });
     } catch (err) {
@@ -275,7 +293,12 @@ export function QuadrantCropperTab() {
               <button onClick={clearAll} style={btn("ghost", "sm")}>
                 Clear all
               </button>
-              <button onClick={downloadAll} disabled={zipping} style={btn("primary", "sm")}>
+              <button
+                onClick={downloadAll}
+                disabled={zipping || missingNames > 0}
+                title={missingNames > 0 ? "Enter an item name for every image first" : undefined}
+                style={{ ...btn("primary", "sm"), ...(missingNames > 0 ? { opacity: 0.5, cursor: "not-allowed" } : {}) }}
+              >
                 {zipping ? "Zipping…" : `Download all ${jobs.length * 4} as one zip`}
               </button>
             </div>
@@ -319,6 +342,40 @@ export function QuadrantCropperTab() {
                     </button>
                   </div>
                 </div>
+
+                {(() => {
+                  const base = itemFileBase(job.itemName);
+                  const ext = extFor(job.mime);
+                  return (
+                    <div style={{ marginBottom: 14 }}>
+                      <label style={{ display: "block", fontSize: 12, fontWeight: 700, color: C.gray700, marginBottom: 5 }}>
+                        Item name <span style={{ color: C.red }}>*</span>
+                      </label>
+                      <input
+                        type="text"
+                        value={job.itemName}
+                        onChange={(e) => setItemName(job.id, e.target.value)}
+                        placeholder="e.g. Brass Pooja Plate 6 inch"
+                        required
+                        style={{
+                          width: "100%",
+                          maxWidth: 420,
+                          boxSizing: "border-box",
+                          padding: "8px 10px",
+                          fontSize: 13,
+                          borderRadius: 8,
+                          border: `1.5px solid ${base ? C.border : C.red}`,
+                          outline: "none",
+                        }}
+                      />
+                      <div style={{ fontSize: 11, marginTop: 4, color: base ? C.gray400 : C.red }}>
+                        {base
+                          ? <>Downloads as <span style={{ fontFamily: "monospace" }}>{base}-1.{ext}</span> … <span style={{ fontFamily: "monospace" }}>{base}-4.{ext}</span></>
+                          : "Required — the downloaded files are named after this."}
+                      </div>
+                    </div>
+                  );
+                })()}
 
                 <div
                   style={{

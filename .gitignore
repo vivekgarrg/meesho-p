@@ -29,6 +29,8 @@ frontend/node_modules/
 # Without this a *symlink* named node_modules slips past the patterns
 # above — one pointing at a local temp dir was committed once already.
 node_modules
+# Root-owned build dirs that deploy/hostinger/update.sh moved aside.
+.*_stale_[0-9]*
 # Scratch left by docs/verify.mjs while checking a recorded video.
 docs/verify-player.html
 docs/frame-*.png
