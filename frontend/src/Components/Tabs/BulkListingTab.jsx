@@ -232,11 +232,17 @@ function planRowImages(urls, ownIndex, slotCount) {
 
 function MsgBanner({ msg, onClose }) {
   if (!msg) return null;
+  // "info" exists because not every non-success outcome is a failure — e.g.
+  // reusing saved fields that only partly match this template is worth saying
+  // out loud, but painting it red would read as "something went wrong".
+  const tone = msg.type === "success"
+    ? { bg: C.greenLight, fg: C.green, border: C.greenBorder }
+    : msg.type === "info"
+      ? { bg: C.amberLight, fg: C.amber, border: C.amberBorder }
+      : { bg: C.redLight, fg: C.red, border: C.redBorder };
   return (
     <div style={{ padding: "11px 16px", borderRadius: 10, fontSize: 13, fontWeight: 600,
-      background: msg.type === "success" ? C.greenLight : C.redLight,
-      color: msg.type === "success" ? C.green : C.red,
-      border: `1px solid ${msg.type === "success" ? C.greenBorder : C.redBorder}`,
+      background: tone.bg, color: tone.fg, border: `1px solid ${tone.border}`,
       display: "flex", alignItems: "center", gap: 8 }}>
       {msg.type === "success" ? <CheckCircleIcon style={{ fontSize: 17 }} /> : <ErrorOutlineIcon style={{ fontSize: 17 }} />}
       <span style={{ flex: 1 }}>{msg.text}</span>
@@ -1045,6 +1051,7 @@ export function BulkListingTab() {
   const [parsing, setParsing] = useState(false);
 
   const [presets, setPresets] = useState([]);
+  const [sourcesOther, setSourcesOther] = useState(0);
   const [presetId, setPresetId] = useState("");
   const [coveredKeys, setCoveredKeys] = useState(new Set());
   const [savingPreset, setSavingPreset] = useState(false);
@@ -1126,6 +1133,9 @@ export function BulkListingTab() {
       setShared({});
       setPresetId("");
       setCoveredKeys(new Set());
+      // The template says which category this is, and that decides which
+      // saved fields are even applicable.
+      refreshPresets(d.category_label || "");
       return d;
     } catch {
       setMsg({ type: "error", text: "Network error while reading the template." });
@@ -1376,13 +1386,28 @@ export function BulkListingTab() {
     return errs;
   }), [rows, sharedFields]);
 
-  const loadPreset = (id) => {
-    setPresetId(id);
-    if (!id) { setCoveredKeys(new Set()); return; }
-    const preset = presets.find((p) => String(p.id) === String(id));
-    if (!preset) return;
-    setShared((s) => ({ ...s, ...preset.fields }));
-    setCoveredKeys(new Set(Object.keys(preset.fields || {}).filter((k) => preset.fields[k] !== "")));
+  // `key` is "preset-<id>" or "batch-<id>" — presets and previously generated
+  // sheets share one picker, since to the seller they are the same thing.
+  // Only keys the current template actually has are applied: a saved field
+  // that this category doesn't have would otherwise sit in `shared` and be
+  // written nowhere, while counting toward "N fields set and hidden".
+  const loadPreset = (key) => {
+    setPresetId(key);
+    if (!key) { setCoveredKeys(new Set()); return; }
+    const src = presets.find((p) => String(p.key ?? p.id) === String(key));
+    if (!src) return;
+    const templateKeys = new Set((spec?.fields || []).map((f) => f.key));
+    const usable = Object.fromEntries(
+      Object.entries(src.fields || {}).filter(([k, v]) => templateKeys.has(k) && v !== "")
+    );
+    setShared((s) => ({ ...s, ...usable }));
+    setCoveredKeys(new Set(Object.keys(usable)));
+    const skipped = Object.keys(src.fields || {}).length - Object.keys(usable).length;
+    setMsg({
+      type: skipped ? "info" : "success",
+      text: `Filled ${Object.keys(usable).length} field(s) from "${src.name}"`
+        + (skipped ? ` — ${skipped} didn't match this template's fields and were left out.` : "."),
+    });
   };
 
   const savePreset = async () => {
@@ -1611,33 +1636,70 @@ export function BulkListingTab() {
                 </Section>
               )}
 
-              <Section title="Saved presets" right={
+              <Section title={`Saved fields for ${spec.category_label}`} right={
                 <button onClick={savePreset} disabled={savingPreset} style={btn("ghost", "sm")}>
                   <SaveIcon style={{ fontSize: 14, verticalAlign: "-3px" }} />&nbsp;Save current fields as preset
                 </button>
               }>
-                {presets.length === 0 ? (
-                  <div style={{ fontSize: 12.5, color: C.gray400 }}>
-                    No presets saved yet — fill in the product details below, then "Save current
-                    fields as preset" to reuse them on future products.
-                  </div>
-                ) : (
-                  <>
-                    <label style={S.label}>Load a preset</label>
-                    <select value={presetId} onChange={(e) => loadPreset(e.target.value)} style={{ ...S.inp, maxWidth: 360 }}>
-                      <option value="">— pick a saved preset —</option>
-                      {presets.map((p) => (
-                        <option key={p.id} value={p.id}>{p.name} ({p.field_count} fields{p.source_label ? ` · ${p.source_label}` : ""})</option>
-                      ))}
-                    </select>
-                  </>
-                )}
+                {(() => {
+                  // Two kinds in one picker: presets saved by hand, and sheets
+                  // actually generated before — which hold the same field
+                  // values and needed nobody to remember to save them.
+                  const savedPresets = presets.filter((p) => p.kind !== "batch");
+                  const pastListings = presets.filter((p) => p.kind === "batch");
+                  if (presets.length === 0) {
+                    return (
+                      <div style={{ fontSize: 12.5, color: C.gray400 }}>
+                        Nothing saved for <strong>{spec.category_label}</strong> yet — fill in the
+                        product details below, then "Save current fields as preset". Every sheet you
+                        generate for this category also becomes reusable here on its own.
+                        {sourcesOther > 0 && (
+                          <> {sourcesOther} saved under other categories {sourcesOther === 1 ? "is" : "are"} not
+                          offered, because a field only means something against the template it came from.</>
+                        )}
+                      </div>
+                    );
+                  }
+                  return (
+                    <>
+                      <label style={S.label}>Reuse fields from</label>
+                      <select value={presetId} onChange={(e) => loadPreset(e.target.value)}
+                        style={{ ...S.inp, maxWidth: 420 }}>
+                        <option value="">— pick saved fields to fill the form —</option>
+                        {savedPresets.length > 0 && (
+                          <optgroup label="Saved presets">
+                            {savedPresets.map((p) => (
+                              <option key={p.key} value={p.key}>
+                                {p.name} ({p.field_count} fields)
+                              </option>
+                            ))}
+                          </optgroup>
+                        )}
+                        {pastListings.length > 0 && (
+                          <optgroup label="Previous listings">
+                            {pastListings.map((p) => (
+                              <option key={p.key} value={p.key}>
+                                {p.name} — {p.field_count} fields
+                                {p.created_at ? ` · ${new Date(p.created_at).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "2-digit" })}` : ""}
+                              </option>
+                            ))}
+                          </optgroup>
+                        )}
+                      </select>
+                      <div style={{ fontSize: 11, color: C.gray400, marginTop: 6 }}>
+                        {savedPresets.length} preset{savedPresets.length === 1 ? "" : "s"} ·
+                        {" "}{pastListings.length} previous listing{pastListings.length === 1 ? "" : "s"} for this category
+                        {sourcesOther > 0 && ` · ${sourcesOther} from other categories hidden`}
+                      </div>
+                    </>
+                  );
+                })()}
                 {hiddenByPreset.length > 0 && (
                   <div style={{ marginTop: 10, padding: "9px 12px", borderRadius: 8,
                     background: C.greenLight, border: `1px solid ${C.greenBorder}`,
                     display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
                     <span style={{ fontSize: 12.5, color: C.green, fontWeight: 700 }}>
-                      Prefilled from "{presets.find((p) => String(p.id) === String(presetId))?.name}" —
+                      Prefilled from "{presets.find((p) => String(p.key ?? p.id) === String(presetId))?.name}" —
                       {" "}{hiddenByPreset.length} field(s) set and hidden below.
                     </span>
                     <button onClick={() => setCoveredKeys(new Set())} style={{ ...btn("ghost", "sm"), marginLeft: "auto" }}>

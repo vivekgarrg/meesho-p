@@ -191,6 +191,10 @@ urlpatterns = [
          bulk_listing_views.bulk_listing_flipkart_template_detail, name="bulk_listing_flipkart_template_detail"),
     path("bulk-listing/flipkart-templates/<int:pk>/review/",
          bulk_listing_views.bulk_listing_flipkart_template_review, name="bulk_listing_flipkart_template_review"),
+    # Presets + previously generated sheets, as one list of "field values I
+    # already typed once", scoped to the uploaded template's category.
+    path("bulk-listing/field-sources/",
+         bulk_listing_views.bulk_listing_field_sources, name="bulk_listing_field_sources"),
     path("bulk-listing/flipkart-presets/",
          bulk_listing_views.bulk_listing_flipkart_presets, name="bulk_listing_flipkart_presets"),
     path("bulk-listing/flipkart-presets/<int:pk>/",

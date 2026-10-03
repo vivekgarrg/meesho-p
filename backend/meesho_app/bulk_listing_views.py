@@ -725,7 +725,14 @@ def bulk_listing_generate(request, business_id):
 @api_view(["GET", "POST"])
 def bulk_listing_presets(request, business_id):
     """
-    GET  — every preset saved for this business.
+    GET  — presets saved for this business.
+           `?source_label=<category>` narrows to presets saved against that
+           same category. A preset is {field_key: value} and a field key only
+           means something against the template it came from, so a preset from
+           another category silently prefills nothing — see
+           bulk_listing_flipkart_presets, which does the same. `other_count`
+           reports how many were filtered out so the UI can say so rather
+           than just look empty.
     POST — save one. An existing preset with the same name is updated in
            place (case-insensitively), so "Save as preset" is idempotent per
            name — same behaviour as listing_templates_list's "same name
@@ -766,7 +773,16 @@ def bulk_listing_presets(request, business_id):
         )
 
     presets = BulkListingFieldPreset.objects.filter(business=business).select_related("created_by")
-    return Response({"results": BulkListingFieldPresetSerializer(presets, many=True).data})
+    source_label = str(request.GET.get("source_label") or "").strip()
+    other_count = 0
+    if source_label:
+        matching = presets.filter(source_label__iexact=source_label)
+        other_count = presets.count() - matching.count()
+        presets = matching
+    return Response({
+        "results": BulkListingFieldPresetSerializer(presets, many=True).data,
+        "other_count": other_count,
+    })
 
 
 @api_view(["DELETE"])
@@ -974,6 +990,116 @@ def bulk_listing_flipkart_preset_detail(request, business_id, pk):
         return Response({"error": "Preset not found."}, status=status.HTTP_404_NOT_FOUND)
     preset.delete()
     return Response({"deleted": True})
+
+
+def _snapshot_fields(batch):
+    """The reusable field values inside a saved batch's payload_snapshot.
+
+    The two platforms store different shapes because their flows differ:
+    Meesho fills one form that applies to every row (`shared`), Flipkart fills
+    each row separately (`rows[i].attributes`). For Flipkart, row 1 is the one
+    worth reusing — it is already the row the UI mirrors onto the others.
+
+    Returns {} for a batch with nothing usable (an older row with no snapshot,
+    or one whose fields were all left blank), which the caller filters out so
+    the picker never offers an entry that would do nothing.
+    """
+    snapshot = batch.payload_snapshot if isinstance(batch.payload_snapshot, dict) else {}
+    if batch.platform == BulkListingBatch.PLATFORM_FLIPKART:
+        rows = snapshot.get("rows")
+        first = rows[0] if isinstance(rows, list) and rows and isinstance(rows[0], dict) else {}
+        raw = first.get("attributes")
+    else:
+        raw = snapshot.get("shared")
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        key: value for key, value in raw.items()
+        if value not in (None, "") and isinstance(key, str)
+    }
+
+
+@api_view(["GET"])
+def bulk_listing_field_sources(request, business_id):
+    """Everything whose field values can be poured into the form being filled.
+
+    Two kinds, one list, because to the seller they are the same thing — "I
+    typed all this before, use it again":
+
+      preset — a BulkListingFieldPreset / FlipkartFieldPreset saved by hand.
+      batch  — a sheet actually generated before (BulkListingBatch). These
+               were never reusable, even though they hold exactly the same
+               field values as a preset and nobody has to remember to save
+               them: every listing ever generated is already a record of a
+               fully filled-in form.
+
+    `?platform=` picks which preset table and which snapshot shape to read
+    (see _snapshot_fields). `?source_label=<category>` is the point of the
+    endpoint: a field key only means something against the template it came
+    from, so sources from another category are filtered out and counted in
+    `other_count` instead of being offered and silently doing nothing.
+    """
+    business = get_authorized_business(request, business_id)
+    platform = str(request.GET.get("platform") or "meesho").strip().lower()
+    if platform not in _PLATFORM_MODULES:
+        return Response({"error": f"Unknown platform '{platform}'."},
+                        status=status.HTTP_400_BAD_REQUEST)
+    source_label = str(request.GET.get("source_label") or "").strip()
+
+    preset_model = (FlipkartFieldPreset if platform == "flipkart" else BulkListingFieldPreset)
+    presets = preset_model.objects.filter(business=business).select_related("created_by")
+    batches = (BulkListingBatch.objects
+               .filter(business=business, platform=platform)
+               .select_related("created_by").order_by("-created_at"))
+
+    other_count = 0
+    if source_label:
+        matching_presets = presets.filter(source_label__iexact=source_label)
+        matching_batches = batches.filter(category_label__iexact=source_label)
+        other_count = ((presets.count() - matching_presets.count())
+                       + (batches.count() - matching_batches.count()))
+        presets, batches = matching_presets, matching_batches
+
+    results = [
+        {
+            "kind": "preset",
+            "key": f"preset-{preset.pk}",
+            "id": preset.pk,
+            "name": preset.name,
+            "fields": preset.fields or {},
+            "labels": preset.labels or {},
+            "field_count": len(preset.fields or {}),
+            "source_label": preset.source_label,
+            "created_by_name": preset.created_by.username if preset.created_by_id else None,
+            "created_at": preset.created_at,
+        }
+        for preset in presets
+    ]
+
+    # Capped: this is a picker, and a business with hundreds of batches does
+    # not want every one of them in a dropdown — the most recent are the ones
+    # anybody reuses.
+    for batch in batches[:40]:
+        fields = _snapshot_fields(batch)
+        if not fields:
+            continue
+        extra = batch.row_count - 1
+        results.append({
+            "kind": "batch",
+            "key": f"batch-{batch.pk}",
+            "id": batch.pk,
+            "name": batch.first_sku_id + (f" +{extra} more" if extra > 0 else ""),
+            "fields": fields,
+            "labels": {},
+            "field_count": len(fields),
+            "source_label": batch.category_label,
+            "created_by_name": batch.created_by.username if batch.created_by_id else None,
+            "created_at": batch.created_at,
+            "row_count": batch.row_count,
+            "filename": batch.filename,
+        })
+
+    return Response({"results": results, "other_count": other_count})
 
 
 @api_view(["GET"])
