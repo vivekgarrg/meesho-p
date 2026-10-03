@@ -329,7 +329,7 @@ function CreateChildForm({ parentId, parentPrice, onSaved, onCancel }) {
 // ── parent card ───────────────────────────────────────────────────────────────
 function ParentCard({ parent, notify, onLink, dragging, unlinked = [], onOptOut, masterItems = [], sales }) {
   const [open, setOpen] = useState(false);
-  const [panel, setPanel] = useState(null); // null | "history" | "link" | "create" | "edit" | "suggest" | "sheet" | "rename" | "bom"
+  const [panel, setPanel] = useState(null); // null | "history" | "link" | "create" | "edit" | "suggest" | "sheet" | "stock" | "rename" | "bom"
   const [dragOver, setDragOver] = useState(false);
   // Seeded from the parent, and re-seeded every time the Edit panel is opened
   // (see `toggle` below). Seeding only at mount meant a card that had been on
@@ -380,6 +380,12 @@ function ParentCard({ parent, notify, onLink, dragging, unlinked = [], onOptOut,
   const [sheetPick, setSheetPick] = useState({});   // sku_id -> true
   const [sheetPrice, setSheetPrice] = useState({ msp: "", wdrp: "", mrp: "" });
   const [sheetBusy, setSheetBusy] = useState(false);
+  // Stock panel: same shape as the price sheet above it — tick the SKUs, say
+  // what the stock should become, download Meesho's own upload format.
+  const [stockPick, setStockPick] = useState({});   // sku_id -> true
+  const [stockMode, setStockMode] = useState("zero"); // "zero" | "qty"
+  const [stockQty, setStockQty] = useState("");
+  const [stockBusy, setStockBusy] = useState(false);
   const [addMasterId, setAddMasterId] = useState("");
   const [addQty, setAddQty] = useState("1");
   const [bomBusy, setBomBusy] = useState(false);
@@ -480,6 +486,49 @@ function ParentCard({ parent, notify, onLink, dragging, unlinked = [], onOptOut,
       notify("ok", `Sheet ready — ${written} row(s)` + (skipped ? `, ${skipped} skipped.` : "."));
     } catch { notify("err", "Could not build the sheet."); }
     finally { setSheetBusy(false); }
+  };
+
+  /**
+   * Build Meesho's bulk inventory sheet for the ticked SKUs under this parent.
+   *
+   * The reason this lives on the parent and not per SKU: taking a product off
+   * sale means every SKU under it, across every variation Meesho lists each one
+   * under — a dozen lines of catalog/product/variation ids that are slow and
+   * error-prone to assemble by hand. Stock 0 is the "stop selling now" case.
+   */
+  const downloadStockSheet = async () => {
+    const skuIds = (children || [])
+      .filter((ch) => stockPick[ch.sku_id] && ch.meesho?.length)
+      .map((ch) => ch.sku_id);
+    if (!skuIds.length) { notify("err", "Tick at least one SKU that has a Meesho catalog row."); return; }
+    if (stockMode === "qty" && !String(stockQty).trim()) { notify("err", "Enter the stock quantity."); return; }
+    const stockCount = stockMode === "zero" ? 0 : stockQty;
+
+    setStockBusy(true);
+    try {
+      const res = await fetch(`${API}/meesho-inventory/stock-sheet/`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sku_ids: skuIds, parent_id: parent.item_id, stock_count: stockCount }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        notify("err", d.error || d.detail || `Could not build the sheet (${res.status}).`);
+        return;
+      }
+      const written = res.headers.get("X-Rows-Written");
+      const skus = res.headers.get("X-Skus-Written");
+      const missing = Number(res.headers.get("X-Skus-Missing") || 0);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${Number(stockCount) === 0 ? "stop" : `stock${stockCount}`}_${parent.item_id.replace(/[^A-Za-z0-9._-]+/g, "_")}.xlsx`;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+      notify("ok", `Sheet ready — ${written} line(s) across ${skus} SKU(s)`
+        + (missing ? `, ${missing} left out (not in Meesho inventory).` : "."));
+    } catch { notify("err", "Could not build the sheet."); }
+    finally { setStockBusy(false); }
   };
 
   /** "Not this one" — take the SKU out of the linking flows for good. */
@@ -807,6 +856,19 @@ function ParentCard({ parent, notify, onLink, dragging, unlinked = [], onOptOut,
               style={{ ...btn(panel === "sheet" ? "secondary" : "ghost", "sm"), fontSize: 11 }}>
               {panel === "sheet" ? "✕ Cancel" : "📄 Price Sheet"}
             </button>
+            <button
+              onClick={() => {
+                toggle("stock");
+                // Default to every SKU Meesho actually knows about — taking a
+                // product off sale almost always means all of them.
+                if (panel !== "stock" && children) {
+                  setStockPick(Object.fromEntries(
+                    children.filter((ch) => ch.meesho?.length).map((ch) => [ch.sku_id, true])));
+                }
+              }}
+              style={{ ...btn(panel === "stock" ? "secondary" : "ghost", "sm"), fontSize: 11 }}>
+              {panel === "stock" ? "✕ Cancel" : "📦 Stock Update"}
+            </button>
             <button onClick={() => toggle("create")} style={{ ...btn(panel === "create" ? "success" : "ghost", "sm"), fontSize: 11 }}>
               {panel === "create" ? "✕ Cancel" : "+ Create New SKU"}
             </button>
@@ -971,6 +1033,89 @@ function ParentCard({ parent, notify, onLink, dragging, unlinked = [], onOptOut,
                   </div>
                 </ActionPanel>
               )}
+              {panel === "stock" && (() => {
+                const picked = (children || []).filter((ch) => stockPick[ch.sku_id] && ch.meesho?.length);
+                const lines = picked.reduce((n, ch) => n + ch.meesho.length, 0);
+                const zero = stockMode === "zero";
+                return (
+                  <ActionPanel accent={zero ? C.red : C.green} icon="📦" title="Meesho Stock Update">
+                    <p style={{ fontSize: 11.5, color: C.gray600, marginBottom: 10, lineHeight: 1.6 }}>
+                      Set the stock for every SKU under this parent in one go and download
+                      Meesho's own inventory sheet. <strong>0 takes the product off sale</strong> —
+                      the quick way to stop a whole product. Catalog id, product id and variation
+                      are filled in from your inventory upload.
+                    </p>
+
+                    <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
+                      <button onClick={() => setStockMode("zero")}
+                        style={{ ...btn(zero ? "danger" : "ghost", "sm"), fontSize: 11.5 }}>
+                        0 — stop selling
+                      </button>
+                      <button onClick={() => setStockMode("qty")}
+                        style={{ ...btn(!zero ? "success" : "ghost", "sm"), fontSize: 11.5 }}>
+                        Set a quantity
+                      </button>
+                      {!zero && (
+                        <input type="number" min="0" step="1" value={stockQty} autoFocus
+                          onChange={(e) => setStockQty(e.target.value)}
+                          onKeyDown={(e) => { if (e.key === "Enter") downloadStockSheet(); }}
+                          placeholder="e.g. 50"
+                          style={{ ...S.inp, fontSize: 12, width: 110 }} />
+                      )}
+                    </div>
+
+                    {children === null ? (
+                      <p style={{ fontSize: 12, color: C.gray400 }}>Loading SKUs…</p>
+                    ) : (
+                      <div style={{ border: `1px solid ${C.border}`, borderRadius: 8, overflow: "hidden", marginBottom: 10 }}>
+                        {children.map((ch, i) => {
+                          const ready = !!ch.meesho?.length;
+                          return (
+                            <label key={ch.sku_id} style={{
+                              display: "flex", alignItems: "center", gap: 8, padding: "7px 10px",
+                              background: i % 2 ? C.gray50 : C.white, borderBottom: `1px solid ${C.gray100}`,
+                              cursor: ready ? "pointer" : "not-allowed", opacity: ready ? 1 : 0.55 }}>
+                              <input type="checkbox" disabled={!ready}
+                                checked={!!stockPick[ch.sku_id]}
+                                onChange={() => setStockPick((p) => ({ ...p, [ch.sku_id]: !p[ch.sku_id] }))} />
+                              <span style={{ flex: 1, minWidth: 0, fontFamily: "monospace", fontSize: 11.5,
+                                fontWeight: 700, color: C.gray800, wordBreak: "break-all" }}>
+                                {ch.sku_id}
+                              </span>
+                              {ready ? (
+                                <span style={{ fontSize: 10.5, color: C.gray400, whiteSpace: "nowrap" }}>
+                                  catalog {ch.meesho[0].catalog_id}
+                                  {ch.meesho.length > 1 ? ` · ${ch.meesho.length} variations` : ""}
+                                </span>
+                              ) : (
+                                <span style={{ fontSize: 10.5, color: C.amber, fontWeight: 700, whiteSpace: "nowrap" }}>
+                                  not in Meesho inventory
+                                </span>
+                              )}
+                            </label>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                      <button onClick={downloadStockSheet} disabled={stockBusy}
+                        style={btn(zero ? "danger" : "primary", "sm")}>
+                        {stockBusy ? "Building…" : zero ? "⬇ Download stop-sale sheet" : "⬇ Download stock sheet"}
+                      </button>
+                      <button onClick={() => setStockPick({})} style={btn("ghost", "sm")}>Clear</button>
+                      <span style={{ fontSize: 11, color: C.gray400 }}>
+                        {picked.length} SKU{picked.length === 1 ? "" : "s"} · {lines} sheet line{lines === 1 ? "" : "s"}
+                        {lines > picked.length ? " (some have several variations)" : ""}
+                      </span>
+                    </div>
+                    <p style={{ fontSize: 10.5, color: C.gray500, marginTop: 8 }}>
+                      Nothing is sent to Meesho from here — upload the downloaded file on Meesho's
+                      bulk inventory page.
+                    </p>
+                  </ActionPanel>
+                );
+              })()}
               {panel === "create" && (
                 <CreateChildForm parentId={parent.item_id} parentPrice={parent}
                   onSaved={() => { setPanel(null); invalidatePricing(); notify("ok", "Child SKU created."); }}

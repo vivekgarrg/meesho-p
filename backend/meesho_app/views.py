@@ -8903,56 +8903,303 @@ def meesho_inventory_list(request, business_id):
     return Response({"items": data, "total": total, "low_stock_count": low_stock_count})
 
 
+# ── Meesho's "Inventory Update File" format ───────────────────────────────────
+# Two header rows then data, exactly as Meesho's own export writes it (see
+# Inventory-Update-File_*.xlsx). Kept in one place because two endpoints now
+# emit this sheet — the whole-inventory download below and the parent-level
+# stock sheet — and a column that drifts between them is a sheet Meesho
+# silently refuses.
+_INV_SHEET_HEADERS = [
+    "SERIAL NO", "CATALOG NAME", "CATALOG ID", "PRODUCT NAME",
+    "PRODUCT ID", "STYLE ID", "VARIATION ID", "VARIATION",
+    "STOCK", "SYSTEM STOCK COUNT", "YOUR STOCK COUNT",
+]
+_INV_SHEET_DESC = [
+    "Row identifier", "Catalog name", "Catalog id", "Product name",
+    "Product id", "Product ID/Style ID", "Variation id", "Variation",
+    "Stock type (IN_STOCK / OUT_OF_STOCK / ALL)",
+    "Current system stock count",
+    "Edit this (keep empty if no change in stock)",
+]
+_INV_SHEET_WIDTHS = [10, 28, 14, 50, 14, 30, 14, 14, 10, 22, 22]
+
+# Meesho's uploader (and meesho_inventory_upload) finds the data sheet by
+# looking for "fill this" in its name, so any title here has to contain it.
+_INV_SHEET_TITLE = "Inventory-Update-Data-Fill This"
+
+
+def _new_inventory_workbook(title=_INV_SHEET_TITLE):
+    """An empty workbook carrying Meesho's two inventory header rows."""
+    import openpyxl
+    from openpyxl.styles import Alignment, Font, PatternFill
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = title
+    ws.append(_INV_SHEET_HEADERS)
+    ws.append(_INV_SHEET_DESC)
+
+    fill = PatternFill("solid", fgColor="4F46E5")
+    font = Font(bold=True, color="FFFFFF")
+    for cell in ws[1]:
+        cell.font = font
+        cell.fill = fill
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+    for cell in ws[2]:
+        cell.font = Font(italic=True, size=9, color="64748B")
+
+    for i, w in enumerate(_INV_SHEET_WIDTHS, 1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
+    return wb, ws
+
+
+def _append_inventory_row(ws, inv, your_stock):
+    """One inventory line. `your_stock` None leaves YOUR STOCK COUNT empty,
+    which is how Meesho is told "no change to this row" — so 0 (stop selling)
+    has to stay a real 0 and never collapse into the empty case."""
+    ws.append([
+        inv.serial_no,
+        inv.catalog_name,
+        inv.catalog_id,
+        inv.product_name,
+        inv.product_id,
+        inv.style_id,
+        inv.variation_id,
+        inv.variation,
+        inv.stock_type,
+        inv.system_stock_count,
+        "" if your_stock is None else int(your_stock),
+    ])
+
+
+def _resolve_parent_skus(business, parent_id, sku_ids):
+    """The SKUs a parent-level stock sheet should cover.
+
+    SKU Analysis groups rows by `parent_item_id || sku_id`, so a "parent group"
+    there is sometimes a real ParentItemPrice and sometimes a lone SKU that has
+    no parent on file. Both have to work, so: resolve a real parent to *every*
+    child on file, and fall back to treating the id as a single SKU.
+
+    Deliberately read from FinalPrice rather than from whatever the caller has
+    on screen — the analysis table is date-filtered, and a SKU with no sales in
+    the chosen window is exactly the one you still need in the sheet when you
+    are taking a product off sale.
+
+    Returns (sku_ids_in_stored_spelling, parent_label).
+    """
+    pid = (parent_id or "").strip()
+    parent = (
+        ParentItemPrice.objects.filter(business=business, item_id=pid).first() if pid else None
+    )
+
+    explicit = [str(s).strip() for s in (sku_ids or []) if str(s).strip()]
+    if explicit:
+        keys = {_sku_key(s) for s in explicit}
+        if parent:
+            # Both given (the Stock Update panel on a parent card sends the
+            # ticked subset): keep the sheet inside that parent. A typo'd or
+            # stale id silently zeroing the stock of some *other* product is
+            # the worst thing this endpoint could do — same reasoning as
+            # parent_price_sheet, with more at stake.
+            stored = FinalPrice.objects.filter(business=business, parent=parent)
+        else:
+            stored = FinalPrice.objects.filter(business=business)
+        matched = [
+            s for s in stored.order_by("sku_id").values_list("sku_id", flat=True)
+            if _sku_key(s) in keys
+        ]
+        if not parent:
+            # A SKU with no FinalPrice row can still have Meesho inventory, so
+            # keep any the caller named that we did not find priced.
+            seen = {_sku_key(s) for s in matched}
+            matched += [s for s in explicit if _sku_key(s) not in seen]
+        return matched, (pid or "selection")
+
+    if not pid:
+        return [], ""
+
+    if parent:
+        children = list(
+            FinalPrice.objects.filter(business=business, parent=parent)
+            .order_by("sku_id").values_list("sku_id", flat=True)
+        )
+        return children, parent.item_id
+
+    # Not a parent — a group of one, under its own SKU id.
+    own = (
+        FinalPrice.objects.filter(business=business, sku_id=pid)
+        .values_list("sku_id", flat=True).first()
+    )
+    return ([own] if own else [pid]), pid
+
+
+def _inventory_by_sku(business):
+    """MeeshoInventory keyed the way SKU ids compare, one list per SKU: a SKU
+    listed under several variations is several rows, and Meesho's template is
+    keyed by variation, so each is its own line."""
+    by_sku = {}
+    for inv in (MeeshoInventory.objects.filter(business=business)
+                .exclude(style_id="").order_by("serial_no")):
+        by_sku.setdefault(_sku_key(inv.style_id), []).append(inv)
+    return by_sku
+
+
+def _plan_stock_sheet(business, parent_id, sku_ids):
+    """Shared by the preview and the download so what the dialog promises and
+    what the file contains can never disagree."""
+    skus, label = _resolve_parent_skus(business, parent_id, sku_ids)
+    by_sku = _inventory_by_sku(business)
+    matched, missing = [], []
+    for sku in skus:
+        rows = by_sku.get(_sku_key(sku)) or []
+        if rows:
+            matched.append((sku, rows))
+        else:
+            missing.append(sku)
+    return label, matched, missing
+
+
+def _clean_stock_count(raw):
+    """The value that goes in YOUR STOCK COUNT. 0 is the whole point of this
+    feature (stop selling), so it must survive as 0 and never be read as
+    "blank" / "no change"."""
+    if raw is None or str(raw).strip() == "":
+        return None, "Enter a stock quantity (0 to take the product off sale)."
+    try:
+        n = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None, "Stock quantity must be a whole number."
+    if n < 0:
+        return None, "Stock quantity cannot be negative."
+    if n > 100000:
+        return None, "Stock quantity looks too large (max 100000)."
+    return n, None
+
+
+@api_view(["GET"])
+def parent_stock_sheet_preview(request, business_id):
+    """What a parent-level stock sheet would contain, before generating it.
+
+    ?parent_id=<parent or SKU id>   — every SKU on file under that parent
+    ?sku_ids=a,b,c                  — an explicit list instead
+
+    The UI needs this to say "12 SKUs, 10 ready, 2 missing from the inventory
+    upload" *before* the seller commits to a file they are about to push to
+    Meesho.
+    """
+    business = get_authorized_business(request, business_id)
+    raw_ids = request.GET.get("sku_ids", "")
+    sku_ids = [s for s in (raw_ids.split(",") if raw_ids else []) if s.strip()]
+    label, matched, missing = _plan_stock_sheet(
+        business, request.GET.get("parent_id"), sku_ids,
+    )
+    return Response({
+        "parent": label,
+        "sku_count": len(matched) + len(missing),
+        "rows_ready": sum(len(rows) for _sku, rows in matched),
+        "matched": [
+            {
+                "sku_id": sku,
+                "catalog_ids": sorted({r.catalog_id for r in rows}),
+                "variations": [
+                    {
+                        "catalog_id": r.catalog_id,
+                        "catalog_name": r.catalog_name,
+                        "product_id": r.product_id,
+                        "variation": r.variation or "Free Size",
+                        "variation_id": r.variation_id,
+                        "system_stock_count": r.system_stock_count,
+                    }
+                    for r in rows
+                ],
+            }
+            for sku, rows in matched
+        ],
+        "missing": missing,
+    })
+
+
+@api_view(["POST"])
+def parent_stock_sheet(request, business_id):
+    """Build a ready-to-upload Meesho stock sheet for every SKU under a parent.
+
+    Body: {"parent_id": "...", "stock_count": 0}
+          {"sku_ids": ["...", "..."], "stock_count": 25}
+
+    stock_count 0 is the "stop selling this product now" case this exists for;
+    any other number sets that quantity. Every SKU under the parent, across
+    every variation Meesho lists it under, becomes a line — which is the part
+    that is slow and error-prone to do by hand.
+
+    SERIAL NO keeps the number from Meesho's own export rather than being
+    renumbered 1..N, so each line still identifies the row it came from. That
+    matches what the whole-inventory download already does.
+    """
+    from io import BytesIO
+
+    from django.http import HttpResponse
+
+    business = get_authorized_business(request, business_id)
+    payload = request.data if isinstance(request.data, dict) else {}
+
+    stock, err = _clean_stock_count(payload.get("stock_count"))
+    if err:
+        return Response({"error": err}, status=status.HTTP_400_BAD_REQUEST)
+
+    label, matched, missing = _plan_stock_sheet(
+        business, payload.get("parent_id"), payload.get("sku_ids"),
+    )
+    if not matched:
+        return Response(
+            {
+                "error": (
+                    "None of these SKUs are in the Meesho inventory on file — "
+                    "upload the inventory sheet on the Meesho Inventory tab first."
+                ),
+                "missing": missing,
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    wb, ws = _new_inventory_workbook()
+    written = 0
+    for _sku, rows in matched:
+        for inv in rows:
+            _append_inventory_row(ws, inv, stock)
+            written += 1
+
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", label)[:60] or "parent"
+    verb = "stop" if stock == 0 else f"stock{stock}"
+    resp = HttpResponse(
+        buf.read(),
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    resp["Content-Disposition"] = f'attachment; filename="{verb}_{safe_name}.xlsx"'
+    # The UI reports these so a partial sheet is never mistaken for a full one.
+    resp["X-Rows-Written"] = str(written)
+    resp["X-Skus-Written"] = str(len(matched))
+    resp["X-Skus-Missing"] = str(len(missing))
+    resp["X-Stock-Count"] = str(stock)
+    return resp
+
+
 @api_view(["GET"])
 def meesho_inventory_download(request, business_id):
     from io import BytesIO
     from django.http import HttpResponse
-    import openpyxl
-    from openpyxl.styles import Font, PatternFill, Alignment
 
     business = get_authorized_business(request, business_id)
     qs = MeeshoInventory.objects.filter(business=business).order_by("serial_no")
 
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "Inventory-Fill this"
-
-    headers = [
-        "SERIAL NO", "CATALOG NAME", "CATALOG ID", "PRODUCT NAME",
-        "PRODUCT ID", "STYLE ID", "VARIATION ID", "VARIATION",
-        "STOCK", "SYSTEM STOCK COUNT", "YOUR STOCK COUNT",
-    ]
-    desc_row = [
-        "Row identifier", "Catalog name", "Catalog id", "Product name",
-        "Product id", "Product ID/Style ID", "Variation id", "Variation",
-        "Stock type (IN_STOCK / OUT_OF_STOCK / ALL)",
-        "Current system stock count",
-        "Edit this (keep empty if no change in stock)",
-    ]
-    ws.append(headers)
-    ws.append(desc_row)
-
+    wb, ws = _new_inventory_workbook(title="Inventory-Fill this")
     for item in qs:
         # YOUR STOCK COUNT: filled only where the seller has set a new value,
         # empty otherwise so Meesho skips those rows
-        your_stock = item.seller_stock_count if item.seller_stock_count is not None else ""
-        ws.append([
-            item.serial_no,
-            item.catalog_name,
-            item.catalog_id,
-            item.product_name,
-            item.product_id,
-            item.style_id,
-            item.variation_id,
-            item.variation,
-            item.stock_type,
-            item.system_stock_count,
-            your_stock,
-        ])
-
-    col_widths = [10, 28, 14, 50, 14, 30, 14, 14, 10, 22, 22]
-    for i, w in enumerate(col_widths, 1):
-        ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
+        _append_inventory_row(ws, item, item.seller_stock_count)
 
     buf = BytesIO()
     wb.save(buf)

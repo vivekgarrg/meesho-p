@@ -183,6 +183,19 @@ def bulk_listing_parse(request, business_id):
         # `error` (present only on a row Flipkart already rejected) — read
         # straight off the uploaded sheet. See extract_prefilled_rows.
         "prefilled_rows": prefilled_rows,
+        # {label: value} for the fields this seller never chooses (Fullfilment
+        # by = Seller, Shipping provider = FLIPKART — see
+        # bulk_listing_flipkart.FORCED_ATTRIBUTE_VALUES). Sent so the UI can
+        # *show* what is being pinned on every row instead of those columns
+        # just silently not appearing in the form.
+        "forced_attributes": (
+            {
+                f["label"]: forced[f["key"]]
+                for f in spec["fields"] if f["key"] in forced
+            }
+            if platform == "flipkart" and (forced := blf.forced_attributes(spec))
+            else {}
+        ),
     })
 
 
@@ -894,7 +907,14 @@ def bulk_listing_flipkart_presets(request, business_id):
     applies to templates: a Flipkart field key only ever means something
     against a Flipkart template's own field list.
 
-    GET  — every Flipkart preset saved for this business.
+    GET  — Flipkart presets saved for this business.
+           `?source_label=<category>` narrows to presets saved against that
+           same category, which is the only place they actually mean anything:
+           a preset is `{field_key: value}`, and a field key is only
+           meaningful against one template's own field list, so offering a
+           "Sarees" preset while filling a "Diyas" template just silently
+           prefills nothing. `other_count` reports how many were filtered out
+           so the UI can say so rather than look empty.
     POST — save one. An existing preset with the same name is updated in
            place (case-insensitively), same idempotency as bulk_listing_presets.
     """
@@ -933,7 +953,16 @@ def bulk_listing_flipkart_presets(request, business_id):
         )
 
     presets = FlipkartFieldPreset.objects.filter(business=business).select_related("created_by")
-    return Response({"results": FlipkartFieldPresetSerializer(presets, many=True).data})
+    source_label = str(request.GET.get("source_label") or "").strip()
+    other_count = 0
+    if source_label:
+        matching = presets.filter(source_label__iexact=source_label)
+        other_count = presets.count() - matching.count()
+        presets = matching
+    return Response({
+        "results": FlipkartFieldPresetSerializer(presets, many=True).data,
+        "other_count": other_count,
+    })
 
 
 @api_view(["DELETE"])

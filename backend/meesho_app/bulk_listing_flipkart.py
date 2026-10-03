@@ -207,20 +207,66 @@ def _resolve_options(rb, col_index, label, hint):
     return []
 
 
+# Values Flipkart's *API* enforces, whatever a given template happens to say.
+#
+# These override any dropdown found on the sheet, unlike FALLBACK_DROPDOWN_
+# VALUES below which only fills a gap. That is deliberate and was learned the
+# hard way: this module used to offer "Instock"/"Express" for procurement type
+# — lifted from the prose in a template's own Summary Sheet instructions — and
+# every upload using them came back rejected with
+#
+#   [procurement_type]: Invalid value given for attribute: procurement_type.
+#   Allowed values are: QUICK,REGULAR,EXPRESS,DOMESTIC,MADE_TO_ORDER,INTERNATIONAL
+#
+# "Instock" is not a value at all and "Express" was the wrong case. The error
+# text enumerates the real set, so it is the authority here — a template's own
+# dropdown (or its instructions prose) is not.
+CANONICAL_DROPDOWN_VALUES = {
+    "procurement type": [
+        "QUICK", "REGULAR", "EXPRESS", "DOMESTIC", "MADE_TO_ORDER", "INTERNATIONAL",
+    ],
+}
+
 # Fields where free text is not an acceptable fallback, but real Flipkart-
 # exported templates (checked against every sample on hand) never actually
 # carry a DropDownValuesForColumn/Index entry for them — Flipkart documents
 # the valid values only as prose in the Summary Sheet's own instructions,
-# never as structured dropdown data. "Instock"/"Express" here are copied
-# verbatim from that instructions text ("...for procurement type "Instock"
-# ... procurement type "Express"..."). Used only when _resolve_options
+# never as structured dropdown data. Used only when _resolve_options
 # genuinely found nothing for the column — a future template that DOES
 # supply its own dropdown for one of these labels keeps using that instead
 # (see parse_template below). Keyed by label, same convention as
 # FORCED_/DEFAULT_ATTRIBUTE_VALUES below.
+#
+# Anything whose values the API fixes outright belongs in
+# CANONICAL_DROPDOWN_VALUES above, not here.
 FALLBACK_DROPDOWN_VALUES = {
-    "procurement type": ["Instock", "Express"],
+    "fullfilment by": ["Seller"],
+    "fulfilment by": ["Seller"],
+    "fulfillment by": ["Seller"],
 }
+
+
+def _label_key(label):
+    """Lowercased, whitespace-collapsed label — the key every one of the
+    per-label tables in this module is looked up by."""
+    return " ".join(str(label or "").split()).strip().lower()
+
+
+def _snap_to_option(value, options):
+    """A forced/default value as the sheet's own dropdown spells it.
+
+    A value that is right but cased differently ("Seller" vs "SELLER") fails
+    the `value not in options` check in bulk_listing_views and takes the whole
+    generate down, so match case-insensitively and hand back the option's own
+    spelling. Returns `value` unchanged when there is nothing to snap to.
+    """
+    if not options:
+        return value
+    target = str(value).strip().casefold()
+    for option in options:
+        if str(option).strip().casefold() == target:
+            return option
+    return value
 
 
 def parse_template(rb):
@@ -245,11 +291,17 @@ def parse_template(rb):
         if _cell_bg(rb, ws, 0, col) == _GREY_BG:
             continue
         hint = str(ws.cell_value(1, col)).strip()
-        options = _resolve_options(rb, col, label, hint)
-        if not options and _TYPE_HINT_BOOLEAN.search(hint):
-            options = ["Yes", "No"]
-        if not options:
-            options = FALLBACK_DROPDOWN_VALUES.get(label.strip().lower(), [])
+        canonical = CANONICAL_DROPDOWN_VALUES.get(_label_key(label))
+        if canonical:
+            # The API's own allowed set — never the sheet's. See the note on
+            # CANONICAL_DROPDOWN_VALUES.
+            options = list(canonical)
+        else:
+            options = _resolve_options(rb, col, label, hint)
+            if not options and _TYPE_HINT_BOOLEAN.search(hint):
+                options = ["Yes", "No"]
+            if not options:
+                options = FALLBACK_DROPDOWN_VALUES.get(_label_key(label), [])
         fields.append({
             "key": _field_key(label, seen_keys),
             "label": label,
@@ -284,16 +336,32 @@ def parse_template(rb):
 # no matter what's already on the sheet or what the seller types.
 FORCED_ATTRIBUTE_VALUES = {
     "shipping provider": "FLIPKART",
+    # This seller fulfils its own orders. It also has to be pinned rather than
+    # left to the seller to pick, because Flipkart-fulfilled is not merely a
+    # different choice — it LOCKS procurement type, procurement SLA, shipping
+    # provider and stock against being touched by a bulk upload at all, which
+    # comes back as the cluster of rejections quoted in extract_prefilled_rows'
+    # docstring ("Fulfilled by Flipkart is not available for this product",
+    # "[procurement_type]: Procurement Type is not allowed to be updated", …).
+    # Forcing "Seller" is what keeps the rest of the sheet writable.
+    #
+    # Flipkart's own template spells the column "Fullfilment by" (sic); other
+    # exports have used the correct spellings, so all of them map here.
+    "fullfilment by": "Seller",
+    "fulfilment by": "Seller",
+    "fulfillment by": "Seller",
+    "fulfilled by": "Seller",
 }
 
 # A sane starting value for a field the seller can still freely change —
 # unlike FORCED_ATTRIBUTE_VALUES, this only fills in where the sheet's own
 # cell is blank, so it's shown (and editable) in the UI rather than hidden.
-# "Express" is this business's usual procurement lane — capitalised to match
-# FALLBACK_DROPDOWN_VALUES above verbatim, since a blank cell filled with
-# this default is validated against that same options list.
+# "EXPRESS" is this business's usual procurement lane, spelled exactly as
+# CANONICAL_DROPDOWN_VALUES above has it — a blank cell filled with this
+# default is validated against that same options list, and the old "Express"
+# was rejected by Flipkart for the casing alone.
 DEFAULT_ATTRIBUTE_VALUES = {
-    "procurement type": "Express",
+    "procurement type": "EXPRESS",
 }
 
 
@@ -303,9 +371,9 @@ def forced_attributes(spec):
     own attributes say (these values always win) before validating or
     writing a row."""
     return {
-        f["key"]: FORCED_ATTRIBUTE_VALUES[f["label"].strip().lower()]
+        f["key"]: _snap_to_option(FORCED_ATTRIBUTE_VALUES[_label_key(f["label"])], f.get("options"))
         for f in spec["fields"]
-        if f["label"].strip().lower() in FORCED_ATTRIBUTE_VALUES
+        if _label_key(f["label"]) in FORCED_ATTRIBUTE_VALUES
     }
 
 
@@ -314,9 +382,9 @@ def default_attributes(spec):
     names — only meant to fill a blank, never to overwrite an existing
     value (see extract_prefilled_rows, the only caller)."""
     return {
-        f["key"]: DEFAULT_ATTRIBUTE_VALUES[f["label"].strip().lower()]
+        f["key"]: _snap_to_option(DEFAULT_ATTRIBUTE_VALUES[_label_key(f["label"])], f.get("options"))
         for f in spec["fields"]
-        if f["label"].strip().lower() in DEFAULT_ATTRIBUTE_VALUES
+        if _label_key(f["label"]) in DEFAULT_ATTRIBUTE_VALUES
     }
 
 
@@ -457,6 +525,39 @@ def extract_prefilled_rows(spec, rb):
     return rows
 
 
+def _restore_palette(wb, rb):
+    """Re-apply the source book's colour palette onto an xlutils copy.
+
+    `.xls` stores a cell's fill as an *index* into one workbook-wide PALETTE
+    record. xlutils.copy carries the XF records (so every cell still points at
+    the same index) but not the PALETTE itself, so any index the source had
+    overridden silently reverts to Excel's factory colour for that slot.
+
+    That is not cosmetic here. Flipkart marks mandatory columns with
+    (141, 180, 226) — an Office theme blue that is *not* in the standard
+    56-colour palette, so it can only exist as an override — and
+    `parse_template` decides `required` purely from that fill. Without this,
+    every generated sheet came back out with its mandatory highlighting gone,
+    so re-uploading one (which the Flipkart flow explicitly invites: it wants
+    a sheet that already has SKUs and images in it, which a generated sheet
+    does) parsed every field as optional and quietly stopped enforcing
+    Flipkart's own mandatory attributes. Grey (192, 192, 192) happens to be a
+    standard palette colour and survived regardless, which is exactly why this
+    was invisible.
+
+    Indices 8-63 are the user-definable range in BIFF8; 0-7 are fixed.
+    """
+    for index, rgb in (rb.colour_map or {}).items():
+        if rgb is None or not 8 <= index <= 63:
+            continue
+        try:
+            wb.set_colour_RGB(index, *rgb)
+        except Exception:
+            # A palette slot xlwt will not take is not worth failing a
+            # generate over — the data is what the upload is judged on.
+            pass
+
+
 def build_workbook(spec, rb, rows):
     """
     `rb`: the `xlrd.Book` from `load_workbook`/`parse_template` — `.xls`
@@ -472,6 +573,7 @@ def build_workbook(spec, rb, rows):
     settled on), `attributes` (field key -> value, this row's own).
     """
     wb = _xlutils_copy(rb)
+    _restore_palette(wb, rb)
     ws = wb.get_sheet(spec["sheet_name"])
     sku_field = find_field(spec, role="sku")
     slot_fields = [f for role in image_slots(spec) for f in spec["fields"] if f["role"] == role]
@@ -489,5 +591,20 @@ def build_workbook(spec, rb, rows):
             f = attribute_fields.get(key)
             if f and value not in (None, ""):
                 ws.write(r, f["column"], coerce_cell(f, value))
+
+    # Blank any data row the source sheet had that this generate does not fill.
+    #
+    # The sheet arrives from Flipkart's bulk image tool with a row per photo
+    # set, and writing `rows` only *overwrites* the first len(rows) of them —
+    # so generating fewer rows than the template carries used to leave the
+    # originals in place, and Flipkart would happily create listings the
+    # seller had taken out, under the template's own stale SKUs. Clearing
+    # every column (system ones included) is right: the row is gone, not
+    # merely empty of attributes. extract_prefilled_rows stops at the first
+    # blank SKU, so this also keeps a regenerated sheet re-readable.
+    source = rb.sheet_by_name(spec["sheet_name"])
+    for r in range(spec["data_start_row"] + len(rows), source.nrows):
+        for col in range(source.ncols):
+            ws.write(r, col, "")
 
     return wb

@@ -142,6 +142,11 @@ API_OWNERSHIP = {
     "inventory/labels/":     ["/inventory-labels"],
     "inventory/":            ["/inventory", "/inventory-labels"],
 
+    # The parent-level stock sheet is driven from SKU Analysis, so it needs its
+    # own (longer, therefore winning) rule — without it, whoever can see SKU
+    # Analysis but not the Meesho Inventory tab is denied, and widening the
+    # rule below instead would hand them that whole tab's data.
+    "meesho-inventory/stock-sheet/": ["/sku-analysis", "/pricing", "/meesho-inventory"],
     "meesho-inventory/":     ["/meesho-inventory"],
     "meesho-price-update/":  ["/meesho-pricing", "/meesho-inventory"],
 

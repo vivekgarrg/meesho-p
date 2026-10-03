@@ -12,6 +12,13 @@ import { C, S, btn, useIsMobile } from "../../App";
  * times per image, scattering crops across whatever folder happened to be
  * picked each time — so the only download path here is a single zip with
  * every crop flat at its root, whether that's 4 images or 40.
+ *
+ * One product name covers the whole batch: a listing set is photos OF ONE
+ * PRODUCT, so naming each grid image separately was asking for the same name
+ * to be typed four times and spelled three ways. The crops are numbered
+ * straight through the batch — "<product>-1.jpg" … "-12.jpg" for three grids —
+ * and the zip itself takes the product name, so what lands in Downloads says
+ * which product it is without being opened.
  */
 
 const MAX_DIM = 6000; // sanity cap so a bad file can't wedge the canvas
@@ -83,7 +90,9 @@ function downloadBlob(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 4000);
 }
 
-/** Flat, collision-safe filenames — everything lands in one folder once unzipped. */
+/** Flat, collision-safe filenames — everything lands in one folder once unzipped.
+ *  Crops are numbered straight through the batch, so the suffix path here is
+ *  only a backstop against a name that somehow repeats. */
 function uniqueName(used, base, ext) {
   let name = `${base}.${ext}`;
   let n = 2;
@@ -100,6 +109,8 @@ let jobSeq = 0;
 export function QuadrantCropperTab() {
   const isMobile = useIsMobile();
   const [jobs, setJobs] = useState([]);
+  // One name for every photo in the batch — see the note at the top of the file.
+  const [productName, setProductName] = useState("");
   const [dragOver, setDragOver] = useState(false);
   const [zipping, setZipping] = useState(false);
   const [status, setStatus] = useState(null);
@@ -119,7 +130,6 @@ export function QuadrantCropperTab() {
           mime: file.type === "image/png" ? "image/png" : "image/jpeg",
           objectUrl: url,
           img,
-          itemName: "",
           splitX: 0.5,
           splitY: 0.5,
         };
@@ -144,11 +154,8 @@ export function QuadrantCropperTab() {
     );
   };
 
-  const setItemName = (jobId, itemName) => {
-    setJobs((prev) => prev.map((j) => (j.id === jobId ? { ...j, itemName } : j)));
-  };
-
-  const missingNames = jobs.filter((j) => !itemFileBase(j.itemName)).length;
+  const nameBase = itemFileBase(productName);
+  const nameMissing = !nameBase;
 
   const removeJob = (jobId) => {
     setJobs((prev) => {
@@ -162,12 +169,14 @@ export function QuadrantCropperTab() {
     jobs.forEach((j) => URL.revokeObjectURL(j.objectUrl));
     setJobs([]);
     setStatus(null);
+    // The name belongs to the batch, so it goes with the batch.
+    setProductName("");
   };
 
   const downloadAll = async () => {
     if (!jobs.length) return;
-    if (missingNames) {
-      setStatus({ kind: "err", text: `Enter an item name for ${missingNames === 1 ? "the highlighted image" : `all ${missingNames} highlighted images`} before downloading.` });
+    if (nameMissing) {
+      setStatus({ kind: "err", text: "Enter the product name before downloading — the files and the zip are named after it." });
       return;
     }
     setZipping(true);
@@ -175,19 +184,21 @@ export function QuadrantCropperTab() {
     try {
       const zip = new JSZip();
       const used = new Set();
+      // Numbered straight through the batch rather than restarting per image,
+      // so three grids give "<product>-1" … "-12" instead of three separate
+      // runs of 1-4 that would collide on name.
+      let n = 0;
       for (const job of jobs) {
-        // Crops are named after the item: "<item name>-1.jpg" … "-4.jpg".
-        const base = itemFileBase(job.itemName);
         const ext = extFor(job.mime);
-        for (const [i, quad] of job.quads.entries()) {
+        for (const quad of job.quads) {
           const blob = await canvasToBlob(quad.canvas, job.mime);
           if (!blob) continue;
-          const name = uniqueName(used, `${base}-${i + 1}`, ext);
-          zip.file(name, blob);
+          n += 1;
+          zip.file(uniqueName(used, `${nameBase}-${n}`, ext), blob);
         }
       }
       const zipBlob = await zip.generateAsync({ type: "blob" });
-      const zipName = jobs.length === 1 ? `${itemFileBase(jobs[0].itemName)}.zip` : "quadrant-crops.zip";
+      const zipName = `${nameBase}.zip`;
       downloadBlob(zipBlob, zipName);
       setStatus({ kind: "ok", text: `Saved ${used.size} images in one zip — ${zipName}` });
     } catch (err) {
@@ -236,9 +247,9 @@ export function QuadrantCropperTab() {
           <h1 style={{ fontSize: isMobile ? 17 : 19, fontWeight: 800, color: C.gray800 }}>Quadrant Cropper</h1>
         </div>
         <p style={{ fontSize: 12, color: C.gray400, marginTop: 3, maxWidth: 640 }}>
-          Drop a 2×2 grid photo and get back four individual images — drag the crosshair if the
-          grid isn't split dead-center. Everything downloads as one zip, all crops together in a
-          single folder, never as separate save prompts.
+          Drop 2×2 grid photos and get back four individual images each — drag the crosshair if a
+          grid isn't split dead-center. Name the product once: every crop and the zip itself are
+          named after it. Everything downloads as one zip, never as separate save prompts.
         </p>
       </div>
 
@@ -277,30 +288,58 @@ export function QuadrantCropperTab() {
 
       {jobs.length > 0 && (
         <>
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              flexWrap: "wrap",
-              gap: 10,
-            }}
-          >
-            <div style={{ fontSize: 12.5, color: C.gray500 }}>
-              {jobs.length} image{jobs.length === 1 ? "" : "s"} loaded · {jobs.length * 4} crops ready
-            </div>
-            <div style={{ display: "flex", gap: 8 }}>
+          {/* One product name for the whole batch — the files and the zip both
+              take it, so it sits here with the download rather than on each
+              image. */}
+          <div style={{ ...S.card, padding: isMobile ? 14 : 18, border: `1.5px solid ${nameMissing ? C.redBorder : C.border}` }}>
+            <label htmlFor="qc-product-name" style={{ display: "block", fontSize: 12, fontWeight: 700, color: C.gray700, marginBottom: 5 }}>
+              Product name <span style={{ color: C.red }}>*</span>
+            </label>
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+              <input
+                id="qc-product-name"
+                type="text"
+                value={productName}
+                onChange={(e) => setProductName(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter" && !nameMissing && !zipping) downloadAll(); }}
+                placeholder="e.g. Brass Pooja Plate 6 inch"
+                autoFocus
+                style={{
+                  flex: "1 1 320px",
+                  maxWidth: 460,
+                  boxSizing: "border-box",
+                  padding: "9px 11px",
+                  fontSize: 13,
+                  borderRadius: 8,
+                  border: `1.5px solid ${nameMissing ? C.red : C.border}`,
+                  outline: "none",
+                }}
+              />
               <button onClick={clearAll} style={btn("ghost", "sm")}>
                 Clear all
               </button>
               <button
                 onClick={downloadAll}
-                disabled={zipping || missingNames > 0}
-                title={missingNames > 0 ? "Enter an item name for every image first" : undefined}
-                style={{ ...btn("primary", "sm"), ...(missingNames > 0 ? { opacity: 0.5, cursor: "not-allowed" } : {}) }}
+                disabled={zipping || nameMissing}
+                title={nameMissing ? "Enter the product name first" : undefined}
+                style={{ ...btn("primary", "sm"), ...(nameMissing ? { opacity: 0.5, cursor: "not-allowed" } : {}) }}
               >
                 {zipping ? "Zipping…" : `Download all ${jobs.length * 4} as one zip`}
               </button>
+            </div>
+            <div style={{ fontSize: 11.5, marginTop: 6, color: nameMissing ? C.red : C.gray400 }}>
+              {nameMissing ? (
+                "Required — every crop and the zip are named after this."
+              ) : (
+                <>
+                  {jobs.length} image{jobs.length === 1 ? "" : "s"} · {jobs.length * 4} crops →{" "}
+                  <span style={{ fontFamily: "monospace", color: C.gray600 }}>{nameBase}-1.{extFor(jobs[0].mime)}</span>
+                  {" … "}
+                  <span style={{ fontFamily: "monospace", color: C.gray600 }}>{nameBase}-{jobs.length * 4}.{extFor(jobs[jobs.length - 1].mime)}</span>
+                  {" inside "}
+                  <span style={{ fontFamily: "monospace", color: C.gray600 }}>{nameBase}.zip</span>
+                </>
+              )}
             </div>
           </div>
 
@@ -343,36 +382,18 @@ export function QuadrantCropperTab() {
                   </div>
                 </div>
 
-                {(() => {
-                  const base = itemFileBase(job.itemName);
+                {/* No name field here any more — one product name covers the
+                    batch. This just says which of its numbers come from this
+                    image, so a crop can be traced back to its grid. */}
+                {!nameMissing && (() => {
+                  const start = jobs.slice(0, jobs.findIndex((j) => j.id === job.id)).length * 4 + 1;
                   const ext = extFor(job.mime);
                   return (
-                    <div style={{ marginBottom: 14 }}>
-                      <label style={{ display: "block", fontSize: 12, fontWeight: 700, color: C.gray700, marginBottom: 5 }}>
-                        Item name <span style={{ color: C.red }}>*</span>
-                      </label>
-                      <input
-                        type="text"
-                        value={job.itemName}
-                        onChange={(e) => setItemName(job.id, e.target.value)}
-                        placeholder="e.g. Brass Pooja Plate 6 inch"
-                        required
-                        style={{
-                          width: "100%",
-                          maxWidth: 420,
-                          boxSizing: "border-box",
-                          padding: "8px 10px",
-                          fontSize: 13,
-                          borderRadius: 8,
-                          border: `1.5px solid ${base ? C.border : C.red}`,
-                          outline: "none",
-                        }}
-                      />
-                      <div style={{ fontSize: 11, marginTop: 4, color: base ? C.gray400 : C.red }}>
-                        {base
-                          ? <>Downloads as <span style={{ fontFamily: "monospace" }}>{base}-1.{ext}</span> … <span style={{ fontFamily: "monospace" }}>{base}-4.{ext}</span></>
-                          : "Required — the downloaded files are named after this."}
-                      </div>
+                    <div style={{ fontSize: 11.5, color: C.gray400, marginBottom: 14 }}>
+                      This image →{" "}
+                      <span style={{ fontFamily: "monospace", color: C.gray600 }}>{nameBase}-{start}.{ext}</span>
+                      {" … "}
+                      <span style={{ fontFamily: "monospace", color: C.gray600 }}>{nameBase}-{start + 3}.{ext}</span>
                     </div>
                   );
                 })()}

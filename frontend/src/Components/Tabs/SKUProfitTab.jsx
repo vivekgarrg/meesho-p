@@ -295,7 +295,7 @@ function MetricsPanel({ data, filterLabel, profitSummary }) {
 // identity column swaps to show the child count instead of a single parent
 // tag, and per-unit cost is dropped (summing a per-unit cost across different
 // SKUs isn't a meaningful number).
-function SKUDataTable({ data, onRowClick, mode = "sku" }) {
+function SKUDataTable({ data, onRowClick, mode = "sku", onStockClick }) {
   const columns = [
     {
       field: "sku_id", headerName: mode === "parent" ? "Parent SKU" : "SKU", minWidth: 190, flex: 1.2,
@@ -382,15 +382,26 @@ function SKUDataTable({ data, onRowClick, mode = "sku" }) {
       renderCell: p => <PLChip value={p.value} large />,
     },
     {
-      field: "actions", headerName: "", width: 52, sortable: false,
+      field: "actions", headerName: "", width: mode === "parent" && onStockClick ? 92 : 52, sortable: false,
       renderCell: p => (
-        <Tooltip title="View full analysis" placement="left">
-          <IconButton size="small"
-            onClick={e => { e.stopPropagation(); onRowClick(p.row); }}
-            sx={{ color: "#CBD5E1", fontSize: 18, "&:hover": { color: "#2563EB", bgcolor: "#EFF6FF" } }}>
-            ▸
-          </IconButton>
-        </Tooltip>
+        <Box sx={{ display: "flex", alignItems: "center" }}>
+          {mode === "parent" && onStockClick && (
+            <Tooltip title="Set Meesho stock for every SKU under this parent" placement="left">
+              <IconButton size="small"
+                onClick={e => { e.stopPropagation(); onStockClick(p.row); }}
+                sx={{ color: "#CBD5E1", fontSize: 15, "&:hover": { color: "#DC2626", bgcolor: "#FFF1F2" } }}>
+                📦
+              </IconButton>
+            </Tooltip>
+          )}
+          <Tooltip title={mode === "parent" ? "See this parent's SKUs" : "View full analysis"} placement="left">
+            <IconButton size="small"
+              onClick={e => { e.stopPropagation(); onRowClick(p.row); }}
+              sx={{ color: "#CBD5E1", fontSize: 18, "&:hover": { color: "#2563EB", bgcolor: "#EFF6FF" } }}>
+              ▸
+            </IconButton>
+          </Tooltip>
+        </Box>
       ),
     },
   ].filter(Boolean);
@@ -1373,6 +1384,232 @@ function LinkToParentDialog({ skuId, onClose, onSaved }) {
   );
 }
 
+// ── Parent-level Meesho stock update ─────────────────────────────────────────
+// "Stop selling this whole product, now." A parent SKU is listed on Meesho as
+// several catalogs/variations, each its own line in Meesho's bulk inventory
+// template keyed by catalog + product + variation id — identifiers nobody can
+// retype without error. This builds that sheet for every SKU under one parent,
+// with one stock number applied across all of them: 0 to take it off sale, or a
+// real quantity to put it back.
+//
+// The SKU list comes from the server (every child on file), NOT from the rows on
+// screen — the analysis table is date-filtered, and a SKU with no sales in the
+// chosen window is exactly the one you still need in the sheet when pulling a
+// product.
+function StockUpdateDialog({ parentId, onClose, notify }) {
+  const [plan, setPlan] = useState(null);
+  const [loadErr, setLoadErr] = useState("");
+  const [mode, setMode] = useState("zero"); // "zero" | "qty"
+  const [qty, setQty] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    const ctrl = new AbortController();
+    setPlan(null); setLoadErr("");
+    fetch(`${API}/meesho-inventory/stock-sheet/preview/?parent_id=${encodeURIComponent(parentId)}`,
+      { signal: ctrl.signal })
+      .then(async (r) => {
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.detail || d.error || `Could not load (${r.status}).`);
+        return d;
+      })
+      .then(setPlan)
+      .catch((e) => { if (e.name !== "AbortError") setLoadErr(e.message); });
+    return () => ctrl.abort();
+  }, [parentId]);
+
+  const stockCount = mode === "zero" ? 0 : qty;
+  const ready = plan ? plan.rows_ready > 0 : false;
+
+  const download = async () => {
+    if (mode === "qty" && !String(qty).trim()) { setErr("Enter a quantity."); return; }
+    setBusy(true); setErr("");
+    try {
+      const r = await fetch(`${API}/meesho-inventory/stock-sheet/`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ parent_id: parentId, stock_count: stockCount }),
+      });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        setErr(d.error || d.detail || `Could not build the sheet (${r.status}).`);
+        return;
+      }
+      const written = r.headers.get("X-Rows-Written");
+      const skus = r.headers.get("X-Skus-Written");
+      const missing = Number(r.headers.get("X-Skus-Missing") || 0);
+      const blob = await r.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${Number(stockCount) === 0 ? "stop" : `stock${stockCount}`}_${parentId.replace(/[^A-Za-z0-9._-]+/g, "_")}.xlsx`;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+      notify?.(
+        `Sheet ready — ${written} line(s) across ${skus} SKU(s)` +
+        (missing ? `, ${missing} SKU(s) left out (not in the Meesho inventory on file).` : ".")
+      );
+      onClose();
+    } catch {
+      setErr("Could not build the sheet — network error.");
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <Dialog open onClose={onClose} maxWidth="sm" fullWidth>
+      <DialogTitle sx={{ fontWeight: 800, fontSize: 16, pb: 1 }}>
+        Meesho stock update — <span style={{ fontFamily: "monospace", color: "#D97706" }}>{parentId}</span>
+      </DialogTitle>
+      <DialogContent sx={{ display: "flex", flexDirection: "column", gap: "14px", pt: "12px !important" }}>
+        {loadErr && <Alert severity="error" sx={{ fontSize: 12 }}>{loadErr}</Alert>}
+        {err && <Alert severity="error" sx={{ fontSize: 12 }}>{err}</Alert>}
+
+        {!plan && !loadErr && (
+          <Box sx={{ display: "flex", alignItems: "center", gap: 1.5, py: 2 }}>
+            <CircularProgress size={18} />
+            <Typography sx={{ fontSize: 13, color: "#94A3B8" }}>Looking up this parent's SKUs…</Typography>
+          </Box>
+        )}
+
+        {plan && (
+          <>
+            <Box sx={{ display: "flex", gap: 3, flexWrap: "wrap" }}>
+              <Box>
+                <Typography sx={DS.label}>SKUs under parent</Typography>
+                <Typography sx={{ fontFamily: "monospace", fontWeight: 800, fontSize: 20 }}>{plan.sku_count}</Typography>
+              </Box>
+              <Box>
+                <Typography sx={DS.label}>Sheet lines</Typography>
+                <Typography sx={{ fontFamily: "monospace", fontWeight: 800, fontSize: 20, color: "#059669" }}>
+                  {plan.rows_ready}
+                </Typography>
+              </Box>
+              {plan.missing?.length > 0 && (
+                <Box>
+                  <Typography sx={DS.label}>Not on Meesho file</Typography>
+                  <Typography sx={{ fontFamily: "monospace", fontWeight: 800, fontSize: 20, color: "#D97706" }}>
+                    {plan.missing.length}
+                  </Typography>
+                </Box>
+              )}
+            </Box>
+
+            {plan.rows_ready > plan.sku_count && (
+              <Typography sx={{ fontSize: 11.5, color: "#94A3B8" }}>
+                More lines than SKUs because Meesho lists some of these under more than one
+                variation — each variation is its own line in the template.
+              </Typography>
+            )}
+
+            {!ready && (
+              <Alert severity="warning" sx={{ fontSize: 12 }}>
+                None of this parent's SKUs are in the Meesho inventory on file. Upload the
+                inventory sheet on the <b>Meesho Stock</b> tab first, then come back.
+              </Alert>
+            )}
+
+            {plan.missing?.length > 0 && ready && (
+              <Alert severity="warning" sx={{ fontSize: 12 }}>
+                Left out of the sheet (no Meesho catalog row on file):{" "}
+                <Box component="span" sx={{ fontFamily: "monospace" }}>{plan.missing.join(", ")}</Box>
+              </Alert>
+            )}
+
+            {/* What to set */}
+            <Box>
+              <Typography sx={{ ...DS.label, mb: 1 }}>Set stock to</Typography>
+              <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap", alignItems: "center" }}>
+                <Button
+                  onClick={() => setMode("zero")}
+                  variant={mode === "zero" ? "contained" : "outlined"}
+                  color={mode === "zero" ? "error" : "inherit"}
+                  sx={{ textTransform: "none", fontWeight: 700, borderRadius: "8px" }}
+                >
+                  0 — stop selling
+                </Button>
+                <Button
+                  onClick={() => setMode("qty")}
+                  variant={mode === "qty" ? "contained" : "outlined"}
+                  color={mode === "qty" ? "primary" : "inherit"}
+                  sx={{ textTransform: "none", fontWeight: 700, borderRadius: "8px" }}
+                >
+                  A quantity
+                </Button>
+                {mode === "qty" && (
+                  <TextField
+                    size="small" type="number" autoFocus value={qty}
+                    onChange={(e) => setQty(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter" && ready) download(); }}
+                    placeholder="e.g. 50"
+                    inputProps={{ min: 0, step: 1 }}
+                    sx={{ width: 130, "& .MuiOutlinedInput-root": { borderRadius: "8px" } }}
+                  />
+                )}
+              </Box>
+            </Box>
+
+            <Typography sx={{ fontSize: 11.5, color: "#94A3B8" }}>
+              {mode === "zero"
+                ? "Every line gets YOUR STOCK COUNT = 0, which is how Meesho takes a product off sale."
+                : "Every line gets the same quantity. This is the stock each variation is set to, not an amount added."}
+              {" "}Download, then upload the file on Meesho's bulk inventory page — nothing is sent to Meesho from here.
+            </Typography>
+
+            {/* What is in the sheet */}
+            {ready && (
+              <Box sx={{ border: "1px solid #E8EDF3", borderRadius: "10px", overflow: "hidden", maxHeight: 220, overflowY: "auto" }}>
+                <Table size="small" stickyHeader>
+                  <TableHead>
+                    <TableRow>
+                      <TableCell sx={{ fontWeight: 800, fontSize: 11 }}>SKU</TableCell>
+                      <TableCell sx={{ fontWeight: 800, fontSize: 11 }}>Catalog ID</TableCell>
+                      <TableCell sx={{ fontWeight: 800, fontSize: 11 }}>Variation</TableCell>
+                      <TableCell align="right" sx={{ fontWeight: 800, fontSize: 11 }}>Now</TableCell>
+                      <TableCell align="right" sx={{ fontWeight: 800, fontSize: 11 }}>After</TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {plan.matched.flatMap((m) =>
+                      m.variations.map((v, i) => (
+                        <TableRow key={`${m.sku_id}-${v.catalog_id}-${v.variation_id}-${i}`}>
+                          <TableCell sx={{ fontFamily: "monospace", fontSize: 11.5 }}>
+                            {i === 0 ? m.sku_id : ""}
+                          </TableCell>
+                          <TableCell sx={{ fontFamily: "monospace", fontSize: 11.5 }}>{v.catalog_id}</TableCell>
+                          <TableCell sx={{ fontSize: 11.5 }}>{v.variation}</TableCell>
+                          <TableCell align="right" sx={{ fontFamily: "monospace", fontSize: 11.5, color: "#94A3B8" }}>
+                            {v.system_stock_count}
+                          </TableCell>
+                          <TableCell align="right" sx={{
+                            fontFamily: "monospace", fontSize: 11.5, fontWeight: 800,
+                            color: Number(stockCount) === 0 ? "#DC2626" : "#059669",
+                          }}>
+                            {mode === "qty" && !String(qty).trim() ? "—" : Number(stockCount)}
+                          </TableCell>
+                        </TableRow>
+                      ))
+                    )}
+                  </TableBody>
+                </Table>
+              </Box>
+            )}
+          </>
+        )}
+      </DialogContent>
+      <DialogActions sx={{ px: "24px", pb: "16px", gap: "8px" }}>
+        <Button onClick={onClose} variant="outlined" color="inherit">Cancel</Button>
+        <Button
+          onClick={download} disabled={busy || !ready}
+          variant="contained" color={mode === "zero" ? "error" : "primary"}
+          sx={{ textTransform: "none", fontWeight: 700, borderRadius: "8px" }}
+        >
+          {busy ? "Building…" : Number(stockCount) === 0 ? "Download stop-sale sheet" : "Download stock sheet"}
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+
 function MissingSkuPanel({ missingSkus, ordersCount, onResolved }) {
   const [open, setOpen] = useState(true);
   const [resolved, setResolved] = useState(new Set());
@@ -1484,6 +1721,8 @@ export function SKUAnalysisTab() {
   const [reloadTick, setReloadTick] = useState(0);
   const [groupBy, setGroupBy] = useState("sku"); // "sku" | "parent"
   const [drillParent, setDrillParent] = useState(null); // parent key while looking at one group's children
+  const [stockParent, setStockParent] = useState(null); // parent whose Meesho stock sheet is being built
+  const [stockMsg, setStockMsg] = useState("");
 
   useEffect(() => {
     const ctrl = new AbortController();
@@ -1765,6 +2004,15 @@ export function SKUAnalysisTab() {
                   </Typography>
                   <Typography sx={{ fontSize: 12, color: "#94A3B8", mt: 0.25 }}>Click any row to open full P&L analysis</Typography>
                 </Box>
+                {/* Acting on the parent you are already looking at — the whole
+                    point is not having to go find it on another tab. */}
+                <Button
+                  size="small" variant="outlined" color="error"
+                  onClick={() => setStockParent(drillParent)}
+                  sx={{ ml: "auto", textTransform: "none", fontWeight: 700, borderRadius: "8px", whiteSpace: "nowrap" }}
+                >
+                  📦 Meesho stock
+                </Button>
               </Box>
               <SKUDataTable data={drillRows} onRowClick={setSelSKU} />
             </Box>
@@ -1781,10 +2029,13 @@ export function SKUAnalysisTab() {
                   </Typography>
                 </Typography>
                 <Typography sx={{ fontSize: 12, color: "#94A3B8", mt: 0.25 }}>
-                  {groupBy === "parent" ? "Click any row to see that parent's SKUs" : "Click any row to open full P&L analysis"}
+                  {groupBy === "parent"
+                    ? "Click any row to see that parent's SKUs, or use 📦 to set its Meesho stock"
+                    : "Click any row to open full P&L analysis"}
                 </Typography>
               </Box>
               <SKUDataTable data={viewData} mode={groupBy}
+                onStockClick={(row) => setStockParent(row.sku_id)}
                 onRowClick={(row) => { if (groupBy === "parent") setDrillParent(row.sku_id); else setSelSKU(row); }} />
             </Box>
           )}
@@ -1799,6 +2050,21 @@ export function SKUAnalysisTab() {
           initialMonth={globalMode === "month" ? globalMonth : null}
           onClose={() => setSelSKU(null)}
         />
+      )}
+
+      {stockParent && (
+        <StockUpdateDialog
+          parentId={stockParent}
+          onClose={() => setStockParent(null)}
+          notify={(text) => { setStockMsg(text); setTimeout(() => setStockMsg(""), 8000); }}
+        />
+      )}
+
+      {stockMsg && (
+        <Alert severity="success" onClose={() => setStockMsg("")}
+          sx={{ position: "fixed", bottom: 24, right: 24, zIndex: 1400, fontSize: 12.5, maxWidth: 440, boxShadow: "0 8px 24px rgba(0,0,0,0.18)" }}>
+          {stockMsg}
+        </Alert>
       )}
     </Box>
   );

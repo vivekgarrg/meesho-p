@@ -18,20 +18,26 @@ const fmtDate = (iso) => {
  * tweak and regenerate. Review status comes straight off the WorkerTask/
  * TaskListing rows the generation seeded, so it doubles as a quick read on
  * how much of a batch has cleared admin approval (and therefore been paid).
+ *
+ * Scoped to one platform via `platform`. It used to list every batch
+ * regardless, so the Flipkart flow showed Meesho sheets alongside its own —
+ * which is not just noise: a Meesho batch cannot be loaded back into the
+ * Flipkart form at all, so every one of those rows was a dead end.
  */
-export function BulkListingBatchesPanel({ isMobile, refreshKey, onLoadToEdit }) {
+export function BulkListingBatchesPanel({ isMobile, refreshKey, onLoadToEdit, platform }) {
   const [batches, setBatches] = useState([]);
   const [loading, setLoading] = useState(true);
   const [downloadingId, setDownloadingId] = useState(null);
 
   const load = useCallback(() => {
     setLoading(true);
-    fetch(`${API}/bulk-listing/batches/`)
+    const q = platform ? `?platform=${encodeURIComponent(platform)}` : "";
+    fetch(`${API}/bulk-listing/batches/${q}`)
       .then((r) => r.json())
       .then((d) => setBatches(d.results || []))
       .catch(() => {})
       .finally(() => setLoading(false));
-  }, []);
+  }, [platform]);
 
   useEffect(() => { load(); }, [load, refreshKey]);
 
@@ -64,7 +70,9 @@ export function BulkListingBatchesPanel({ isMobile, refreshKey, onLoadToEdit }) 
     }}>
       <div style={{ padding: "12px 16px", borderBottom: `1px solid ${C.gray100}`, display: "flex", alignItems: "center", gap: 8 }}>
         <HistoryIcon style={{ fontSize: 17, color: C.gray400 }} />
-        <span style={{ fontWeight: 700, fontSize: 13, color: C.gray800 }}>Generated Files</span>
+        <span style={{ fontWeight: 700, fontSize: 13, color: C.gray800 }}>
+          {platform === "flipkart" ? "Flipkart Files" : platform === "meesho" ? "Meesho Files" : "Generated Files"}
+        </span>
         <span style={{ fontSize: 11, color: C.gray400, background: C.gray100, borderRadius: 10, padding: "2px 8px", fontWeight: 600 }}>
           {batches.length}
         </span>

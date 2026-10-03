@@ -58,7 +58,19 @@ const isImageRole = (role) => /^image_\d+$/.test(role || "");
 // NOT in this set — it's a normal, visible, editable field that just
 // starts out prefilled with "express" (see DEFAULT_ATTRIBUTE_VALUES
 // server-side, applied in extract_prefilled_rows).
-const FORCED_ATTRIBUTE_LABELS = new Set(["shipping provider"]);
+// Fields the server pins on every row (bulk_listing_flipkart.
+// FORCED_ATTRIBUTE_VALUES) — kept out of the editable form, and shown instead
+// as a read-only "fixed on every row" strip built from the parse response's
+// `forced_attributes`, so the seller can see what they are rather than just
+// not finding the column. "Fullfilment by" is Flipkart's own (mis)spelling;
+// the correct spellings are matched too since exports have used them.
+const FORCED_ATTRIBUTE_LABELS = new Set([
+  "shipping provider",
+  "fullfilment by",
+  "fulfilment by",
+  "fulfillment by",
+  "fulfilled by",
+]);
 
 const LISTING_TYPES = [
   { id: "unique", label: "Unique Listing", hint: "Every row is its own catalog — a different Group ID per row" },
@@ -346,6 +358,7 @@ function FlipkartFlow() {
   const [reviewingId, setReviewingId] = useState(null);
 
   const [presets, setPresets] = useState([]);
+  const [presetsOther, setPresetsOther] = useState(0);
   const [presetId, setPresetId] = useState("");
   const [savingPreset, setSavingPreset] = useState(false);
 
@@ -361,9 +374,17 @@ function FlipkartFlow() {
 
   const approvedTemplates = useMemo(() => templates.filter((t) => t.status === "APPROVED"), [templates]);
 
-  const refreshPresets = () => {
-    fetch(`${API}/bulk-listing/flipkart-presets/`).then((r) => r.json())
-      .then((d) => setPresets(d.results || [])).catch(() => {});
+  // Only presets saved against THIS category. A preset is {field_key: value}
+  // and a Flipkart field key only means something against its own template's
+  // field list, so a preset from another category would silently prefill
+  // nothing — see bulk_listing_flipkart_presets. `presetsOther` is how many
+  // were filtered out, so an empty list can say why.
+  const refreshPresets = (label) => {
+    const cat = label !== undefined ? label : spec?.category_label;
+    const q = cat ? `?source_label=${encodeURIComponent(cat)}` : "";
+    fetch(`${API}/bulk-listing/flipkart-presets/${q}`).then((r) => r.json())
+      .then((d) => { setPresets(d.results || []); setPresetsOther(d.other_count || 0); })
+      .catch(() => {});
   };
 
   const refreshTemplates = () => {
@@ -411,7 +432,14 @@ function FlipkartFlow() {
       else if (skuCounts[k] > 1) errs.push("SKU id (duplicate)");
       if (mainRequired && !row.images[0]) errs.push(slotFields[0]?.label || "Main image");
       attributeFields.forEach((f) => {
-        if (f.required && !String(row.attributes[f.key] ?? "").trim()) errs.push(f.label);
+        const value = String(row.attributes[f.key] ?? "").trim();
+        if (f.required && !value) { errs.push(f.label); return; }
+        // Caught here as well as server-side, because the alternative is
+        // finding out from Flipkart's own rejection a day later — which is
+        // exactly how the procurement_type "Instock"/"Express" bug surfaced.
+        if (value && f.options?.length && !f.options.includes(value)) {
+          errs.push(`${f.label} (invalid value)`);
+        }
       });
       return errs;
     });
@@ -443,6 +471,9 @@ function FlipkartFlow() {
       }
       setSpec(d);
       setSource(src);
+      // This template's category decides which presets are even applicable.
+      setPresetId("");
+      refreshPresets(d.category_label || "");
       const newRows = (d.prefilled_rows || []).map((r) => ({
         sku: r.sku_id, images: [...r.images], attributes: { ...(r.attributes || {}) }, error: r.error || null,
       }));
@@ -586,6 +617,33 @@ function FlipkartFlow() {
     }
   };
 
+  /** Drop a row from this batch.
+   *
+   * Flipkart's bulk image tool seeds the sheet with every photo set it
+   * generated, which is routinely more products than the seller is actually
+   * listing now. Safe to offer only because build_workbook blanks the
+   * template's leftover data rows — before that, a removed row stayed in the
+   * generated file and Flipkart created it anyway, under the template's own
+   * stale SKU.
+   *
+   * `expanded` is keyed by index, so it has to be re-indexed rather than just
+   * carried over, or closing row 2 would appear to close row 3 instead.
+   */
+  const removeRow = (i) => {
+    setRows((rs) => rs.filter((_r, j) => j !== i));
+    setExpanded((prev) => {
+      const next = new Set();
+      prev.forEach((j) => {
+        if (j < i) next.add(j);
+        else if (j > i) next.add(j - 1);
+      });
+      return next;
+    });
+    // Row 1 driving every other row no longer means what it did if row 1 is
+    // the one that just went.
+    if (i === 0) setSyncFromRow1(false);
+  };
+
   const setRowSku = (i) => (value) =>
     setRows((rs) => rs.map((r, j) => (j === i ? { ...r, sku: value } : r)));
 
@@ -703,6 +761,25 @@ function FlipkartFlow() {
             <button onClick={changeTemplate} style={{ ...btn("ghost", "sm"), marginLeft: source?.type === "file" ? 0 : "auto" }}>
               <ChangeCircleIcon style={{ fontSize: 15, verticalAlign: "-3px" }} />&nbsp;Change template
             </button>
+            {/* The columns this seller never picks. Shown rather than just
+                missing from the form — "where is Fullfilment by?" is a fair
+                question otherwise. */}
+            {Object.keys(spec.forced_attributes || {}).length > 0 && (
+              <div style={{ flexBasis: "100%", display: "flex", alignItems: "center", gap: 7,
+                flexWrap: "wrap", fontSize: 11, color: C.gray500, marginTop: 2 }}>
+                <span style={{ fontWeight: 700, color: C.gray400 }}>Fixed on every row:</span>
+                {Object.entries(spec.forced_attributes).map(([label, value]) => (
+                  <span key={label} style={{ background: C.gray50, border: `1px solid ${C.border}`,
+                    borderRadius: 7, padding: "2px 8px" }}>
+                    {label} = <strong style={{ color: C.gray700 }}>{value}</strong>
+                  </span>
+                ))}
+                <span style={{ color: C.gray400 }}>
+                  — Flipkart locks procurement type, SLA and stock on Flipkart-fulfilled listings,
+                  so these stay pinned.
+                </span>
+              </div>
+            )}
           </div>
         ) : (
           <>
@@ -780,8 +857,14 @@ function FlipkartFlow() {
           }>
             {presets.length === 0 ? (
               <div style={{ fontSize: 12.5, color: C.gray400 }}>
-                No presets saved yet — fill in Row 1's attribute values below, then "Save Row 1 as
-                preset" to reuse them on a future product in this category.
+                No presets for <strong>{spec?.category_label || "this category"}</strong> yet — fill in
+                Row 1's attribute values below, then "Save Row 1 as preset" to reuse them on a future
+                product in this category.
+                {presetsOther > 0 && (
+                  <> {presetsOther} preset{presetsOther === 1 ? " exists" : "s exist"} for other
+                  categories; they aren't offered here because a Flipkart field only means something
+                  against its own template.</>
+                )}
               </div>
             ) : (
               <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
@@ -791,6 +874,11 @@ function FlipkartFlow() {
                     <option key={p.id} value={p.id}>{p.name} ({p.field_count} fields{p.source_label ? ` · ${p.source_label}` : ""})</option>
                   ))}
                 </select>
+                {presetsOther > 0 && (
+                  <span style={{ fontSize: 11, color: C.gray400 }}>
+                    {presetsOther} from other categories hidden
+                  </span>
+                )}
                 {presets.map((p) => (
                   <span key={p.id} style={{ display: "inline-flex", alignItems: "center", gap: 5,
                     fontSize: 11, color: C.gray500, background: C.gray50, border: `1px solid ${C.border}`,
@@ -808,7 +896,20 @@ function FlipkartFlow() {
 
           <Section title={`The ${rows.length} listing${rows.length === 1 ? "" : "s"}`.trim()}>
             {rows.length === 0 ? (
-              <div style={{ fontSize: 12.5, color: C.gray400 }}>No rows found in this template.</div>
+              // "None found" and "you removed them all" are different problems
+              // with different fixes, so don't report the first for the second.
+              <div style={{ fontSize: 12.5, color: C.gray400 }}>
+                {(spec?.prefilled_rows?.length || 0) > 0 ? (
+                  <>
+                    Every row has been removed, so there is nothing to generate.{" "}
+                    <button onClick={() => source && parseSource(source)}
+                      style={{ background: "none", border: "none", padding: 0, color: C.orange,
+                        fontWeight: 700, cursor: "pointer", fontSize: 12.5, textDecoration: "underline" }}>
+                      Reload the template
+                    </button>{" "}to start over.
+                  </>
+                ) : "No rows found in this template."}
+              </div>
             ) : (
               <>
                 {rows.length > 1 && (
@@ -856,6 +957,14 @@ function FlipkartFlow() {
                         </div>
                         <button onClick={() => toggleExpanded(i)} style={btn("secondary", "sm")}>
                           {isOpen ? "Done editing" : `Edit attributes (${filledCount}/${attributeFields.length})`}
+                        </button>
+                        <button
+                          onClick={() => {
+                            if (window.confirm(`Remove row ${i + 1}${row.sku ? ` (${row.sku})` : ""} from this batch? It won't be listed.`)) removeRow(i);
+                          }}
+                          title="Leave this product out of the generated sheet"
+                          style={{ ...btn("ghost", "sm"), color: C.red, borderColor: C.redBorder }}>
+                          Remove
                         </button>
                       </div>
 
@@ -1806,6 +1915,7 @@ export function BulkListingTab() {
       isMobile={isMobile}
       refreshKey={batchesRefreshKey}
       onLoadToEdit={loadBatchToEdit}
+      platform={mode === "flipkart" ? "flipkart" : "meesho"}
     />
     </div>
   );

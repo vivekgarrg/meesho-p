@@ -127,6 +127,10 @@ urlpatterns = [
     path("meesho-inventory/",          views.meesho_inventory_list,     name="meesho_inventory_list"),
     path("meesho-inventory/upload/",   views.meesho_inventory_upload,   name="meesho_inventory_upload"),
     path("meesho-inventory/download/", views.meesho_inventory_download, name="meesho_inventory_download"),
+    # Parent-level stock sheet (SKU Analysis): take a whole parent off sale, or
+    # set one quantity across every SKU under it, in Meesho's own upload format.
+    path("meesho-inventory/stock-sheet/",         views.parent_stock_sheet,         name="parent_stock_sheet"),
+    path("meesho-inventory/stock-sheet/preview/", views.parent_stock_sheet_preview, name="parent_stock_sheet_preview"),
     # Meesho Price Update
     path("meesho-price-update/",          views.meesho_price_update_list,     name="meesho_price_update_list"),
     path("meesho-price-update/download/", views.meesho_price_update_download, name="meesho_price_update_download"),
