@@ -191,6 +191,32 @@ export default function BusinessProfilePage() {
             </div>
           </div>
         </label>
+        <label style={{
+          display: "flex", alignItems: "flex-start", gap: 12, cursor: canEdit ? "pointer" : "default",
+          padding: "12px 14px", borderRadius: 10, marginTop: 10,
+          border: `1px solid ${profile?.deduct_employee_salaries ? C.greenBorder : C.border}`,
+          background: profile?.deduct_employee_salaries ? C.greenLight : C.gray50,
+          opacity: canEdit ? 1 : 0.75,
+        }}>
+          <input
+            type="checkbox"
+            disabled={!canEdit || profileSaving}
+            checked={!!profile?.deduct_employee_salaries}
+            onChange={(e) => saveProfile({ deduct_employee_salaries: e.target.checked })}
+            style={{ width: 18, height: 18, marginTop: 2, cursor: canEdit ? "pointer" : "default", flexShrink: 0 }}
+          />
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: C.gray800 }}>
+              Deduct employee salaries from profit
+            </div>
+            <div style={{ fontSize: 12, color: C.gray500, marginTop: 3 }}>
+              When on, this business's salary cost for the selected period — earned salary from the
+              Payroll Run, plus extra pay (Sunday / weekly-off working, overtime) and bonuses — is
+              subtracted from net profit. A month counts in proportion to how much of it falls in the
+              period. Off by default, and set per business — the salary cost is always shown either way.
+            </div>
+          </div>
+        </label>
         {!canEdit && (
           <div style={{ fontSize: 12, color: C.gray400, marginTop: 8 }}>
             Only a super admin can change these settings.

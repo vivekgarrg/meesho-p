@@ -1042,6 +1042,17 @@ class EmployeeAttendance(models.Model):
     overtime_hours = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("0"))
     extra_pay      = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0"))
 
+    # What the extra pay was for. Mostly it's a Sunday (or the employee's own
+    # weekly off) worked, paid as an agreed extra on top of the month — so the
+    # payslip can say "2 Sundays" instead of an unexplained number.
+    EXTRA_PAY_REASON_CHOICES = [
+        ("sunday",   "Sunday / weekly-off working"),
+        ("holiday",  "Holiday working"),
+        ("overtime", "Overtime"),
+        ("other",    "Other"),
+    ]
+    extra_pay_reason = models.CharField(max_length=10, choices=EXTRA_PAY_REASON_CHOICES, blank=True, default="")
+
     note = models.CharField(max_length=255, blank=True)
 
     created_by = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True,

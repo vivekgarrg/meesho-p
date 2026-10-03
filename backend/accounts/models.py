@@ -189,6 +189,14 @@ class BusinessProfile(models.Model):
         default=False,
         help_text="Subtract daily transportation charges from profit for this business",
     )
+    # When on, the payroll cost of this business's employees (earned salary +
+    # extra pay, plus bonuses paid) is subtracted from profit for the period.
+    # Not named `deduct_salaries`: an earlier, reverted column by that name is
+    # dropped on every deploy by deploy/hostinger/update.sh.
+    deduct_employee_salaries = models.BooleanField(
+        default=False,
+        help_text="Subtract employee salaries (incl. extra pay) from profit for this business",
+    )
 
     # ── Access ────────────────────────────────────────────────────────────
     # Which areas of the app this business shows. Empty = no override, so the

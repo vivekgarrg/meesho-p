@@ -87,6 +87,24 @@ const ATTENDANCE_STATUSES = [
 ];
 const statusMeta = (v) => ATTENDANCE_STATUSES.find((s) => s.value === v);
 
+// Mirrors EmployeeAttendance.EXTRA_PAY_REASON_CHOICES on the server.
+const EXTRA_PAY_REASONS = [
+  { value: "sunday",   label: "Sunday / weekly-off working" },
+  { value: "holiday",  label: "Holiday working" },
+  { value: "overtime", label: "Overtime" },
+  { value: "other",    label: "Other" },
+];
+
+/** "2 Sundays · 1 overtime" — the short form of a payslip's extra_pay_breakdown. */
+function extraPaySummary(breakdown) {
+  if (!breakdown?.length) return "";
+  const short = { sunday: "Sunday", holiday: "holiday", overtime: "overtime", other: "other", "": "unspecified" };
+  return breakdown.map((b) => {
+    const word = short[b.reason] ?? b.reason;
+    return `${b.days} ${word}${b.reason === "sunday" && b.days !== 1 ? "s" : ""}`;
+  }).join(" · ");
+}
+
 // ── Shared field schemas (declarative, same shape used across BusinessProfile) ──
 const ADDRESS_FIELDS = [
   { key: "address_line1", label: "Address line 1" },
@@ -467,9 +485,17 @@ function HolidayFormDialog({ open, employees, onClose, onSaved }) {
 
 // ── Day editor: the one place attendance and extra pay get typed in ──
 function DayEditorDialog({ open, employee, date, existing, onClose, onSaved }) {
-  const [form, setForm] = useState({ status: "present", overtime_hours: "", extra_pay: "", note: "" });
+  const [form, setForm] = useState({ status: "present", overtime_hours: "", extra_pay: "", extra_pay_reason: "", note: "" });
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
+
+  // Monday = 0, matching weekly_off_day. Extra pay on a Sunday or on this
+  // person's own weekly off is almost always "worked their day off".
+  const weekday = date ? (new Date(`${date}T00:00:00`).getDay() + 6) % 7 : null;
+  const isSunday = weekday === 6;
+  const isOwnWeekOff = employee?.weekly_off_day !== null && employee?.weekly_off_day !== undefined
+    && weekday === Number(employee.weekly_off_day);
+  const suggestedReason = isSunday || isOwnWeekOff ? "sunday" : "overtime";
 
   useEffect(() => {
     if (!open) return;
@@ -477,12 +503,17 @@ function DayEditorDialog({ open, employee, date, existing, onClose, onSaved }) {
       status: existing?.status || "present",
       overtime_hours: existing?.overtime_hours ?? "",
       extra_pay: existing?.extra_pay ?? "",
+      extra_pay_reason: existing?.extra_pay_reason || suggestedReason,
       note: existing?.note || "",
     });
     setErr("");
-  }, [open, existing]);
+  }, [open, existing]); // eslint-disable-line
+
+  const hasExtraPay = Number(form.extra_pay) > 0;
 
   const save = async () => {
+    if (Number(form.extra_pay) < 0) { setErr("Extra pay can't be negative."); return; }
+    if (hasExtraPay && !form.extra_pay_reason) { setErr("Pick what the extra pay is for."); return; }
     setSaving(true); setErr("");
     try {
       const res = await fetch(`${API}/employees/attendance/`, {
@@ -493,6 +524,7 @@ function DayEditorDialog({ open, employee, date, existing, onClose, onSaved }) {
           status: form.status,
           overtime_hours: form.overtime_hours || 0,
           extra_pay: form.extra_pay || 0,
+          extra_pay_reason: hasExtraPay ? form.extra_pay_reason : "",
           note: form.note,
         }),
       });
@@ -540,8 +572,23 @@ function DayEditorDialog({ open, employee, date, existing, onClose, onSaved }) {
                      onChange={(e) => setForm((f) => ({ ...f, extra_pay: e.target.value }))} placeholder="0" />
             </div>
           </div>
+          {(isSunday || isOwnWeekOff) && (
+            <div style={{ fontSize: 11.5, color: "#92400E", background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "7px 10px", marginTop: -4 }}>
+              {isOwnWeekOff ? `This is ${employee?.full_name}'s weekly off` : "This is a Sunday"} — if they came in,
+              enter the agreed Sunday-working amount as extra pay.
+            </div>
+          )}
+          <div>
+            <label style={S.label}>Extra pay is for {hasExtraPay && <span style={{ color: C.red }}>*</span>}</label>
+            <TextField select fullWidth size="small" value={form.extra_pay_reason} disabled={!hasExtraPay}
+                       onChange={(e) => setForm((f) => ({ ...f, extra_pay_reason: e.target.value }))}>
+              {EXTRA_PAY_REASONS.map((o) => <MenuItem key={o.value} value={o.value}>{o.label}</MenuItem>)}
+            </TextField>
+          </div>
           <div style={{ fontSize: 11.5, color: C.gray400, marginTop: -4 }}>
-            Extra pay for work beyond the normal day. It's added on top of the month's salary.
+            Extra pay is mainly for working on a Sunday (or the person's weekly off). It's paid on top
+            of the month's salary, shows on the payslip by reason, and counts in salary cost when
+            salaries are deducted from profit.
           </div>
           <div>
             <label style={S.label}>Note</label>
@@ -602,7 +649,11 @@ function AttendanceCalendar({ month, employee, attendance, holidays, canEdit, on
             <div
               key={iso}
               onClick={canEdit ? () => onPickDay(iso, att) : undefined}
-              title={holiday ? holiday.name : (att?.note || (isWeekOff ? "Weekly off" : ""))}
+              title={[
+                holiday ? holiday.name : (isWeekOff ? "Weekly off" : ""),
+                hasExtra ? `+${fmt0(att.extra_pay)} ${EXTRA_PAY_REASONS.find((r) => r.value === att.extra_pay_reason)?.label || "extra pay"}` : "",
+                att?.note || "",
+              ].filter(Boolean).join(" · ")}
               style={{
                 position: "relative", minHeight: 46, borderRadius: 8, background: bg,
                 border: `1px solid ${border}`, padding: "4px 5px", cursor: canEdit ? "pointer" : "default",
@@ -676,7 +727,13 @@ function PayslipBreakdown({ slip }) {
         <Row label="Day rate" value={fmt2(slip.day_rate)} note={`÷ ${slip.days_in_month} days`} />
         <Row label="Earned salary" value={fmt2(slip.earned_salary)} note={`${slip.payable_days} × day rate`} bold divider />
         <Row label="Extra pay" value={`+ ${fmt2(slip.extra_pay)}`} color={C.green}
-             note={Number(slip.overtime_hours) > 0 ? `${slip.overtime_hours} extra hrs` : ""} />
+             note={[extraPaySummary(slip.extra_pay_breakdown),
+                    Number(slip.overtime_hours) > 0 ? `${slip.overtime_hours} extra hrs` : ""].filter(Boolean).join(" · ")
+                   || "Sunday / weekly-off working, overtime"} />
+        {(slip.extra_pay_breakdown || []).map((b) => (
+          <Row key={b.reason || "unspecified"} label={`   ↳ ${b.label}`} value={`+ ${fmt2(b.amount)}`} color={C.green}
+               note={`${b.days} day${b.days === 1 ? "" : "s"}`} />
+        ))}
         <Row label="Net payable" value={fmt2(slip.net_payable)} color={C.gray800} bold divider />
         <Row label="Already settled" value={`− ${fmt2(slip.settled)}`} color={C.gray500}
              note={Number(slip.advances) > 0 ? `incl. ${fmt2(slip.advances)} advance` : ""} />
@@ -1051,10 +1108,29 @@ export function EmployeesTab() {
             title="Payroll Run"
             actions={<MonthPicker value={payrollMonth} onChange={setPayrollMonth} />}
           >
-            <div style={{ padding: "10px 20px", borderBottom: `1px solid ${C.gray100}`, fontSize: 11.5, color: C.gray500 }}>
-              {register?.is_closed
-                ? `${monthLabel(payrollMonth)} has ended — this is what's owed for it.`
-                : `${monthLabel(payrollMonth)} is still running. These figures are provisional and become payable on the 1st.`}
+            <div style={{ padding: "10px 20px", borderBottom: `1px solid ${C.gray100}`, fontSize: 11.5, color: C.gray500, display: "flex", flexDirection: "column", gap: 4 }}>
+              <div>
+                {register?.is_closed
+                  ? `${monthLabel(payrollMonth)} has ended — this is what's owed for it.`
+                  : `${monthLabel(payrollMonth)} is still running. These figures are provisional and become payable on the 1st.`}
+              </div>
+              <div>
+                <b style={{ color: C.gray700 }}>Extra Pay</b> is the extra paid for working on a Sunday (or the
+                person's weekly off), plus any holiday working or overtime — entered per day from the
+                employee's attendance calendar and added on top of the earned salary.
+              </div>
+              {register && (
+                <div style={{
+                  alignSelf: "flex-start", marginTop: 2, padding: "4px 10px", borderRadius: 999, fontWeight: 600,
+                  background: register.deducted_from_profit ? "#ECFDF5" : C.gray50,
+                  border: `1px solid ${register.deducted_from_profit ? "#A7F3D0" : C.gray200}`,
+                  color: register.deducted_from_profit ? C.green : C.gray500,
+                }}>
+                  {register.deducted_from_profit
+                    ? "✓ Salaries (incl. extra pay) are deducted from this business's profit"
+                    : "Salaries are not deducted from profit — turn it on in Business Profile → Profit calculation"}
+                </div>
+              )}
             </div>
             <div style={{ overflowX: "auto" }}>
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
@@ -1089,6 +1165,11 @@ export function EmployeesTab() {
                         <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace" }}>{fmt0(r.earned_salary)}</td>
                         <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", color: Number(r.extra_pay) > 0 ? C.green : C.gray400 }}>
                           {Number(r.extra_pay) > 0 ? `+${fmt0(r.extra_pay)}` : "—"}
+                          {Number(r.extra_pay) > 0 && r.extra_pay_breakdown?.length > 0 && (
+                            <div style={{ fontFamily: "inherit", fontSize: 10, color: C.gray400, whiteSpace: "nowrap" }}>
+                              {extraPaySummary(r.extra_pay_breakdown)}
+                            </div>
+                          )}
                         </td>
                         <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", fontWeight: 700, color: C.gray800 }}>{fmt0(r.net_payable)}</td>
                         <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", color: C.gray500 }}>{fmt0(r.settled)}</td>

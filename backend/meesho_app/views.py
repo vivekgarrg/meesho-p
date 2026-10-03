@@ -2099,9 +2099,17 @@ def profit_summary(request, business_id):
     deduct_transport = bool(profile and profile.deduct_transport_charges)
     transport_deducted = transport_total if deduct_transport else Decimal("0")
 
+    # ── Employee salaries ─────────────────────────────────────────────────────
+    # Same treatment as transport: a business-level overhead taken off the
+    # final bottom line only when the business has the switch on, and always
+    # reported so the figure is visible either way.
+    salary = _salary_cost(business, date_from, date_to)
+    deduct_salaries = bool(profile and profile.deduct_employee_salaries)
+    salary_deducted = salary["total"] if deduct_salaries else Decimal("0")
+
     # Order-level result: settlement less item cost. `ads` is already negative.
     net_profit_loss = revenue - total_purchase_cost
-    net_revenue = revenue - total_purchase_cost + ads + comp_recovery - transport_deducted
+    net_revenue = revenue - total_purchase_cost + ads + comp_recovery - transport_deducted - salary_deducted
 
     # Ensure sum(sku.net_profit) == revenue - total_purchase_cost by absorbing the gap
     # (settlement from missing-SKU orders) into a synthetic __unattributed__ bucket.
@@ -2149,6 +2157,14 @@ def profit_summary(request, business_id):
         "total_tax_cost":         round(total_tax_cost, 2),
         "total_transport_charges":   round(transport_total, 2),
         "transport_charges_deducted": deduct_transport,
+        "total_salary_cost":         round(salary["total"], 2),
+        "salary_cost_breakdown": {
+            "earned_salary": round(salary["earned"], 2),
+            "extra_pay":     round(salary["extra_pay"], 2),
+            "bonus":         round(salary["bonus"], 2),
+            "months":        salary["months"],
+        },
+        "salary_cost_deducted":      deduct_salaries,
         "net_profit_loss": round(float(net_profit_loss), 2),
         "order_summary": order_status_summary,
         "total_loss":             round(total_loss, 2),
@@ -10036,6 +10052,9 @@ def _employment_window(emp, month_start, month_end):
     return (start, end) if start <= end else None
 
 
+_EXTRA_PAY_REASON_LABELS = dict(EmployeeAttendance.EXTRA_PAY_REASON_CHOICES)
+
+
 def _compute_payroll(emp, month_start, attendance, holiday_dates, payments):
     """Build one employee's payslip for one month.
 
@@ -10061,7 +10080,7 @@ def _compute_payroll(emp, month_start, attendance, holiday_dates, payments):
             "week_off_days": 0, "holiday_days": 0,
             "lop_days": "0.0", "payable_days": "0.0",
             "day_rate": str(day_rate.quantize(_PAISE)),
-            "earned_salary": "0.00", "extra_pay": "0.00", "overtime_hours": "0.00",
+            "earned_salary": "0.00", "extra_pay": "0.00", "extra_pay_breakdown": [], "overtime_hours": "0.00",
             "net_payable": "0.00", "settled": "0.00", "due": "0.00",
             "advances": "0.00", "bonus": "0.00",
         }
@@ -10074,6 +10093,9 @@ def _compute_payroll(emp, month_start, attendance, holiday_dates, payments):
     week_offs = holidays = 0
     extra_pay = Decimal("0")
     overtime_hours = Decimal("0")
+    # {reason: {"amount", "days"}} — why the extra pay was earned. Rows saved
+    # before reasons existed land under "" and show as "unspecified".
+    extra_by_reason = {}
 
     day = start
     while day <= end:
@@ -10081,6 +10103,10 @@ def _compute_payroll(emp, month_start, attendance, holiday_dates, payments):
         if row:
             extra_pay += row.extra_pay
             overtime_hours += row.overtime_hours
+            if row.extra_pay:
+                slot = extra_by_reason.setdefault(row.extra_pay_reason or "", {"amount": Decimal("0"), "days": 0})
+                slot["amount"] += row.extra_pay
+                slot["days"] += 1
 
         # A holiday outranks a weekly off (they can coincide), and both outrank
         # attendance: you can't be marked absent on a day you weren't due in.
@@ -10148,6 +10174,11 @@ def _compute_payroll(emp, month_start, attendance, holiday_dates, payments):
         "day_rate": str(day_rate.quantize(_PAISE)),
         "earned_salary": str(earned),
         "extra_pay": str(extra_pay.quantize(_PAISE)),
+        "extra_pay_breakdown": [
+            {"reason": reason, "label": _EXTRA_PAY_REASON_LABELS.get(reason, "Unspecified"),
+             "amount": str(v["amount"].quantize(_PAISE)), "days": v["days"]}
+            for reason, v in sorted(extra_by_reason.items(), key=lambda kv: -kv[1]["amount"])
+        ],
         "overtime_hours": _days(overtime_hours),
         "net_payable": str(net_payable),
         "settled": str(settled.quantize(_PAISE)),
@@ -10200,6 +10231,74 @@ def _payroll_register(business, month_start, employees=None):
     ]
 
 
+def _salary_cost(business, date_from="", date_to=""):
+    """What the business's employees cost over [date_from, date_to] (YYYY-MM-DD,
+    either may be blank), for deducting salaries from profit.
+
+    Built from the same payslips as the Payroll Run, so the two can't disagree:
+      · earned salary — each month's earned figure, pro-rated by the share of
+        that month's days inside the range (a full month counts in full);
+      · extra pay — exactly what was entered on days inside the range
+        (Sunday working, holiday working, overtime);
+      · bonuses — paid on a date inside the range.
+    Accrual, not cash: September's wage is September's cost even though it is
+    paid on 1 October. Days that haven't happened yet are never counted.
+    """
+    employees = list(Employee.objects.filter(business=business))
+    zero = Decimal("0")
+    empty = {"total": zero, "earned": zero, "extra_pay": zero, "bonus": zero, "months": []}
+    if not employees:
+        return empty
+
+    today = timezone.localdate()
+    try:
+        start = _to_date(date_from) if date_from else None
+        end = _to_date(date_to) if date_to else today
+    except ValueError:
+        return empty
+    if start is None:
+        start = min(e.date_of_joining or timezone.localdate(e.created_at) for e in employees)
+    end = min(end, today)
+    if start > end:
+        return empty
+
+    earned_total = zero
+    months = []
+    month = _month_start(start)
+    while month <= end:
+        days_in_month = calendar.monthrange(month.year, month.month)[1]
+        month_end = month.replace(day=days_in_month)
+        overlap = (min(end, month_end) - max(start, month)).days + 1
+        rows = [r for r in _payroll_register(business, month, employees) if r["employed"]]
+        month_earned = sum((Decimal(r["earned_salary"]) for r in rows), zero)
+        share = (month_earned * Decimal(overlap) / Decimal(days_in_month)).quantize(_PAISE)
+        earned_total += share
+        months.append({
+            "month": month.strftime("%Y-%m"),
+            "earned": str(share),
+            "days_counted": overlap,
+            "days_in_month": days_in_month,
+        })
+        month = _shift_month(month, 1)
+
+    extra_pay = EmployeeAttendance.objects.filter(
+        business=business, date__gte=start, date__lte=end,
+    ).aggregate(t=Sum("extra_pay"))["t"] or zero
+    bonus = EmployeePayment.objects.filter(
+        business=business, payment_type="bonus", paid_on__gte=start, paid_on__lte=end,
+    ).aggregate(t=Sum("amount"))["t"] or zero
+
+    return {
+        "total": (earned_total + extra_pay + bonus).quantize(_PAISE),
+        "earned": earned_total.quantize(_PAISE),
+        "extra_pay": Decimal(extra_pay).quantize(_PAISE),
+        "bonus": Decimal(bonus).quantize(_PAISE),
+        "months": months,
+        "from": str(start),
+        "to": str(end),
+    }
+
+
 def _attendance_to_dict(a):
     return {
         "id": a.id,
@@ -10208,6 +10307,7 @@ def _attendance_to_dict(a):
         "status": a.status,
         "overtime_hours": str(a.overtime_hours),
         "extra_pay": str(a.extra_pay),
+        "extra_pay_reason": a.extra_pay_reason,
         "note": a.note,
     }
 
@@ -10283,6 +10383,9 @@ def payroll_register(request, business_id):
         "totals": {k: str(v.quantize(_PAISE)) for k, v in totals.items()},
         # The month can only be paid out once it's over — that's the arrears rule.
         "is_closed": month_start < _month_start(timezone.localdate()),
+        # So the Salary tab can say whether this cost is coming off profit.
+        "deducted_from_profit": bool(getattr(business, "profile", None)
+                                     and business.profile.deduct_employee_salaries),
     })
 
 
@@ -10380,13 +10483,27 @@ def attendance_list(request, business_id):
     if status_ not in dict(EmployeeAttendance.STATUS_CHOICES):
         return Response({"error": f"Unknown status '{status_}'."}, status=400)
 
+    try:
+        extra_pay = Decimal(str(data.get("extra_pay") or 0))
+    except InvalidOperation:
+        return Response({"error": "extra_pay must be a number."}, status=400)
+    if extra_pay < 0:
+        return Response({"error": "extra_pay can't be negative."}, status=400)
+    # A reason only means something when there is extra pay to explain.
+    extra_pay_reason = (data.get("extra_pay_reason") or "") if extra_pay > 0 else ""
+    if extra_pay_reason and extra_pay_reason not in dict(EmployeeAttendance.EXTRA_PAY_REASON_CHOICES):
+        return Response({"error": f"Unknown extra pay reason '{extra_pay_reason}'."}, status=400)
+    if extra_pay > 0 and not extra_pay_reason:
+        return Response({"error": "Pick what the extra pay is for (e.g. Sunday working)."}, status=400)
+
     row, _created = EmployeeAttendance.objects.update_or_create(
         employee=emp, date=day,
         defaults={
             "business": business,
             "status": status_,
             "overtime_hours": Decimal(str(data.get("overtime_hours") or 0)),
-            "extra_pay": Decimal(str(data.get("extra_pay") or 0)),
+            "extra_pay": extra_pay,
+            "extra_pay_reason": extra_pay_reason,
             "note": data.get("note", ""),
             "created_by": request.user,
         },

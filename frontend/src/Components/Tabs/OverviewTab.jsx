@@ -1269,6 +1269,22 @@ export function OverviewTab() {
                     note="turn on 'Deduct transportation charges' in Business Profile to subtract this"
                   />
                 ))}
+              {/* Salaries, same rule as transport: always visible when there is a
+                cost, subtracted only when the business has the switch on. */}
+              {Number(profit.total_salary_cost || 0) !== 0 && (() => {
+                const b = profit.salary_cost_breakdown || {};
+                const parts = [
+                  `salary ${fmt(b.earned_salary)}`,
+                  Number(b.extra_pay) > 0 ? `extra pay (Sunday working etc.) ${fmt(b.extra_pay)}` : "",
+                  Number(b.bonus) > 0 ? `bonus ${fmt(b.bonus)}` : "",
+                ].filter(Boolean).join(" + ");
+                return profit.salary_cost_deducted ? (
+                  <FormulaStep sign="−" label="Employee Salaries" value={profit.total_salary_cost} color={C.orange} note={parts} />
+                ) : (
+                  <FormulaStep sign="·" label="Employee Salaries (not deducted)" value={profit.total_salary_cost} color={C.gray400}
+                    note="turn on 'Deduct employee salaries' in Business Profile to subtract this" />
+                );
+              })()}
               <FormulaStep
                 sign="="
                 label="NET P&L (Final)"
