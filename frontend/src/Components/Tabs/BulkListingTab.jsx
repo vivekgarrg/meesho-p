@@ -230,6 +230,26 @@ function planRowImages(urls, ownIndex, slotCount) {
   return picked;
 }
 
+/**
+ * The obvious "next" SKU after an existing one: bump a trailing number,
+ * or add one where there isn't any. "KALASH-001" -> "KALASH-002",
+ * "DIYA" -> "DIYA-2".
+ *
+ * Used when duplicating a generated sheet. Only ever a *suggestion* — the
+ * server rejects a SKU already in the catalogue (_existing_sku_clash), which
+ * is the real guard; this just means the seller usually has one character to
+ * change rather than a whole id to retype.
+ */
+export function nextSku(sku) {
+  const text = String(sku || "").trim();
+  if (!text) return "";
+  const m = text.match(/^(.*?)(\d+)(\D*)$/);
+  if (!m) return `${text}-2`;
+  const [, head, digits, tail] = m;
+  const bumped = String(Number(digits) + 1).padStart(digits.length, "0");
+  return `${head}${bumped}${tail}`;
+}
+
 function MsgBanner({ msg, onClose }) {
   if (!msg) return null;
   // "info" exists because not every non-success outcome is a failure — e.g.
@@ -1073,12 +1093,36 @@ export function BulkListingTab() {
     refreshPresets();
   }, []);
 
-  const refreshPresets = () => {
-    fetch(`${API}/bulk-listing/presets/`).then((r) => r.json())
-      .then((d) => setPresets(d.results || [])).catch(() => {});
+  // Presets AND previously generated sheets, scoped to the uploaded
+  // template's own category — a field key only means something against the
+  // template it came from, so anything saved under another category would
+  // silently prefill nothing. `sourcesOther` is how many were filtered out,
+  // so an empty picker can say why instead of looking broken.
+  //
+  // Every entry is given a `key` here even if the server did not send one:
+  // the picker's <option value> is that key, and an entry without one
+  // rendered value="undefined", so choosing it looked up nothing and the
+  // form simply never filled in.
+  const refreshPresets = (label) => {
+    const cat = label !== undefined ? label : spec?.category_label;
+    const params = new URLSearchParams({ platform: "meesho" });
+    if (cat) params.set("source_label", cat);
+    fetch(`${API}/bulk-listing/field-sources/?${params}`)
+      .then((r) => r.json())
+      .then((d) => {
+        const results = (d.results || []).map((x) => ({
+          ...x,
+          kind: x.kind || "preset",
+          key: x.key ?? `${x.kind || "preset"}-${x.id}`,
+        }));
+        setPresets(results);
+        setSourcesOther(d.other_count || 0);
+      })
+      .catch(() => {});
   };
 
   const resetFlow = () => {
+    setDuplicatedFrom(null);
     setSpec(null);
     setSource(null);
     setShared({});
@@ -1153,6 +1197,9 @@ export function BulkListingTab() {
   const changeTemplate = () => resetFlow();
 
   const [batchesRefreshKey, setBatchesRefreshKey] = useState(0);
+  // Set while the form holds a copy of a previous sheet, so the SKU step can
+  // say what it came from and what the original ids were.
+  const [duplicatedFrom, setDuplicatedFrom] = useState(null);
 
   // "Load to edit" from the batches panel — rebuild the form from a
   // previously generated batch's own template + row data (payload_snapshot),
@@ -1163,32 +1210,133 @@ export function BulkListingTab() {
       setMsg({ type: "error", text: "Loading a Flipkart batch back into the form isn't supported yet — download it instead." });
       return;
     }
+    const detail = await fetchBatchDetail(batch);
+    if (!detail) return;
+    const snap = detail.payload_snapshot || {};
+    const snapMode = snap.mode === "prefilled" ? "prefilled" : "new";
+    setMode(snapMode);
+    const parsed = await parseSource({ type: "batch", id: batch.id });
+    if (!parsed) return;
+    setShared(snap.shared || {});
+    applySnapshotPhotos(snap, snapMode);
+    setRows(snapshotRows(snap));
+    setMsg({ type: "success", text: `Loaded "${batch.filename}" for editing.` });
+  };
+
+  const fetchBatchDetail = async (batch) => {
     try {
       const res = await fetch(`${API}/bulk-listing/batches/${batch.id}/`);
       const detail = await res.json().catch(() => ({}));
       if (!res.ok) {
         setMsg({ type: "error", text: detail.error || "Could not load that batch." });
-        return;
+        return null;
       }
-      const snap = detail.payload_snapshot || {};
-      const snapMode = snap.mode === "prefilled" ? "prefilled" : "new";
-      setMode(snapMode);
-      const parsed = await parseSource({ type: "batch", id: batch.id });
-      if (!parsed) return;
-      setShared(snap.shared || {});
-      if (snapMode === "prefilled") {
-        setPrefilledImages((snap.rows || []).map((r) => (r.images || [])[0]).filter(Boolean));
-      } else {
-        setImageText((snap.image_urls || []).join("\n"));
-      }
-      setRows((snap.rows || []).map((r) => ({
-        title: r.product_name || "", sku: r.sku_id || "", style: r.style_id || "",
-        groupId: r.group_id || "", images: r.images || [], overrides: r.overrides || {},
-      })));
-      setMsg({ type: "success", text: `Loaded "${batch.filename}" for editing.` });
+      return detail;
     } catch {
       setMsg({ type: "error", text: "Network error while loading that batch." });
+      return null;
     }
+  };
+
+  const snapshotRows = (snap) => (snap.rows || []).map((r) => ({
+    title: r.product_name || "", sku: r.sku_id || "", style: r.style_id || "",
+    groupId: r.group_id || "", images: r.images || [], overrides: r.overrides || {},
+  }));
+
+  const applySnapshotPhotos = (snap, snapMode) => {
+    if (snapMode === "prefilled") {
+      setPrefilledImages((snap.rows || []).map((r) => (r.images || [])[0]).filter(Boolean));
+    } else {
+      setImageText((snap.image_urls || []).join("\n"));
+    }
+  };
+
+  /**
+   * Duplicate a previous sheet — "make another product like that one".
+   *
+   * Photos are the one thing never copied when there are already photos in
+   * play. The workflow this exists for is: upload this week's sheet (its
+   * photos *are* its rows — see the rows effect below), then pull last
+   * week's product details onto them. Overwriting those photos with the old
+   * batch's would destroy the only thing the new sheet contributed.
+   *
+   * So:
+   *   photos already loaded -> replace every field value, keep the photos,
+   *                            keep the rows (and therefore their SKUs) as
+   *                            the uploaded sheet set them.
+   *   no photos loaded      -> nothing to preserve, so bring the whole batch
+   *                            across, photos included, and suggest fresh
+   *                            SKU ids since the old ones are already in the
+   *                            catalogue and would be refused.
+   */
+  const duplicateBatch = async (batch) => {
+    setMsg(null);
+    if (batch.platform === "flipkart") {
+      setMsg({ type: "error", text: "Duplicating a Flipkart batch isn't supported yet — download it instead." });
+      return;
+    }
+    const detail = await fetchBatchDetail(batch);
+    if (!detail) return;
+    const snap = detail.payload_snapshot || {};
+
+    const havePhotos = !!spec && imageUrls.length > 0;
+
+    if (havePhotos) {
+      // Fields only. Restricted to keys this template actually has: a value
+      // under a key the current category doesn't define would sit in `shared`
+      // and be written nowhere.
+      const templateKeys = new Set((spec.fields || []).map((f) => f.key));
+      const incoming = Object.fromEntries(
+        Object.entries(snap.shared || {}).filter(([k, v]) => templateKeys.has(k) && v !== "")
+      );
+      setShared(incoming);          // replace outright, not merge — "all the fields"
+      setCoveredKeys(new Set());    // these are the point; don't tuck them away
+      setPresetId("");
+      setDuplicatedFrom({
+        filename: batch.filename,
+        fieldsOnly: true,
+        fieldCount: Object.keys(incoming).length,
+        photoCount: imageUrls.length,
+        skipped: Object.keys(snap.shared || {}).length - Object.keys(incoming).length,
+        skus: [],
+      });
+      setMsg({
+        type: "info",
+        text: `Copied ${Object.keys(incoming).length} field(s) from "${batch.filename}" onto the `
+          + `${imageUrls.length} photo(s) already loaded. Photos and SKU ids were left as they are.`,
+      });
+      return;
+    }
+
+    // Nothing loaded to protect — take the whole thing, photos included.
+    const snapMode = snap.mode === "prefilled" ? "prefilled" : "new";
+    setMode(snapMode);
+    const parsed = await parseSource({ type: "batch", id: batch.id });
+    if (!parsed) return;
+    setShared(snap.shared || {});
+    applySnapshotPhotos(snap, snapMode);
+
+    const loadedRows = snapshotRows(snap);
+    // Suggest the next id per row, and make sure the suggestions don't
+    // collide with each other — two rows bumping to the same id would only
+    // be caught by the server, after the seller thought they were done.
+    const taken = new Set();
+    setRows(loadedRows.map((r) => {
+      let candidate = nextSku(r.sku);
+      while (candidate && taken.has(candidate.toLowerCase())) candidate = nextSku(candidate);
+      if (candidate) taken.add(candidate.toLowerCase());
+      return { ...r, sku: candidate, style: candidate || r.style };
+    }));
+    setDuplicatedFrom({
+      filename: batch.filename,
+      fieldsOnly: false,
+      skus: loadedRows.map((r) => r.sku).filter(Boolean),
+    });
+    setMsg({
+      type: "info",
+      text: `Copied "${batch.filename}" — fields and photos, since nothing was loaded. `
+        + `Check the ${loadedRows.length} SKU id${loadedRows.length === 1 ? "" : "s"} below, then generate.`,
+    });
   };
 
   const setField = (key) => (value) => setShared((s) => ({ ...s, [key]: value }));
@@ -1395,7 +1543,10 @@ export function BulkListingTab() {
     setPresetId(key);
     if (!key) { setCoveredKeys(new Set()); return; }
     const src = presets.find((p) => String(p.key ?? p.id) === String(key));
-    if (!src) return;
+    if (!src) {
+      setMsg({ type: "error", text: "Could not find those saved fields — reload the template and try again." });
+      return;
+    }
     const templateKeys = new Set((spec?.fields || []).map((f) => f.key));
     const usable = Object.fromEntries(
       Object.entries(src.fields || {}).filter(([k, v]) => templateKeys.has(k) && v !== "")
@@ -1769,6 +1920,51 @@ export function BulkListingTab() {
                       </div>
                     )}
 
+                    {duplicatedFrom && (
+                      <div style={{ marginBottom: 14, padding: "10px 13px", borderRadius: 10,
+                        background: C.amberLight, border: `1px solid ${C.amberBorder}` }}>
+                        {duplicatedFrom.fieldsOnly ? (
+                          <>
+                            <div style={{ fontSize: 12.5, fontWeight: 700, color: C.amber }}>
+                              Fields copied from "{duplicatedFrom.filename}" — your {duplicatedFrom.photoCount} uploaded
+                              photo{duplicatedFrom.photoCount === 1 ? "" : "s"} were kept.
+                            </div>
+                            <div style={{ fontSize: 11.5, color: C.gray600, marginTop: 5, lineHeight: 1.6 }}>
+                              {duplicatedFrom.fieldCount} product detail{duplicatedFrom.fieldCount === 1 ? "" : "s"} replaced.
+                              {duplicatedFrom.skipped > 0 && (
+                                <> {duplicatedFrom.skipped} didn't match this template's fields and were left out.</>
+                              )}
+                              {" "}The SKU ids below are the ones from the sheet you uploaded — set them however
+                              you like; one already in your catalogue is refused when you generate.
+                            </div>
+                          </>
+                        ) : (
+                          <>
+                            <div style={{ fontSize: 12.5, fontWeight: 700, color: C.amber }}>
+                              Copied from "{duplicatedFrom.filename}" — the SKU ids are the only thing that
+                              can't be reused.
+                            </div>
+                            <div style={{ fontSize: 11.5, color: C.gray600, marginTop: 5, lineHeight: 1.6 }}>
+                              Fields and photos both came across, because nothing was loaded at the time.
+                              Each SKU below is a suggestion bumped from the original
+                              {duplicatedFrom.skus.length > 0 && (
+                                <>
+                                  {" "}(
+                                  <span style={{ fontFamily: "monospace" }}>
+                                    {duplicatedFrom.skus.slice(0, 4).join(", ")}
+                                    {duplicatedFrom.skus.length > 4 ? `, +${duplicatedFrom.skus.length - 4} more` : ""}
+                                  </span>
+                                  )
+                                </>
+                              )}
+                              . Change them to whatever you actually want — a SKU already in your catalogue
+                              is refused when you generate, so nothing can quietly overwrite an existing listing.
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    )}
+
                     <div style={{ display: "flex", alignItems: "flex-end", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
                       <div style={{ maxWidth: 260 }}>
                         <label style={S.label}>SKU / Style prefix</label>
@@ -1977,6 +2173,7 @@ export function BulkListingTab() {
       isMobile={isMobile}
       refreshKey={batchesRefreshKey}
       onLoadToEdit={loadBatchToEdit}
+      onDuplicate={duplicateBatch}
       platform={mode === "flipkart" ? "flipkart" : "meesho"}
     />
     </div>

@@ -3,6 +3,7 @@ import { API, C, S } from "../../App";
 import { IconButton, Tooltip, CircularProgress } from "@mui/material";
 import DownloadIcon from "@mui/icons-material/Download";
 import EditIcon from "@mui/icons-material/Edit";
+import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import HistoryIcon from "@mui/icons-material/History";
 
 const fmtDate = (iso) => {
@@ -24,7 +25,7 @@ const fmtDate = (iso) => {
  * which is not just noise: a Meesho batch cannot be loaded back into the
  * Flipkart form at all, so every one of those rows was a dead end.
  */
-export function BulkListingBatchesPanel({ isMobile, refreshKey, onLoadToEdit, platform }) {
+export function BulkListingBatchesPanel({ isMobile, refreshKey, onLoadToEdit, onDuplicate, platform }) {
   const [batches, setBatches] = useState([]);
   const [loading, setLoading] = useState(true);
   const [downloadingId, setDownloadingId] = useState(null);
@@ -110,6 +111,23 @@ export function BulkListingBatchesPanel({ isMobile, refreshKey, onLoadToEdit, pl
                   <span style={{ fontSize: 10.5, color: C.gray400 }}>{fmtDate(b.created_at)}</span>
                 </div>
                 <div style={{ display: "flex", gap: 4, marginTop: 6, justifyContent: "flex-end" }}>
+                  {/* Duplicate rather than edit is usually what's wanted: every
+                      SKU a generation produces is registered immediately, so
+                      re-generating this batch under its own SKUs is always
+                      rejected as a clash.
+
+                      What it copies depends on what is already loaded — with a
+                      sheet uploaded it brings the fields only and leaves those
+                      photos alone, otherwise it brings photos too. See
+                      duplicateBatch in BulkListingTab. */}
+                  <Tooltip title="Duplicate — copy this listing's fields onto the sheet you've uploaded (or everything, if nothing is loaded)">
+                    <span>
+                      <IconButton size="small" onClick={() => onDuplicate?.(b)}
+                        disabled={b.platform === "flipkart" || !onDuplicate}>
+                        <ContentCopyIcon fontSize="inherit" />
+                      </IconButton>
+                    </span>
+                  </Tooltip>
                   <Tooltip title="Load into the form to edit">
                     <span>
                       <IconButton size="small" onClick={() => onLoadToEdit(b)} disabled={b.platform === "flipkart"}>

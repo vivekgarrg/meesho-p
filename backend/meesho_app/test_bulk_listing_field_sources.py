@@ -185,3 +185,51 @@ class LegacyPresetEndpointTests(FieldSourceTestCase):
         r = self.client.get(f"{self.base}/bulk-listing/presets/")
         self.assertEqual(len(r.data["results"]), 2)
         self.assertEqual(r.data["other_count"], 0)
+
+
+class PickerKeyTests(FieldSourceTestCase):
+    """Every entry must carry a usable `key`.
+
+    The picker renders it as the <option value>, looks the chosen source back
+    up by it, and does nothing at all if the lookup misses — so an entry
+    without a key is a dropdown that silently refuses to fill the form. That
+    is exactly how this broke once: the UI was reading `key` while the old
+    presets-only endpoint was still being called, every option rendered
+    value="undefined", and selecting one loaded nothing.
+    """
+
+    def test_every_entry_has_a_resolvable_key(self):
+        self.preset("Diya basics", "Diyas")
+        self.batch("Diyas", "SKU-1", {"shared": {"brand": "K"}})
+        for entry in self.sources(platform="meesho", source_label="Diyas").data["results"]:
+            key = entry.get("key")
+            self.assertTrue(key, entry)
+            self.assertNotIn("None", str(key))
+            self.assertIn(entry["kind"], ("preset", "batch"))
+            self.assertTrue(key.startswith(entry["kind"] + "-"), key)
+
+    def test_a_key_identifies_exactly_one_entry(self):
+        self.preset("P1", "Diyas")
+        self.preset("P2", "Diyas")
+        self.batch("Diyas", "B1", {"shared": {"brand": "K"}})
+        self.batch("Diyas", "B2", {"shared": {"brand": "K"}})
+        results = self.sources(platform="meesho", source_label="Diyas").data["results"]
+        for entry in results:
+            matches = [x for x in results if x["key"] == entry["key"]]
+            self.assertEqual(len(matches), 1, entry["key"])
+
+    def test_a_preset_and_a_batch_sharing_a_row_id_do_not_collide(self):
+        """Both tables start at pk 1, so an unprefixed id would alias."""
+        preset = self.preset("P", "Diyas")
+        batch = self.batch("Diyas", "B", {"shared": {"brand": "K"}})
+        results = self.sources(platform="meesho", source_label="Diyas").data["results"]
+        keys = {x["key"] for x in results}
+        self.assertIn(f"preset-{preset.pk}", keys)
+        self.assertIn(f"batch-{batch.pk}", keys)
+        self.assertEqual(len(keys), 2)
+
+    def test_a_batch_exposes_its_skus_so_a_duplicate_can_show_them(self):
+        self.batch("Diyas", "SKU-1", {"shared": {"brand": "K"}}, row_count=3)
+        entry = self.sources(platform="meesho", source_label="Diyas").data["results"][0]
+        self.assertEqual(entry["row_count"], 3)
+        self.assertEqual(entry["name"], "SKU-1 +2 more")
