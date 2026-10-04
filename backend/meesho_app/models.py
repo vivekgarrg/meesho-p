@@ -2754,3 +2754,80 @@ class FlipkartOrderPayment(models.Model):
     def is_returned(self):
         rt = (self.return_type or "").strip().upper()
         return bool(rt) and rt != "NA"
+
+
+class ListingImage(models.Model):
+    """One listing photo stored in object storage (Cloudflare R2), linked to
+    the parent SKU it was cropped for.
+
+    `image_no` is the unique number the seller sees — in the downloaded
+    filename (`<product>-<image_no>.jpg`) and the object key — and it never
+    changes or gets reused within a business, so "image 1042" always means
+    one photo. The pixels are never touched: marketplaces reject watermarked
+    catalog images.
+
+    Only `uploaded` rows count as linked. A row is created `pending` when the
+    browser is given its signed upload url and becomes `uploaded` only after
+    the server has seen the object in the bucket (listing_images_confirm). The
+    gap matters: an upload that dies half-way must never leave a parent
+    pointing at a url that 404s inside a Meesho listing.
+
+    `sha256` makes a re-upload of the same crop return the existing image
+    instead of storing a second copy under a new number.
+    """
+
+    STATUS_PENDING = "pending"
+    STATUS_UPLOADED = "uploaded"
+    STATUS_CHOICES = [(STATUS_PENDING, "Pending upload"), (STATUS_UPLOADED, "Uploaded")]
+
+    business = models.ForeignKey("accounts.Business", on_delete=models.PROTECT,
+                                 related_name="listing_images")
+    image_no = models.PositiveIntegerField()
+    parent = models.ForeignKey(ParentItemPrice, on_delete=models.SET_NULL, null=True, blank=True,
+                               related_name="listing_images")
+    product_name = models.CharField(max_length=255, blank=True)
+    # The folder this image lives in inside the bucket — the same name as the
+    # zip it was downloaded in, so a seller can find a batch in the R2
+    # dashboard by the name they gave it. One folder per product: a later
+    # batch for the same parent goes into the same folder, a different parent
+    # that happens to reuse the name gets "<name>-001", "-002", …
+    # (see listing_images_views._resolve_folder).
+    folder = models.CharField(max_length=120, blank=True, db_index=True)
+    sha256 = models.CharField(max_length=64)
+    # 255, not more: this column is uniquely indexed, and MySQL (production)
+    # can refuse a unique index on a wider utf8mb4 column. Keys are ~45
+    # characters (listing-images/<biz>/<yyyy>/<mm>/<rand8>-<no>.jpg).
+    key = models.CharField(max_length=255, unique=True)
+    content_type = models.CharField(max_length=100)
+    bytes = models.PositiveIntegerField(default=0)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_PENDING,
+                              db_index=True)
+    created_by = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True,
+                                   blank=True, related_name="listing_images_created")
+    created_at = models.DateTimeField(auto_now_add=True)
+    uploaded_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "listing_images"
+        ordering = ["-image_no"]
+        unique_together = [("business", "image_no")]
+        indexes = [models.Index(fields=["business", "sha256"])]
+
+    def __str__(self):
+        return f"#{self.image_no} {self.key}"
+
+
+class ListingImageCounter(models.Model):
+    """The last image number handed out per business.
+
+    A row of its own so allocation can lock it (select_for_update): working
+    out the next number from MAX(image_no) races when two batches upload at
+    once and both read the same maximum.
+    """
+
+    business = models.OneToOneField("accounts.Business", on_delete=models.CASCADE,
+                                    primary_key=True, related_name="listing_image_counter")
+    last_no = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        db_table = "listing_image_counters"

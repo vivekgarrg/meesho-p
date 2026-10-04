@@ -146,6 +146,12 @@ API_OWNERSHIP = {
     # own (longer, therefore winning) rule — without it, whoever can see SKU
     # Analysis but not the Meesho Inventory tab is denied, and widening the
     # rule below instead would hand them that whole tab's data.
+    # Cropped listing photos: uploaded from the Quadrant Cropper, shown on a
+    # parent's card in SKU Pricing.
+    "listing-images/":       ["/quadrant-cropper", "/pricing"],
+    # Read-only parent search used by the cropper's and Bulk Listing's parent
+    # pickers.
+    "parent-lookup/":        ["/quadrant-cropper", "/pricing", "/bulk-listing"],
     "meesho-inventory/stock-sheet/": ["/sku-analysis", "/pricing", "/meesho-inventory"],
     "meesho-inventory/":     ["/meesho-inventory"],
     "meesho-price-update/":  ["/meesho-pricing", "/meesho-inventory"],

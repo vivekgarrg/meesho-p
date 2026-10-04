@@ -45,7 +45,7 @@ from .serializers import (
 )
 from .views import (
     _approve_listing, _bulk_link_skus_to_parent, _is_admin, _reject_listing,
-    _sku_key, _workbook_from_upload, safe_decimal,
+    _sku_key, _workbook_from_upload, clean_new_parent_pricing, safe_decimal,
 )
 
 # Each module exposes the same contract — load_workbook/parse_template/
@@ -230,7 +230,8 @@ BULK_LISTING_REWARD_PER_SKU = Decimal("6")
 
 
 def _persist_batch_and_worker_task(*, business, request, platform, spec, source_meta,
-                                    payload_snapshot, sku_ids, filename, file_bytes):
+                                    payload_snapshot, sku_ids, filename, file_bytes,
+                                    parent_plan=None):
     """
     Everything a successful generation triggers besides the download itself:
 
@@ -255,15 +256,28 @@ def _persist_batch_and_worker_task(*, business, request, platform, spec, source_
         listing now creates paid, reviewable work" (point 5) actually is:
         reusing the pipeline Team Tasks already has, not a new one.
 
+      - with a `parent_plan` (see _resolve_listing_parent): the parent SKU —
+        created here if new — and every generated SKU linked under it with the
+        parent's pricing copied on, the same rule every other linking path
+        follows. Before this, generated SKUs landed in the catalogue with no
+        parent and no price, so they were costed at zero until someone linked
+        them by hand.
+
     All in one transaction: a failure partway through must not leave a batch
-    recorded without its SKUs registered, or SKUs registered without a
-    reviewable task behind them.
+    recorded without its SKUs registered, SKUs registered without a
+    reviewable task behind them — or a brand-new parent with nothing in it.
     """
     wt_platform = WorkerTask.PLATFORM_MEESHO if platform == "meesho" else WorkerTask.PLATFORM_FLIPKART
     batch_platform = (BulkListingBatch.PLATFORM_MEESHO if platform == "meesho"
                       else BulkListingBatch.PLATFORM_FLIPKART)
 
     with transaction.atomic():
+        parent = None
+        if parent_plan:
+            parent = parent_plan.get("parent") or ParentItemPrice.objects.create(
+                business=business, **parent_plan["create"])
+            payload_snapshot = {**payload_snapshot, "parent": parent.item_id}
+
         batch = BulkListingBatch.objects.create(
             business=business, platform=batch_platform, category_label=spec.get("category_label", ""),
             filename=filename, file_data=file_bytes,
@@ -277,6 +291,8 @@ def _persist_batch_and_worker_task(*, business, request, platform, spec, source_
 
         if platform == "meesho":
             FinalPrice.objects.bulk_create([FinalPrice(business=business, sku_id=s) for s in sku_ids])
+            if parent is not None:
+                _bulk_link_skus_to_parent(business=business, parent=parent, sku_ids=sku_ids)
 
         now = timezone.now()
         task = WorkerTask.objects.create(
@@ -288,6 +304,8 @@ def _persist_batch_and_worker_task(*, business, request, platform, spec, source_
             reward_amount=BULK_LISTING_REWARD_PER_SKU,
             status=WorkerTask.STATUS_SUBMITTED,
             submitted_at=now, submitted_by=request.user,
+            # Approval links each SKU to this parent too (_approve_listing).
+            parent_sku=parent,
         )
         task.assignees.set([request.user])
 
@@ -297,7 +315,50 @@ def _persist_batch_and_worker_task(*, business, request, platform, spec, source_
         ])
         batch.worker_task = task
         batch.save(update_fields=["worker_task"])
+    batch.linked_parent = parent
     return batch
+
+
+def _resolve_listing_parent(business, raw, skus):
+    """Which parent a Meesho batch's SKUs go under — before anything is built.
+
+    `raw` is the payload's "parent": {"parent_id": "…", "create": bool,
+    plus item_price / tax_percent / packaging_cost when create}.
+
+    Returns (plan, error_response). plan is {"parent": <existing>} or
+    {"create": {item_id + pricing}}; nothing is written here — creation happens
+    inside _persist_batch_and_worker_task's transaction, so a generation that
+    fails later can't leave an empty new parent behind.
+    """
+    def bad(msg, code=status.HTTP_400_BAD_REQUEST, **extra):
+        return None, Response({"error": msg, **extra}, status=code)
+
+    raw = raw if isinstance(raw, dict) else {}
+    parent_id = str(raw.get("parent_id") or "").strip()
+    if not parent_id:
+        return bad("Choose the parent SKU these listings belong to, or create a new one.")
+    if len(parent_id) > 200:
+        return bad("That parent SKU name is too long (200 characters max).")
+
+    existing = ParentItemPrice.objects.filter(business=business, item_id__iexact=parent_id).first()
+    if not raw.get("create"):
+        if existing is None:
+            return bad(f'No parent SKU named "{parent_id}" — pick one from the list, or create it.',
+                       status.HTTP_404_NOT_FOUND)
+        return {"parent": existing}, None
+
+    pricing, errors = clean_new_parent_pricing(raw)
+    if errors:
+        return bad(" ".join(m for ms in errors.values() for m in ms), fields=errors)
+    if existing is not None:
+        return bad(f'A parent SKU named "{existing.item_id}" already exists — pick it under '
+                   '"Choose existing" instead.', status.HTTP_409_CONFLICT)
+    if _sku_key(parent_id) in {_sku_key(s) for s in skus}:
+        return bad(f"The parent can't be named \"{parent_id}\" — that's one of the SKUs being listed.")
+    if _existing_sku_clash(business, [parent_id]):
+        return bad(f'"{parent_id}" is already used as a SKU in your catalogue — give the parent '
+                   "a different name.", status.HTTP_409_CONFLICT)
+    return {"create": {"item_id": parent_id, **pricing}}, None
 
 
 def _category_slug(category_label):
@@ -571,6 +632,12 @@ def bulk_listing_generate(request, business_id):
             status=status.HTTP_409_CONFLICT,
         )
 
+    # Every Meesho batch goes under a parent SKU — checked now, before the
+    # sheet is built, so a bad choice costs nothing.
+    parent_plan, parent_error = _resolve_listing_parent(business, payload.get("parent"), skus)
+    if parent_error is not None:
+        return parent_error
+
     # ── shared fields (copied identically onto every row, unless a specific
     # row overrides one — see BulkListingTab.jsx's per-row override grid) ──
     per_row_keys = {f["key"] for f in spec["fields"] if f["role"] in bl.PER_ROW_ROLES}
@@ -702,12 +769,13 @@ def bulk_listing_generate(request, business_id):
     filename = _download_filename(original_filename, spec, "xlsx", first_sku_id=skus[0])
 
     try:
-        _persist_batch_and_worker_task(
+        batch = _persist_batch_and_worker_task(
             business=business, request=request, platform="meesho", spec=spec,
             source_meta=source_meta,
             payload_snapshot={"mode": str(payload.get("mode") or "new"), "shared": shared_in,
                               "rows": rows_in, "image_urls": image_urls},
             sku_ids=skus, filename=filename, file_bytes=file_bytes,
+            parent_plan=parent_plan,
         )
     except IntegrityError:
         return Response(
@@ -718,7 +786,9 @@ def bulk_listing_generate(request, business_id):
     resp = HttpResponse(file_bytes, content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     resp["Content-Disposition"] = f'attachment; filename="{filename}"'
     resp["X-Filename"] = filename
-    resp["Access-Control-Expose-Headers"] = "X-Filename"
+    resp["X-Parent-Id"] = batch.linked_parent.item_id
+    resp["X-Parent-Created"] = "1" if "create" in parent_plan else "0"
+    resp["Access-Control-Expose-Headers"] = "X-Filename, X-Parent-Id, X-Parent-Created"
     return resp
 
 
@@ -1108,6 +1178,11 @@ def bulk_listing_batches(request, business_id):
     Every bulk listing sheet ever generated for this business — visible to
     every business member, not just whoever generated it, so a teammate
     picking up someone else's batch can still re-download or reuse it.
+
+    `?platform=` / `?product_id=` narrow the list. `?search=` matches the
+    filename, the category, and *any* SKU in the sheet — not just the first
+    one, since "which sheet had SKU-0042 in it" is the question actually
+    being asked when a seller goes looking for a generated file.
     """
     business = get_authorized_business(request, business_id)
     qs = (BulkListingBatch.objects.filter(business=business)
@@ -1120,7 +1195,26 @@ def bulk_listing_batches(request, business_id):
         qs = qs.filter(product_id=product_id)
     search = str(request.GET.get("search") or "").strip()
     if search:
-        qs = qs.filter(DQ(filename__icontains=search) | DQ(first_sku_id__icontains=search))
+        # filename / first SKU / category are plain columns, so the database
+        # does those. Every *other* SKU in the sheet lives in the `sku_ids`
+        # JSON list, and JSON containment is not portable between this app's
+        # two backends (SQLite locally, MySQL in production) — so those are
+        # matched by scanning just that one column and folding the hits back
+        # in by pk. values_list keeps `file_data` out of it: the blobs are
+        # hundreds of KB each and nothing here needs them.
+        needle = search.casefold()
+        sku_hits = [
+            pk for pk, sku_ids in
+            BulkListingBatch.objects.filter(business=business).values_list("pk", "sku_ids")
+            if isinstance(sku_ids, list)
+            and any(needle in str(sku).casefold() for sku in sku_ids)
+        ]
+        qs = qs.filter(
+            DQ(filename__icontains=search)
+            | DQ(first_sku_id__icontains=search)
+            | DQ(category_label__icontains=search)
+            | DQ(pk__in=sku_hits)
+        )
     batches = list(qs[:500])
     return Response({"results": BulkListingBatchSerializer(batches, many=True).data, "total": len(batches)})
 

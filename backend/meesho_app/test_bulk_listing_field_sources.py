@@ -233,3 +233,66 @@ class PickerKeyTests(FieldSourceTestCase):
         entry = self.sources(platform="meesho", source_label="Diyas").data["results"][0]
         self.assertEqual(entry["row_count"], 3)
         self.assertEqual(entry["name"], "SKU-1 +2 more")
+
+
+class BatchSearchTests(FieldSourceTestCase):
+    """"Which sheet had SKU-0042 in it" is the question a seller actually asks,
+    so search covers every SKU in a sheet, not just the first one."""
+
+    def setUp(self):
+        super().setUp()
+        self.batch("Diyas", "DIYA-001", {"shared": {}}, row_count=3)
+        BulkListingBatch.objects.filter(first_sku_id="DIYA-001").update(
+            sku_ids=["DIYA-001", "DIYA-002", "SPECIAL-042"], filename="diwali-set.xlsx",
+        )
+        self.batch("Sarees", "SAREE-001", {"shared": {}})
+        BulkListingBatch.objects.filter(first_sku_id="SAREE-001").update(
+            sku_ids=["SAREE-001"], filename="saree-batch.xlsx",
+        )
+
+    def found(self, term):
+        r = self.client.get(f"{self.base}/bulk-listing/batches/?search={term}")
+        self.assertEqual(r.status_code, 200, r.data)
+        return sorted(b["first_sku_id"] for b in r.data["results"])
+
+    def test_the_first_sku_matches(self):
+        self.assertEqual(self.found("DIYA-001"), ["DIYA-001"])
+
+    def test_a_sku_buried_later_in_the_sheet_matches(self):
+        """The whole point — this one is neither the filename nor first_sku."""
+        self.assertEqual(self.found("SPECIAL-042"), ["DIYA-001"])
+
+    def test_the_filename_matches(self):
+        self.assertEqual(self.found("diwali"), ["DIYA-001"])
+
+    def test_the_category_matches(self):
+        self.assertEqual(self.found("Sarees"), ["SAREE-001"])
+
+    def test_search_is_case_insensitive_including_inside_sku_ids(self):
+        self.assertEqual(self.found("special-042"), ["DIYA-001"])
+        self.assertEqual(self.found("sPeCiAl-042"), ["DIYA-001"])
+
+    def test_a_partial_sku_matches(self):
+        self.assertEqual(self.found("042"), ["DIYA-001"])
+
+    def test_no_match_returns_nothing_rather_than_everything(self):
+        self.assertEqual(self.found("nothing-like-this"), [])
+
+    def test_an_empty_search_returns_everything(self):
+        self.assertEqual(self.found(""), ["DIYA-001", "SAREE-001"])
+
+    def test_search_combines_with_the_platform_filter(self):
+        self.batch("kalash", "FK-001", {"mode": "flipkart", "rows": []},
+                   platform=BulkListingBatch.PLATFORM_FLIPKART)
+        BulkListingBatch.objects.filter(first_sku_id="FK-001").update(sku_ids=["SPECIAL-042"])
+        r = self.client.get(f"{self.base}/bulk-listing/batches/?platform=meesho&search=SPECIAL-042")
+        self.assertEqual([b["first_sku_id"] for b in r.data["results"]], ["DIYA-001"])
+
+    def test_search_never_reaches_another_business(self):
+        other = Business.objects.create(name="Other")
+        BulkListingBatch.objects.create(
+            business=other, platform=BulkListingBatch.PLATFORM_MEESHO, category_label="Diyas",
+            filename="theirs.xlsx", file_data=b"x", source_kind=BulkListingBatch.SOURCE_FILE,
+            first_sku_id="THEIRS-1", sku_ids=["SPECIAL-042"], row_count=1,
+        )
+        self.assertEqual(self.found("SPECIAL-042"), ["DIYA-001"])

@@ -15,6 +15,34 @@ mimetypes.add_type("application/wasm", ".wasm")
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+
+def _load_local_env(path):
+    """KEY=VALUE lines from a gitignored backend/.env, for local development.
+
+    Production never has this file — systemd injects deploy/hostinger/.env as
+    real environment variables — and setdefault means a variable that is
+    already set always wins, so this can only ever *fill gaps*, never change
+    what a deployed server sees. No dependency: it is a dozen lines.
+    """
+    if not path.is_file():
+        return
+    for raw in path.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if key.startswith("export "):
+            key = key[len("export "):].strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if key:
+            os.environ.setdefault(key, value)
+
+
+_load_local_env(BASE_DIR / ".env")
+
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "django-insecure-change-me-in-production-use-env-var")
 
 DEBUG = os.environ.get("DJANGO_DEBUG", "true").lower() == "true"
@@ -208,3 +236,27 @@ SIMPLE_JWT = {
 # File upload limit: 50 MB
 DATA_UPLOAD_MAX_MEMORY_SIZE = 52428800
 FILE_UPLOAD_MAX_MEMORY_SIZE = 52428800
+
+# ── Object storage: Cloudflare R2, or any S3-compatible bucket ───────────────
+# Where listing images uploaded from the Quadrant Cropper are kept. Entirely
+# optional — with these unset the upload path is simply unavailable and the
+# cropper stays a download-only tool, so an unconfigured deploy degrades
+# rather than breaking (same gate style as the Cloudflare/seed settings).
+#
+# S3_ENDPOINT_URL is R2's S3 API host
+# (https://<account_id>.r2.cloudflarestorage.com) and is used for *writing*
+# only: nothing written through it is publicly readable. Public reads come
+# from S3_PUBLIC_BASE_URL — an R2 custom domain (e.g. https://images.rudam.in).
+# That is why the readiness flag below demands it: without it we would hand
+# Meesho and Flipkart URLs they cannot fetch.
+S3_ENDPOINT_URL      = os.environ.get("S3_ENDPOINT_URL", "")
+S3_BUCKET            = os.environ.get("S3_BUCKET", "")
+S3_ACCESS_KEY_ID     = os.environ.get("S3_ACCESS_KEY_ID", "")
+S3_SECRET_ACCESS_KEY = os.environ.get("S3_SECRET_ACCESS_KEY", "")
+S3_PUBLIC_BASE_URL   = os.environ.get("S3_PUBLIC_BASE_URL", "").rstrip("/")
+# R2 requires the literal "auto"; real AWS wants a region like ap-south-1.
+S3_REGION            = os.environ.get("S3_REGION", "auto")
+
+OBJECT_STORAGE_READY = bool(
+    S3_BUCKET and S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY and S3_PUBLIC_BASE_URL
+)

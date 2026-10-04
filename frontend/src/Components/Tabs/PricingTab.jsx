@@ -329,7 +329,7 @@ function CreateChildForm({ parentId, parentPrice, onSaved, onCancel }) {
 // ── parent card ───────────────────────────────────────────────────────────────
 function ParentCard({ parent, notify, onLink, dragging, unlinked = [], onOptOut, masterItems = [], sales }) {
   const [open, setOpen] = useState(false);
-  const [panel, setPanel] = useState(null); // null | "history" | "link" | "create" | "edit" | "suggest" | "sheet" | "stock" | "rename" | "bom"
+  const [panel, setPanel] = useState(null); // null | "history" | "link" | "create" | "edit" | "suggest" | "sheet" | "stock" | "photos" | "rename" | "bom"
   const [dragOver, setDragOver] = useState(false);
   // Seeded from the parent, and re-seeded every time the Edit panel is opened
   // (see `toggle` below). Seeding only at mount meant a card that had been on
@@ -371,6 +371,12 @@ function ParentCard({ parent, notify, onLink, dragging, unlinked = [], onOptOut,
   const { data: componentsData } = useSWR(
     panel === "bom" ? `${API}/parent-prices/${idPath}/components/` : null
   );
+  // Photos uploaded from the Quadrant Cropper for this parent.
+  const { data: photosData, isLoading: photosLoading } = useSWR(
+    panel === "photos" ? `${API}/listing-images/?parent_id=${idPath}` : null
+  );
+  const photos = photosData?.results ?? null;
+  const photoCount = photos ? photos.length : (parent.listing_image_count ?? 0);
 
   const children = childrenData?.results ?? null;
   const histories = historyData ? (Array.isArray(historyData) ? historyData : historyData.results || []) : null;
@@ -869,6 +875,10 @@ function ParentCard({ parent, notify, onLink, dragging, unlinked = [], onOptOut,
               style={{ ...btn(panel === "stock" ? "secondary" : "ghost", "sm"), fontSize: 11 }}>
               {panel === "stock" ? "✕ Cancel" : "📦 Stock Update"}
             </button>
+            <button onClick={() => toggle("photos")}
+              style={{ ...btn(panel === "photos" ? "secondary" : "ghost", "sm"), fontSize: 11 }}>
+              {panel === "photos" ? "✕ Close" : `📷 Photos${photoCount ? ` (${photoCount})` : ""}`}
+            </button>
             <button onClick={() => toggle("create")} style={{ ...btn(panel === "create" ? "success" : "ghost", "sm"), fontSize: 11 }}>
               {panel === "create" ? "✕ Cancel" : "+ Create New SKU"}
             </button>
@@ -1116,6 +1126,47 @@ function ParentCard({ parent, notify, onLink, dragging, unlinked = [], onOptOut,
                   </ActionPanel>
                 );
               })()}
+              {panel === "photos" && (
+                <ActionPanel accent={C.blue} icon="📷" title="Photos" right={
+                  photos?.length ? (
+                    <button
+                      onClick={() => {
+                        navigator.clipboard?.writeText(photos.map((ph) => ph.public_url).join("\n"))
+                          .then(() => notify("ok", `Copied ${photos.length} link(s) — paste them into Bulk Listing.`))
+                          .catch(() => notify("err", "Could not copy — your browser blocked clipboard access."));
+                      }}
+                      style={{ ...btn("ghost", "sm"), fontSize: 11 }}>
+                      Copy all links
+                    </button>
+                  ) : null
+                }>
+                  {photosLoading && photos === null ? (
+                    <p style={{ fontSize: 12, color: C.gray400 }}>Loading photos…</p>
+                  ) : !photos?.length ? (
+                    <p style={{ fontSize: 12, color: C.gray400, fontStyle: "italic" }}>
+                      No photos yet. Crop this product's photos in the Quadrant Cropper and choose
+                      this parent when you download — they upload and appear here.
+                    </p>
+                  ) : (
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(96px, 1fr))", gap: 10 }}>
+                      {photos.map((ph) => (
+                        <a key={ph.id} href={ph.public_url} target="_blank" rel="noreferrer"
+                          title={`#${ph.image_no}${ph.product_name ? ` · ${ph.product_name}` : ""} — open full size`}
+                          style={{ textDecoration: "none", color: "inherit" }}>
+                          <img src={ph.public_url} alt={`#${ph.image_no}`} loading="lazy"
+                            onError={(e) => { e.currentTarget.style.opacity = 0.2; }}
+                            style={{ width: "100%", aspectRatio: "1 / 1", objectFit: "cover", borderRadius: 8,
+                              border: `1px solid ${C.border}`, background: C.gray50, display: "block" }} />
+                          <div style={{ fontSize: 10.5, fontFamily: "monospace", fontWeight: 700,
+                            color: C.gray600, marginTop: 3, textAlign: "center" }}>
+                            #{ph.image_no}
+                          </div>
+                        </a>
+                      ))}
+                    </div>
+                  )}
+                </ActionPanel>
+              )}
               {panel === "create" && (
                 <CreateChildForm parentId={parent.item_id} parentPrice={parent}
                   onSaved={() => { setPanel(null); invalidatePricing(); notify("ok", "Child SKU created."); }}
@@ -1356,51 +1407,107 @@ function ParentCard({ parent, notify, onLink, dragging, unlinked = [], onOptOut,
 }
 
 // ── add parent form ───────────────────────────────────────────────────────────
+// India's GST slabs, offered as a choice so a typo can't mis-tax a parent.
+// The server accepts any whole number 0–28 (clean_new_parent_pricing).
+const GST_SLABS = ["0", "3", "5", "12", "18", "28"];
+
 function AddParentForm({ onSaved, onCancel, notify }) {
-  const [form, setForm] = useState({ item_id: "", item_price: "", tax_percent: "0", packaging_cost: "0", image_url: "" });
-  const [saving, setSaving] = useState(false); const [err, setErr] = useState(null);
+  // Tax and packaging start EMPTY, not "0": pre-filled zeros counted as
+  // "filled in" without anyone having decided them. A parent's price is what
+  // every SKU under it is costed at, so all three must be chosen.
+  const [form, setForm] = useState({ item_id: "", item_price: "", tax_percent: "", packaging_cost: "", image_url: "" });
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState(null);
+  const [fieldErrs, setFieldErrs] = useState({});
   const preview = calcFinal(form.item_price, form.tax_percent, form.packaging_cost);
 
-  const save = async () => {
-    if (!form.item_id.trim()) return setErr("Parent ID required.");
-    if (parseFloat(form.item_price) <= 0) return setErr("Price required.");
-    setSaving(true); setErr(null);
-    const res = await fetch(`${API}/parent-prices/`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...form, image_url: form.image_url.trim(), final_price: preview.toFixed(2) }),
-    });
-    setSaving(false);
-    if (res.ok) { notify("ok", `"${form.item_id}" created.`); onSaved(); }
-    else { const e = await res.json(); setErr(Object.values(e).flat().join(" ")); }
+  const problems = () => {
+    const p = {};
+    if (!form.item_id.trim()) p.item_id = "Required";
+    // Not `parseFloat(x) <= 0`: parseFloat("") is NaN, and NaN <= 0 is false,
+    // so an empty price used to sail through.
+    const ip = Number(form.item_price);
+    if (form.item_price.trim() === "" || !Number.isFinite(ip) || ip <= 0) p.item_price = "Enter a price above 0";
+    if (form.tax_percent === "") p.tax_percent = "Choose the tax rate";
+    const pk = Number(form.packaging_cost);
+    if (form.packaging_cost.trim() === "" || !Number.isFinite(pk) || pk < 0) p.packaging_cost = "Enter packaging (0 if none)";
+    return p;
   };
+  const ready = Object.keys(problems()).length === 0;
+
+  const save = async () => {
+    const p = problems();
+    setFieldErrs(p);
+    if (Object.keys(p).length) return setErr("Fill in every field marked *.");
+    setSaving(true); setErr(null);
+    try {
+      const res = await fetch(`${API}/parent-prices/`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        // final_price is not sent: the server computes it from these three.
+        body: JSON.stringify({
+          item_id: form.item_id.trim(), item_price: form.item_price, tax_percent: form.tax_percent,
+          packaging_cost: form.packaging_cost, image_url: form.image_url.trim(),
+        }),
+      });
+      if (res.ok) { notify("ok", `"${form.item_id.trim()}" created.`); onSaved(); return; }
+      const e = await res.json().catch(() => ({}));
+      setFieldErrs(Object.fromEntries(Object.entries(e).map(([k, v]) => [k, [].concat(v).join(" ")])));
+      setErr(Object.values(e).flat().join(" ") || `Could not create (${res.status}).`);
+    } catch {
+      setErr("Could not create — network error.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const fieldStyle = (key) => (fieldErrs[key] ? { ...S.inp, borderColor: C.red } : S.inp);
+  const fieldErr = (key) => fieldErrs[key] && (
+    <div style={{ fontSize: 10.5, color: C.red, marginTop: 3, fontWeight: 600 }}>{fieldErrs[key]}</div>
+  );
+  const set = (key) => (e) => { setForm((f) => ({ ...f, [key]: e.target.value })); setFieldErrs((fe) => ({ ...fe, [key]: undefined })); };
 
   return (
     <div style={{ background: C.white, border: `2px solid ${C.orange}`, borderRadius: 12, padding: "18px 20px", boxShadow: "0 4px 16px rgba(232,81,10,0.12)" }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14, flexWrap: "wrap", gap: 10 }}>
         <p style={{ fontSize: 14, fontWeight: 700, color: C.gray800 }}>➕ New Parent SKU</p>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <span style={{ fontSize: 13, color: C.gray500 }}>Final price: <strong style={{ fontFamily: "monospace", color: C.orange, fontSize: 16 }}>{fmt(preview)}</strong></span>
+          <span style={{ fontSize: 13, color: C.gray500 }}>Final price: <strong style={{ fontFamily: "monospace", color: C.orange, fontSize: 16 }}>{ready ? fmt(preview) : "—"}</strong></span>
           <button onClick={onCancel} style={btn("ghost")}>Cancel</button>
-          <button onClick={save} disabled={saving} style={btn("primary")}>{saving ? "Creating…" : "Create Parent"}</button>
+          <button onClick={save} disabled={saving} style={{ ...btn("primary"), ...(!ready ? { opacity: 0.55 } : {}) }}>
+            {saving ? "Creating…" : "Create Parent"}
+          </button>
         </div>
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1fr", gap: 12 }}>
         <div>
           <label style={S.label}>Parent ID *</label>
-          <input value={form.item_id} onChange={e => setForm(f => ({ ...f, item_id: e.target.value }))}
-            placeholder="e.g. copper_bottle" style={S.inp} />
+          <input value={form.item_id} onChange={set("item_id")} placeholder="e.g. copper_bottle" style={fieldStyle("item_id")} />
+          {fieldErr("item_id")}
         </div>
-        {[["Item Price (₹) *", "item_price"], ["Tax %", "tax_percent"], ["Packaging (₹)", "packaging_cost"]].map(([label, key]) => (
-          <div key={key}>
-            <label style={S.label}>{label}</label>
-            <input type="number" step="0.01" value={form[key]} onChange={e => setForm(f => ({ ...f, [key]: e.target.value }))} style={S.inp} />
-          </div>
-        ))}
+        <div>
+          <label style={S.label}>Item Price (₹) *</label>
+          <input type="text" inputMode="decimal" value={form.item_price} onChange={set("item_price")} style={fieldStyle("item_price")} />
+          {fieldErr("item_price")}
+        </div>
+        <div>
+          <label style={S.label}>Tax % *</label>
+          <select value={form.tax_percent} onChange={set("tax_percent")} style={fieldStyle("tax_percent")}>
+            <option value="">Choose…</option>
+            {GST_SLABS.map((t) => <option key={t} value={t}>{t}%</option>)}
+          </select>
+          {fieldErr("tax_percent")}
+        </div>
+        <div>
+          <label style={S.label}>Packaging (₹) *</label>
+          <input type="text" inputMode="decimal" value={form.packaging_cost} onChange={set("packaging_cost")}
+            placeholder="0 if none" style={fieldStyle("packaging_cost")} />
+          {fieldErr("packaging_cost")}
+        </div>
       </div>
       <div style={{ display: "flex", gap: 10, alignItems: "flex-end", marginTop: 12 }}>
         <div style={{ flex: 1 }}>
           <label style={S.label}>Photo — Meesho catalog image URL</label>
-          <input value={form.image_url} onChange={e => setForm(f => ({ ...f, image_url: e.target.value }))}
+          <input value={form.image_url} onChange={set("image_url")}
             placeholder="https://images.meesho.com/images/products/... (optional)"
             style={{ ...S.inp, fontFamily: "monospace" }} />
         </div>

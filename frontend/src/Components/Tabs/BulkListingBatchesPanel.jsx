@@ -5,6 +5,9 @@ import DownloadIcon from "@mui/icons-material/Download";
 import EditIcon from "@mui/icons-material/Edit";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import HistoryIcon from "@mui/icons-material/History";
+import SearchIcon from "@mui/icons-material/Search";
+import ClearIcon from "@mui/icons-material/Clear";
+import { InputAdornment, TextField } from "@mui/material";
 
 const fmtDate = (iso) => {
   if (!iso) return "—";
@@ -29,18 +32,31 @@ export function BulkListingBatchesPanel({ isMobile, refreshKey, onLoadToEdit, on
   const [batches, setBatches] = useState([]);
   const [loading, setLoading] = useState(true);
   const [downloadingId, setDownloadingId] = useState(null);
+  const [search, setSearch] = useState("");
 
-  const load = useCallback(() => {
+  // Searched server-side rather than filtering what's already here: the list
+  // is capped at 500 rows, so the sheet being looked for may not be in the
+  // page the client holds — and the match runs over every SKU in each sheet,
+  // which the client payload doesn't carry in full either.
+  const load = useCallback((term) => {
     setLoading(true);
-    const q = platform ? `?platform=${encodeURIComponent(platform)}` : "";
-    fetch(`${API}/bulk-listing/batches/${q}`)
+    const params = new URLSearchParams();
+    if (platform) params.set("platform", platform);
+    const q = (term ?? "").trim();
+    if (q) params.set("search", q);
+    fetch(`${API}/bulk-listing/batches/?${params}`)
       .then((r) => r.json())
       .then((d) => setBatches(d.results || []))
       .catch(() => {})
       .finally(() => setLoading(false));
   }, [platform]);
 
-  useEffect(() => { load(); }, [load, refreshKey]);
+  // Typing shouldn't fire a request per keystroke; an empty box reloads at
+  // once so clearing it feels instant.
+  useEffect(() => {
+    const t = setTimeout(() => load(search), search ? 250 : 0);
+    return () => clearTimeout(t);
+  }, [search, load, refreshKey]);
 
   const download = async (batch) => {
     setDownloadingId(batch.id);
@@ -79,13 +95,47 @@ export function BulkListingBatchesPanel({ isMobile, refreshKey, onLoadToEdit, on
         </span>
       </div>
 
+      <div style={{ padding: "10px 12px", borderBottom: `1px solid ${C.gray100}` }}>
+        <TextField
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search SKU, file or category…"
+          size="small"
+          fullWidth
+          InputProps={{
+            startAdornment: (
+              <InputAdornment position="start">
+                <SearchIcon style={{ fontSize: 16, color: C.gray400 }} />
+              </InputAdornment>
+            ),
+            endAdornment: search ? (
+              <InputAdornment position="end">
+                <IconButton size="small" onClick={() => setSearch("")} title="Clear search">
+                  <ClearIcon style={{ fontSize: 15 }} />
+                </IconButton>
+              </InputAdornment>
+            ) : undefined,
+            sx: { fontSize: 12.5, borderRadius: "9px" },
+          }}
+        />
+      </div>
+
       <div style={{ overflowY: "auto", flex: 1 }}>
         {loading ? (
           <div style={{ display: "flex", justifyContent: "center", padding: 24 }}><CircularProgress size={22} /></div>
         ) : batches.length === 0 ? (
           <div style={{ padding: "20px 16px", fontSize: 12, color: C.gray400 }}>
-            Nothing generated yet. Every sheet you generate is saved here — SKUs, titles and all —
-            so you can re-download it or reload it to edit without retyping anything.
+            {search.trim() ? (
+              <>
+                No sheet matches "<strong>{search.trim()}</strong>". The search covers the file name,
+                the category, and every SKU inside each sheet.
+              </>
+            ) : (
+              <>
+                Nothing generated yet. Every sheet you generate is saved here — SKUs, titles and all —
+                so you can re-download it or reload it to edit without retyping anything.
+              </>
+            )}
           </div>
         ) : (
           batches.map((b) => {

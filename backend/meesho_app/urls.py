@@ -1,6 +1,7 @@
 from django.urls import path
 from . import views
 from . import bulk_listing_views
+from . import listing_images_views
 
 urlpatterns = [
     path("upload/", views.upload_excel, name="upload_excel"),
@@ -193,6 +194,16 @@ urlpatterns = [
          bulk_listing_views.bulk_listing_flipkart_template_review, name="bulk_listing_flipkart_template_review"),
     # Presets + previously generated sheets, as one list of "field values I
     # already typed once", scoped to the uploaded template's category.
+    # Parent SKU search for the "which parent is this for?" pickers on the
+    # Quadrant Cropper and Bulk Listing — read-only, its own prefix so neither
+    # page needs the whole parent-prices/ family (which reprices and deletes).
+    path("parent-lookup/",          listing_images_views.listing_images_parents, name="parent_lookup"),
+    # Quadrant Cropper -> R2 -> parent SKU. See listing_images_views.py.
+    path("listing-images/config/",  listing_images_views.listing_images_config,  name="listing_images_config"),
+    path("listing-images/check/",   listing_images_views.listing_images_check,   name="listing_images_check"),
+    path("listing-images/presign/", listing_images_views.listing_images_presign, name="listing_images_presign"),
+    path("listing-images/confirm/", listing_images_views.listing_images_confirm, name="listing_images_confirm"),
+    path("listing-images/",         listing_images_views.listing_images_list,    name="listing_images_list"),
     path("bulk-listing/field-sources/",
          bulk_listing_views.bulk_listing_field_sources, name="bulk_listing_field_sources"),
     path("bulk-listing/flipkart-presets/",

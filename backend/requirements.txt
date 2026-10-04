@@ -17,3 +17,5 @@ pypdf>=4.0
 reportlab>=4.0
 requests>=2.31
 Pillow>=10.0
+# S3-compatible object storage (Cloudflare R2) for listing images.
+boto3>=1.34

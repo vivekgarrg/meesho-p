@@ -26,7 +26,7 @@ from . import master_pricing, pricing_sync
 
 from .helpers.label_pdf import extract_all_pages
 
-from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, MasterItem, MasterItemComponent, MasterItemPriceHistory, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, LabelDayReset, PurchaseBill, PurchaseItem, BlockedCustomer, InventoryAdjustment, ConsumableItem, ConsumablePurchase, ConsumableUsage, InventoryLog, MeeshoInventory, MeeshoPriceUpdate, ExpenseInvoice, ExpenseInvoiceItem, TransportCharge, PackedStockEvent, EstimatedProfitOrder, ReturnDelivery, GstTransaction, GstInvoiceDetail, ScannedOrder, ListingTemplate, ClaimTicket, WorkerTask, WalletEntry, WalletSettlement, TaskListing, PlatformRate, TaskDocument, BusinessCostSetting, Employee, EmployeePayment, EmployeeAttendance, EmployeeHoliday, BusinessOwner, Product, BulkListingBatch, ReturnVideoBatch, FlipkartOrderPayment
+from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, ListingImage, MasterItem, MasterItemComponent, MasterItemPriceHistory, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, LabelDayReset, PurchaseBill, PurchaseItem, BlockedCustomer, InventoryAdjustment, ConsumableItem, ConsumablePurchase, ConsumableUsage, InventoryLog, MeeshoInventory, MeeshoPriceUpdate, ExpenseInvoice, ExpenseInvoiceItem, TransportCharge, PackedStockEvent, EstimatedProfitOrder, ReturnDelivery, GstTransaction, GstInvoiceDetail, ScannedOrder, ListingTemplate, ClaimTicket, WorkerTask, WalletEntry, WalletSettlement, TaskListing, PlatformRate, TaskDocument, BusinessCostSetting, Employee, EmployeePayment, EmployeeAttendance, EmployeeHoliday, BusinessOwner, Product, BulkListingBatch, ReturnVideoBatch, FlipkartOrderPayment
 from .serializers import (
     OrderPaymentSerializer, AdsCostSerializer,
     ReferralPaymentSerializer, CompensationRecoverySerializer,
@@ -3720,17 +3720,102 @@ def parent_price_list(request, business_id):
         rows = (
             qs.annotate(sku_count=Count("sku_prices", distinct=True),
                         history_count=Count("price_history", distinct=True),
-                        component_count=Count("master_components", distinct=True))
+                        component_count=Count("master_components", distinct=True),
+                        # Photos uploaded from the Quadrant Cropper; only ones
+                        # confirmed in the bucket count — see ListingImage.
+                        listing_image_count=Count(
+                            "listing_images",
+                            filter=DQ(listing_images__status=ListingImage.STATUS_UPLOADED),
+                            distinct=True))
               .values("id", "item_id", "item_price", "tax_percent", "packaging_cost",
-                      "final_price", "image_url", "sku_count", "history_count", "component_count")
+                      "final_price", "image_url", "sku_count", "history_count", "component_count",
+                      "listing_image_count")
               .order_by("item_id")
         )
         return Response({"results": list(rows), "slim": True})
 
-    serializer = ParentItemPriceSerializer(data=request.data)
+    pricing, errors = clean_new_parent_pricing(request.data)
+    if errors:
+        return Response(errors, status=status.HTTP_400_BAD_REQUEST)
+    data = request.data.copy() if hasattr(request.data, "copy") else dict(request.data)
+    # The server computes final_price rather than trusting the form's preview,
+    # so a parent's price can never disagree with its own components.
+    data.update({k: str(v) for k, v in pricing.items()})
+    serializer = ParentItemPriceSerializer(data=data)
     serializer.is_valid(raise_exception=True)
     serializer.save(business=business)
     return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+def clean_new_parent_pricing(data):
+    """Price, tax and packaging — all required to create a parent SKU.
+
+    A parent's price is what every child SKU under it is costed at, so a
+    parent created without one silently zeroes the cost of everything linked
+    to it and every profit figure built on those SKUs reads as pure margin.
+    Required everywhere a parent is created from scratch: SKU Pricing's Add
+    Parent form and the Quadrant Cropper's "Create new". (Flows that derive a
+    parent from an existing SKU inherit that SKU's pricing instead.)
+
+    Returns (cleaned, errors): cleaned has item_price / tax_percent /
+    packaging_cost / final_price, with final_price computed here; errors is a
+    DRF-style {field: [message]} dict, empty when everything is valid.
+    """
+    from . import master_pricing
+
+    def raw(name):
+        value = data.get(name) if hasattr(data, "get") else None
+        return "" if value is None else str(value).strip()
+
+    errors = {}
+
+    def money(name, label, minimum, allow_zero):
+        text = raw(name)
+        if text == "":
+            errors[name] = [f"{label} is required."]
+            return None
+        value = safe_decimal(text)
+        if value is None or not value.is_finite():
+            errors[name] = [f"{label} must be a number."]
+            return None
+        if value < minimum or (not allow_zero and value == 0):
+            errors[name] = [f"{label} must be {'more than' if not allow_zero else 'at least'} {minimum}."]
+            return None
+        if value > Decimal("10000000"):
+            errors[name] = [f"{label} looks too large."]
+            return None
+        if value != value.quantize(Decimal("0.01")):
+            errors[name] = [f"{label} can have at most 2 decimal places."]
+            return None
+        return value
+
+    item_price = money("item_price", "Item price", Decimal("0"), allow_zero=False)
+    packaging = money("packaging_cost", "Packaging cost", Decimal("0"), allow_zero=True)
+
+    tax = None
+    tax_text = raw("tax_percent")
+    if tax_text == "":
+        errors["tax_percent"] = ["Tax % is required (use 0 if the product is GST-exempt)."]
+    else:
+        try:
+            tax_value = Decimal(tax_text)
+        except (InvalidOperation, ValueError):
+            tax_value = None
+        if tax_value is None or tax_value != tax_value.to_integral_value():
+            errors["tax_percent"] = ["Tax % must be a whole number."]
+        elif not 0 <= tax_value <= 28:
+            errors["tax_percent"] = ["Tax % must be between 0 and 28."]
+        else:
+            tax = int(tax_value)
+
+    if errors:
+        return None, errors
+    return {
+        "item_price": item_price,
+        "tax_percent": tax,
+        "packaging_cost": packaging,
+        "final_price": master_pricing.compute_final_price(item_price, tax, packaging),
+    }, {}
 
 
 

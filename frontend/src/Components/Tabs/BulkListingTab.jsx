@@ -11,6 +11,9 @@ import TipsAndUpdatesIcon from "@mui/icons-material/TipsAndUpdates";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import { CircularProgress } from "@mui/material";
 import { BulkListingBatchesPanel } from "./BulkListingBatchesPanel";
+import {
+  ParentPicker, emptyParentChoice, parentChoiceLabel, parentChoicePayload, parentChoiceReady, suggestParentId,
+} from "../shared/ParentPicker";
 import { useAuth } from "../../contexts/AuthContext";
 
 /**
@@ -23,26 +26,46 @@ import { useAuth } from "../../contexts/AuthContext";
  * template it's given and derives the form's fields from it — nothing about
  * a category is hardcoded here. See backend/meesho_app/bulk_listing.py.
  *
- * Two ways to supply the photos (see MODES below) — both end up going
- * through the exact same generation pipeline, they only differ in where the
- * photo list comes from.
+ * Two ways to supply the photos (SOURCE_MODES — a blank template you paste
+ * links into, or a sheet that already has one photo per row). Both end up
+ * going through the exact same generation pipeline; they only differ in
+ * where the photo list comes from, which is why that choice lives inside the
+ * Template step rather than beside the platform switch. PLATFORMS is the
+ * genuinely separate decision: those two used to share one row of three
+ * buttons, which read as three equivalent choices when only two are.
+ *
+ * The Meesho flow is laid out as four numbered steps (Template, Photos,
+ * Product details, The N listings) over a sticky action bar. Every step
+ * carries its own readiness line, so a folded step still says where it
+ * stands and Generate is reachable from anywhere instead of living at the
+ * bottom of a very long scroll. The steps are presentation only — all the
+ * state and validation below is unchanged, and nothing gates moving between
+ * them, since these legitimately get worked out of order.
  *
  * Fully stateless re: the template: the File the user picked (or the
  * built-in key) is kept in this component's state and resent on Generate,
  * same as it was sent for Parse — nothing about it is stored server-side.
  *
- * A third mode, Flipkart Listing, is a genuinely different flow (see
- * FlipkartFlow below) — Flipkart's template already has each row's SKU and
+ * Flipkart is a genuinely different flow (see FlipkartFlow below) —
+ * Flipkart's template already has each row's SKU and
  * images filled in before it's ever uploaded here, attribute values can
  * differ row to row instead of being one shared form, and there's no image
  * shuffle at all — so it keeps its own state and UI rather than being
  * squeezed into this component's Meesho-shaped logic.
  */
 
-const MODES = [
-  { id: "new", label: "New Sheet", hint: "Paste your own photo links (Meesho)" },
-  { id: "prefilled", label: "Prefilled Sheet", hint: "Upload a Meesho sheet that already has one photo per row" },
-  { id: "flipkart", label: "Flipkart Listing", hint: "Upload your Flipkart category template" },
+// Which marketplace's template and flow. A separate decision from where the
+// photos come from below — the two used to share one row of buttons, which
+// read as three equivalent choices when only two of them are.
+const PLATFORMS = [
+  { id: "meesho", label: "Meesho", hint: "Meesho category template" },
+  { id: "flipkart", label: "Flipkart", hint: "Your Flipkart category template" },
+];
+
+// Meesho only: where this batch's photos come from.
+const SOURCE_MODES = [
+  { id: "new", label: "Blank template", hint: "Paste your own photo links" },
+  { id: "prefilled", label: "Sheet with photos in it", hint: "Upload a Meesho sheet that already has one photo per row" },
 ];
 
 // Categories carry however many image columns they carry — four in some, well
@@ -126,14 +149,66 @@ function validateMoney(value, moneyMax) {
   return Math.abs(n * 100 - cents) < 1e-6;
 }
 
-function Section({ title, right, children }) {
+// `flat` drops the card chrome, for a Section nested inside a Step — two
+// stacked cards read as two unrelated things when they are one step.
+function Section({ title, right, children, flat }) {
   return (
-    <div style={S.card}>
-      <div style={{ display: "flex", alignItems: "center", marginBottom: 15 }}>
-        <div style={{ ...S.cardTitle, marginBottom: 0 }}>{title}</div>
-        {right && <div style={{ marginLeft: "auto" }}>{right}</div>}
-      </div>
+    <div style={flat ? undefined : S.card}>
+      {(title || right) && (
+        <div style={{ display: "flex", alignItems: "center", marginBottom: 15 }}>
+          <div style={{ ...S.cardTitle, marginBottom: 0 }}>{title}</div>
+          {right && <div style={{ marginLeft: "auto" }}>{right}</div>}
+        </div>
+      )}
       {children}
+    </div>
+  );
+}
+
+/**
+ * One numbered step. The page was a single long scroll of equal-looking
+ * cards, so "where do I put the SKUs" meant scrolling and reading — the
+ * number, the status line and being able to fold a finished step away are
+ * the whole point.
+ *
+ * `status` is a short readiness string ("5 photos", "8 of 12 filled"), shown
+ * next to the title so a folded step still says where it stands. `done`
+ * only tints the number — nothing here blocks moving on, since the seller
+ * legitimately works these out of order.
+ */
+function Step({ n, title, status, done, open, onToggle, right, children, disabled }) {
+  return (
+    <div style={{ ...S.card, opacity: disabled ? 0.55 : 1, padding: 0, overflow: "hidden" }}>
+      <div
+        onClick={disabled ? undefined : onToggle}
+        style={{ display: "flex", alignItems: "center", gap: 11, padding: "13px 18px",
+          cursor: disabled ? "default" : "pointer", userSelect: "none" }}
+      >
+        <span style={{
+          flexShrink: 0, width: 23, height: 23, borderRadius: "50%",
+          background: done ? C.green : C.gray200,
+          color: done ? C.white : C.gray600,
+          fontSize: 11.5, fontWeight: 800,
+          display: "flex", alignItems: "center", justifyContent: "center",
+        }}>
+          {done ? "✓" : n}
+        </span>
+        <span style={{ fontSize: 13.5, fontWeight: 800, color: C.gray800 }}>{title}</span>
+        {status && (
+          <span style={{ fontSize: 11.5, color: C.gray400, fontWeight: 600 }}>{status}</span>
+        )}
+        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10 }}>
+          {right && <div onClick={(e) => e.stopPropagation()}>{right}</div>}
+          {!disabled && (
+            <span style={{ fontSize: 11, color: C.gray400, fontWeight: 700 }}>{open ? "▾" : "▸"}</span>
+          )}
+        </div>
+      </div>
+      {open && !disabled && (
+        <div style={{ padding: "0 18px 18px", borderTop: `1px solid ${C.gray100}`, paddingTop: 16 }}>
+          {children}
+        </div>
+      )}
     </div>
   );
 }
@@ -1064,6 +1139,9 @@ export function BulkListingTab() {
   const isMobile = useIsMobile();
   const fileInputRef = useRef(null);
 
+  // Which marketplace. `mode` below is Meesho's own "where do the photos come
+  // from" choice and nothing to do with this.
+  const [platform, setPlatform] = useState("meesho");
   const [mode, setMode] = useState("new");
   const [builtIns, setBuiltIns] = useState([]);
   const [spec, setSpec] = useState(null);           // { category_label, fields }
@@ -1075,6 +1153,10 @@ export function BulkListingTab() {
   const [presetId, setPresetId] = useState("");
   const [coveredKeys, setCoveredKeys] = useState(new Set());
   const [savingPreset, setSavingPreset] = useState(false);
+  // The parent SKU every generated listing goes under — required. Generated
+  // SKUs used to land in the catalogue with no parent and no price, costed at
+  // zero until someone linked them by hand.
+  const [parentChoice, setParentChoice] = useState(() => emptyParentChoice());
 
   const [shared, setShared] = useState({});
   const [imageText, setImageText] = useState("");     // "New Sheet" mode input
@@ -1122,6 +1204,8 @@ export function BulkListingTab() {
   };
 
   const resetFlow = () => {
+    setParentChoice(emptyParentChoice());
+    setOpenSteps(new Set([1]));
     setDuplicatedFrom(null);
     setSpec(null);
     setSource(null);
@@ -1135,6 +1219,13 @@ export function BulkListingTab() {
     setAddPickerFor(null);
     setExpandedOverrides(new Set());
     if (fileInputRef.current) fileInputRef.current.value = "";
+  };
+
+  const switchPlatform = (id) => {
+    if (id === platform) return;
+    setPlatform(id);
+    setMsg(null);
+    resetFlow();
   };
 
   const switchMode = (id) => {
@@ -1180,6 +1271,8 @@ export function BulkListingTab() {
       // The template says which category this is, and that decides which
       // saved fields are even applicable.
       refreshPresets(d.category_label || "");
+      // Template settled — the next thing to do is photos.
+      setOpenSteps(new Set([2]));
       return d;
     } catch {
       setMsg({ type: "error", text: "Network error while reading the template." });
@@ -1220,6 +1313,7 @@ export function BulkListingTab() {
     setShared(snap.shared || {});
     applySnapshotPhotos(snap, snapMode);
     setRows(snapshotRows(snap));
+    restoreParent(snap);
     setMsg({ type: "success", text: `Loaded "${batch.filename}" for editing.` });
   };
 
@@ -1236,6 +1330,12 @@ export function BulkListingTab() {
       setMsg({ type: "error", text: "Network error while loading that batch." });
       return null;
     }
+  };
+
+  // A batch generated after parents became required remembers its parent;
+  // older ones don't, and leave the choice empty for the seller to make.
+  const restoreParent = (snap) => {
+    setParentChoice(snap.parent ? { ...emptyParentChoice(), picked: snap.parent } : emptyParentChoice());
   };
 
   const snapshotRows = (snap) => (snap.rows || []).map((r) => ({
@@ -1290,6 +1390,9 @@ export function BulkListingTab() {
         Object.entries(snap.shared || {}).filter(([k, v]) => templateKeys.has(k) && v !== "")
       );
       setShared(incoming);          // replace outright, not merge — "all the fields"
+      // Same product, so same parent — but an older batch that predates
+      // parents must not wipe one the seller has already chosen here.
+      if (snap.parent) restoreParent(snap);
       setCoveredKeys(new Set());    // these are the point; don't tuck them away
       setPresetId("");
       setDuplicatedFrom({
@@ -1315,6 +1418,7 @@ export function BulkListingTab() {
     if (!parsed) return;
     setShared(snap.shared || {});
     applySnapshotPhotos(snap, snapMode);
+    restoreParent(snap);
 
     const loadedRows = snapshotRows(snap);
     // Suggest the next id per row, and make sure the suggestions don't
@@ -1534,6 +1638,39 @@ export function BulkListingTab() {
     return errs;
   }), [rows, sharedFields]);
 
+  // ── Step readiness ──────────────────────────────────────────────────────
+  // Shown on each step header and in the sticky bar, so a folded step still
+  // says where it stands and the seller never has to scroll to find out what
+  // is left. Importer fields only count when the template would actually
+  // require them (country of origin not India) — same exemption
+  // missingRequired already applies.
+  const countableFields = useMemo(
+    () => sharedFields.filter((f) => !(excludedFromGrid.has(f.key) && !needsImporter)),
+    [sharedFields, excludedFromGrid, needsImporter]
+  );
+  const fieldsFilled = useMemo(
+    () => countableFields.filter((f) => String(shared[f.key] ?? "").trim() !== "").length,
+    [countableFields, shared]
+  );
+  const skusSet = useMemo(
+    () => rows.filter((r) => String(r.sku ?? "").trim() !== "").length,
+    [rows]
+  );
+  const rowProblemCount = useMemo(
+    () => rowOverrideErrors.filter((e) => e.length > 0).length,
+    [rowOverrideErrors]
+  );
+
+  // Which steps are expanded. A Set rather than one index because these get
+  // worked out of order — coming back to tweak one field should not fold the
+  // rows away.
+  const [openSteps, setOpenSteps] = useState(() => new Set([1]));
+  const toggleStep = (n) => setOpenSteps((prev) => {
+    const next = new Set(prev);
+    if (next.has(n)) next.delete(n); else next.add(n);
+    return next;
+  });
+
   // `key` is "preset-<id>" or "batch-<id>" — presets and previously generated
   // sheets share one picker, since to the seller they are the same thing.
   // Only keys the current template actually has are applied: a saved field
@@ -1624,8 +1761,19 @@ export function BulkListingTab() {
       setMsg({ type: "error", text: "Fix the row-specific overrides highlighted below." });
       return;
     }
+    if (!parentChoiceReady(parentChoice)) {
+      setOpenSteps((prev) => new Set([...prev, 4]));
+      setMsg({
+        type: "error",
+        text: parentChoice.mode === "new"
+          ? "Fill in the new parent SKU's name, price, tax and packaging (step 4)."
+          : "Choose the parent SKU these listings belong to, or create a new one (step 4).",
+      });
+      return;
+    }
     const payload = {
       mode,
+      parent: parentChoicePayload(parentChoice),
       shared,
       rows: rows.map((r) => ({
         product_name: r.title, sku_id: r.sku, style_id: r.style, group_id: r.groupId,
@@ -1662,7 +1810,16 @@ export function BulkListingTab() {
       a.remove();
       URL.revokeObjectURL(url);
       setBatchesRefreshKey((k) => k + 1);
-      setMsg({ type: "success", text: "Sheet downloaded — ready to upload on Meesho. It's also saved in the panel on the right for reuse." });
+      const parentId = res.headers.get("X-Parent-Id");
+      const parentNew = res.headers.get("X-Parent-Created") === "1";
+      setMsg({
+        type: "success",
+        text: `Sheet downloaded — ready to upload on Meesho. ${rows.length} SKU${rows.length === 1 ? "" : "s"} linked to `
+          + `${parentNew ? "new parent " : ""}"${parentId}" and priced like it. It's also saved in the panel on the right.`,
+      });
+      // The parent now exists either way — a second generation for the same
+      // product should pick it, not try to create it again.
+      if (parentId) setParentChoice({ ...emptyParentChoice(), picked: parentId });
     } catch {
       setMsg({ type: "error", text: "Network error." });
     } finally {
@@ -1686,28 +1843,60 @@ export function BulkListingTab() {
         </p>
       </div>
 
-      <div style={{ display: "inline-flex", background: C.gray100, borderRadius: 10, padding: 3,
-        border: `1px solid ${C.border}`, width: "fit-content" }}>
-        {MODES.map((m) => (
-          <button key={m.id} onClick={() => switchMode(m.id)} title={m.hint}
-            style={{ border: "none", cursor: "pointer", fontFamily: "inherit",
-              background: mode === m.id ? C.white : "transparent",
-              color: mode === m.id ? C.gray800 : C.gray500,
-              fontWeight: mode === m.id ? 800 : 600, fontSize: 12.5,
-              padding: "7px 16px", borderRadius: 8,
-              boxShadow: mode === m.id ? "0 1px 3px rgba(0,0,0,0.10)" : "none" }}>
-            {m.label}
-          </button>
-        ))}
+      {/* Platform only. Where the photos come from is Meesho's own choice and
+          now lives inside its Template step, not alongside this. */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <span style={{ fontSize: 12, fontWeight: 700, color: C.gray400 }}>Platform</span>
+        <div style={{ display: "inline-flex", background: C.gray100, borderRadius: 10, padding: 3,
+          border: `1px solid ${C.border}`, width: "fit-content" }}>
+          {PLATFORMS.map((pl) => (
+            <button key={pl.id} onClick={() => switchPlatform(pl.id)} title={pl.hint}
+              style={{ border: "none", cursor: "pointer", fontFamily: "inherit",
+                background: platform === pl.id ? C.white : "transparent",
+                color: platform === pl.id ? C.gray800 : C.gray500,
+                fontWeight: platform === pl.id ? 800 : 600, fontSize: 12.5,
+                padding: "7px 18px", borderRadius: 8,
+                boxShadow: platform === pl.id ? "0 1px 3px rgba(0,0,0,0.10)" : "none" }}>
+              {pl.label}
+            </button>
+          ))}
+        </div>
       </div>
 
-      {mode === "flipkart" ? (
+      {platform === "flipkart" ? (
         <FlipkartFlow />
       ) : (
         <>
           <MsgBanner msg={msg} onClose={() => setMsg(null)} />
 
-          <Section title="Template">
+          <Step
+            n={1} title="Template"
+            status={spec ? spec.category_label : "not chosen yet"}
+            done={!!spec}
+            open={openSteps.has(1)} onToggle={() => toggleStep(1)}
+          >
+            {/* Where the photos come from — a Meesho decision about this
+                template, which is why it lives here now rather than next to
+                the platform switch. */}
+            {!spec && (
+              <div style={{ marginBottom: 14 }}>
+                <label style={S.label}>Start from</label>
+                <div style={{ display: "inline-flex", background: C.gray100, borderRadius: 10, padding: 3,
+                  border: `1px solid ${C.border}`, width: "fit-content" }}>
+                  {SOURCE_MODES.map((m) => (
+                    <button key={m.id} onClick={() => switchMode(m.id)} title={m.hint}
+                      style={{ border: "none", cursor: "pointer", fontFamily: "inherit",
+                        background: mode === m.id ? C.white : "transparent",
+                        color: mode === m.id ? C.gray800 : C.gray500,
+                        fontWeight: mode === m.id ? 800 : 600, fontSize: 12.5,
+                        padding: "7px 14px", borderRadius: 8,
+                        boxShadow: mode === m.id ? "0 1px 3px rgba(0,0,0,0.10)" : "none" }}>
+                      {m.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
             {spec ? (
               <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
                 <Tag variant="green" fontSize={12}>{spec.category_label}</Tag>
@@ -1745,12 +1934,18 @@ export function BulkListingTab() {
                 </div>
               </>
             )}
-          </Section>
+          </Step>
 
           {spec && (
             <>
+              <Step
+                n={2} title="Photos"
+                status={imageUrls.length ? `${imageUrls.length} photo${imageUrls.length === 1 ? "" : "s"}` : "none yet"}
+                done={imageUrls.length > 0}
+                open={openSteps.has(2)} onToggle={() => toggleStep(2)}
+              >
               {mode === "new" ? (
-                <Section title="Photos">
+                <Section flat title="Paste photo links">
                   <label style={S.label}>Paste your image links (one per line)</label>
                   <textarea value={imageText} onChange={(e) => setImageText(e.target.value)} rows={5}
                     placeholder={"https://…/photo1.jpg\nhttps://…/photo2.jpg\nhttps://…/photo3.jpg\n…"}
@@ -1772,7 +1967,7 @@ export function BulkListingTab() {
                   )}
                 </Section>
               ) : (
-                <Section title="Photos found in this sheet">
+                <Section flat title="Photos found in this sheet">
                   <div style={{ fontSize: 11.5, color: C.gray500, lineHeight: 1.6 }}>
                     <b style={{ color: C.green }}>{imageUrls.length} photo{imageUrls.length === 1 ? "" : "s"} found</b>,
                     {" "}one per row from the uploaded sheet. Each stays that row's own front
@@ -1786,8 +1981,18 @@ export function BulkListingTab() {
                   )}
                 </Section>
               )}
+              </Step>
 
-              <Section title={`Saved fields for ${spec.category_label}`} right={
+              <Step
+                n={3} title="Product details"
+                status={countableFields.length
+                  ? `${fieldsFilled} of ${countableFields.length} filled`
+                  + (missingRequired.length ? ` · ${missingRequired.length} required missing` : "")
+                  : ""}
+                done={countableFields.length > 0 && missingRequired.length === 0 && invalidMoney.length === 0}
+                open={openSteps.has(3)} onToggle={() => toggleStep(3)}
+              >
+              <Section flat title={`Saved fields for ${spec.category_label}`} right={
                 <button onClick={savePreset} disabled={savingPreset} style={btn("ghost", "sm")}>
                   <SaveIcon style={{ fontSize: 14, verticalAlign: "-3px" }} />&nbsp;Save current fields as preset
                 </button>
@@ -1860,7 +2065,7 @@ export function BulkListingTab() {
                 )}
               </Section>
 
-              <Section title="Product Details">
+              <Section flat title="Product Details">
                 <FieldGrid>
                   {visibleFields.map((f) => (
                     <Field key={f.key} def={f} value={shared[f.key]} onChange={setField(f.key)} />
@@ -1874,7 +2079,7 @@ export function BulkListingTab() {
               </Section>
 
               {importerFields.length > 0 && (
-                <Section title="Importer">
+                <Section flat title="Importer">
                   {needsImporter ? (
                     <FieldGrid>
                       {importerFields.map((f) => (
@@ -1888,8 +2093,42 @@ export function BulkListingTab() {
                   )}
                 </Section>
               )}
+              </Step>
 
-              <Section title={`The ${rowCount || ""} listing${rowCount === 1 ? "" : "s"}`.trim()}>
+              <Step
+                n={4} title={`The ${rowCount || ""} listing${rowCount === 1 ? "" : "s"}`.trim()}
+                status={rowCount
+                  ? `SKU ids ${skusSet} of ${rowCount} set`
+                    + (rowProblemCount ? ` · ${rowProblemCount} row${rowProblemCount === 1 ? "" : "s"} to fix` : "")
+                    + (parentChoiceReady(parentChoice) ? ` · parent ${parentChoiceLabel(parentChoice)}` : " · parent not chosen")
+                  : "waiting on photos"}
+                done={rowCount > 0 && skusSet === rowCount && rowProblemCount === 0 && parentChoiceReady(parentChoice)}
+                open={openSteps.has(4)} onToggle={() => toggleStep(4)}
+              >
+              {/* Every listing generated here goes under one parent SKU, and is
+                  priced like it — chosen here, next to the SKU ids it applies to. */}
+              <div style={{ marginBottom: 18, padding: 14, borderRadius: 10,
+                background: C.gray50, border: `1px solid ${parentChoiceReady(parentChoice) ? C.border : C.amberBorder}` }}>
+                <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+                  <span style={{ fontSize: 13, fontWeight: 800, color: C.gray800 }}>Parent SKU *</span>
+                  <span style={{ fontSize: 11.5, color: C.gray500 }}>
+                    Every SKU below is linked under it and priced like it.
+                  </span>
+                </div>
+                <ParentPicker
+                  value={parentChoice}
+                  autoFocus={false}
+                  onChange={(next) => setParentChoice(
+                    // Switching to "Create new" with nothing typed yet: offer a
+                    // name built from the SKU prefix or the first title.
+                    next.mode === "new" && !next.newId
+                      ? { ...next, newId: suggestParentId(prefix || rows[0]?.title || "") }
+                      : next
+                  )}
+                />
+              </div>
+
+              <Section flat>
                 {rowCount === 0 ? (
                   <div style={{ fontSize: 12.5, color: C.gray400 }}>
                     {mode === "new" ? "Paste some photo links above to create listings." : "No photos to build listings from."}
@@ -2156,9 +2395,44 @@ export function BulkListingTab() {
                   </>
                 )}
               </Section>
+              </Step>
 
-              <div style={{ display: "flex", justifyContent: "flex-end" }}>
-                <button onClick={generate} disabled={busy || rowCount === 0} style={btn("primary", "lg")}>
+              {/* Sticky action bar. Generate used to sit at the bottom of a
+                  very long scroll, so the one thing the page exists to do was
+                  the hardest thing to reach — and whether it was even ready
+                  took scrolling back up to work out. */}
+              <div style={{
+                position: "sticky", bottom: 0, zIndex: 5,
+                background: C.white, border: `1px solid ${C.border}`,
+                borderRadius: 12, padding: "11px 16px",
+                boxShadow: "0 -2px 14px rgba(19,17,28,0.08)",
+                display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap",
+              }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", fontSize: 11.5 }}>
+                  {[
+                    { label: "photos", value: imageUrls.length, ok: imageUrls.length > 0 },
+                    { label: "fields", value: `${fieldsFilled}/${countableFields.length}`, ok: missingRequired.length === 0 && invalidMoney.length === 0 },
+                    { label: "SKU ids", value: `${skusSet}/${rowCount}`, ok: rowCount > 0 && skusSet === rowCount },
+                    { label: "", value: parentChoiceReady(parentChoice) ? `parent ${parentChoiceLabel(parentChoice)}` : "no parent",
+                      ok: parentChoiceReady(parentChoice) },
+                  ].map((bit) => (
+                    <span key={bit.label} style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+                      <span style={{
+                        width: 7, height: 7, borderRadius: "50%",
+                        background: bit.ok ? C.green : C.amber,
+                      }} />
+                      <strong style={{ color: C.gray700, fontWeight: 800 }}>{bit.value}</strong>
+                      <span style={{ color: C.gray400 }}>{bit.label}</span>
+                    </span>
+                  ))}
+                  {missingRequired.length > 0 && (
+                    <span style={{ color: C.amber, fontWeight: 700 }}>
+                      {missingRequired.length} required field{missingRequired.length === 1 ? "" : "s"} empty
+                    </span>
+                  )}
+                </div>
+                <button onClick={generate} disabled={busy || rowCount === 0}
+                  style={{ ...btn("primary", "lg"), marginLeft: "auto" }}>
                   {busy
                     ? "Generating…"
                     : <><DownloadIcon style={{ fontSize: 17, verticalAlign: "-3px" }} />&nbsp;Generate &amp; download sheet</>}
@@ -2174,7 +2448,7 @@ export function BulkListingTab() {
       refreshKey={batchesRefreshKey}
       onLoadToEdit={loadBatchToEdit}
       onDuplicate={duplicateBatch}
-      platform={mode === "flipkart" ? "flipkart" : "meesho"}
+      platform={platform}
     />
     </div>
   );
