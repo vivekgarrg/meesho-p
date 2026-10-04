@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from "react"
 import useSWR, { mutate as globalMutate } from "swr";
 import { API, btn, C, S, fmt, useIsMobile } from "../../App";
 import { useBusiness } from "../../contexts/BusinessContext";
+import { useSearchParams } from "react-router-dom";
 import { AppBarChart } from "../Charts/AppBarChart";
 import { AppPieChart } from "../Charts/AppPieChart";
 import { ImageUrlPreview, ImageUrlThumb } from "../shared/ImageUrlPreview";
@@ -1663,7 +1664,6 @@ export function PricingTab() {
   // what make a 144-group list navigable.
   const [sortBy, setSortBy] = useState("units");
   const [attention, setAttention] = useState(null); // null | "no_history" | "never_sold" | "no_price"
-  const [linkOpen, setLinkOpen] = useState(true);
 
   const [linkParentId, setLinkParentId] = useState("");
   const [linkQuery, setLinkQuery] = useState("");
@@ -1677,6 +1677,21 @@ export function PricingTab() {
     setMsg({ type, text }); setTimeout(() => setMsg(null), 4000);
   }, []);
 
+  // Which sub-tab — kept in the URL (?view=link) so a reload or a bookmark
+  // lands where you were. Every tab's state lives up here in PricingTab and
+  // stays mounted, so switching tabs never loses a search, a selection or a
+  // half-filled form.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const VIEW_IDS = ["pricing", "link", "analytics"];
+  const view = VIEW_IDS.includes(searchParams.get("view")) ? searchParams.get("view") : "pricing";
+  const setView = useCallback((id) => {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      if (id === "pricing") next.delete("view"); else next.set("view", id);
+      return next;
+    }, { replace: true });
+  }, [setSearchParams]);
+
   // Debounced so typing a SKU doesn't fire a request per character.
   useEffect(() => {
     const t = setTimeout(() => setDebouncedSearch(search), search ? 300 : 0);
@@ -1689,6 +1704,13 @@ export function PricingTab() {
   // business's sync, a master-item cascade — shows up here on its own.
   const { data: parentsData, isLoading: loading } = useSWR(parentsKey(debouncedSearch), LIVE);
   const parents = parentsData?.results || [];
+  // The whole catalogue, unaffected by the SKU Pricing search box. Analytics
+  // and SKU Link read this: once they're separate tabs, a search typed on
+  // another tab silently shrinking their totals or their parent list would
+  // be invisible and baffling. With no search it's the same SWR key as
+  // above, so it's a cache hit, not a second request.
+  const { data: allParentsData } = useSWR(parentsKey(""), LIVE);
+  const allParents = allParentsData?.results || parents;
 
   // "Hidden" is the same list, filtered the other way — so a SKU you removed
   // is always one click from coming back rather than being lost.
@@ -1696,7 +1718,7 @@ export function PricingTab() {
   const unlinked = unlinkedData?.results || [];
   const hiddenCount = unlinkedData?.hidden_count || 0;
   // The Analytics donut always shows the true unlinked/hidden split regardless
-  // of which view the Link Center is toggled to — same SWR key as above when
+  // of which view SKU Link is toggled to — same SWR key as above when
   // showHidden is already false, so this is a cache hit, not an extra request.
   const { data: unlinkedStableData } = useSWR(unlinkedKey(false), LIVE);
   const trueUnlinkedCount = showHidden ? (unlinkedStableData?.results?.length ?? 0) : unlinked.length;
@@ -1814,7 +1836,7 @@ export function PricingTab() {
   // already uses the other direction (a parent's own suggestions panel).
   // Lets a row link in one click without first picking a target above.
   const suggestedParentFor = useMemo(() => {
-    const parentWordSets = parents.map(p => ({
+    const parentWordSets = allParents.map(p => ({
       item_id: p.item_id,
       words: p.item_id.toLowerCase().split(/[_\-\s]+/).filter(w => w.length > 2),
     }));
@@ -1829,7 +1851,7 @@ export function PricingTab() {
       if (best) map[sku.sku_id] = best;
     }
     return map;
-  }, [parents, unlinked]);
+  }, [allParents, unlinked]);
 
   const toggleUnlinked = skuId => {
     setSelectedUnlinked(prev => {
@@ -1880,9 +1902,9 @@ export function PricingTab() {
     }
   };
 
-  const totalSkus = parents.reduce((a, p) => a + (p.sku_count || 0), 0);
-  const withHistory = parents.filter(p => (p.history_count || 0) > 0).length;
-  const noHistory = parents.length - withHistory;
+  const totalSkus = allParents.reduce((a, p) => a + (p.sku_count || 0), 0);
+  const withHistory = allParents.filter(p => (p.history_count || 0) > 0).length;
+  const noHistory = allParents.length - withHistory;
   const selectedCount = selectedUnlinked.size;
 
   // ── Sales-joined, sorted, filtered catalogue ──────────────────────────
@@ -1891,9 +1913,9 @@ export function PricingTab() {
   const unitsOf   = p => sales[p.item_id]?.units_sold || 0;
   const revenueOf = p => sales[p.item_id]?.revenue || 0;
 
-  const totalUnitsSold = parents.reduce((a, p) => a + unitsOf(p), 0);
-  const totalRevenue   = parents.reduce((a, p) => a + revenueOf(p), 0);
-  const neverSold      = parents.filter(p => unitsOf(p) === 0).length;
+  const totalUnitsSold = allParents.reduce((a, p) => a + unitsOf(p), 0);
+  const totalRevenue   = allParents.reduce((a, p) => a + revenueOf(p), 0);
+  const neverSold      = allParents.filter(p => unitsOf(p) === 0).length;
 
   const visibleParents = useMemo(() => {
     let rows = parents;
@@ -1925,14 +1947,14 @@ export function PricingTab() {
   // a single-bar chart into one enormous block.
   const barHeight = n => n * 34 + 50;
 
-  const bestSellersChart = [...parents]
+  const bestSellersChart = [...allParents]
     .filter(p => unitsOf(p) > 0)
     .sort((a, b) => unitsOf(b) - unitsOf(a))
     .slice(0, 8)
     .reverse() // horizontal bar reads highest-at-top when the dataset is bottom-to-top
     .map(p => ({ label: shortLabel(p.item_id), units_sold: unitsOf(p) }));
 
-  const revenueChart = [...parents]
+  const revenueChart = [...allParents]
     .filter(p => revenueOf(p) > 0)
     .sort((a, b) => revenueOf(b) - revenueOf(a))
     .slice(0, 8)
@@ -1946,248 +1968,81 @@ export function PricingTab() {
     .reverse()
     .map(m => ({ label: shortLabel(m.name), used_in_count: m.used_in_count }));
 
-  // Glass-style action button for the dark studio header — `primary` gets a
-  // solid white fill so "+ New Parent Group" still reads as the main action.
-  const studioBtn = (primary = false) => ({
-    padding: "9px 16px",
-    borderRadius: 10,
-    fontSize: 12.5,
-    fontWeight: 700,
-    cursor: "pointer",
-    border: primary ? "1px solid #fff" : "1px solid rgba(255,255,255,0.22)",
-    background: primary ? "#fff" : "rgba(255,255,255,0.1)",
-    color: primary ? "#4C1D95" : "#fff",
-    backdropFilter: "blur(6px)",
-    transition: "transform 0.12s ease, background 0.12s ease",
-    whiteSpace: "nowrap",
+  // ── Sub-tabs ──────────────────────────────────────────────────────────
+  // Three jobs that used to share one long page: pricing the catalogue (the
+  // everyday one), linking SKUs to parents (an occasional clean-up), and
+  // reading how it's all doing. Each gets its own tab; the tab bar's counts
+  // say when the other two need you.
+  const VIEWS = [
+    { id: "pricing", icon: "🏷️", label: "SKU Pricing", count: allParents.length,
+      hint: "Parent groups, their SKUs and prices" },
+    { id: "link", icon: "🔗", label: "SKU Link", count: trueUnlinkedCount, alert: trueUnlinkedCount > 0,
+      hint: "Put unlinked SKUs under their parents" },
+    { id: "analytics", icon: "📊", label: "Analytics",
+      hint: "What sells, what's linked, what needs attention" },
+  ];
+
+  // SKU Link's parent list: filtered in the browser — it's the whole
+  // catalogue, already loaded.
+  const [targetQuery, setTargetQuery] = useState("");
+  const [dropOver, setDropOver] = useState(null);
+  const targetParents = useMemo(() => {
+    const q = targetQuery.trim().toLowerCase();
+    const rows = q ? allParents.filter(p => p.item_id.toLowerCase().includes(q)) : allParents;
+    return [...rows].sort((a, b) => a.item_id.localeCompare(b.item_id));
+  }, [allParents, targetQuery]);
+
+  // An Analytics tile that describes a problem takes you to where it's fixed.
+  const goFix = (filter) => { setAttention(filter); setView("pricing"); };
+
+  const actionBtn = (primary = false) => ({
+    ...btn(primary ? "primary" : "ghost", "sm"),
+    fontSize: 12, whiteSpace: "nowrap",
   });
 
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+  const msgBanner = msg && (
+    <div style={{ padding: "10px 16px", borderRadius: 10, fontSize: 13, fontWeight: 600,
+      background: msg.type === "ok" ? C.greenLight : "#FEF2F2",
+      color: msg.type === "ok" ? C.green : C.red,
+      border: `1px solid ${msg.type === "ok" ? C.greenBorder : "#FECACA"}` }}>
+      {msg.text}
+    </div>
+  );
 
-      {/* ── Studio header — dark, confident chrome around a light workspace ── */}
-      <div style={{
-        borderRadius: 18,
-        padding: "22px 24px",
-        background: "linear-gradient(135deg, #140F22 0%, #2A1854 55%, #4C1D95 100%)",
-        boxShadow: "0 12px 32px -12px rgba(76,29,149,0.45)",
-        position: "relative", overflow: "hidden",
-      }}>
-        {/* Soft decorative glow — pure chrome, no content */}
-        <div style={{ position: "absolute", top: -60, right: -40, width: 220, height: 220, borderRadius: "50%", background: "radial-gradient(circle, rgba(167,139,250,0.35) 0%, transparent 70%)", pointerEvents: "none" }} />
-        <div style={{ display: "flex", justifyContent: "space-between", gap: 14, flexWrap: "wrap", alignItems: "center", position: "relative" }}>
-          <div>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
-              <span style={{ fontSize: 10, fontWeight: 800, letterSpacing: "0.14em", textTransform: "uppercase", color: "#C4B5FD" }}>
-                Catalog · Pricing Workspace
-              </span>
-              <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 10, fontWeight: 700, color: "#86EFAC" }}>
-                <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#4ADE80", boxShadow: "0 0 0 3px rgba(74,222,128,0.25)", animation: "pulse 2s infinite" }} />
-                LIVE
-              </span>
-            </div>
-            <h2 style={{ fontSize: 24, fontWeight: 900, color: "#fff", marginBottom: 5, letterSpacing: "-0.01em" }}>SKU Pricing Studio</h2>
-            <p style={{ fontSize: 13, color: "rgba(255,255,255,0.65)", maxWidth: 480 }}>
-              Link SKUs to parents, price from a master ingredient list, and watch every number stay
-              in sync automatically — on this screen, and anywhere this business shares pricing.
-            </p>
-            {pricingPartners.length > 0 && (
-              <div style={{
-                display: "inline-flex", alignItems: "center", gap: 6, marginTop: 10,
-                background: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.18)", color: "#fff",
-                fontSize: 11.5, fontWeight: 700, padding: "4px 10px", borderRadius: 20,
-              }}>
-                🔗 Shared pricing with {pricingPartners.join(", ")} — editing a price here updates it there too.
-              </div>
-            )}
-          </div>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <button onClick={handleDownload} style={studioBtn()} title="Export parents and SKUs together as a two-sheet Excel workbook">
-              ⬇ Download Excel
-            </button>
-            <button
-              onClick={() => fileRef.current && fileRef.current.click()}
-              disabled={uploading}
-              style={{ ...studioBtn(), opacity: uploading ? 0.6 : 1 }}
-              title="Upload the Excel workbook to add/update parents and SKUs in one go"
-            >
-              {uploading ? "Uploading…" : "⬆ Upload Excel"}
-            </button>
-            <input
-              ref={fileRef}
-              type="file"
-              accept=".xlsx,.xls,.csv"
-              style={{ display: "none" }}
-              onChange={(e) => handleUpload(e.target.files?.[0])}
-            />
-            {missingSkus.length > 0 && (
-              <button onClick={() => setShowMissing(o => !o)} style={{ ...studioBtn(), background: "rgba(248,113,113,0.18)", borderColor: "rgba(248,113,113,0.4)" }}>
-                ⚠ {showMissing ? "Hide" : "Show"} Unpriced ({missingSkus.length})
-              </button>
-            )}
-            <button onClick={() => setShowAdd(o => !o)} style={studioBtn(true)}>
-              {showAdd ? "✕ Close" : "+ New Parent Group"}
-            </button>
+  const addParentForm = showAdd && (
+    <AddParentForm notify={notify} onSaved={() => { setShowAdd(false); invalidatePricing(); }} onCancel={() => setShowAdd(false)} />
+  );
+
+  // ── 🏷️ SKU Pricing ─────────────────────────────────────────────────────
+  const pricingView = (
+    <>
+      {/* Everything that changes the catalogue as a whole lives on this
+          tab's own action row, not in the page header. */}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <div style={{ marginRight: "auto" }}>
+          <div style={{ fontSize: 15, fontWeight: 800, color: C.gray800 }}>Parent groups</div>
+          <div style={{ fontSize: 12, color: C.gray400 }}>
+            Open a group to price it, see its SKUs and photos, or build a price sheet.
           </div>
         </div>
+        {missingSkus.length > 0 && (
+          <button onClick={() => setShowMissing(o => !o)}
+            style={{ ...actionBtn(), color: C.red, borderColor: C.redBorder, background: showMissing ? C.redLight : C.white }}>
+            ⚠ {showMissing ? "Hide" : ""} Unpriced ({missingSkus.length})
+          </button>
+        )}
+        <button onClick={handleDownload} style={actionBtn()} title="Export parents and SKUs together as a two-sheet Excel workbook">
+          ⬇ Excel
+        </button>
+        <button onClick={() => fileRef.current && fileRef.current.click()} disabled={uploading}
+          style={{ ...actionBtn(), opacity: uploading ? 0.6 : 1 }}
+          title="Upload the Excel workbook to add/update parents and SKUs in one go">
+          {uploading ? "Uploading…" : "⬆ Excel"}
+        </button>
+        <button onClick={() => setShowAdd(o => !o)} style={actionBtn(true)}>
+          {showAdd ? "✕ Close" : "+ New Parent Group"}
+        </button>
       </div>
-
-      {/* ── Analytics ─────────────────────────────────────────────────────── */}
-      <div>
-        <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 10 }}>
-          <span style={{ fontSize: 13 }}>📊</span>
-          <h3 style={{ fontSize: 12.5, fontWeight: 800, color: C.gray700, textTransform: "uppercase", letterSpacing: "0.06em" }}>Analytics</h3>
-        </div>
-
-        {/* KPI tiles. The ones that describe a problem are buttons: clicking
-            filters the catalogue below to exactly those parents, so a count
-            like "38 never sold" becomes somewhere to go rather than a fact to
-            read and forget. */}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10, marginBottom: 12 }}>
-          {[
-            { label: "Units Sold", sub: "delivered", value: totalUnitsSold.toLocaleString("en-IN"), color: C.green, icon: "✅" },
-            { label: "Revenue", sub: "delivered", value: fmtCompact(totalRevenue), color: "#6D28D9", icon: "💰" },
-            { label: "Parent Groups", value: parents.length, color: C.orange, icon: "📦" },
-            { label: "Linked SKUs", value: totalSkus, color: C.blue, icon: "🔗" },
-            { label: "Never Sold", value: neverSold, color: C.amber, icon: "😴", filter: "never_sold" },
-            { label: "No History", value: noHistory, color: C.gray500, icon: "⏳", filter: "no_history" },
-            { label: "Unlinked SKUs", value: unlinked.length, color: C.red, icon: "⚠️" },
-          ].map(t => {
-            const active = t.filter && attention === t.filter;
-            const clickable = !!t.filter;
-            return (
-              <div
-                key={t.label}
-                onClick={clickable ? () => setAttention(active ? null : t.filter) : undefined}
-                title={clickable ? (active ? "Clear this filter" : `Show only the ${t.label.toLowerCase()} groups`) : undefined}
-                style={{
-                  ...S.card, padding: "12px 14px", display: "flex", alignItems: "center", gap: 10,
-                  cursor: clickable ? "pointer" : "default",
-                  ...(active ? { borderColor: t.color, boxShadow: `0 0 0 2px ${t.color}33` } : {}),
-                }}
-              >
-                <div style={{ width: 34, height: 34, borderRadius: 10, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, background: `${t.color}1A`, border: `1px solid ${t.color}33` }}>
-                  {t.icon}
-                </div>
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ fontSize: 10.5, color: C.gray500, fontWeight: 700, whiteSpace: "nowrap" }}>
-                    {t.label}
-                    {t.sub && <span style={{ color: C.gray300, fontWeight: 600 }}> · {t.sub}</span>}
-                  </div>
-                  <div style={{ fontSize: 21, fontWeight: 900, color: t.color, lineHeight: 1.1 }}>{t.value}</div>
-                  {clickable && (
-                    <div style={{ fontSize: 9.5, fontWeight: 700, color: active ? t.color : C.gray300 }}>
-                      {active ? "✕ filtering" : "click to filter"}
-                    </div>
-                  )}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-
-        {/* Top row: a compact donut (its legend reads as progress bars, not a
-            cramped dot-list) beside the priced-parents ranking, each with its
-            own generous column so neither chart has to fight for width. The
-            usage chart below gets a full-width row of its own for the same
-            reason — a ranked bar list reads best wide, not squeezed into a
-            third of the row. */}
-        <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "minmax(240px, 0.85fr) minmax(360px, 1.4fr)", gap: 12, marginBottom: 12 }}>
-          <div style={S.card}>
-            <p style={S.cardTitle}>Linking Status</p>
-            {linkingTotal === 0 ? (
-              <p style={{ fontSize: 12, color: C.gray400 }}>No SKUs yet.</p>
-            ) : (
-              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 14, paddingTop: 4 }}>
-                <div style={{ position: "relative", width: 136, height: 136 }}>
-                  <AppPieChart data={linkingChartData} height={136} valueFormatter={(v) => v.toLocaleString("en-IN")} />
-                  <div style={{
-                    position: "absolute", inset: 0, display: "flex", flexDirection: "column",
-                    alignItems: "center", justifyContent: "center", pointerEvents: "none",
-                  }}>
-                    <span style={{ fontSize: 22, fontWeight: 900, color: C.gray900, lineHeight: 1 }}>{linkingTotal}</span>
-                    <span style={{ fontSize: 9, fontWeight: 700, color: C.gray400, textTransform: "uppercase", letterSpacing: "0.04em" }}>total SKUs</span>
-                  </div>
-                </div>
-                <div style={{ width: "100%", display: "flex", flexDirection: "column", gap: 9 }}>
-                  {linkingChartData.map(d => {
-                    const pct = Math.round((d.value / linkingTotal) * 100);
-                    return (
-                      <div key={d.id}>
-                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 11, marginBottom: 3 }}>
-                          <span style={{ display: "flex", alignItems: "center", gap: 5, color: C.gray600, fontWeight: 600 }}>
-                            <span style={{ width: 8, height: 8, borderRadius: "50%", background: d.color, flexShrink: 0 }} />
-                            {d.label}
-                          </span>
-                          <span style={{ fontFamily: "monospace", fontWeight: 700, color: C.gray800, whiteSpace: "nowrap" }}>
-                            {d.value.toLocaleString("en-IN")} <span style={{ color: C.gray400, fontWeight: 600 }}>· {pct}%</span>
-                          </span>
-                        </div>
-                        <div style={{ height: 6, borderRadius: 3, background: C.gray100, overflow: "hidden" }}>
-                          <div style={{ height: "100%", width: `${pct}%`, background: d.color, borderRadius: 3, transition: "width 0.3s ease" }} />
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-          </div>
-
-          <div style={S.card}>
-            <p style={S.cardTitle}>Best Sellers — units delivered</p>
-            {bestSellersChart.length === 0 ? (
-              <p style={{ fontSize: 12, color: C.gray400 }}>
-                No delivered orders matched to a parent yet — link SKUs to parents and sales roll up here.
-              </p>
-            ) : (
-              <AppBarChart dataset={bestSellersChart} indexKey="label" layout="horizontal" colorful
-                series={[{ dataKey: "units_sold", label: "Units" }]}
-                height={barHeight(bestSellersChart.length)}
-                valueFormatter={(v) => `${v.toLocaleString("en-IN")} units`}
-                axisValueFormatter={(v) => v.toLocaleString("en-IN")} valueTicks={5} />
-            )}
-          </div>
-        </div>
-
-        <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1.4fr 1fr", gap: 12 }}>
-          <div style={S.card}>
-            <p style={S.cardTitle}>Revenue by Parent — delivered</p>
-            {revenueChart.length === 0 ? (
-              <p style={{ fontSize: 12, color: C.gray400 }}>No delivered revenue to show yet.</p>
-            ) : (
-              <AppBarChart dataset={revenueChart} indexKey="label" layout="horizontal" colorful
-                series={[{ dataKey: "revenue", label: "Revenue" }]}
-                height={barHeight(revenueChart.length)}
-                valueFormatter={fmt} axisValueFormatter={fmtCompact} valueTicks={5} />
-            )}
-          </div>
-
-          <div style={S.card}>
-            <p style={S.cardTitle}>Most-Used Master Items</p>
-            {topMasterUsageChart.length === 0 ? (
-              <p style={{ fontSize: 12, color: C.gray400 }}>
-                No master item is used by a parent yet — build a recipe in any card's "Bill of Materials" panel.
-              </p>
-            ) : (
-              <AppBarChart dataset={topMasterUsageChart} indexKey="label" layout="horizontal" colorful
-                series={[{ dataKey: "used_in_count", label: "Parents" }]}
-                height={barHeight(topMasterUsageChart.length)}
-                valueFormatter={(v) => `${v} parent${v === 1 ? "" : "s"}`}
-                axisValueFormatter={(v) => (Number.isInteger(v) ? String(v) : "")} valueTicks={4} />
-            )}
-          </div>
-        </div>
-      </div>
-
-      {msg && (
-        <div style={{ padding: "10px 16px", borderRadius: 8, fontSize: 13, fontWeight: 500,
-          background: msg.type === "ok" ? C.greenLight : "#FEF2F2",
-          color: msg.type === "ok" ? C.green : C.red,
-          border: `1px solid ${msg.type === "ok" ? C.greenBorder : "#FECACA"}` }}>
-          {msg.text}
-        </div>
-      )}
 
       {showMissing && missingSkus.length > 0 && (
         <div style={{ background: "#FEF2F2", border: "1px solid #FECACA", borderLeft: `4px solid ${C.red}`, borderRadius: 10, padding: "12px 16px" }}>
@@ -2206,142 +2061,152 @@ export function PricingTab() {
         </div>
       )}
 
-      {showAdd && <AddParentForm notify={notify} onSaved={() => { setShowAdd(false); invalidatePricing(); }} onCancel={() => setShowAdd(false)} />}
+      {addParentForm}
 
-      <div style={{
-        display: "grid",
-        // A 300px-minimum column beside a 1fr sibling cannot fit a 390px
-        // screen, so the Link Center stacks above the list on mobile.
-        // Collapsed, it yields its whole column to the catalogue: linking is
-        // an occasional job, pricing is the everyday one, and a permanent
-        // 360px sidebar taxed the common case for the rare one.
-        gridTemplateColumns: isMobile
-          ? "minmax(0, 1fr)"
-          : linkOpen ? "minmax(300px, 360px) minmax(0, 1fr)" : "auto minmax(0, 1fr)",
-        gap: 14,
-        alignItems: "start",
-      }}>
-
-        {/* Collapsed, the Link Center becomes a vertical rail that still
-            reports how many SKUs are waiting — the unlinked count is the one
-            thing you need to see even when you're not linking. */}
-        {!linkOpen && !isMobile ? (
-          <button
-            onClick={() => setLinkOpen(true)}
-            title="Open the Link Center"
-            style={{
-              ...S.card, padding: "14px 10px", minWidth: 0, cursor: "pointer", fontFamily: "inherit",
-              display: "flex", flexDirection: "column", alignItems: "center", gap: 10,
-              border: `1px solid ${unlinked.length > 0 ? C.redBorder : C.border}`,
-              position: "sticky", top: 8,
-            }}
-          >
-            <span style={{ fontSize: 15 }}>🔗</span>
-            {unlinked.length > 0 && (
-              <span style={{
-                background: C.redLight, color: C.red, border: `1px solid ${C.redBorder}`,
-                borderRadius: 20, fontSize: 11, fontWeight: 800, padding: "2px 7px",
-              }}>{unlinked.length}</span>
-            )}
-            <span style={{
-              fontSize: 11, fontWeight: 800, color: C.gray500, letterSpacing: "0.08em",
-              writingMode: "vertical-rl", textTransform: "uppercase",
-            }}>
-              Link Center
-            </span>
-            <span style={{ fontSize: 11, color: C.gray400 }}>›</span>
-          </button>
-        ) : (
-        <div style={{
-          ...S.card, padding: 0, height: "fit-content", minWidth: 0, overflow: "hidden",
-          // Sticky is only useful next to a long scrolling list; stacked on
-          // mobile it would pin the panel over the content below it.
-          ...(isMobile ? {} : { position: "sticky", top: 8 }),
-        }}>
-          <div style={{
-            padding: "12px 16px",
-            background: "linear-gradient(135deg, #2A1854 0%, #4C1D95 100%)",
-          }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-              <h3 style={{ fontSize: 14, fontWeight: 800, color: "#fff", display: "flex", alignItems: "center", gap: 7 }}>
-                <span>🔗</span> Link Center
-              </h3>
-              <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
-                <span style={{
-                  background: showHidden ? "rgba(255,255,255,0.12)" : "rgba(248,113,113,0.22)",
-                  color: showHidden ? "#fff" : "#FCA5A5",
-                  border: `1px solid ${showHidden ? "rgba(255,255,255,0.22)" : "rgba(248,113,113,0.4)"}`,
-                  padding: "2px 9px", borderRadius: 20, fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" }}>
-                  {unlinked.length} {showHidden ? "hidden" : "unlinked"}
-                </span>
-                {!isMobile && (
-                  <button onClick={() => setLinkOpen(false)} title="Collapse — give the catalogue the full width"
-                    style={{
-                      background: "rgba(255,255,255,0.12)", border: "1px solid rgba(255,255,255,0.2)",
-                      color: "#fff", borderRadius: 6, cursor: "pointer", fontFamily: "inherit",
-                      fontSize: 12, lineHeight: 1, padding: "4px 7px",
-                    }}>‹</button>
-                )}
-              </div>
-            </div>
+      {/* Search + sort + active filter. "Best selling" is the order someone
+          making pricing decisions actually wants. */}
+      <div style={{ ...S.card, padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <input
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Search parent ID or child SKU"
+            style={{ ...S.inp, maxWidth: 300, fontSize: 12 }}
+          />
+          {search && <button onClick={() => setSearch("")} style={btn("ghost", "sm")}>Clear</button>}
+          <div style={{ flex: 1, minWidth: 4 }} />
+          <span style={{ fontSize: 11, fontWeight: 700, color: C.gray500 }}>Sort</span>
+          <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+            {[
+              { key: "units", label: "Best selling" },
+              { key: "revenue", label: "Revenue" },
+              { key: "price", label: "Price" },
+              { key: "skus", label: "Most SKUs" },
+              { key: "name", label: "A–Z" },
+            ].map(o => {
+              const on = sortBy === o.key;
+              return (
+                <button key={o.key} onClick={() => setSortBy(o.key)}
+                  style={{
+                    padding: "4px 10px", borderRadius: 20, fontSize: 11, fontWeight: 700,
+                    cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap",
+                    border: `1px solid ${on ? "#6D28D9" : C.gray200}`,
+                    background: on ? "#EDE9FE" : C.white,
+                    color: on ? "#6D28D9" : C.gray500,
+                  }}>
+                  {o.label}
+                </button>
+              );
+            })}
           </div>
-          <div style={{ padding: 14 }}>
-          <p style={{ fontSize: 11, color: C.gray400, marginBottom: 8 }}>
-            {showHidden
-              ? "SKUs you've said will never have a parent. Restore any of them here."
-              : "Pick a target parent, then one-click link — or make any SKU its own new parent."}
-          </p>
-          {(hiddenCount > 0 || showHidden) && (
-            <button onClick={() => { setShowHidden(h => !h); clearSelectedUnlinked(); }}
-              style={{ background: "none", border: "none", padding: 0, marginBottom: 10,
-                cursor: "pointer", fontFamily: "inherit", fontSize: 11.5, fontWeight: 700,
-                color: C.blue }}>
-              {showHidden ? "← Back to unlinked" : `Show ${hiddenCount} hidden SKU${hiddenCount === 1 ? "" : "s"}`}
+        </div>
+
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <span style={{ fontSize: 12, color: C.gray500 }}>
+            Showing <strong style={{ color: C.gray800 }}>{visibleParents.length}</strong> of {parents.length} group{parents.length === 1 ? "" : "s"}{search ? " matching" : ""}
+          </span>
+          {attention && (
+            <button onClick={() => setAttention(null)}
+              style={{
+                display: "inline-flex", alignItems: "center", gap: 5, cursor: "pointer",
+                border: `1px solid ${C.amberBorder}`, background: C.amberLight, color: C.amber,
+                fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 20, fontFamily: "inherit",
+              }}>
+              {{ no_history: "⏳ No price history", never_sold: "😴 Never sold", no_price: "⚠ No price set" }[attention]} ✕
             </button>
           )}
-
-          {/* Step 1 — choose target parent */}
-          <label style={S.label}>① Target Parent Group</label>
-          <select value={linkParentId} onChange={e => setLinkParentId(e.target.value)}
-            style={{ ...S.inp, marginBottom: 6, borderColor: linkParentId ? C.blue : C.gray200 }}>
-            <option value="">Select a parent to link into…</option>
-            {parents.map(p => (
-              <option key={p.item_id} value={p.item_id}>{p.item_id} ({p.sku_count || 0})</option>
-            ))}
-          </select>
-          {!linkParentId && (
-            <p style={{ fontSize: 10, color: C.amber, marginBottom: 10 }}>Choose a parent to enable one-click linking below.</p>
+          {trueUnlinkedCount > 0 && (
+            <button onClick={() => setView("link")}
+              style={{ marginLeft: "auto", background: "none", border: "none", cursor: "pointer",
+                fontFamily: "inherit", fontSize: 11.5, fontWeight: 700, color: C.red }}>
+              {trueUnlinkedCount} SKU{trueUnlinkedCount === 1 ? "" : "s"} not linked yet → SKU Link
+            </button>
           )}
+        </div>
+      </div>
 
-          {/* Step 2 — find + bulk act */}
-          <label style={{ ...S.label, marginTop: 4 }}>② Find & Link</label>
-          <input
-            value={linkQuery}
-            onChange={e => setLinkQuery(e.target.value)}
-            placeholder="Filter unlinked SKUs…"
-            style={{ ...S.inp, fontSize: 12, marginBottom: 8 }}
-          />
+      {loading ? (
+        <div style={{ textAlign: "center", padding: 48, color: C.gray400 }}>Loading pricing data...</div>
+      ) : visibleParents.length === 0 ? (
+        <div style={{ textAlign: "center", padding: 48, color: C.gray400, fontSize: 13 }}>
+          {attention
+            ? "No groups match that filter — everything here is in good shape."
+            : search ? "No results matching your search." : "No parent SKUs yet - create your first parent group."}
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {visibleParents.map(p => (
+            <ParentCard key={p.item_id} parent={p} notify={notify} onOptOut={setOptOut}
+              onLink={linkSku} dragging={dragging} unlinked={unlinked} masterItems={masterItems}
+              sales={sales[p.item_id]} />
+          ))}
+        </div>
+      )}
+    </>
+  );
 
-          <div style={{ display: "flex", gap: 6, marginBottom: 8, flexWrap: "wrap" }}>
-            <button onClick={selectVisibleUnlinked} style={btn("ghost", "sm")}>Select visible</button>
-            {selectedCount > 0 && <button onClick={clearSelectedUnlinked} style={btn("ghost", "sm")}>Clear ({selectedCount})</button>}
+  // ── 🔗 SKU Link ────────────────────────────────────────────────────────
+  // Left: the SKUs waiting for a parent. Right: the parent they go into.
+  // Same actions as the old side panel — select and bulk link, one-click
+  // suggestion, drag a SKU onto a parent, promote a SKU to its own parent,
+  // hide one that never belongs anywhere — laid out with room to work.
+  const linkView = (
+    <>
+      {addParentForm}
+      <div style={{
+        display: "grid", gap: 14, alignItems: "start",
+        gridTemplateColumns: isMobile ? "minmax(0, 1fr)" : "minmax(0, 1fr) minmax(280px, 340px)",
+      }}>
+        {/* Unlinked SKUs */}
+        <div style={{ ...S.card, padding: 0, overflow: "hidden", minWidth: 0 }}>
+          <div style={{ padding: "14px 16px", borderBottom: `1px solid ${C.gray100}`,
+            display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            <div style={{ marginRight: "auto" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ fontSize: 15, fontWeight: 800, color: C.gray800 }}>
+                  {showHidden ? "Hidden SKUs" : "Unlinked SKUs"}
+                </span>
+                <span style={{
+                  background: showHidden ? C.gray100 : (unlinked.length ? C.redLight : C.greenLight),
+                  color: showHidden ? C.gray500 : (unlinked.length ? C.red : C.green),
+                  border: `1px solid ${showHidden ? C.gray200 : (unlinked.length ? C.redBorder : C.greenBorder)}`,
+                  padding: "1px 9px", borderRadius: 20, fontSize: 11, fontWeight: 800 }}>
+                  {unlinked.length}
+                </span>
+              </div>
+              <div style={{ fontSize: 11.5, color: C.gray400, marginTop: 2 }}>
+                {showHidden
+                  ? "SKUs you've said will never have a parent. Restore any of them here."
+                  : "Tick SKUs, pick a parent on the right, link. Or use a ✨ suggestion, or drag a SKU onto a parent."}
+              </div>
+            </div>
+            {(hiddenCount > 0 || showHidden) && (
+              <button onClick={() => { setShowHidden(h => !h); clearSelectedUnlinked(); }}
+                style={{ ...btn("ghost", "sm"), fontSize: 11.5 }}>
+                {showHidden ? "← Back to unlinked" : `Show ${hiddenCount} hidden`}
+              </button>
+            )}
           </div>
 
-          <button
-            onClick={bulkLinkSelected}
-            disabled={!linkParentId || selectedCount === 0 || bulkLinking}
-            style={{ ...btn("primary", "md"), width: "100%", marginBottom: 12,
-              opacity: (!linkParentId || selectedCount === 0) ? 0.5 : 1 }}
-          >
-            {bulkLinking ? "Linking…" : `Link ${selectedCount} selected → ${linkParentId || "parent"}`}
-          </button>
+          <div style={{ padding: "10px 16px", display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap",
+            borderBottom: `1px solid ${C.gray100}`, background: C.gray50 }}>
+            <input
+              value={linkQuery}
+              onChange={e => setLinkQuery(e.target.value)}
+              placeholder="Filter SKUs…"
+              style={{ ...S.inp, fontSize: 12, maxWidth: 260, padding: "7px 11px" }}
+            />
+            <button onClick={selectVisibleUnlinked} style={btn("ghost", "sm")}>Select visible</button>
+            {selectedCount > 0 && (
+              <button onClick={clearSelectedUnlinked} style={btn("ghost", "sm")}>Clear ({selectedCount})</button>
+            )}
+          </div>
 
-          {/* Unlinked SKU rows with inline quick actions */}
-          <div style={{ border: `1px solid ${C.gray100}`, borderRadius: 10, overflow: "hidden", maxHeight: 420, overflowY: "auto" }}>
+          <div style={{ maxHeight: "62vh", overflowY: "auto" }}>
             {quickUnlinked.length === 0 ? (
-              <div style={{ fontSize: 12, color: C.gray400, padding: 14, textAlign: "center" }}>
+              <div style={{ fontSize: 13, color: C.gray400, padding: 28, textAlign: "center" }}>
                 {unlinked.length === 0
-                  ? (showHidden ? "Nothing hidden." : "🎉 Every SKU is linked.")
+                  ? (showHidden ? "Nothing hidden." : "🎉 Every SKU is linked to a parent.")
                   : "No SKUs match your filter."}
               </div>
             ) : (
@@ -2352,155 +2217,353 @@ export function PricingTab() {
                     key={s.id ?? s.sku_id}
                     draggable
                     onDragStart={e => { e.dataTransfer.setData("text/plain", s.sku_id); setDragging(s.sku_id); }}
-                    onDragEnd={() => setDragging(null)}
+                    onDragEnd={() => { setDragging(null); setDropOver(null); }}
                     style={{
-                      display: "flex", alignItems: "center", gap: 8, padding: "7px 9px",
+                      display: "flex", alignItems: "center", gap: 10, padding: "9px 16px",
                       background: selected ? C.blueLight : i % 2 ? C.gray50 : C.white,
                       borderBottom: `1px solid ${C.gray100}`, cursor: "grab",
                     }}
-                    title={`Drag onto a parent card to link · ${s.order_count || 0} order(s)`}
+                    title={`Drag onto a parent on the right to link · ${s.order_count || 0} order(s)`}
                   >
                     <input type="checkbox" checked={selected} onChange={() => toggleUnlinked(s.sku_id)} />
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontFamily: "monospace", fontSize: 12, fontWeight: 700, color: s.has_price ? C.orange : C.green, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                      <div style={{ fontFamily: "monospace", fontSize: 12.5, fontWeight: 700, color: s.has_price ? C.orange : C.green, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                         {s.sku_id}
                       </div>
-                      <div style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 1, flexWrap: "wrap" }}>
+                      <div style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 2, flexWrap: "wrap" }}>
                         {s.has_price
-                          ? <span style={{ fontSize: 10, fontFamily: "monospace", color: C.gray400 }}>{fmt(s.final_price)}</span>
-                          : <span style={{ fontSize: 8, fontWeight: 800, color: C.white, background: C.green, padding: "1px 5px", borderRadius: 10 }}>NEW</span>}
-                        {s.order_count > 0 && <span style={{ fontSize: 10, color: C.gray400 }}>📦 {s.order_count}</span>}
+                          ? <span style={{ fontSize: 10.5, fontFamily: "monospace", color: C.gray400 }}>{fmt(s.final_price)}</span>
+                          : <span style={{ fontSize: 8.5, fontWeight: 800, color: C.white, background: C.green, padding: "1px 5px", borderRadius: 10 }}>NEW</span>}
+                        {s.order_count > 0 && <span style={{ fontSize: 10.5, color: C.gray400 }}>📦 {s.order_count} order{s.order_count === 1 ? "" : "s"}</span>}
                         {!showHidden && suggestedParentFor[s.sku_id] && (
                           <button
                             onClick={(e) => { e.stopPropagation(); linkSku(s.sku_id, suggestedParentFor[s.sku_id]); }}
                             title={`One-click link to the best-matching parent, ${suggestedParentFor[s.sku_id]}`}
                             style={{
                               display: "inline-flex", alignItems: "center", gap: 3, border: "none", cursor: "pointer",
-                              background: "#EDE9FE", color: "#6D28D9", fontSize: 9.5, fontWeight: 700,
-                              padding: "1px 7px", borderRadius: 10, fontFamily: "inherit", maxWidth: 150,
+                              background: "#EDE9FE", color: "#6D28D9", fontSize: 10, fontWeight: 700,
+                              padding: "2px 8px", borderRadius: 10, fontFamily: "inherit", maxWidth: 220,
                             }}
                           >
-                            <span>✨→</span>
+                            <span>✨ link to</span>
                             <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{suggestedParentFor[s.sku_id]}</span>
                           </button>
                         )}
                       </div>
                     </div>
-                    {/* Quick actions */}
                     {!showHidden && (
                       <button
                         onClick={() => linkParentId && linkSku(s.sku_id, linkParentId)}
                         disabled={!linkParentId}
-                        title={linkParentId ? `Link to ${linkParentId}` : "Select a target parent first"}
-                        style={{ ...btn("secondary", "sm"), padding: "3px 8px", fontSize: 11, opacity: linkParentId ? 1 : 0.4 }}
-                      >🔗</button>
+                        title={linkParentId ? `Link to ${linkParentId}` : "Pick a parent on the right first"}
+                        style={{ ...btn("secondary", "sm"), padding: "4px 9px", fontSize: 11, opacity: linkParentId ? 1 : 0.4 }}
+                      >🔗 Link</button>
                     )}
                     {!showHidden && (
                       <button
                         onClick={() => setNewParentFor(s)}
                         title="Create a new parent from this SKU"
-                        style={{ ...btn("success", "sm"), padding: "3px 8px", fontSize: 11 }}
+                        style={{ ...btn("success", "sm"), padding: "4px 9px", fontSize: 11 }}
                       >+ Parent</button>
                     )}
                     {/* Some SKUs will never belong to a group. Hiding one keeps
-                        the pile meaning "still needs attention". */}
+                        the list meaning "still needs attention". */}
                     <button
                       onClick={() => setOptOut(s.sku_id, !showHidden)}
                       title={showHidden
                         ? "Put this SKU back in the unlinked list"
                         : "This SKU will never have a parent — hide it"}
-                      style={{ ...btn("ghost", "sm"), padding: "3px 8px", fontSize: 11,
+                      style={{ ...btn("ghost", "sm"), padding: "4px 9px", fontSize: 11,
                         color: showHidden ? C.green : C.gray400 }}
-                    >{showHidden ? "↩" : "🚫"}</button>
+                    >{showHidden ? "↩ Restore" : "🚫"}</button>
                   </div>
                 );
               })
             )}
           </div>
-
-          <div style={{ marginTop: 8, fontSize: 11, color: C.gray400 }}>
-            Tip: 🔗 links to the target parent · <strong>+ Parent</strong> promotes a SKU into its own group · drag a row onto any card to link.
-          </div>
-          </div>
+          {quickUnlinked.length > 200 && (
+            <div style={{ padding: "8px 16px", fontSize: 11, color: C.gray400, borderTop: `1px solid ${C.gray100}` }}>
+              Showing the first 200 of {quickUnlinked.length} — filter to narrow down.
+            </div>
+          )}
         </div>
-        )}
 
-        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          {/* Search + sort + active filter. Sorting is the fix for a catalogue
-              that only ever arrived alphabetically: "best selling" is the
-              order someone making pricing decisions actually wants. */}
-          <div style={{ ...S.card, padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-              <input
-                value={search}
-                onChange={e => setSearch(e.target.value)}
-                placeholder="Search parent ID or child SKU"
-                style={{ ...S.inp, maxWidth: 300, fontSize: 12 }}
-              />
-              {search && <button onClick={() => setSearch("")} style={btn("ghost", "sm")}>Clear</button>}
-              <div style={{ flex: 1, minWidth: 4 }} />
-              <span style={{ fontSize: 11, fontWeight: 700, color: C.gray500 }}>Sort</span>
-              <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-                {[
-                  { key: "units", label: "Best selling" },
-                  { key: "revenue", label: "Revenue" },
-                  { key: "price", label: "Price" },
-                  { key: "skus", label: "Most SKUs" },
-                  { key: "name", label: "A–Z" },
-                ].map(s => {
-                  const on = sortBy === s.key;
+        {/* Target parent */}
+        {!showHidden && (
+          <div style={{ ...S.card, padding: 0, overflow: "hidden", minWidth: 0,
+            ...(isMobile ? {} : { position: "sticky", top: 8 }) }}>
+            <div style={{ padding: "14px 16px", borderBottom: `1px solid ${C.gray100}` }}>
+              <div style={{ fontSize: 15, fontWeight: 800, color: C.gray800 }}>Link into parent</div>
+              <div style={{ fontSize: 11.5, color: C.gray400, marginTop: 2 }}>
+                Pick one — or drop a SKU straight onto it.
+              </div>
+            </div>
+            <div style={{ padding: "10px 16px" }}>
+              <input value={targetQuery} onChange={e => setTargetQuery(e.target.value)}
+                placeholder="Search parents…" style={{ ...S.inp, fontSize: 12, padding: "7px 11px" }} />
+            </div>
+            <div style={{ maxHeight: "44vh", overflowY: "auto", borderTop: `1px solid ${C.gray100}` }}>
+              {targetParents.length === 0 ? (
+                <div style={{ padding: 16, fontSize: 12, color: C.gray400 }}>
+                  {allParents.length ? "No parent matches." : "No parents yet — create one below."}
+                </div>
+              ) : targetParents.map(p => {
+                const on = linkParentId === p.item_id;
+                const over = dropOver === p.item_id;
+                return (
+                  <div key={p.item_id}
+                    onClick={() => setLinkParentId(on ? "" : p.item_id)}
+                    onDragOver={e => { if (!dragging) return; e.preventDefault(); if (dropOver !== p.item_id) setDropOver(p.item_id); }}
+                    onDragLeave={() => setDropOver(d => (d === p.item_id ? null : d))}
+                    onDrop={e => {
+                      e.preventDefault();
+                      setDropOver(null);
+                      const skuId = e.dataTransfer.getData("text/plain");
+                      if (skuId) linkSku(skuId, p.item_id);
+                    }}
+                    style={{
+                      display: "flex", alignItems: "center", gap: 8, padding: "9px 16px", cursor: "pointer",
+                      borderBottom: `1px solid ${C.gray100}`,
+                      background: over ? C.greenLight : on ? "#EDE9FE" : C.white,
+                      outline: over ? `2px dashed ${C.green}` : "none", outlineOffset: -3,
+                    }}>
+                    <span style={{ width: 16, color: "#6D28D9", fontWeight: 900 }}>{on ? "●" : ""}</span>
+                    <span style={{ flex: 1, minWidth: 0, fontFamily: "monospace", fontSize: 12.5, fontWeight: 700,
+                      color: on ? "#6D28D9" : C.gray800, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {p.item_id}
+                    </span>
+                    <span style={{ fontSize: 11, color: C.gray400, whiteSpace: "nowrap" }}>
+                      {p.sku_count || 0} SKU{(p.sku_count || 0) === 1 ? "" : "s"}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+            <div style={{ padding: 16, borderTop: `1px solid ${C.gray100}`, display: "flex", flexDirection: "column", gap: 8 }}>
+              <button
+                onClick={bulkLinkSelected}
+                disabled={!linkParentId || selectedCount === 0 || bulkLinking}
+                style={{ ...btn("primary", "md"), width: "100%",
+                  opacity: (!linkParentId || selectedCount === 0) ? 0.5 : 1 }}
+              >
+                {bulkLinking
+                  ? "Linking…"
+                  : selectedCount === 0
+                    ? "Tick SKUs to link them"
+                    : !linkParentId
+                      ? `Pick a parent for ${selectedCount} SKU${selectedCount === 1 ? "" : "s"}`
+                      : `Link ${selectedCount} SKU${selectedCount === 1 ? "" : "s"} → ${linkParentId}`}
+              </button>
+              <button onClick={() => setShowAdd(o => !o)} style={{ ...btn("ghost", "sm"), width: "100%" }}>
+                {showAdd ? "✕ Close new parent form" : "+ New parent group"}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </>
+  );
+
+  // ── 📊 Analytics ───────────────────────────────────────────────────────
+  const analyticsView = (
+    <>
+      {/* KPI tiles. The ones that describe a problem are buttons that take
+          you to where it's fixed: "38 never sold" opens SKU Pricing filtered
+          to exactly those groups; "Unlinked" opens SKU Link. */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 }}>
+        {[
+          { label: "Units Sold", sub: "delivered", value: totalUnitsSold.toLocaleString("en-IN"), color: C.green, icon: "✅" },
+          { label: "Revenue", sub: "delivered", value: fmtCompact(totalRevenue), color: "#6D28D9", icon: "💰" },
+          { label: "Parent Groups", value: allParents.length, color: C.orange, icon: "📦" },
+          { label: "Linked SKUs", value: totalSkus, color: C.blue, icon: "🔗" },
+          { label: "Never Sold", value: neverSold, color: C.amber, icon: "😴", go: () => goFix("never_sold"), cta: "show in SKU Pricing" },
+          { label: "No History", value: noHistory, color: C.gray500, icon: "⏳", go: () => goFix("no_history"), cta: "show in SKU Pricing" },
+          { label: "Unlinked SKUs", value: trueUnlinkedCount, color: C.red, icon: "⚠️", go: () => setView("link"), cta: "open SKU Link" },
+          ...(missingSkus.length ? [{ label: "Unpriced SKUs", value: missingSkus.length, color: C.red, icon: "🏷️",
+            go: () => { setShowMissing(true); setView("pricing"); }, cta: "show in SKU Pricing" }] : []),
+        ].map(t => (
+          <div
+            key={t.label}
+            onClick={t.go}
+            title={t.go ? t.cta : undefined}
+            style={{ ...S.card, padding: "12px 14px", display: "flex", alignItems: "center", gap: 10,
+              cursor: t.go ? "pointer" : "default" }}
+          >
+            <div style={{ width: 34, height: 34, borderRadius: 10, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, background: `${t.color}1A`, border: `1px solid ${t.color}33` }}>
+              {t.icon}
+            </div>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 10.5, color: C.gray500, fontWeight: 700, whiteSpace: "nowrap" }}>
+                {t.label}
+                {t.sub && <span style={{ color: C.gray300, fontWeight: 600 }}> · {t.sub}</span>}
+              </div>
+              <div style={{ fontSize: 21, fontWeight: 900, color: t.color, lineHeight: 1.1 }}>{t.value}</div>
+              {t.go && <div style={{ fontSize: 9.5, fontWeight: 700, color: C.gray300 }}>{t.cta} →</div>}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "minmax(240px, 0.85fr) minmax(360px, 1.4fr)", gap: 12 }}>
+        <div style={S.card}>
+          <p style={S.cardTitle}>Linking Status</p>
+          {linkingTotal === 0 ? (
+            <p style={{ fontSize: 12, color: C.gray400 }}>No SKUs yet.</p>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 14, paddingTop: 4 }}>
+              <div style={{ position: "relative", width: 136, height: 136 }}>
+                <AppPieChart data={linkingChartData} height={136} valueFormatter={(v) => v.toLocaleString("en-IN")} />
+                <div style={{
+                  position: "absolute", inset: 0, display: "flex", flexDirection: "column",
+                  alignItems: "center", justifyContent: "center", pointerEvents: "none",
+                }}>
+                  <span style={{ fontSize: 22, fontWeight: 900, color: C.gray900, lineHeight: 1 }}>{linkingTotal}</span>
+                  <span style={{ fontSize: 9, fontWeight: 700, color: C.gray400, textTransform: "uppercase", letterSpacing: "0.04em" }}>total SKUs</span>
+                </div>
+              </div>
+              <div style={{ width: "100%", display: "flex", flexDirection: "column", gap: 9 }}>
+                {linkingChartData.map(d => {
+                  const pct = Math.round((d.value / linkingTotal) * 100);
                   return (
-                    <button key={s.key} onClick={() => setSortBy(s.key)}
-                      style={{
-                        padding: "4px 10px", borderRadius: 20, fontSize: 11, fontWeight: 700,
-                        cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap",
-                        border: `1px solid ${on ? "#6D28D9" : C.gray200}`,
-                        background: on ? "#EDE9FE" : C.white,
-                        color: on ? "#6D28D9" : C.gray500,
-                      }}>
-                      {s.label}
-                    </button>
+                    <div key={d.id}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 11, marginBottom: 3 }}>
+                        <span style={{ display: "flex", alignItems: "center", gap: 5, color: C.gray600, fontWeight: 600 }}>
+                          <span style={{ width: 8, height: 8, borderRadius: "50%", background: d.color, flexShrink: 0 }} />
+                          {d.label}
+                        </span>
+                        <span style={{ fontFamily: "monospace", fontWeight: 700, color: C.gray800, whiteSpace: "nowrap" }}>
+                          {d.value.toLocaleString("en-IN")} <span style={{ color: C.gray400, fontWeight: 600 }}>· {pct}%</span>
+                        </span>
+                      </div>
+                      <div style={{ height: 6, borderRadius: 3, background: C.gray100, overflow: "hidden" }}>
+                        <div style={{ height: "100%", width: `${pct}%`, background: d.color, borderRadius: 3, transition: "width 0.3s ease" }} />
+                      </div>
+                    </div>
                   );
                 })}
               </div>
             </div>
+          )}
+        </div>
 
-            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-              <span style={{ fontSize: 12, color: C.gray500 }}>
-                Showing <strong style={{ color: C.gray800 }}>{visibleParents.length}</strong> of {parents.length} group{parents.length === 1 ? "" : "s"}{search ? " matching" : ""}
-              </span>
-              {attention && (
-                <button onClick={() => setAttention(null)}
-                  style={{
-                    display: "inline-flex", alignItems: "center", gap: 5, cursor: "pointer",
-                    border: `1px solid ${C.amberBorder}`, background: C.amberLight, color: C.amber,
-                    fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 20, fontFamily: "inherit",
-                  }}>
-                  {{ no_history: "⏳ No price history", never_sold: "😴 Never sold", no_price: "⚠ No price set" }[attention]} ✕
-                </button>
-              )}
-            </div>
-          </div>
-
-          {loading ? (
-            <div style={{ textAlign: "center", padding: 48, color: C.gray400 }}>Loading pricing data...</div>
-          ) : visibleParents.length === 0 ? (
-            <div style={{ textAlign: "center", padding: 48, color: C.gray400, fontSize: 13 }}>
-              {attention
-                ? "No groups match that filter — everything here is in good shape."
-                : search ? "No results matching your search." : "No parent SKUs yet - create your first parent group."}
-            </div>
+        <div style={S.card}>
+          <p style={S.cardTitle}>Best Sellers — units delivered</p>
+          {bestSellersChart.length === 0 ? (
+            <p style={{ fontSize: 12, color: C.gray400 }}>
+              No delivered orders matched to a parent yet — link SKUs to parents and sales roll up here.
+            </p>
           ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              {visibleParents.map(p => (
-                <ParentCard key={p.item_id} parent={p} notify={notify} onOptOut={setOptOut}
-                  onLink={linkSku} dragging={dragging} unlinked={unlinked} masterItems={masterItems}
-                  sales={sales[p.item_id]} />
-              ))}
-            </div>
+            <AppBarChart dataset={bestSellersChart} indexKey="label" layout="horizontal" colorful
+              series={[{ dataKey: "units_sold", label: "Units" }]}
+              height={barHeight(bestSellersChart.length)}
+              valueFormatter={(v) => `${v.toLocaleString("en-IN")} units`}
+              axisValueFormatter={(v) => v.toLocaleString("en-IN")} valueTicks={5} />
           )}
         </div>
       </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1.4fr 1fr", gap: 12 }}>
+        <div style={S.card}>
+          <p style={S.cardTitle}>Revenue by Parent — delivered</p>
+          {revenueChart.length === 0 ? (
+            <p style={{ fontSize: 12, color: C.gray400 }}>No delivered revenue to show yet.</p>
+          ) : (
+            <AppBarChart dataset={revenueChart} indexKey="label" layout="horizontal" colorful
+              series={[{ dataKey: "revenue", label: "Revenue" }]}
+              height={barHeight(revenueChart.length)}
+              valueFormatter={fmt} axisValueFormatter={fmtCompact} valueTicks={5} />
+          )}
+        </div>
+
+        <div style={S.card}>
+          <p style={S.cardTitle}>Most-Used Master Items</p>
+          {topMasterUsageChart.length === 0 ? (
+            <p style={{ fontSize: 12, color: C.gray400 }}>
+              No master item is used by a parent yet — build a recipe in any card's "Bill of Materials" panel.
+            </p>
+          ) : (
+            <AppBarChart dataset={topMasterUsageChart} indexKey="label" layout="horizontal" colorful
+              series={[{ dataKey: "used_in_count", label: "Parents" }]}
+              height={barHeight(topMasterUsageChart.length)}
+              valueFormatter={(v) => `${v} parent${v === 1 ? "" : "s"}`}
+              axisValueFormatter={(v) => (Number.isInteger(v) ? String(v) : "")} valueTicks={4} />
+          )}
+        </div>
+      </div>
+    </>
+  );
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+
+      {/* ── Studio header, with the sub-tabs as its bottom edge ── */}
+      <div style={{
+        borderRadius: 18,
+        padding: isMobile ? "18px 16px 0" : "20px 24px 0",
+        background: "linear-gradient(135deg, #140F22 0%, #2A1854 55%, #4C1D95 100%)",
+        boxShadow: "0 12px 32px -12px rgba(76,29,149,0.45)",
+        position: "relative", overflow: "hidden",
+      }}>
+        <div style={{ position: "absolute", top: -60, right: -40, width: 220, height: 220, borderRadius: "50%", background: "radial-gradient(circle, rgba(167,139,250,0.35) 0%, transparent 70%)", pointerEvents: "none" }} />
+        <div style={{ position: "relative" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 5 }}>
+            <span style={{ fontSize: 10, fontWeight: 800, letterSpacing: "0.14em", textTransform: "uppercase", color: "#C4B5FD" }}>
+              Catalog · Pricing Workspace
+            </span>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 10, fontWeight: 700, color: "#86EFAC" }}>
+              <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#4ADE80", boxShadow: "0 0 0 3px rgba(74,222,128,0.25)", animation: "pulse 2s infinite" }} />
+              LIVE
+            </span>
+          </div>
+          <h2 style={{ fontSize: 22, fontWeight: 900, color: "#fff", letterSpacing: "-0.01em" }}>SKU Pricing Studio</h2>
+          {pricingPartners.length > 0 && (
+            <div style={{
+              display: "inline-flex", alignItems: "center", gap: 6, marginTop: 8,
+              background: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.18)", color: "#fff",
+              fontSize: 11.5, fontWeight: 700, padding: "4px 10px", borderRadius: 20,
+            }}>
+              🔗 Shared pricing with {pricingPartners.join(", ")} — editing a price here updates it there too.
+            </div>
+          )}
+
+          <div role="tablist" style={{ display: "flex", gap: 4, marginTop: 16, overflowX: "auto" }}>
+            {VIEWS.map(v => {
+              const active = view === v.id;
+              return (
+                <button key={v.id} role="tab" aria-selected={active} onClick={() => setView(v.id)} title={v.hint}
+                  style={{
+                    display: "inline-flex", alignItems: "center", gap: 7, flexShrink: 0,
+                    padding: "10px 16px", border: "none", cursor: "pointer", fontFamily: "inherit",
+                    borderRadius: "10px 10px 0 0",
+                    background: active ? C.bg : "rgba(255,255,255,0.08)",
+                    color: active ? C.gray800 : "rgba(255,255,255,0.78)",
+                    fontSize: 13, fontWeight: active ? 800 : 650,
+                  }}>
+                  <span>{v.icon}</span>
+                  {v.label}
+                  {v.count != null && (
+                    <span style={{
+                      fontSize: 10.5, fontWeight: 800, padding: "1px 7px", borderRadius: 20,
+                      background: v.alert ? (active ? C.redLight : "rgba(248,113,113,0.25)") : (active ? C.gray100 : "rgba(255,255,255,0.14)"),
+                      color: v.alert ? (active ? C.red : "#FCA5A5") : (active ? C.gray500 : "rgba(255,255,255,0.8)"),
+                    }}>{v.count}</span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+
+      {/* Both Excel buttons share one hidden input, wherever they're shown. */}
+      <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" style={{ display: "none" }}
+        onChange={(e) => handleUpload(e.target.files?.[0])} />
+
+      {msgBanner}
+
+      {view === "pricing" && pricingView}
+      {view === "link" && linkView}
+      {view === "analytics" && analyticsView}
 
       {newParentFor && (
         <CreateParentFromSkuModal
