@@ -13,6 +13,7 @@ urlpatterns = [
     path("estimated-profit/upload/", views.estimated_profit_upload, name="estimated_profit_upload"),
     path("flipkart-profit/", views.flipkart_profit_summary, name="flipkart_profit_summary"),
     path("flipkart-profit/upload/", views.flipkart_profit_upload, name="flipkart_profit_upload"),
+    path("flipkart-profit/sku-payments/", views.flipkart_profit_sku_payments, name="flipkart_profit_sku_payments"),
     path("orders/", views.order_payments_list, name="order_payments_list"),
     path("orders/grouped/",          views.orders_grouped,         name="orders_grouped"),
     path("orders/status-breakdown/", views.order_status_breakdown, name="order_status_breakdown"),

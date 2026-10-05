@@ -2965,7 +2965,9 @@ def flipkart_profit_upload(request, business_id):
             else:
                 updated += 1
 
-    summary = _compute_flipkart_profit_summary(business)
+    date_from = request.GET.get("date_from", "") or None
+    date_to = request.GET.get("date_to", "") or None
+    summary = _compute_flipkart_profit_summary(business, date_from, date_to)
     summary.update({
         "total_rows":   total_rows,
         "invalid_rows": invalid_rows,
@@ -2984,6 +2986,62 @@ def flipkart_profit_summary(request, business_id):
     return Response(_compute_flipkart_profit_summary(business, date_from, date_to))
 
 
+def _flipkart_parent_link_map(business):
+    """sku_key -> linked parent's item_id (or None), for every seller_sku that
+    already has a FinalPrice row — lets the P&L surface which SKUs are using a
+    shared parent's price vs. a one-off standalone price, and which have none."""
+    return _SkuMap(
+        (fp.sku_id, fp.parent.item_id if fp.parent_id else None)
+        for fp in FinalPrice.objects.filter(business=business)
+        .select_related("parent").only("sku_id", "parent_id", "parent__item_id")
+    )
+
+
+def _flipkart_breakeven_adjustment(net_profit, delivered_count):
+    """
+    How far off breakeven a loss-making SKU is, and the minimum per-unit move
+    that would close the gap.
+
+    In this model every rupee of cost comes from delivered rows — a return
+    either carries zero cost (it's a real loss, counted at the settlement
+    value alone) or isn't counted at all (non-loss return). So the only lever
+    that can turn a loss into a profit is the per-unit economics (item price +
+    tax + packaging, or equivalently the selling price) on the SKU's delivered
+    orders: shrinking cost or growing settlement by `required_adjustment_per_unit`
+    on each of them closes exactly the `required_total_adjustment` gap. If
+    there are no delivered orders at all, the loss is purely from returns and
+    no per-unit price/cost change can fix it.
+    """
+    if net_profit >= 0:
+        return {
+            "is_loss_making": False,
+            "required_total_adjustment": 0.0,
+            "required_adjustment_per_unit": None,
+            "loss_all_from_returns": False,
+        }
+    shortfall = round(-net_profit, 2)
+    if not delivered_count:
+        return {
+            "is_loss_making": True,
+            "required_total_adjustment": shortfall,
+            "required_adjustment_per_unit": None,
+            "loss_all_from_returns": True,
+        }
+    return {
+        "is_loss_making": True,
+        "required_total_adjustment": shortfall,
+        "required_adjustment_per_unit": round(shortfall / delivered_count, 2),
+        "loss_all_from_returns": False,
+    }
+
+
+_FLIPKART_PAYMENT_COMPONENTS = [
+    "sale_amount", "total_offer_amount", "my_share", "marketplace_fee", "taxes",
+    "offer_adjustments", "protection_fund", "refund", "tcs", "tds", "gst_on_mp_fees",
+    "settlement_value",
+]
+
+
 def _compute_flipkart_profit_summary(business, date_from=None, date_to=None):
     """
     Live P&L over every saved FlipkartOrderPayment row, using the same SKU
@@ -2999,13 +3057,45 @@ def _compute_flipkart_profit_summary(business, date_from=None, date_to=None):
     the "non-loss payout excluded" rule used for Meesho Returns/RTO.
     """
     get_price, known_skus, canonical_sku = _estimated_profit_pricing_lookup(business)
+    parent_link_map = _flipkart_parent_link_map(business)
     cost_setting = _cost_setting(business)
 
-    qs = FlipkartOrderPayment.objects.filter(business=business)
+    all_rows_qs = FlipkartOrderPayment.objects.filter(business=business)
+    has_any_rows = all_rows_qs.exists()
+
+    qs = all_rows_qs
     if date_from:
         qs = qs.filter(order_date__gte=date_from)
     if date_to:
         qs = qs.filter(order_date__lte=date_to)
+
+    # Raw payment-component reconciliation (sale amount -> fees/taxes/offers ->
+    # bank settlement) — independent of SKU pricing, so it's available even
+    # for rows whose SKU has no cost set yet.
+    payment_breakdown = {
+        field: _to_num(val or Decimal("0"))
+        for field, val in qs.aggregate(**{f: Sum(f) for f in _FLIPKART_PAYMENT_COMPONENTS}).items()
+    }
+
+    # Full payment list, one row per SKU — every settlement component plus the
+    # final Bank Settlement Value, for every SKU that appears in the uploaded
+    # reports. Unlike sku_wise below, this is raw settlement reporting: it is
+    # not filtered by whether the SKU has a cost price, and isn't net of cost.
+    sku_payment_list = []
+    for row in (
+        qs.values("seller_sku")
+        .annotate(order_count=Count("id"), **{f: Sum(f) for f in _FLIPKART_PAYMENT_COMPONENTS})
+        .order_by("-settlement_value")
+    ):
+        sku_id = row["seller_sku"] or ""
+        entry = {
+            "sku_id": sku_id or "(blank SKU)",
+            "order_count": row["order_count"],
+            "parent_id": parent_link_map.get(sku_id),
+        }
+        for f in _FLIPKART_PAYMENT_COMPONENTS:
+            entry[f] = _to_num(row[f] or Decimal("0"))
+        sku_payment_list.append(entry)
 
     missing_price_skus_seen = []
     missing_price_settlement = Decimal("0")
@@ -3022,8 +3112,13 @@ def _compute_flipkart_profit_summary(business, date_from=None, date_to=None):
         for b in ("delivered", "return")
     }
     sku_agg = {}
+    fulfilment_agg = {}
+    category_agg = {}
+    monthly_agg = {}
 
-    for row in qs.only("seller_sku", "quantity", "settlement_value", "return_type", "order_date").iterator():
+    fields = ("seller_sku", "quantity", "settlement_value", "return_type", "order_date",
+              "fulfilment_type", "product_sub_category")
+    for row in qs.only(*fields).iterator():
         sku_id = row.seller_sku or ""
         settlement = row.settlement_value or Decimal("0")
         returned = bool(row.return_type) and row.return_type.strip().upper() != "NA"
@@ -3069,6 +3164,7 @@ def _compute_flipkart_profit_summary(business, date_from=None, date_to=None):
         agg = sku_agg.setdefault(display_sku, {
             "sku_id": display_sku, "order_count": 0, "delivered_count": 0, "return_count": 0,
             "gross_payout": Decimal("0"), "total_cost": Decimal("0"), "net_profit": Decimal("0"),
+            "parent_id": parent_link_map.get(sku_id),
         })
         agg["order_count"] += 1
         agg[f"{bucket}_count"] += 1
@@ -3076,11 +3172,40 @@ def _compute_flipkart_profit_summary(business, date_from=None, date_to=None):
         agg["total_cost"] += cost
         agg["net_profit"] += net
 
+        fu = fulfilment_agg.setdefault(row.fulfilment_type or "Unknown", {
+            "label": row.fulfilment_type or "Unknown", "count": 0,
+            "gross": Decimal("0"), "cost": Decimal("0"), "net": Decimal("0"),
+        })
+        fu["count"] += 1
+        fu["gross"] += gross
+        fu["cost"] += cost
+        fu["net"] += net
+
+        ca = category_agg.setdefault(row.product_sub_category or "Unknown", {
+            "label": row.product_sub_category or "Unknown", "count": 0,
+            "gross": Decimal("0"), "cost": Decimal("0"), "net": Decimal("0"),
+        })
+        ca["count"] += 1
+        ca["gross"] += gross
+        ca["cost"] += cost
+        ca["net"] += net
+
+        month_key = row.order_date.strftime("%Y-%m") if row.order_date else "Unknown"
+        mo = monthly_agg.setdefault(month_key, {
+            "month": month_key, "count": 0,
+            "gross": Decimal("0"), "cost": Decimal("0"), "net": Decimal("0"),
+        })
+        mo["count"] += 1
+        mo["gross"] += gross
+        mo["cost"] += cost
+        mo["net"] += net
+
     sku_list = list(sku_agg.values())
     for r in sku_list:
         r["gross_payout"] = _to_num(r["gross_payout"])
         r["total_cost"]   = _to_num(r["total_cost"])
         r["net_profit"]   = _to_num(r["net_profit"])
+        r.update(_flipkart_breakeven_adjustment(r["net_profit"], r["delivered_count"]))
     sku_list.sort(key=lambda r: r["net_profit"], reverse=True)
 
     status_breakdown = [
@@ -3094,10 +3219,24 @@ def _compute_flipkart_profit_summary(business, date_from=None, date_to=None):
         for b in ("delivered", "return")
     ]
 
+    def _finalize(agg_dict, key_field, sort_key=None):
+        rows = list(agg_dict.values())
+        for r in rows:
+            r["gross"] = _to_num(r["gross"])
+            r["cost"]  = _to_num(r["cost"])
+            r["net"]   = _to_num(r["net"])
+        rows.sort(key=sort_key or (lambda r: r[key_field]))
+        return rows
+
+    fulfilment_breakdown = _finalize(fulfilment_agg, "label", sort_key=lambda r: -r["count"])
+    category_breakdown   = _finalize(category_agg, "label", sort_key=lambda r: -r["count"])
+    monthly_trend        = _finalize(monthly_agg, "month", sort_key=lambda r: r["month"])
+
     missing_price_sku_list = sorted(set(missing_price_skus_seen))
 
     return {
         "saved_order_count": qs.count(),
+        "has_any_rows": has_any_rows,
         "processed_count": processed_count,
         "missing_price_count": missing_price_count,
         "missing_price_skus": missing_price_sku_list,
@@ -3109,12 +3248,103 @@ def _compute_flipkart_profit_summary(business, date_from=None, date_to=None):
             "gross_payout": _to_num(total_gross),
             "total_cost":   _to_num(total_cost),
             "net_profit":   _to_num(total_net),
+            **_flipkart_breakeven_adjustment(_to_num(total_net), bucket_totals["delivered"]["count"]),
         },
         "status_breakdown": status_breakdown,
+        "payment_breakdown": payment_breakdown,
+        "sku_payment_list": sku_payment_list,
+        "fulfilment_breakdown": fulfilment_breakdown,
+        "category_breakdown": category_breakdown,
+        "monthly_trend": monthly_trend,
         "sku_wise":        sku_list,
         "top_profit_skus": [r for r in sku_list[:10] if r["net_profit"] > 0],
         "top_loss_skus":   [r for r in sku_list[::-1][:10] if r["net_profit"] < 0],
     }
+
+
+@api_view(["GET"])
+def flipkart_profit_sku_payments(request, business_id):
+    """
+    Every individual settlement row for one Flipkart seller_sku, each with its
+    own cost/net breakdown computed the same way as _compute_flipkart_profit_summary
+    — the line-by-line detail behind that SKU's row in /flipkart-profit/'s
+    sku_wise and sku_payment_list tables.
+    Params: sku (required), date_from / date_to (YYYY-MM-DD).
+    """
+    business = get_authorized_business(request, business_id)
+    sku_param = (request.GET.get("sku") or "").strip()
+    if not sku_param:
+        return Response({"error": "sku is required"}, status=status.HTTP_400_BAD_REQUEST)
+    date_from = request.GET.get("date_from", "") or None
+    date_to = request.GET.get("date_to", "") or None
+
+    get_price, known_skus, _ = _estimated_profit_pricing_lookup(business)
+    cost_setting = _cost_setting(business)
+
+    qs = FlipkartOrderPayment.objects.filter(business=business, seller_sku__iexact=sku_param)
+    if date_from:
+        qs = qs.filter(order_date__gte=date_from)
+    if date_to:
+        qs = qs.filter(order_date__lte=date_to)
+
+    payments = []
+    for row in qs.order_by("-order_date", "-payment_date"):
+        returned = bool(row.return_type) and row.return_type.strip().upper() != "NA"
+        settlement = row.settlement_value or Decimal("0")
+        cost = Decimal("0")
+        net = settlement
+        excluded_reason = None
+
+        if returned:
+            if settlement >= 0:
+                excluded_reason = "non_loss_return"
+        elif _sku_key(row.seller_sku) not in known_skus:
+            excluded_reason = "missing_price"
+        else:
+            item_price, packaging_cost, tax_pct = get_price(row.seller_sku, row.order_date)
+            item_price = Decimal(str(item_price or 0))
+            packaging_cost = Decimal(str(packaging_cost or 0))
+            tax_pct = Decimal(str(tax_pct or 0))
+            qty_d = Decimal(str(row.quantity or 1))
+            purchase_cost = item_price * qty_d
+            tax_cost = purchase_cost * tax_pct / Decimal("100")
+            packaging = _packaging_charge(BusinessCostSetting.DELIVERED, packaging_cost, cost_setting)
+            cost = purchase_cost + tax_cost + packaging
+            net = settlement - cost
+
+        payments.append({
+            "order_id": row.order_id,
+            "order_item_id": row.order_item_id,
+            "neft_id": row.neft_id,
+            "order_date": str(row.order_date) if row.order_date else None,
+            "payment_date": str(row.payment_date) if row.payment_date else None,
+            "dispatch_date": str(row.dispatch_date) if row.dispatch_date else None,
+            "quantity": row.quantity,
+            "fulfilment_type": row.fulfilment_type,
+            "product_sub_category": row.product_sub_category,
+            "return_type": row.return_type,
+            "item_return_status": row.item_return_status,
+            "sale_amount": _to_num(row.sale_amount or Decimal("0")),
+            "total_offer_amount": _to_num(row.total_offer_amount or Decimal("0")),
+            "my_share": _to_num(row.my_share or Decimal("0")),
+            "marketplace_fee": _to_num(row.marketplace_fee or Decimal("0")),
+            "taxes": _to_num(row.taxes or Decimal("0")),
+            "offer_adjustments": _to_num(row.offer_adjustments or Decimal("0")),
+            "protection_fund": _to_num(row.protection_fund or Decimal("0")),
+            "refund": _to_num(row.refund or Decimal("0")),
+            "tcs": _to_num(row.tcs or Decimal("0")),
+            "tds": _to_num(row.tds or Decimal("0")),
+            "gst_on_mp_fees": _to_num(row.gst_on_mp_fees or Decimal("0")),
+            "settlement_value": _to_num(settlement),
+            "cost": _to_num(cost),
+            "net_profit": _to_num(net),
+            "is_return": returned,
+            "excluded_reason": excluded_reason,
+            "invoice_id": row.invoice_id,
+            "invoice_date": str(row.invoice_date) if row.invoice_date else None,
+        })
+
+    return Response({"sku": sku_param, "count": len(payments), "payments": payments})
 
 
 @api_view(["GET"])

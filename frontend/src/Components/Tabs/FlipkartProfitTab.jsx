@@ -2,6 +2,9 @@ import React, { useEffect, useMemo, useState } from 'react';
 import CircularProgress from '@mui/material/CircularProgress';
 import { AppBarChart } from '../Charts/AppBarChart';
 import { AppPieChart } from '../Charts/AppPieChart';
+import { AppLineChart } from '../Charts/AppLineChart';
+import { ParentLinkInline } from './ParentLinkInline';
+import { useDateFilter } from '../../contexts/DateFilterContext';
 import { API, C, fmt } from '../../App';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -261,6 +264,499 @@ function StatusBreakdownTable({ rows }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Generic "label / count / settlement / cost / net" breakdown (fulfilment type,
+// product category) — same column language as StatusBreakdownTable, without the
+// fixed Delivered/Returned icon set.
+// ─────────────────────────────────────────────────────────────────────────────
+function SimpleBreakdownTable({ rows, nameHeader }) {
+  if (!rows.length) return null;
+  return (
+    <div style={{ overflowX: 'auto' }}>
+      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, minWidth: 480 }}>
+        <thead>
+          <tr style={{ background: '#F8FAFC' }}>
+            {[nameHeader, 'Orders', 'Settlement', 'Cost Deducted', 'Net P&L'].map((h, i) => (
+              <th
+                key={h}
+                style={{
+                  padding: '7px 12px',
+                  textAlign: i <= 1 ? 'left' : 'right',
+                  fontSize: 10,
+                  fontWeight: 700,
+                  color: C.gray500,
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.05em',
+                  borderBottom: '2px solid #E2E8F0',
+                }}
+              >
+                {h}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r, i) => (
+            <tr key={r.label} style={{ borderBottom: i < rows.length - 1 ? '1px solid #F1F5F9' : 'none' }}>
+              <td style={{ padding: '8px 12px', fontWeight: 600, color: C.gray700 }}>{r.label}</td>
+              <td style={{ padding: '8px 12px', fontFamily: 'monospace', color: C.gray500 }}>
+                {r.count.toLocaleString()}
+              </td>
+              <td style={{ padding: '8px 12px', textAlign: 'right', fontFamily: 'monospace', color: C.gray700 }}>
+                {fmt(r.gross)}
+              </td>
+              <td
+                style={{
+                  padding: '8px 12px',
+                  textAlign: 'right',
+                  fontFamily: 'monospace',
+                  color: r.cost > 0 ? C.red : C.gray300,
+                }}
+              >
+                {r.cost ? `−${fmt(r.cost)}` : '—'}
+              </td>
+              <td
+                style={{
+                  padding: '8px 12px',
+                  textAlign: 'right',
+                  fontFamily: 'monospace',
+                  fontWeight: 800,
+                  color: r.net >= 0 ? C.green : C.red,
+                }}
+              >
+                {fmt(r.net)}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Payment reconciliation — where the "Bank Settlement Value" actually came
+// from, straight off the raw settlement-report columns (no SKU pricing
+// involved, so it's available even for SKUs that haven't been priced yet).
+// ─────────────────────────────────────────────────────────────────────────────
+const PAYMENT_COMPONENT_ROWS = [
+  { key: 'sale_amount', label: 'Sale Amount' },
+  { key: 'total_offer_amount', label: 'Total Offer Amount' },
+  { key: 'my_share', label: 'My Share' },
+  { key: 'marketplace_fee', label: 'Marketplace Fee' },
+  { key: 'taxes', label: 'Taxes' },
+  { key: 'offer_adjustments', label: 'Offer Adjustments' },
+  { key: 'protection_fund', label: 'Protection Fund' },
+  { key: 'refund', label: 'Refund' },
+];
+const PAYMENT_DEDUCTION_ROWS = [
+  { key: 'tcs', label: 'TCS' },
+  { key: 'tds', label: 'TDS' },
+  { key: 'gst_on_mp_fees', label: 'GST on MP Fees' },
+];
+
+function PaymentBreakdownTable({ breakdown }) {
+  const row = (key, label, bold) => (
+    <tr key={key} style={{ borderBottom: '1px solid #F1F5F9' }}>
+      <td style={{ padding: '7px 12px', fontWeight: bold ? 800 : 500, color: bold ? C.gray800 : C.gray600 }}>
+        {label}
+      </td>
+      <td
+        style={{
+          padding: '7px 12px',
+          textAlign: 'right',
+          fontFamily: 'monospace',
+          fontWeight: bold ? 800 : 600,
+          color: breakdown[key] < 0 ? C.red : bold ? C.gray800 : C.gray700,
+        }}
+      >
+        {fmt(breakdown[key] || 0)}
+      </td>
+    </tr>
+  );
+  return (
+    <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }}>
+      <div style={{ overflowX: 'auto', flex: '1 1 320px' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+          <tbody>
+            {PAYMENT_COMPONENT_ROWS.map((r) => row(r.key, r.label))}
+            {row('settlement_value', 'Bank Settlement Value', true)}
+          </tbody>
+        </table>
+      </div>
+      <div style={{ overflowX: 'auto', flex: '1 1 220px' }}>
+        <p style={{ ...T.label, marginBottom: 6 }}>Withheld at Source</p>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+          <tbody>{PAYMENT_DEDUCTION_ROWS.map((r) => row(r.key, r.label))}</tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Full payment list — one row per SKU, every raw settlement component plus
+// the final Bank Settlement Value. Independent of cost pricing (unlike the
+// SKU-wise P&L table below): every SKU that was ever settled shows up here,
+// including ones with no price set and ones that were only returns.
+// ─────────────────────────────────────────────────────────────────────────────
+const PAYMENT_LIST_COLUMNS = [
+  { key: 'sale_amount', label: 'Sale Amt' },
+  { key: 'total_offer_amount', label: 'Offer Amt' },
+  { key: 'my_share', label: 'My Share' },
+  { key: 'marketplace_fee', label: 'Mkt Fee' },
+  { key: 'taxes', label: 'Taxes' },
+  { key: 'offer_adjustments', label: 'Offer Adj' },
+  { key: 'protection_fund', label: 'Prot. Fund' },
+  { key: 'refund', label: 'Refund' },
+  { key: 'tcs', label: 'TCS' },
+  { key: 'tds', label: 'TDS' },
+  { key: 'gst_on_mp_fees', label: 'GST' },
+];
+
+// Individual order-item payments for one SKU, shown inline when its row in
+// SkuPaymentListTable is expanded — "all payments one by one" behind that
+// SKU's aggregate.
+function SkuPaymentDetailRows({ sku, dateQuery, colSpan }) {
+  const [state, setState] = useState({ loading: true, error: null, payments: [] });
+
+  useEffect(() => {
+    let dead = false;
+    setState({ loading: true, error: null, payments: [] });
+    const params = new URLSearchParams(dateQuery);
+    params.set('sku', sku);
+    fetch(`${API}/flipkart-profit/sku-payments/?${params}`)
+      .then((r) => r.json().then((d) => ({ ok: r.ok, d })))
+      .then(({ ok, d }) => {
+        if (dead) return;
+        setState(
+          ok ? { loading: false, error: null, payments: d.payments || [] } : { loading: false, error: d.error || 'Failed to load', payments: [] },
+        );
+      })
+      .catch(() => {
+        if (!dead) setState({ loading: false, error: 'Network error', payments: [] });
+      });
+    return () => {
+      dead = true;
+    };
+  }, [sku, dateQuery]);
+
+  const thD = {
+    padding: '5px 8px',
+    textAlign: 'right',
+    fontSize: 9.5,
+    fontWeight: 700,
+    color: C.gray400,
+    textTransform: 'uppercase',
+    letterSpacing: '0.03em',
+    borderBottom: '1.5px solid #E2E8F0',
+    whiteSpace: 'nowrap',
+  };
+  const tdD = { padding: '5px 8px', textAlign: 'right', fontFamily: 'monospace', fontSize: 11, color: C.gray600, whiteSpace: 'nowrap' };
+
+  return (
+    <tr>
+      <td colSpan={colSpan} style={{ padding: 0, background: '#FBFBFD', borderBottom: '1px solid #F1F5F9' }}>
+        <div style={{ padding: '10px 16px 16px 40px' }}>
+          {state.loading && <p style={{ fontSize: 11.5, color: C.gray400 }}>Loading payments…</p>}
+          {state.error && <p style={{ fontSize: 11.5, color: C.red }}>⚠ {state.error}</p>}
+          {!state.loading && !state.error && (
+            <div style={{ overflowX: 'auto' }}>
+              <p style={{ fontSize: 11, fontWeight: 700, color: C.gray500, marginBottom: 6 }}>
+                {state.payments.length} payment{state.payments.length === 1 ? '' : 's'} for {sku}
+              </p>
+              <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 1280 }}>
+                <thead>
+                  <tr>
+                    <th style={{ ...thD, textAlign: 'left' }}>Order ID</th>
+                    <th style={{ ...thD, textAlign: 'left' }}>Order Date</th>
+                    <th style={thD}>Qty</th>
+                    <th style={{ ...thD, textAlign: 'left' }}>Status</th>
+                    {PAYMENT_LIST_COLUMNS.map((c) => (
+                      <th key={c.key} style={thD}>{c.label}</th>
+                    ))}
+                    <th style={{ ...thD, color: C.gray700 }}>Settlement</th>
+                    <th style={{ ...thD, color: C.gray700 }}>Net P&L</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {state.payments.length === 0 && (
+                    <tr>
+                      <td colSpan={17} style={{ padding: 16, textAlign: 'center', color: C.gray400, fontSize: 11.5 }}>
+                        No individual payments found for this period.
+                      </td>
+                    </tr>
+                  )}
+                  {state.payments.map((p) => (
+                    <tr key={p.order_item_id} style={{ borderBottom: '1px solid #F1F5F9' }}>
+                      <td style={{ padding: '5px 8px', fontFamily: 'monospace', fontSize: 10.5, color: C.gray600, whiteSpace: 'nowrap' }}>
+                        {p.order_id}
+                      </td>
+                      <td style={{ padding: '5px 8px', fontSize: 10.5, color: C.gray500, whiteSpace: 'nowrap' }}>
+                        {p.order_date || '—'}
+                      </td>
+                      <td style={tdD}>{p.quantity}</td>
+                      <td style={{ padding: '5px 8px', fontSize: 10.5, whiteSpace: 'nowrap' }}>
+                        {p.is_return ? (
+                          <span style={{ color: C.red }}>↩ {p.return_type}</span>
+                        ) : (
+                          <span style={{ color: C.green }}>✅ Delivered</span>
+                        )}
+                        {p.excluded_reason && (
+                          <span style={{ marginLeft: 4, color: C.gray400, fontStyle: 'italic' }}>
+                            ({p.excluded_reason === 'missing_price' ? 'no price set' : 'not a loss'})
+                          </span>
+                        )}
+                      </td>
+                      {PAYMENT_LIST_COLUMNS.map((c) => (
+                        <td key={c.key} style={{ ...tdD, color: p[c.key] < 0 ? C.red : C.gray600 }}>
+                          {fmt(p[c.key])}
+                        </td>
+                      ))}
+                      <td style={{ ...tdD, fontWeight: 700, color: p.settlement_value >= 0 ? C.green : C.red }}>
+                        {fmt(p.settlement_value)}
+                      </td>
+                      <td style={{ ...tdD, fontWeight: 800, color: p.net_profit >= 0 ? C.green : C.red }}>
+                        {fmt(p.net_profit)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </td>
+    </tr>
+  );
+}
+
+function SkuPaymentListTable({ rows, onRelinked, dateQuery }) {
+  const [expanded, setExpanded] = useState({});
+  const [search, setSearch] = useState('');
+  const [sortKey, setSortKey] = useState('settlement_value');
+  const [sortDir, setSortDir] = useState('desc');
+  const [page, setPage] = useState(1);
+
+  const filtered = useMemo(() => {
+    const f = rows.filter((r) => !search || r.sku_id.toLowerCase().includes(search.toLowerCase()));
+    const dir = sortDir === 'asc' ? 1 : -1;
+    return [...f].sort((a, b) => (a[sortKey] - b[sortKey]) * dir);
+  }, [rows, search, sortKey, sortDir]);
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const pageSafe = Math.min(page, totalPages);
+  const visible = filtered.slice((pageSafe - 1) * PAGE_SIZE, pageSafe * PAGE_SIZE);
+
+  const toggleSort = (key) => {
+    if (key === sortKey) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+    else {
+      setSortKey(key);
+      setSortDir('desc');
+    }
+    setPage(1);
+  };
+
+  const thR = {
+    padding: '8px 10px',
+    textAlign: 'right',
+    fontSize: 10,
+    fontWeight: 700,
+    color: C.gray500,
+    textTransform: 'uppercase',
+    letterSpacing: '0.04em',
+    borderBottom: '2px solid #E2E8F0',
+    whiteSpace: 'nowrap',
+  };
+  const tdR = { padding: '8px 10px', textAlign: 'right', fontFamily: 'monospace', color: C.gray600, whiteSpace: 'nowrap' };
+
+  return (
+    <div>
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          marginBottom: 10,
+          flexWrap: 'wrap',
+          gap: 10,
+        }}
+      >
+        <p style={{ fontSize: 12, fontWeight: 700, color: C.gray600 }}>
+          {filtered.length.toLocaleString()} SKUs{' '}
+          <span style={{ fontWeight: 500, color: C.gray400 }}>· click a row to see every individual payment</span>
+        </p>
+        <input
+          value={search}
+          onChange={(e) => {
+            setSearch(e.target.value);
+            setPage(1);
+          }}
+          placeholder="Search SKU…"
+          style={{
+            padding: '7px 12px',
+            borderRadius: 8,
+            border: '1.5px solid #E2E8F0',
+            fontSize: 12,
+            width: 220,
+            fontFamily: 'inherit',
+          }}
+        />
+      </div>
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, minWidth: 1180 }}>
+          <thead>
+            <tr style={{ background: '#F8FAFC' }}>
+              <th
+                style={{
+                  padding: '8px 10px',
+                  textAlign: 'left',
+                  fontSize: 10,
+                  fontWeight: 700,
+                  color: C.gray500,
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.04em',
+                  borderBottom: '2px solid #E2E8F0',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                SKU ID
+              </th>
+              <th style={{ padding: '8px 10px', textAlign: 'left', fontSize: 10, fontWeight: 700, color: C.gray500,
+                           textTransform: 'uppercase', letterSpacing: '0.04em', borderBottom: '2px solid #E2E8F0' }}>
+                Pricing
+              </th>
+              <th
+                style={{ ...thR, cursor: 'pointer', userSelect: 'none' }}
+                onClick={() => toggleSort('order_count')}
+              >
+                Orders{sortKey === 'order_count' ? (sortDir === 'asc' ? ' ▲' : ' ▼') : ''}
+              </th>
+              {PAYMENT_LIST_COLUMNS.map((c) => (
+                <th
+                  key={c.key}
+                  style={{ ...thR, cursor: c.key === 'sale_amount' ? 'pointer' : 'default', userSelect: 'none' }}
+                  onClick={c.key === 'sale_amount' ? () => toggleSort('sale_amount') : undefined}
+                >
+                  {c.label}
+                  {sortKey === c.key ? (sortDir === 'asc' ? ' ▲' : ' ▼') : ''}
+                </th>
+              ))}
+              <th
+                style={{ ...thR, cursor: 'pointer', userSelect: 'none', color: C.gray700 }}
+                onClick={() => toggleSort('settlement_value')}
+              >
+                Settlement Value{sortKey === 'settlement_value' ? (sortDir === 'asc' ? ' ▲' : ' ▼') : ''}
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {visible.length === 0 && (
+              <tr>
+                <td colSpan={15} style={{ padding: 30, textAlign: 'center', color: C.gray400, fontSize: 12 }}>
+                  No SKUs match your search.
+                </td>
+              </tr>
+            )}
+            {visible.map((r, i) => (
+              <React.Fragment key={r.sku_id}>
+                <tr
+                  onClick={() => setExpanded((e) => ({ ...e, [r.sku_id]: !e[r.sku_id] }))}
+                  style={{
+                    background: expanded[r.sku_id] ? '#FFF8F0' : i % 2 === 0 ? '#fff' : '#FAFBFC',
+                    borderBottom: expanded[r.sku_id] ? 'none' : '1px solid #F1F5F9',
+                    cursor: 'pointer',
+                  }}
+                >
+                  <td style={{ padding: '8px 10px' }}>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                      <span style={{ fontSize: 10, color: C.gray400, width: 10, display: 'inline-block' }}>
+                        {expanded[r.sku_id] ? '▾' : '▸'}
+                      </span>
+                      <span
+                        style={{
+                          fontFamily: 'monospace',
+                          fontSize: 11,
+                          color: C.orange,
+                          fontWeight: 600,
+                          background: C.orangeLight,
+                          padding: '2px 6px',
+                          borderRadius: 4,
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {r.sku_id}
+                      </span>
+                    </span>
+                  </td>
+                  <td style={{ padding: '8px 10px' }} onClick={(e) => e.stopPropagation()}>
+                    {r.parent_id ? (
+                      <span style={{ fontSize: 10.5, color: C.gray500, whiteSpace: 'nowrap' }}>
+                        ↳ <span style={{ fontWeight: 700, color: C.gray700 }}>{r.parent_id}</span>
+                      </span>
+                    ) : (
+                      <span style={{ fontSize: 10.5, color: C.gray400, fontStyle: 'italic', whiteSpace: 'nowrap' }}>
+                        standalone
+                      </span>
+                    )}
+                    <div style={{ marginTop: 2 }}>
+                      <ParentLinkInline sku={r.sku_id} currentParent={r.parent_id} onDone={() => onRelinked?.()} />
+                    </div>
+                  </td>
+                  <td style={tdR}>{r.order_count}</td>
+                  {PAYMENT_LIST_COLUMNS.map((c) => (
+                    <td key={c.key} style={{ ...tdR, color: r[c.key] < 0 ? C.red : C.gray600 }}>
+                      {fmt(r[c.key])}
+                    </td>
+                  ))}
+                  <td style={{ ...tdR, fontWeight: 800, color: r.settlement_value >= 0 ? C.green : C.red }}>
+                    {fmt(r.settlement_value)}
+                  </td>
+                </tr>
+                {expanded[r.sku_id] && (
+                  <SkuPaymentDetailRows sku={r.sku_id} dateQuery={dateQuery} colSpan={15} />
+                )}
+              </React.Fragment>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {totalPages > 1 && (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            marginTop: 12,
+            padding: '10px 0 0',
+            borderTop: '1px solid #F1F5F9',
+          }}
+        >
+          <span style={{ fontSize: 12, color: C.gray400 }}>
+            {Math.min((pageSafe - 1) * PAGE_SIZE + 1, filtered.length)}–
+            {Math.min(pageSafe * PAGE_SIZE, filtered.length)} of {filtered.length}
+          </span>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <button onClick={() => setPage((p) => p - 1)} disabled={pageSafe === 1} style={pagerBtn(pageSafe === 1)}>
+              ← Prev
+            </button>
+            <span style={{ fontSize: 12, color: C.gray500, alignSelf: 'center', padding: '0 4px' }}>
+              Page {pageSafe} / {totalPages}
+            </span>
+            <button
+              onClick={() => setPage((p) => p + 1)}
+              disabled={pageSafe >= totalPages}
+              style={pagerBtn(pageSafe >= totalPages)}
+            >
+              Next →
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // SKU-wise table
 // ─────────────────────────────────────────────────────────────────────────────
 const SORT_OPTIONS = [
@@ -271,7 +767,7 @@ const SORT_OPTIONS = [
 ];
 const PAGE_SIZE = 25;
 
-function SkuProfitTable({ rows }) {
+function SkuProfitTable({ rows, onRelinked }) {
   const [search, setSearch] = useState('');
   const [sortKey, setSortKey] = useState('net_profit');
   const [sortDir, setSortDir] = useState('desc');
@@ -343,7 +839,7 @@ function SkuProfitTable({ rows }) {
         />
       </div>
       <div style={{ overflowX: 'auto' }}>
-        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, minWidth: 720 }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, minWidth: 980 }}>
           <thead>
             <tr style={{ background: '#F8FAFC' }}>
               <th
@@ -360,6 +856,10 @@ function SkuProfitTable({ rows }) {
               >
                 SKU ID
               </th>
+              <th style={{ padding: '8px 10px', textAlign: 'left', fontSize: 10, fontWeight: 700, color: C.gray500,
+                           textTransform: 'uppercase', letterSpacing: '0.04em', borderBottom: '2px solid #E2E8F0' }}>
+                Pricing
+              </th>
               <th style={{ ...thR, textAlign: 'center', cursor: 'default' }}>Outcomes</th>
               {SORT_OPTIONS.map((opt) => (
                 <th key={opt.key} style={thR} onClick={() => toggleSort(opt.key)}>
@@ -367,12 +867,13 @@ function SkuProfitTable({ rows }) {
                   {sortKey === opt.key ? (sortDir === 'asc' ? ' ▲' : ' ▼') : ''}
                 </th>
               ))}
+              <th style={{ ...thR, cursor: 'default', textAlign: 'left' }}>To Break Even</th>
             </tr>
           </thead>
           <tbody>
             {visible.length === 0 && (
               <tr>
-                <td colSpan={6} style={{ padding: 30, textAlign: 'center', color: C.gray400, fontSize: 12 }}>
+                <td colSpan={8} style={{ padding: 30, textAlign: 'center', color: C.gray400, fontSize: 12 }}>
                   No SKUs match your search.
                 </td>
               </tr>
@@ -396,6 +897,22 @@ function SkuProfitTable({ rows }) {
                   >
                     {r.sku_id}
                   </span>
+                </td>
+                <td style={{ padding: '8px 10px' }}>
+                  {r.parent_id ? (
+                    <span style={{ fontSize: 10.5, color: C.gray500 }}>
+                      ↳ <span style={{ fontWeight: 700, color: C.gray700 }}>{r.parent_id}</span>
+                    </span>
+                  ) : (
+                    <span style={{ fontSize: 10.5, color: C.gray400, fontStyle: 'italic' }}>standalone price</span>
+                  )}
+                  <div style={{ marginTop: 2 }}>
+                    <ParentLinkInline
+                      sku={r.sku_id}
+                      currentParent={r.parent_id}
+                      onDone={() => onRelinked?.()}
+                    />
+                  </div>
                 </td>
                 <td style={{ padding: '8px 10px', textAlign: 'center' }}>
                   <div style={{ display: 'flex', gap: 4, justifyContent: 'center', flexWrap: 'wrap' }}>
@@ -422,6 +939,22 @@ function SkuProfitTable({ rows }) {
                 </td>
                 <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'monospace', color: C.red }}>
                   {r.total_cost ? fmt(r.total_cost) : '—'}
+                </td>
+                <td style={{ padding: '8px 10px', textAlign: 'left' }}>
+                  {!r.is_loss_making ? (
+                    <span style={{ fontSize: 11, color: C.green, fontWeight: 700 }}>✓ already profitable</span>
+                  ) : r.loss_all_from_returns ? (
+                    <span style={{ fontSize: 11, color: C.red }}>
+                      no delivered orders — loss is entirely returns, not fixable by price/cost
+                    </span>
+                  ) : (
+                    <span style={{ fontSize: 11, color: C.red }}>
+                      cut cost (or raise price) by{' '}
+                      <strong style={{ fontFamily: 'monospace' }}>{fmt(r.required_adjustment_per_unit)}</strong>
+                      /unit across {r.delivered_count} delivered order{r.delivered_count === 1 ? '' : 's'}
+                      <span style={{ color: C.gray400 }}> ({fmt(r.required_total_adjustment)} total)</span>
+                    </span>
+                  )}
                 </td>
               </tr>
             ))}
@@ -550,25 +1083,35 @@ function MissingPriceSkuRow({ sku, onSaved }) {
 
   if (!open) {
     return (
-      <button
-        onClick={() => setOpen(true)}
+      <div
         style={{
           display: 'inline-flex',
           alignItems: 'center',
-          gap: 5,
-          fontFamily: 'monospace',
-          fontSize: 11,
-          color: C.red,
+          gap: 6,
           background: '#fff',
           border: `1px solid ${C.redBorder}`,
-          padding: '2px 7px 2px 7px',
+          padding: '2px 7px',
           borderRadius: 6,
-          cursor: 'pointer',
-          fontWeight: 600,
         }}
       >
-        {sku} <span style={{ color: C.orange, fontWeight: 800 }}>＋ Add Price</span>
-      </button>
+        <span style={{ fontFamily: 'monospace', fontSize: 11, color: C.red, fontWeight: 600 }}>{sku}</span>
+        <ParentLinkInline sku={sku} currentParent={null} onDone={() => onSaved()} />
+        <button
+          onClick={() => setOpen(true)}
+          style={{
+            fontFamily: 'monospace',
+            fontSize: 11,
+            color: C.orange,
+            background: 'transparent',
+            border: 'none',
+            cursor: 'pointer',
+            fontWeight: 800,
+            padding: 0,
+          }}
+        >
+          ＋ Add Price
+        </button>
+      </div>
     );
   }
 
@@ -585,6 +1128,10 @@ function MissingPriceSkuRow({ sku, onSaved }) {
       }}
     >
       <span style={{ fontFamily: 'monospace', fontSize: 11, fontWeight: 700, color: C.gray700 }}>{sku}</span>
+      <p style={{ fontSize: 10.5, color: C.gray400, margin: 0 }}>
+        Setting a price here makes it standalone — use "link to parent" above instead if this SKU shares pricing
+        with an existing product.
+      </p>
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
         <input
           type="number"
@@ -650,19 +1197,27 @@ function MissingPriceSkuRow({ sku, onSaved }) {
 // Main tab
 // ─────────────────────────────────────────────────────────────────────────────
 export function FlipkartProfitTab() {
+  const { range, label: periodLabel } = useDateFilter();
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState(null);
   const [result, setResult] = useState(null);
   const [fileName, setFileName] = useState('Saved Data');
 
+  const dateQuery = () => {
+    const params = new URLSearchParams();
+    if (range.date_from) params.set('date_from', range.date_from);
+    if (range.date_to) params.set('date_to', range.date_to);
+    return params.toString();
+  };
+
   const loadSaved = async () => {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`${API}/flipkart-profit/`);
+      const res = await fetch(`${API}/flipkart-profit/?${dateQuery()}`);
       const data = await res.json();
-      if (res.ok && data.saved_order_count > 0) {
+      if (res.ok) {
         setResult(data);
         setFileName('Saved Data');
       }
@@ -673,12 +1228,13 @@ export function FlipkartProfitTab() {
   };
   useEffect(() => {
     loadSaved();
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [range.date_from, range.date_to]);
 
   const refresh = async () => {
     setRefreshing(true);
     try {
-      const res = await fetch(`${API}/flipkart-profit/`);
+      const res = await fetch(`${API}/flipkart-profit/?${dateQuery()}`);
       const data = await res.json();
       if (res.ok) setResult((prev) => (prev ? { ...prev, ...data } : data));
     } catch {
@@ -695,7 +1251,7 @@ export function FlipkartProfitTab() {
     const fd = new FormData();
     fd.append('file', file);
     try {
-      const res = await fetch(`${API}/flipkart-profit/upload/`, { method: 'POST', body: fd });
+      const res = await fetch(`${API}/flipkart-profit/upload/?${dateQuery()}`, { method: 'POST', body: fd });
       const data = await res.json();
       if (!res.ok) {
         setError(data.error || 'Upload failed');
@@ -738,11 +1294,12 @@ export function FlipkartProfitTab() {
           Upload a Flipkart Settlement Report (.xlsx) and each order item's Bank Settlement Value is matched to its
           Seller SKU's cost (same SKU pricing used for Meesho) to compute profit or loss. A returned item deducts no
           cost, and only counts if the settlement itself was actually negative. Rows are saved — re-uploading the same
-          or an updated report refreshes existing rows instead of duplicating them.
+          or an updated report refreshes existing rows instead of duplicating them. Scoped to <strong>{periodLabel}</strong> —
+          change the period at the top of the page to see a different date range (e.g. 1–30 Sep, 1–31 Oct).
         </p>
       </div>
 
-      <UploadZone loading={loading} error={error} onFile={handleFile} hasResult={!!result} />
+      <UploadZone loading={loading} error={error} onFile={handleFile} hasResult={!!result?.has_any_rows} />
 
       {loading && (
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '50px 0', gap: 12 }}>
@@ -751,7 +1308,7 @@ export function FlipkartProfitTab() {
         </div>
       )}
 
-      {!loading && result && (
+      {!loading && result?.saved_order_count > 0 && (
         <>
           <div
             style={{
@@ -835,6 +1392,25 @@ export function FlipkartProfitTab() {
                   </span>
                 )}
               </div>
+              {totals.is_loss_making && (
+                <p style={{ fontSize: 12, color: C.gray600, marginTop: 12, maxWidth: 520, lineHeight: 1.5 }}>
+                  {totals.loss_all_from_returns ? (
+                    <>
+                      This loss has <strong>no delivered orders</strong> behind it — every scored order item was a
+                      return, so there's no per-unit price or cost to adjust. The fix here is fewer/cheaper returns,
+                      not pricing.
+                    </>
+                  ) : (
+                    <>
+                      To break even, cut cost (or raise selling price) by{' '}
+                      <strong style={{ color: C.red }}>{fmt(totals.required_adjustment_per_unit)}</strong> per
+                      delivered unit, averaged across every delivered order this period — that closes the{' '}
+                      <strong style={{ color: C.red }}>{fmt(totals.required_total_adjustment)}</strong> gap. See the
+                      "To Break Even" column in the SKU-wise table below for which SKUs need it most.
+                    </>
+                  )}
+                </p>
+              )}
             </div>
             <div style={{ display: 'flex', gap: 28, flexWrap: 'wrap' }}>
               {[
@@ -966,15 +1542,63 @@ export function FlipkartProfitTab() {
             </SectionCard>
           )}
 
+          {result.monthly_trend?.length > 1 && (
+            <SectionCard title="Net P&L Trend" subtitle="Month-wise settlement vs. net profit, across priced order items">
+              <AppLineChart
+                dataset={result.monthly_trend}
+                indexKey="month"
+                series={[
+                  { dataKey: 'gross', label: 'Settlement', color: C.blue },
+                  { dataKey: 'net', label: 'Net P&L', color: C.green },
+                ]}
+                valueFormatter={fmt}
+                height={240}
+              />
+            </SectionCard>
+          )}
+
+          {result.payment_breakdown && (
+            <SectionCard
+              title="Payment Reconciliation"
+              subtitle="How the Bank Settlement Value was made up, straight from the settlement report — independent of SKU pricing"
+            >
+              <PaymentBreakdownTable breakdown={result.payment_breakdown} />
+            </SectionCard>
+          )}
+
+          {result.sku_payment_list?.length > 0 && (
+            <SectionCard
+              title="Full Payment List — SKU-wise"
+              subtitle="Every SKU that was settled, with the full breakdown of how its amount was settled and the final Bank Settlement Value — includes SKUs with no price set yet and return-only SKUs"
+            >
+              <SkuPaymentListTable rows={result.sku_payment_list} onRelinked={refresh} dateQuery={dateQuery()} />
+            </SectionCard>
+          )}
+
+          <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap' }}>
+            {result.fulfilment_breakdown?.length > 0 && (
+              <SectionCard title="P&L by Fulfilment Type" style={{ flex: '1 1 380px' }}>
+                <SimpleBreakdownTable rows={result.fulfilment_breakdown} nameHeader="Fulfilment Type" />
+              </SectionCard>
+            )}
+            {result.category_breakdown?.length > 0 && (
+              <SectionCard title="P&L by Product Category" style={{ flex: '1 1 380px' }}>
+                <SimpleBreakdownTable rows={result.category_breakdown} nameHeader="Category" />
+              </SectionCard>
+            )}
+          </div>
+
           <SectionCard title="SKU-wise Profit / Loss">
-            <SkuProfitTable rows={result.sku_wise} />
+            <SkuProfitTable rows={result.sku_wise} onRelinked={refresh} />
           </SectionCard>
         </>
       )}
 
-      {!loading && !result && !error && (
+      {!loading && !error && result?.saved_order_count === 0 && (
         <p style={{ fontSize: 12, color: C.gray400, textAlign: 'center', padding: '20px 0' }}>
-          Upload a Flipkart Settlement Report to see the profit / loss breakdown.
+          {result.has_any_rows
+            ? `No Flipkart order items fall within ${periodLabel} — try a different period above.`
+            : `Upload a Flipkart Settlement Report to see the profit / loss breakdown for ${periodLabel}.`}
         </p>
       )}
     </div>
