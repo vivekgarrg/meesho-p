@@ -6,6 +6,7 @@ import { useSearchParams } from "react-router-dom";
 import { AppBarChart } from "../Charts/AppBarChart";
 import { AppPieChart } from "../Charts/AppPieChart";
 import { ImageUrlPreview, ImageUrlThumb } from "../shared/ImageUrlPreview";
+import { UPLOADABLE_TYPES, rejectReason, uploadListingImages } from "../../lib/listingImageUpload";
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 const calcFinal = (ip, tax, pkg) => {
@@ -378,6 +379,45 @@ function ParentCard({ parent, notify, onLink, dragging, unlinked = [], onOptOut,
   );
   const photos = photosData?.results ?? null;
   const photoCount = photos ? photos.length : (parent.listing_image_count ?? 0);
+
+  // "Upload photos" straight into this parent: they land in a folder named
+  // after the parent SKU (<parent>/<parent>-<number>.jpg) and are linked to
+  // it — no cropper detour for photos that are already ready. Only offered
+  // when the server says storage is set up; otherwise the panel says why.
+  const { data: storageConfig } = useSWR(panel === "photos" ? `${API}/listing-images/config/` : null);
+  const photoInputRef = useRef(null);
+  const [photoUpload, setPhotoUpload] = useState(null); // { active, done, total } | { result }
+
+  // Closing the tab mid-upload kills it; the browser's own prompt is the only
+  // warning that survives a close.
+  useEffect(() => {
+    if (!photoUpload?.active) return undefined;
+    const warn = (e) => { e.preventDefault(); e.returnValue = ""; };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [photoUpload?.active]);
+
+  const uploadPhotos = async (fileList) => {
+    const chosen = Array.from(fileList || []);
+    if (photoInputRef.current) photoInputRef.current.value = "";
+    if (!chosen.length) return;
+    const rejected = chosen.map(rejectReason).filter(Boolean);
+    const usable = chosen.filter((f) => !rejectReason(f));
+    if (!usable.length) {
+      setPhotoUpload({ result: { ok: false, error: rejected.join("; ") } });
+      return;
+    }
+    setPhotoUpload({ active: true, done: 0, total: usable.length });
+    const result = await uploadListingImages({
+      files: usable.map((f) => ({ blob: f, mime: f.type })),
+      parentId: parent.item_id,
+      productName: parent.item_id,     // folder + file names follow the parent SKU
+      onProgress: ({ done, total }) => setPhotoUpload((st) => ({ ...st, done, total })),
+    });
+    setPhotoUpload({ result: { ...result, rejected } });
+    globalMutate(`${API}/listing-images/?parent_id=${idPath}`);
+    invalidatePricing();   // photo count, and the parent's picture if it had none
+  };
 
   const children = childrenData?.results ?? null;
   const histories = historyData ? (Array.isArray(historyData) ? historyData : historyData.results || []) : null;
@@ -1129,24 +1169,80 @@ function ParentCard({ parent, notify, onLink, dragging, unlinked = [], onOptOut,
               })()}
               {panel === "photos" && (
                 <ActionPanel accent={C.blue} icon="📷" title="Photos" right={
-                  photos?.length ? (
-                    <button
-                      onClick={() => {
-                        navigator.clipboard?.writeText(photos.map((ph) => ph.public_url).join("\n"))
-                          .then(() => notify("ok", `Copied ${photos.length} link(s) — paste them into Bulk Listing.`))
-                          .catch(() => notify("err", "Could not copy — your browser blocked clipboard access."));
-                      }}
-                      style={{ ...btn("ghost", "sm"), fontSize: 11 }}>
-                      Copy all links
-                    </button>
-                  ) : null
+                  <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                    {photos?.length ? (
+                      <button
+                        onClick={() => {
+                          navigator.clipboard?.writeText(photos.map((ph) => ph.public_url).join("\n"))
+                            .then(() => notify("ok", `Copied ${photos.length} link(s) — paste them into Bulk Listing.`))
+                            .catch(() => notify("err", "Could not copy — your browser blocked clipboard access."));
+                        }}
+                        style={{ ...btn("ghost", "sm"), fontSize: 11 }}>
+                        Copy all links
+                      </button>
+                    ) : null}
+                    {storageConfig?.enabled && (
+                      <button onClick={() => photoInputRef.current?.click()} disabled={!!photoUpload?.active}
+                        title={`Uploads into a folder named ${parent.item_id}`}
+                        style={{ ...btn("primary", "sm"), fontSize: 11, opacity: photoUpload?.active ? 0.6 : 1 }}>
+                        {photoUpload?.active ? "Uploading…" : "⬆ Upload photos"}
+                      </button>
+                    )}
+                    <input ref={photoInputRef} type="file" multiple accept={UPLOADABLE_TYPES.join(",")}
+                      style={{ display: "none" }} onChange={(e) => uploadPhotos(e.target.files)} />
+                  </div>
                 }>
+                  {storageConfig && !storageConfig.enabled && (
+                    <p style={{ fontSize: 11.5, color: storageConfig.problem ? C.red : C.gray500, marginBottom: 10 }}>
+                      {storageConfig.problem
+                        ? `Photo upload is set up but can't work: ${storageConfig.problem}`
+                        : "Photo upload isn't set up on this server yet, so photos can't be added here."}
+                    </p>
+                  )}
+                  {photoUpload?.active && (
+                    <div style={{ marginBottom: 12 }}>
+                      <div style={{ fontSize: 12, fontWeight: 700, color: C.gray700 }}>
+                        Uploading {photoUpload.done} of {photoUpload.total} into <code>{parent.item_id}</code>…
+                      </div>
+                      <div style={{ height: 5, background: C.gray100, borderRadius: 99, marginTop: 6, overflow: "hidden" }}>
+                        <div style={{ height: "100%", background: C.blue, borderRadius: 99, transition: "width 0.3s",
+                          width: `${Math.max(6, photoUpload.total ? (photoUpload.done / photoUpload.total) * 100 : 0)}%` }} />
+                      </div>
+                    </div>
+                  )}
+                  {photoUpload?.result && (() => {
+                    const r = photoUpload.result;
+                    const good = r.ok && !r.failed;
+                    return (
+                      <div style={{ marginBottom: 12, padding: "8px 11px", borderRadius: 8, fontSize: 12, lineHeight: 1.6,
+                        background: good ? C.greenLight : C.redLight, color: good ? C.green : C.red,
+                        border: `1px solid ${good ? C.greenBorder : C.redBorder}`,
+                        display: "flex", gap: 10, alignItems: "flex-start" }}>
+                        <div style={{ flex: 1 }}>
+                          {!r.ok ? (
+                            <>Nothing uploaded — {r.error}</>
+                          ) : (
+                            <>
+                              <b>{r.linked} photo{r.linked === 1 ? "" : "s"}</b> in folder <code>{r.folder}</code>
+                              {r.alreadyStored > 0 && <> ({r.alreadyStored} already stored, reused)</>}
+                              {r.failed > 0 && <> · <b>{r.failed} failed</b>{r.reason && <> — {r.reason}</>}</>}
+                            </>
+                          )}
+                          {r.rejected?.length > 0 && (
+                            <div style={{ color: C.amber }}>Skipped: {r.rejected.join("; ")}</div>
+                          )}
+                        </div>
+                        <button onClick={() => setPhotoUpload(null)} title="Dismiss"
+                          style={{ background: "none", border: "none", cursor: "pointer", color: "inherit", fontSize: 14 }}>✕</button>
+                      </div>
+                    );
+                  })()}
                   {photosLoading && photos === null ? (
                     <p style={{ fontSize: 12, color: C.gray400 }}>Loading photos…</p>
                   ) : !photos?.length ? (
                     <p style={{ fontSize: 12, color: C.gray400, fontStyle: "italic" }}>
-                      No photos yet. Crop this product's photos in the Quadrant Cropper and choose
-                      this parent when you download — they upload and appear here.
+                      No photos yet. {storageConfig?.enabled ? "Use ⬆ Upload photos above, or crop" : "Crop"} this
+                      product's photos in the Quadrant Cropper and choose this parent when you download.
                     </p>
                   ) : (
                     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(96px, 1fr))", gap: 10 }}>
@@ -1195,6 +1291,14 @@ function ParentCard({ parent, notify, onLink, dragging, unlinked = [], onOptOut,
                       );
                     })}
                   </div>
+                  {/* The rule the profit report follows, said where the price is
+                      changed — so raising a price never looks like it rewrote
+                      last month's profit. */}
+                  <p style={{ fontSize: 11, color: C.gray500, marginTop: 8, lineHeight: 1.6 }}>
+                    📅 Applies to orders placed from <b>today ({new Date().toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })})</b>.
+                    Orders placed before today keep the price they were sold at — both are kept in this
+                    parent's price history. To date a change differently, use <b>Add Price Entry</b>.
+                  </p>
                   {hasComponents && (
                     <p style={{ fontSize: 10.5, color: C.gray500, marginTop: 6 }}>
                       Item price is computed from this parent's <button onClick={() => setPanel("bom")}
@@ -2177,7 +2281,7 @@ export function PricingTab() {
               <div style={{ fontSize: 11.5, color: C.gray400, marginTop: 2 }}>
                 {showHidden
                   ? "SKUs you've said will never have a parent. Restore any of them here."
-                  : "Tick SKUs, pick a parent on the right, link. Or use a ✨ suggestion, or drag a SKU onto a parent."}
+                  : `Tick SKUs, pick a parent ${isMobile ? "below" : "on the right"}, link. Or use a ✨ suggestion, or drag a SKU onto a parent.`}
               </div>
             </div>
             {(hiddenCount > 0 || showHidden) && (
@@ -2255,7 +2359,7 @@ export function PricingTab() {
                       <button
                         onClick={() => linkParentId && linkSku(s.sku_id, linkParentId)}
                         disabled={!linkParentId}
-                        title={linkParentId ? `Link to ${linkParentId}` : "Pick a parent on the right first"}
+                        title={linkParentId ? `Link to ${linkParentId}` : `Pick a parent ${isMobile ? "below" : "on the right"} first`}
                         style={{ ...btn("secondary", "sm"), padding: "4px 9px", fontSize: 11, opacity: linkParentId ? 1 : 0.4 }}
                       >🔗 Link</button>
                     )}
@@ -2532,15 +2636,18 @@ export function PricingTab() {
               return (
                 <button key={v.id} role="tab" aria-selected={active} onClick={() => setView(v.id)} title={v.hint}
                   style={{
-                    display: "inline-flex", alignItems: "center", gap: 7, flexShrink: 0,
-                    padding: "10px 16px", border: "none", cursor: "pointer", fontFamily: "inherit",
-                    borderRadius: "10px 10px 0 0",
+                    // On a phone all three must fit without scrolling — a tab
+                    // hidden off the edge of the bar is a tab nobody finds.
+                    display: "inline-flex", alignItems: "center", gap: isMobile ? 4 : 7,
+                    flexShrink: isMobile ? 1 : 0, minWidth: 0,
+                    padding: isMobile ? "9px 8px" : "10px 16px", border: "none", cursor: "pointer", fontFamily: "inherit",
+                    borderRadius: "10px 10px 0 0", whiteSpace: "nowrap",
                     background: active ? C.bg : "rgba(255,255,255,0.08)",
                     color: active ? C.gray800 : "rgba(255,255,255,0.78)",
-                    fontSize: 13, fontWeight: active ? 800 : 650,
+                    fontSize: isMobile ? 11.5 : 13, fontWeight: active ? 800 : 650,
                   }}>
                   <span>{v.icon}</span>
-                  {v.label}
+                  {isMobile ? v.label.replace("SKU ", "") : v.label}
                   {v.count != null && (
                     <span style={{
                       fontSize: 10.5, fontWeight: 800, padding: "1px 7px", borderRadius: 20,
