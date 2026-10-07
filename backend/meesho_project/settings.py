@@ -256,6 +256,15 @@ S3_SECRET_ACCESS_KEY = os.environ.get("S3_SECRET_ACCESS_KEY", "")
 S3_PUBLIC_BASE_URL   = os.environ.get("S3_PUBLIC_BASE_URL", "").rstrip("/")
 # R2 requires the literal "auto"; real AWS wants a region like ap-south-1.
 S3_REGION            = os.environ.get("S3_REGION", "auto")
+# Top folder for listing images. Development and production share one bucket,
+# and image paths are built from business and image numbers that each
+# database counts on its own — so without separate top folders a local
+# upload and a production upload can land on the same path and the later one
+# silently overwrites the other. Production (DEBUG off) keeps
+# "listing-images"; anything running with DEBUG on writes under "dev/".
+S3_KEY_PREFIX = os.environ.get(
+    "S3_KEY_PREFIX", "dev/listing-images" if DEBUG else "listing-images",
+).strip("/")
 
 OBJECT_STORAGE_READY = bool(
     S3_BUCKET and S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY and S3_PUBLIC_BASE_URL

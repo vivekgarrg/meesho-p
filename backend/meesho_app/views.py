@@ -1735,12 +1735,9 @@ class _PriceResolver:
             # Dated parent price history wins when we know when the order was placed.
             if order_date:
                 od = order_date.date() if hasattr(order_date, "date") else order_date
-                applicable = [
-                    (d, fp, pkg, ip, tax)
-                    for d, fp, pkg, ip, tax in self.parent_histories[pid] if d <= od
-                ]
-                if applicable:
-                    _, fp, pkg, ip, tax = applicable[-1]
+                entry = _history_entry_at(self.parent_histories[pid], od)
+                if entry:
+                    _, fp, pkg, ip, tax = entry
                     if ip:
                         return fp, pkg, ip, tax
 
@@ -2311,12 +2308,9 @@ def profit_daily_summary(request, business_id):
         if pid:
             if order_date:
                 od = order_date.date() if hasattr(order_date, "date") else order_date
-                applicable = [
-                    (d, fp, pkg, ip, tax)
-                    for d, fp, pkg, ip, tax in _parent_histories[pid] if d <= od
-                ]
-                if applicable:
-                    _, fp, pkg, ip, tax = applicable[-1]
+                entry = _history_entry_at(_parent_histories[pid], od)
+                if entry:
+                    _, fp, pkg, ip, tax = entry
                     if ip:
                         return fp, pkg, ip, tax
             p_item = parent_item_price_map.get(pid, Decimal("0"))
@@ -2514,12 +2508,9 @@ def _estimated_profit_pricing_lookup(business):
         # price of its own must not zero out the cost.
         pid = sku_parent_map.get(sku_id)
         if pid:
-            applicable = [
-                (d, ip, pkg, tax) for d, ip, pkg, tax in parent_histories[pid]
-                if order_date and d <= order_date
-            ]
-            if applicable:
-                _, ip, pkg, tax = applicable[-1]
+            entry = _history_entry_at(parent_histories[pid], order_date)
+            if entry:
+                _, ip, pkg, tax = entry
                 if ip:
                     return ip, pkg, tax
             p_item = parent_item_price_map.get(pid, Decimal("0"))
@@ -3437,12 +3428,9 @@ def ads_sku_analysis(request, business_id):
             # Dated parent price history wins when we know when the order was placed.
             if order_date:
                 od = order_date.date() if hasattr(order_date, "date") else order_date
-                applicable = [
-                    (d, fp, pkg, ip, tax)
-                    for d, fp, pkg, ip, tax in _parent_histories[pid] if d <= od
-                ]
-                if applicable:
-                    _, fp, pkg, ip, tax = applicable[-1]
+                entry = _history_entry_at(_parent_histories[pid], od)
+                if entry:
+                    _, fp, pkg, ip, tax = entry
                     if ip:
                         return fp, pkg, ip, tax
 
@@ -4247,6 +4235,15 @@ def parent_price_history_list(request, business_id, item_id):
 
     serializer = ParentPriceHistorySerializer(data=data)
     serializer.is_valid(raise_exception=True)
+    # A parent's first dated price: also record the price it replaces, dated
+    # before it, so orders placed earlier keep being costed at that — not at
+    # this new one. See pricing_history.
+    from . import pricing_history
+    current = pricing_history.price_snapshot(parent)
+    incoming = (serializer.validated_data.get("item_price"), serializer.validated_data.get("tax_percent"),
+                serializer.validated_data.get("packaging_cost"), serializer.validated_data.get("final_price"))
+    if not pricing_history.same_price(current[:3], incoming[:3]):
+        pricing_history.ensure_baseline(parent, current, serializer.validated_data["effective_from"])
     serializer.save(business=business)
     _sync_parent_current_price(item_id, business)
     return Response(serializer.data, status=201)
@@ -4650,6 +4647,36 @@ def create_parent_from_sku(request, business_id):
         _bulk_link_skus_to_parent(business=business, parent=parent, sku_ids=[sku_id])
 
     return Response(ParentItemPriceSerializer(parent).data, status=status.HTTP_201_CREATED)
+
+
+def _history_entry_at(entries, on_date):
+    """The price-history entry in effect on `on_date` — an order's date.
+
+    `entries` are tuples sorted by date with the effective_from date first.
+    Returns the last entry dated on or before `on_date`; for an order older
+    than every entry, the EARLIEST entry rather than None.
+
+    That fallback is the point. Returning None sent the caller to the parent's
+    *current* price, so an order from before the first recorded change was
+    costed at the newest price — raise a price today and last month's orders
+    were silently recosted at it. The earliest entry is the closest thing on
+    record to what the price was then (and since price changes now record the
+    price they replace — see pricing_history — it is usually exactly that).
+
+    None when the order date is unknown or there is no history at all: the
+    caller then uses the current price, as before.
+    """
+    if not entries or on_date is None:
+        return None
+    if hasattr(on_date, "date"):
+        on_date = on_date.date()
+    chosen = None
+    for entry in entries:
+        if entry[0] <= on_date:
+            chosen = entry
+        else:
+            break
+    return chosen or entries[0]
 
 
 def _sku_key(sku_id):

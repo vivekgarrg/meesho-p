@@ -124,10 +124,11 @@ def _still_in_bucket(img):
 
 
 def _build_key(business, folder, file_base, image_no, ext):
-    # listing-images/<business>/<folder>/<product>-<number>.<ext>
+    # <prefix>/<business>/<folder>/<product>-<number>.<ext>
     # The business segment is not decoration: image numbers are per business,
     # so without it two businesses' "Brass Diya-1.jpg" would be one object.
-    return f"listing-images/{business.pk}/{folder}/{file_base}-{image_no}.{ext}"
+    # The prefix keeps development and production apart — see S3_KEY_PREFIX.
+    return f"{settings.S3_KEY_PREFIX}/{business.pk}/{folder}/{file_base}-{image_no}.{ext}"
 
 
 @api_view(["GET"])

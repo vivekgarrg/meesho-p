@@ -7,7 +7,7 @@ linking and the confirm-before-link rule, none of which need a real bucket.
 import threading
 from unittest import mock
 
-from django.test import TestCase, TransactionTestCase
+from django.test import TestCase, TransactionTestCase, override_settings
 from rest_framework.test import APIClient
 
 from accounts.models import Business, Membership, User
@@ -42,6 +42,8 @@ class StorageMock:
             test.addCleanup(p.stop)
 
 
+# Pinned so key assertions don't depend on whether DEBUG happens to be on.
+@override_settings(S3_KEY_PREFIX="listing-images")
 class ListingImageTestCase(TestCase):
     def setUp(self):
         self.user = User.objects.create_user(username="o", password="pw", role=User.ROLE_SUPER_ADMIN)
@@ -628,3 +630,67 @@ class TidyCommandTests(ListingImageTestCase):
         self.run_cmd()
         _out, mv = self.run_cmd()
         mv.assert_not_called()
+
+
+class EnvironmentPrefixTests(ListingImageTestCase):
+    """Development and production share one bucket; their paths must never
+    meet, or one environment's upload overwrites the other's photo."""
+
+    def key_with(self, prefix):
+        with override_settings(S3_KEY_PREFIX=prefix):
+            r = self.presign("P", create=True, product="Brass Diya",
+                             files=[file(SHA_A if prefix == "listing-images" else SHA_B)])
+        return ListingImage.objects.get(pk=r.data["results"][0]["id"]).key
+
+    def test_development_and_production_write_to_different_paths(self):
+        prod = self.key_with("listing-images")
+        # A second database starting from scratch, as dev and prod each do.
+        ListingImage.objects.all().delete()
+        ListingImageCounter.objects.all().delete()
+        ParentItemPrice.objects.all().delete()
+        dev = self.key_with("dev/listing-images")
+        self.assertTrue(prod.startswith("listing-images/"))
+        self.assertTrue(dev.startswith("dev/listing-images/"))
+        self.assertNotEqual(prod, dev)
+        self.assertEqual(prod.split("/", 1)[1], dev.split("/", 2)[2])   # same name, different home
+
+
+class DirectParentUploadTests(ListingImageTestCase):
+    """SKU Pricing's "Upload photos": named after the parent SKU itself."""
+
+    def upload_to(self, parent_id, files):
+        r = self.presign(parent_id, create=False, product=parent_id, files=files)
+        self.assertEqual(r.status_code, 200, r.data)
+        self.upload(r.data["results"])
+        self.confirm([x["id"] for x in r.data["results"]])
+        return r.data
+
+    def test_folder_and_files_are_named_after_the_parent_sku(self):
+        ParentItemPrice.objects.create(business=self.business, item_id="BRASS-DIYA", item_price="40")
+        data = self.upload_to("BRASS-DIYA", [file(SHA_A), file(SHA_B, "image/png")])
+        self.assertEqual(data["folder"], "BRASS-DIYA")
+        keys = sorted(ListingImage.objects.values_list("key", flat=True))
+        self.assertEqual(keys, [
+            f"listing-images/{self.business.pk}/BRASS-DIYA/BRASS-DIYA-1.jpg",
+            f"listing-images/{self.business.pk}/BRASS-DIYA/BRASS-DIYA-2.png",
+        ])
+
+    def test_a_second_upload_adds_to_the_same_folder(self):
+        ParentItemPrice.objects.create(business=self.business, item_id="BRASS-DIYA", item_price="40")
+        self.upload_to("BRASS-DIYA", [file(SHA_A)])
+        data = self.upload_to("BRASS-DIYA", [file(SHA_B)])
+        self.assertEqual(data["folder"], "BRASS-DIYA")
+        self.assertEqual(set(ListingImage.objects.values_list("folder", flat=True)), {"BRASS-DIYA"})
+
+    def test_uploaded_photos_are_linked_and_the_first_becomes_its_picture(self):
+        ParentItemPrice.objects.create(business=self.business, item_id="BRASS-DIYA", item_price="40")
+        self.upload_to("BRASS-DIYA", [file(SHA_A), file(SHA_B)])
+        listed = self.client.get(f"{self.base}/listing-images/?parent_id=BRASS-DIYA").data["results"]
+        self.assertEqual(len(listed), 2)
+        parent = ParentItemPrice.objects.get(item_id="BRASS-DIYA")
+        self.assertTrue(parent.image_url.endswith("/BRASS-DIYA/BRASS-DIYA-1.jpg"))
+
+    def test_uploading_to_an_existing_parent_needs_no_pricing(self):
+        ParentItemPrice.objects.create(business=self.business, item_id="BRASS-DIYA", item_price="40")
+        r = self.presign("BRASS-DIYA", create=False, product="BRASS-DIYA")
+        self.assertEqual(r.status_code, 200)

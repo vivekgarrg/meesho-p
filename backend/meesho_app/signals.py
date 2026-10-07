@@ -8,7 +8,7 @@ full picture. Registered from apps.py's ready().
 from django.db.models.signals import post_delete, post_save, pre_save
 from django.dispatch import receiver
 
-from . import master_pricing, pricing_sync
+from . import master_pricing, pricing_history, pricing_sync
 from .models import FinalPrice, MasterItem, MasterItemComponent, ParentItemPrice
 
 
@@ -20,8 +20,14 @@ def _parent_item_price_pre_save(sender, instance, **kwargs):
     if instance.pk:
         old = ParentItemPrice.objects.filter(pk=instance.pk).values_list("item_id", flat=True).first()
         instance._pricing_sync_old_item_id = old
+        # The price as it was, so post_save can date the change — see
+        # pricing_history for why every price change has to be dated.
+        before = ParentItemPrice.objects.filter(pk=instance.pk).values_list(
+            *pricing_history.PRICE_FIELDS).first()
+        instance._price_before = tuple(before) if before else None
     else:
         instance._pricing_sync_old_item_id = None
+        instance._price_before = None
 
 
 @receiver(post_save, sender=ParentItemPrice)
@@ -29,6 +35,9 @@ def _parent_item_price_saved(sender, instance, created, **kwargs):
     old_item_id = getattr(instance, "_pricing_sync_old_item_id", None)
     if not created and old_item_id and old_item_id != instance.item_id:
         pricing_sync.sync_parent_renamed(instance.business, old_item_id, instance.item_id)
+    before = getattr(instance, "_price_before", None)
+    if not created and before is not None:
+        pricing_history.record_change(instance, before)
     pricing_sync.sync_parent_saved(instance)
 
 
