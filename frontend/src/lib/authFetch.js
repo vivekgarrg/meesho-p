@@ -1,5 +1,6 @@
 const ACCESS_KEY = "access_token";
 const REFRESH_KEY = "refresh_token";
+const SETTLEMENT_KEY = "settlement_mode";
 
 const EXEMPT_PATHS = ["/api/auth/login/", "/api/auth/token/refresh/"];
 
@@ -19,6 +20,19 @@ export function setTokens({ access, refresh }) {
 export function clearTokens() {
   localStorage.removeItem(ACCESS_KEY);
   localStorage.removeItem(REFRESH_KEY);
+}
+
+// The global Settled-only switch — "settled" or "all" (default, i.e. every
+// payment row, unfiltered — today's behavior from before this switch
+// existed). Sent on every API call below as X-Settlement-Mode, so the
+// backend's one shared filter (_apply_settlement_filter in views.py) always
+// knows which the seller wants without each endpoint threading a param.
+export function getSettlementMode() {
+  return localStorage.getItem(SETTLEMENT_KEY) === "settled" ? "settled" : "all";
+}
+
+export function setSettlementMode(mode) {
+  localStorage.setItem(SETTLEMENT_KEY, mode === "settled" ? "settled" : "all");
 }
 
 function resolvePathname(url) {
@@ -74,6 +88,7 @@ async function refreshAccessToken() {
 function withAuthHeader(input, init, token) {
   const headers = new Headers(init?.headers || (input instanceof Request ? input.headers : undefined));
   if (token) headers.set("Authorization", `Bearer ${token}`);
+  headers.set("X-Settlement-Mode", getSettlementMode());
   return { ...init, headers };
 }
 

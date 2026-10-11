@@ -12,6 +12,7 @@ import { AuthProvider } from "./contexts/AuthContext.jsx";
 import { BusinessProvider } from "./contexts/BusinessContext.jsx";
 import { AccessProvider } from "./contexts/AccessContext.jsx";
 import { CombinedViewProvider } from "./contexts/CombinedViewContext.jsx";
+import { SettlementModeProvider } from "./contexts/SettlementModeContext.jsx";
 import "./index.css";
 
 ReactDOM.createRoot(document.getElementById("root")).render(
@@ -33,16 +34,20 @@ ReactDOM.createRoot(document.getElementById("root")).render(
       <BrowserRouter>
         <ThemeProvider theme={theme}>
           <CssBaseline />
-          <AuthProvider>
-            <BusinessProvider>
-              {/* Inside BusinessProvider: both need to know which businesses exist. */}
-              <CombinedViewProvider>
-                <AccessProvider>
-                  <App />
-                </AccessProvider>
-              </CombinedViewProvider>
-            </BusinessProvider>
-          </AuthProvider>
+          {/* No dependency on auth/business state — the mode is just read from
+              localStorage and sent as a header on every fetch (authFetch.js). */}
+          <SettlementModeProvider>
+            <AuthProvider>
+              <BusinessProvider>
+                {/* Inside BusinessProvider: both need to know which businesses exist. */}
+                <CombinedViewProvider>
+                  <AccessProvider>
+                    <App />
+                  </AccessProvider>
+                </CombinedViewProvider>
+              </BusinessProvider>
+            </AuthProvider>
+          </SettlementModeProvider>
         </ThemeProvider>
       </BrowserRouter>
     </SWRConfig>

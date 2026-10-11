@@ -1644,7 +1644,45 @@ _PROFIT_FIELDS = (
 )
 
 
-def _profit_payments_qs(business, date_from, date_to):
+SETTLEMENT_SETTLED = "settled"
+SETTLEMENT_ALL = "all"
+
+
+def _settlement_mode(request):
+    """
+    "settled" or "all" (default) — whichever the seller has the global header
+    switch set to. Sent on every API call as the X-Settlement-Mode header (see
+    frontend/src/lib/authFetch.js), so a view never has to thread a query
+    param through just to read it.
+    """
+    mode = (request.headers.get("X-Settlement-Mode") or "").strip().lower()
+    return SETTLEMENT_SETTLED if mode == SETTLEMENT_SETTLED else SETTLEMENT_ALL
+
+
+def _apply_settlement_filter(qs, request):
+    """
+    The one place every OrderPayment query should pass through to respect the
+    global Settled-only switch — so a new endpoint can't forget it and two
+    endpoints can't silently disagree about what "settled" means.
+
+    The switch only ever narrows the data, never swaps it for a different
+    subset: off (default) is every payment row, unfiltered — today's behavior
+    from before this switch existed, so nothing changes until a seller opts
+    in. On restricts to rows with a transaction_id.
+
+    Meesho's export carries no genuine bank-settlement-confirmation field
+    (unlike Flipkart's neft_id) — transaction_id is the proxy chosen instead,
+    despite it only being consistently populated by some upload sources rather
+    than reflecting true settlement state (e.g. in this business's own data,
+    "Delivered" rows are roughly 46%/54% blank/populated). Known-imperfect,
+    kept anyway — see the switch's own tooltip on the frontend for this caveat.
+    """
+    if _settlement_mode(request) != SETTLEMENT_SETTLED:
+        return qs
+    return qs.exclude(DQ(transaction_id__isnull=True) | DQ(transaction_id=""))
+
+
+def _profit_payments_qs(business, date_from, date_to, request):
     """
     The payment rows the settled-profit figures are computed over. Shared by
     profit_summary and sku_order_payments so a SKU's order list always adds up
@@ -1653,7 +1691,7 @@ def _profit_payments_qs(business, date_from, date_to):
     Filters via the Order.order_date join; falls back to
     OrderPayment.order_date if the Order table has no records for the range.
     """
-    qs = OrderPayment.objects.filter(business=business)
+    qs = _apply_settlement_filter(OrderPayment.objects.filter(business=business), request)
     if date_from or date_to:
         ord_qs = Order.objects.filter(business=business)
         if date_from:
@@ -1777,7 +1815,7 @@ def sku_order_payments(request, business_id):
     date_to   = request.GET.get("date_to", "")
     target = _sku_key(sku_param)
 
-    qs = _profit_payments_qs(business, date_from, date_to)
+    qs = _profit_payments_qs(business, date_from, date_to, request)
     # Candidate orders: anything that names this SKU in either table. The exact
     # SKU per order is then resolved below the same way profit_summary does it
     # (Order.sku wins over the payment sheet's supplier_sku).
@@ -1846,7 +1884,7 @@ def profit_summary(request, business_id):
     date_to   = request.GET.get("date_to", "")
 
     from collections import defaultdict
-    qs = _profit_payments_qs(business, date_from, date_to)
+    qs = _profit_payments_qs(business, date_from, date_to, request)
 
     pricing        = _PriceResolver(business)
     price_map      = pricing.price_map
@@ -2333,9 +2371,9 @@ def profit_daily_summary(request, business_id):
     }
     BUCKET_KEYS = ["delivered", "return", "rto", "exchange", "claim", "unknown", "cancelled"]
 
-    payments = OrderPayment.objects.filter(
+    payments = _apply_settlement_filter(OrderPayment.objects.filter(
         business=business, sub_order_no__in=order_date_map.keys()
-    ).only(
+    ), request).only(
         "sub_order_no", "supplier_sku", "quantity", "final_settlement_amount",
         "live_order_status", "recovery_reason", "claims", "return_shipping_charge",
         "order_date", "payment_date",
@@ -3400,22 +3438,7 @@ def ads_sku_analysis(request, business_id):
     date_from = request.GET.get("date_from", "")
     date_to   = request.GET.get("date_to", "")
 
-    qs = OrderPayment.objects.filter(business=business)
-    if date_from or date_to:
-        ord_qs = Order.objects.filter(business=business)
-        if date_from:
-            ord_qs = ord_qs.filter(order_date__gte=date_from)
-        if date_to:
-            ord_qs = ord_qs.filter(order_date__lte=date_to)
-        if ord_qs.exists():
-            qs = qs.filter(sub_order_no__in=ord_qs.values("sub_order_no"))
-        else:
-            # Aware day-bounds, not __date — see _aware_day_bounds.
-            _start, _end = _aware_day_bounds(date_from, date_to)
-            if _start:
-                qs = qs.filter(order_date__gte=_start)
-            if _end:
-                qs = qs.filter(order_date__lt=_end)
+    qs = _profit_payments_qs(business, date_from, date_to, request)
 
     # sub_order_nos where any row is flagged as coming through ads
     ad_sub_orders = set(qs.filter(order_source="Ad order").values_list("sub_order_no", flat=True))
@@ -3679,7 +3702,7 @@ def orders_grouped(request, business_id):
     page_size  = int(request.GET.get("page_size", 50))
     search = request.GET.get("search", "").strip()
 
-    qs = OrderPayment.objects.filter(business=business)
+    qs = _apply_settlement_filter(OrderPayment.objects.filter(business=business), request)
 
     if month:
         year, mo = (int(x) for x in month.split("-"))
@@ -3815,7 +3838,7 @@ def order_payments_list(request, business_id):
     date_from = request.GET.get("date_from", "")
     date_to = request.GET.get("date_to", "")
 
-    qs = OrderPayment.objects.filter(business=business)
+    qs = _apply_settlement_filter(OrderPayment.objects.filter(business=business), request)
     if status_filter:
         qs = qs.filter(live_order_status__iexact=status_filter)
     if sku_filter:
@@ -5814,7 +5837,7 @@ def dashboard_analytics(request, business_id):
 
     # ── Step 2: find payments for those orders ────────────────────────────────
     payment_qs = (
-        OrderPayment.objects.filter(business=business, sub_order_no__in=order_nos)
+        _apply_settlement_filter(OrderPayment.objects.filter(business=business, sub_order_no__in=order_nos), request)
         if order_nos
         else OrderPayment.objects.none()
     )

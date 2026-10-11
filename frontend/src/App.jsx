@@ -58,8 +58,10 @@ import BusinessProfilePage from './Components/BusinessProfile/BusinessProfilePag
 import BusinessSwitcher from './Components/BusinessSwitcher';
 import CombinedViewToggle from './Components/CombinedViewToggle';
 import CombinedViewBanner from './Components/CombinedViewBanner';
+import SettlementModeSwitch from './Components/SettlementModeSwitch';
 import { useBusiness } from './contexts/BusinessContext';
 import { DateFilterProvider } from './contexts/DateFilterContext';
+import { useSettlementMode } from './contexts/SettlementModeContext';
 import { GlobalDateFilterBar } from './Components/shared/GlobalDateFilterBar';
 import ChangePasswordModal from './Components/ChangePasswordModal';
 import AdminPanel from './Components/Admin/AdminPanel';
@@ -1099,6 +1101,7 @@ function TopBar({ isMobile, showMenuButton, onOpenMenu }) {
           </button>
         )}
         <BusinessSwitcher />
+        <SettlementModeSwitch />
         <CombinedViewToggle />
         {/* The breadcrumb duplicates the page's own <h1> — drop it on mobile
             where the row has no room to spare. */}
@@ -1124,6 +1127,7 @@ function TopBar({ isMobile, showMenuButton, onOpenMenu }) {
 // ── Authenticated app shell ───────────────────────────────────────────────────
 function AppShell() {
   const { activeBusinessId } = useBusiness();
+  const { mode: settlementMode } = useSettlementMode();
   const isMobile = useIsMobile();
   // Below 1024px (phones and tablets alike) the sidebar collapses to a fully
   // hidden off-canvas drawer instead of a big-screen icon rail — see Sidebar's
@@ -1199,11 +1203,12 @@ function AppShell() {
             business switches so it's never remounted, only its context value
             changes. Every tab reads the active range from useDateFilter(). */}
         <GlobalDateFilterBar />
-        {/* key by active business so switching businesses remounts the routed
-            view, forcing every tab (dashboard included) to refetch fresh data
-            against the newly-set business-scoped API base. */}
+        {/* key by active business + settlement mode so switching either remounts
+            the routed view, forcing every tab (dashboard included) to refetch
+            fresh data against the newly-set business-scoped API base / the
+            newly-flipped Settled/On-the-way switch (see SettlementModeContext). */}
         <div
-          key={activeBusinessId ?? 'none'}
+          key={`${activeBusinessId ?? 'none'}-${settlementMode}`}
           style={{
             flex: 1,
             overflowY: 'auto',
