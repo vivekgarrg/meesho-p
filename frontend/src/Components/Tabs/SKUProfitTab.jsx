@@ -25,6 +25,9 @@ import { AppBarChart } from "../Charts/AppBarChart";
 import { AppPieChart } from "../Charts/AppPieChart";
 import { API, fmt } from "../../App";
 import { useDateFilter } from "../../contexts/DateFilterContext";
+import { useBusiness } from "../../contexts/BusinessContext";
+import { useCombinedView } from "../../contexts/CombinedViewContext";
+import { mergeProfitResponses } from "../../lib/combinedMerge";
 
 // ── utils ─────────────────────────────────────────────────────────────────────
 const fmtMonth = ym => new Date(...ym.split("-").map((v, i) => i === 1 ? v - 1 : +v), 1)
@@ -149,7 +152,7 @@ function MonthFilter({ months, selMonth, onSelect }) {
 }
 
 // ── Metrics Panel ─────────────────────────────────────────────────────────────
-function MetricsPanel({ data, filterLabel, profitSummary }) {
+function MetricsPanel({ data, filterLabel, profitSummary, combinedCount }) {
   const ps = profitSummary || {};
   const delSum = ps?.order_summary?.delivered_summary || {};
   const retSum = ps?.order_summary?.return_summary || {};
@@ -203,6 +206,12 @@ function MetricsPanel({ data, filterLabel, profitSummary }) {
         <Box sx={{ minWidth: 200 }}>
           <Typography sx={{ ...DS.label, color: pos ? "#059669" : "#DC2626", mb: 1 }}>
             Net P&L · {filterLabel}
+            {combinedCount > 0 && (
+              <Chip size="small" label={`🧩 combined · ${combinedCount} businesses`} sx={{
+                ml: 1, fontSize: 10.5, fontWeight: 800, height: 20,
+                bgcolor: "#FFF7ED", color: "#C2410C", border: "1px solid #FDBA74",
+              }} />
+            )}
           </Typography>
           <Typography sx={{ fontFamily: "monospace", fontWeight: 900, fontSize: 44, lineHeight: 1, color: pos ? "#059669" : "#E11D48" }}>
             {pos ? "+" : ""}{fmt(netPL)}
@@ -309,9 +318,12 @@ function SKUDataTable({ data, onRowClick, mode = "sku", onStockClick }) {
           {mode === "parent" ? (
             <Typography sx={{ fontSize: 11, color: "#94A3B8", mt: 0.3, pl: 0.5 }}>
               {p.row.child_count} SKU{p.row.child_count === 1 ? "" : "s"}
+              {p.row.business && ` · ${p.row.business}`}
             </Typography>
           ) : p.row.parent && (
-            <Typography sx={{ fontSize: 11, color: "#94A3B8", mt: 0.3, pl: 0.5 }}>↳ {p.row.parent}</Typography>
+            <Typography sx={{ fontSize: 11, color: "#94A3B8", mt: 0.3, pl: 0.5 }}>
+              ↳ {p.row.parent}{p.row.business && ` · ${p.row.business}`}
+            </Typography>
           )}
         </Box>
       ),
@@ -410,7 +422,11 @@ function SKUDataTable({ data, onRowClick, mode = "sku", onStockClick }) {
     <DataGrid
       rows={data}
       columns={columns}
-      getRowId={r => r.sku_id}
+      // Not sku_id: in combined mode two businesses can share a SKU/parent
+      // display name (same product line, different seller) — r.id carries
+      // the business-qualified key so DataGrid never collides two distinct
+      // rows into one (it silently drops/duplicates on an id clash).
+      getRowId={r => r.id ?? r.sku_id}
       initialState={{ pagination: { paginationModel: { pageSize: 25 } } }}
       pageSizeOptions={[25, 50, 100]}
       onRowClick={p => onRowClick(p.row)}
@@ -1712,6 +1728,9 @@ function MissingSkuPanel({ missingSkus, ordersCount, onResolved }) {
 // ── Main tab ──────────────────────────────────────────────────────────────────
 export function SKUAnalysisTab() {
   const { range, label, months, mode: globalMode, selectedMonth: globalMonth } = useDateFilter();
+  const { businesses } = useBusiness();
+  const combined = useCombinedView();
+  const combinedIds = combined.active ? combined.selectedIds : null;
   const [allData, setAllData] = useState([]);
   const [profitSummary, setProfitSummary] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -1730,13 +1749,21 @@ export function SKUAnalysisTab() {
     const params = new URLSearchParams();
     if (range.date_from) params.set("date_from", range.date_from);
     if (range.date_to) params.set("date_to", range.date_to);
-    fetch(`${API}/profit/?${params}`, { signal: ctrl.signal })
-      .then(r => r.json())
-      .then(d => {
+    // Combined mode: fan out to every ticked business and merge (see
+    // lib/combinedMerge.js) — sku_wise_profit is merged as "identity-keyed",
+    // so the same SKU code in two different businesses stays two rows, each
+    // tagged with which business it's from, never summed into one.
+    const urls = combinedIds
+      ? combinedIds.map((id) => `/api/business/${id}/profit/?${params}`)
+      : [`${API}/profit/?${params}`];
+    Promise.all(urls.map((u) => fetch(u, { signal: ctrl.signal }).then((r) => r.json())))
+      .then(profits => {
+        const bizList = combinedIds ? combinedIds.map((id) => businesses.find((b) => b.id === id)) : null;
+        const d = combinedIds ? mergeProfitResponses(profits, bizList) : profits[0];
         setProfitSummary(d);
         const raw = d.sku_wise_profit || {};
         const prepared = Object.keys(raw)
-          .filter(key => key !== "__unattributed__")
+          .filter(key => (raw[key]._sku_id ?? key) !== "__unattributed__")
           .map(key => {
             const skuRaw = raw[key];
             const delPft = Number(skuRaw.delivered_profit || 0);
@@ -1747,7 +1774,12 @@ export function SKUAnalysisTab() {
             const avg_profit_per_piece = delQty > 0 ? delPft / delQty : null;
             const avg_settlement_per_piece = delQty > 0 ? (delPft + delCost) / delQty : null;
             return {
-              sku_id: key, ...skuRaw,
+              // id stays unique even when two businesses share a SKU code —
+              // `key` is already business-qualified for combined mode (see
+              // mergeBusinessJson's identity-keyed merge); sku_id is just the
+              // clean value shown on screen.
+              id: key, sku_id: skuRaw._sku_id ?? key, ...skuRaw,
+              business: skuRaw._business,
               net_profit: Number(skuRaw.net_profit ?? (delPft + Number(skuRaw.return_loss || 0) + Number(skuRaw.rto_loss || 0) + Number(skuRaw.exchange_loss || 0) + Number(skuRaw.claim_loss || 0))),
               avg_profit_per_piece,
               avg_settlement_per_piece,
@@ -1757,7 +1789,8 @@ export function SKUAnalysisTab() {
       })
       .catch(e => { if (e.name !== "AbortError") setLoading(false); });
     return () => ctrl.abort();
-  }, [JSON.stringify(range), reloadTick]); // eslint-disable-line
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [JSON.stringify(range), reloadTick, combinedIds?.join(",")]);
 
   // Rolls every child SKU under its parent's item_id (or, for a SKU with no
   // parent on file, under itself — a "group of one" rather than a special
@@ -1770,9 +1803,13 @@ export function SKUAnalysisTab() {
   const groupedData = useMemo(() => {
     const groups = {};
     for (const row of allData) {
-      const key = row.parent_item_id || row.sku_id;
+      // Combined mode: two businesses can legitimately name a parent the
+      // same thing, so the grouping key (not the displayed name) carries the
+      // business too — otherwise their SKUs would wrongly merge into one group.
+      const displayKey = row.parent_item_id || row.sku_id;
+      const key = row.business ? `${row.business}::${displayKey}` : displayKey;
       if (!groups[key]) {
-        groups[key] = { sku_id: key, parent_item_id: row.parent_item_id || null, is_group: true, child_count: 0, _children: [] };
+        groups[key] = { id: key, sku_id: displayKey, parent_item_id: row.parent_item_id || null, business: row.business, is_group: true, child_count: 0, _children: [] };
       }
       const g = groups[key];
       g.child_count += 1;
@@ -1796,7 +1833,12 @@ export function SKUAnalysisTab() {
   }, [allData]);
 
   const activeData = groupBy === "parent" ? groupedData : allData;
-  const drillRows = drillParent ? allData.filter(s => (s.parent_item_id || s.sku_id) === drillParent) : null;
+  // Matched on business too (when set) — in combined mode two businesses can
+  // name a parent the same thing, and drilling into one must not pull in the
+  // other's children.
+  const drillRows = drillParent
+    ? allData.filter(s => (s.parent_item_id || s.sku_id) === drillParent.key && (s.business || null) === (drillParent.business || null))
+    : null;
 
   const profitRows = activeData.filter(s => s.net_profit > 0);
   const lossRows = activeData.filter(s => s.net_profit < 0).reverse();
@@ -1955,7 +1997,7 @@ export function SKUAnalysisTab() {
 
       {!loading && allData.length > 0 && (
         <>
-          <MetricsPanel data={allData} filterLabel={label} profitSummary={profitSummary} />
+          <MetricsPanel data={allData} filterLabel={label} profitSummary={profitSummary} combinedCount={combinedIds?.length} />
 
           {/* ── Top SKUs / parent groups chart ─────────────────────────── */}
           {!drillParent && chartData.length > 0 && (
@@ -1973,10 +2015,13 @@ export function SKUAnalysisTab() {
                 diverging
                 valueFormatter={fmt}
                 height={230}
-                onBarClick={(key) => {
-                  const row = activeData.find(s => s.sku_id === key);
+                onBarClick={(key, bar) => {
+                  // bar.data is the exact row object that was clicked — not a
+                  // lookup by sku_id, which in combined mode can be the same
+                  // display name for two different businesses' products.
+                  const row = bar?.data ?? activeData.find(s => s.sku_id === key);
                   if (!row) return;
-                  if (groupBy === "parent") setDrillParent(row.sku_id); else setSelSKU(row);
+                  if (groupBy === "parent") setDrillParent({ key: row.sku_id, business: row.business }); else setSelSKU(row);
                 }}
               />
             </Box>
@@ -1985,7 +2030,7 @@ export function SKUAnalysisTab() {
           {/* ── Low Margin Panel ──────────────────────────────────────── */}
           {!drillParent && view === "low-margin" && (
             <LowMarginPanel rows={lowMarginRows} threshold={marginThreshold} setThreshold={setMarginThreshold}
-              onRowClick={(row) => { if (groupBy === "parent") setDrillParent(row.sku_id); else setSelSKU(row); }} />
+              onRowClick={(row) => { if (groupBy === "parent") setDrillParent({ key: row.sku_id, business: row.business }); else setSelSKU(row); }} />
           )}
 
           {/* ── Drilled into one parent group's child SKUs ──────────────── */}
@@ -1999,7 +2044,8 @@ export function SKUAnalysisTab() {
                   <Typography sx={{ fontWeight: 700, fontSize: 15 }}>
                     {drillRows.length} SKU{drillRows.length === 1 ? "" : "s"}
                     <Typography component="span" sx={{ fontSize: 13, fontWeight: 400, color: "#94A3B8", ml: 1 }}>
-                      under <Box component="span" sx={{ fontFamily: "monospace", fontWeight: 700, color: "#0F172A" }}>{drillParent}</Box>
+                      under <Box component="span" sx={{ fontFamily: "monospace", fontWeight: 700, color: "#0F172A" }}>{drillParent.key}</Box>
+                      {drillParent.business && <> · {drillParent.business}</>}
                     </Typography>
                   </Typography>
                   <Typography sx={{ fontSize: 12, color: "#94A3B8", mt: 0.25 }}>Click any row to open full P&L analysis</Typography>
@@ -2008,7 +2054,7 @@ export function SKUAnalysisTab() {
                     point is not having to go find it on another tab. */}
                 <Button
                   size="small" variant="outlined" color="error"
-                  onClick={() => setStockParent(drillParent)}
+                  onClick={() => setStockParent(drillParent.key)}
                   sx={{ ml: "auto", textTransform: "none", fontWeight: 700, borderRadius: "8px", whiteSpace: "nowrap" }}
                 >
                   📦 Meesho stock
@@ -2036,7 +2082,7 @@ export function SKUAnalysisTab() {
               </Box>
               <SKUDataTable data={viewData} mode={groupBy}
                 onStockClick={(row) => setStockParent(row.sku_id)}
-                onRowClick={(row) => { if (groupBy === "parent") setDrillParent(row.sku_id); else setSelSKU(row); }} />
+                onRowClick={(row) => { if (groupBy === "parent") setDrillParent({ key: row.sku_id, business: row.business }); else setSelSKU(row); }} />
             </Box>
           )}
         </>

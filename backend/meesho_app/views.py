@@ -3107,12 +3107,29 @@ def _compute_flipkart_profit_summary(business, date_from=None, date_to=None):
     category_agg = {}
     monthly_agg = {}
 
-    fields = ("seller_sku", "quantity", "settlement_value", "return_type", "order_date",
-              "fulfilment_type", "product_sub_category")
-    for row in qs.only(*fields).iterator():
-        sku_id = row.seller_sku or ""
-        settlement = row.settlement_value or Decimal("0")
-        returned = bool(row.return_type) and row.return_type.strip().upper() != "NA"
+    # Flipkart can settle one order item across several rows — e.g. the main
+    # sale on one NEFT batch and a separate "offer" reimbursement on another,
+    # both carrying the same order_item_id. Those rows are instalments of the
+    # same physical unit, not separate units, so they must be grouped and
+    # costed *once* per order_item_id — costing every row independently would
+    # charge the same unit's cost again on its second (offer-only) instalment
+    # and manufacture a loss that was never real.
+    fields = ("order_item_id", "seller_sku", "sale_amount", "quantity", "settlement_value",
+              "return_type", "order_date", "fulfilment_type", "product_sub_category")
+    order_groups = {}
+    for row in qs.only(*fields):
+        order_groups.setdefault(row.order_item_id, []).append(row)
+
+    for group_rows in order_groups.values():
+        primary = max(group_rows, key=lambda r: abs(r.sale_amount or Decimal("0")))
+        sku_id = primary.seller_sku or next((r.seller_sku for r in group_rows if r.seller_sku), "") or ""
+        settlement = sum((r.settlement_value or Decimal("0") for r in group_rows), Decimal("0"))
+        returned = any(bool(r.return_type) and r.return_type.strip().upper() != "NA" for r in group_rows)
+        order_date = primary.order_date or next((r.order_date for r in group_rows if r.order_date), None)
+        quantity = primary.quantity or next((r.quantity for r in group_rows if r.quantity), 1)
+        fulfilment_type = primary.fulfilment_type or next((r.fulfilment_type for r in group_rows if r.fulfilment_type), None)
+        product_sub_category = primary.product_sub_category or next(
+            (r.product_sub_category for r in group_rows if r.product_sub_category), None)
         bucket = "return" if returned else "delivered"
 
         if returned:
@@ -3128,11 +3145,11 @@ def _compute_flipkart_profit_summary(business, date_from=None, date_to=None):
                 missing_price_count += 1
                 continue
 
-            item_price, packaging_cost, tax_pct = get_price(sku_id, row.order_date)
+            item_price, packaging_cost, tax_pct = get_price(sku_id, order_date)
             item_price = Decimal(str(item_price or 0))
             packaging_cost = Decimal(str(packaging_cost or 0))
             tax_pct = Decimal(str(tax_pct or 0))
-            qty_d = Decimal(str(row.quantity or 1))
+            qty_d = Decimal(str(quantity or 1))
 
             purchase_cost = item_price * qty_d
             tax_cost = purchase_cost * tax_pct / Decimal("100")
@@ -3163,8 +3180,8 @@ def _compute_flipkart_profit_summary(business, date_from=None, date_to=None):
         agg["total_cost"] += cost
         agg["net_profit"] += net
 
-        fu = fulfilment_agg.setdefault(row.fulfilment_type or "Unknown", {
-            "label": row.fulfilment_type or "Unknown", "count": 0,
+        fu = fulfilment_agg.setdefault(fulfilment_type or "Unknown", {
+            "label": fulfilment_type or "Unknown", "count": 0,
             "gross": Decimal("0"), "cost": Decimal("0"), "net": Decimal("0"),
         })
         fu["count"] += 1
@@ -3172,8 +3189,8 @@ def _compute_flipkart_profit_summary(business, date_from=None, date_to=None):
         fu["cost"] += cost
         fu["net"] += net
 
-        ca = category_agg.setdefault(row.product_sub_category or "Unknown", {
-            "label": row.product_sub_category or "Unknown", "count": 0,
+        ca = category_agg.setdefault(product_sub_category or "Unknown", {
+            "label": product_sub_category or "Unknown", "count": 0,
             "gross": Decimal("0"), "cost": Decimal("0"), "net": Decimal("0"),
         })
         ca["count"] += 1
@@ -3181,7 +3198,7 @@ def _compute_flipkart_profit_summary(business, date_from=None, date_to=None):
         ca["cost"] += cost
         ca["net"] += net
 
-        month_key = row.order_date.strftime("%Y-%m") if row.order_date else "Unknown"
+        month_key = order_date.strftime("%Y-%m") if order_date else "Unknown"
         mo = monthly_agg.setdefault(month_key, {
             "month": month_key, "count": 0,
             "gross": Decimal("0"), "cost": Decimal("0"), "net": Decimal("0"),
@@ -3253,13 +3270,45 @@ def _compute_flipkart_profit_summary(business, date_from=None, date_to=None):
     }
 
 
+def _flipkart_payment_row_dict(row):
+    return {
+        "order_id": row.order_id,
+        "order_item_id": row.order_item_id,
+        "neft_id": row.neft_id,
+        "payment_date": str(row.payment_date) if row.payment_date else None,
+        "dispatch_date": str(row.dispatch_date) if row.dispatch_date else None,
+        "return_type": row.return_type,
+        "item_return_status": row.item_return_status,
+        "sale_amount": _to_num(row.sale_amount or Decimal("0")),
+        "total_offer_amount": _to_num(row.total_offer_amount or Decimal("0")),
+        "my_share": _to_num(row.my_share or Decimal("0")),
+        "marketplace_fee": _to_num(row.marketplace_fee or Decimal("0")),
+        "taxes": _to_num(row.taxes or Decimal("0")),
+        "offer_adjustments": _to_num(row.offer_adjustments or Decimal("0")),
+        "protection_fund": _to_num(row.protection_fund or Decimal("0")),
+        "refund": _to_num(row.refund or Decimal("0")),
+        "tcs": _to_num(row.tcs or Decimal("0")),
+        "tds": _to_num(row.tds or Decimal("0")),
+        "gst_on_mp_fees": _to_num(row.gst_on_mp_fees or Decimal("0")),
+        "settlement_value": _to_num(row.settlement_value or Decimal("0")),
+        "invoice_id": row.invoice_id,
+        "invoice_date": str(row.invoice_date) if row.invoice_date else None,
+    }
+
+
 @api_view(["GET"])
 def flipkart_profit_sku_payments(request, business_id):
     """
-    Every individual settlement row for one Flipkart seller_sku, each with its
-    own cost/net breakdown computed the same way as _compute_flipkart_profit_summary
-    — the line-by-line detail behind that SKU's row in /flipkart-profit/'s
-    sku_wise and sku_payment_list tables.
+    Every order item of one Flipkart seller_sku, cost/net computed the same
+    way as _compute_flipkart_profit_summary — the line-by-line detail behind
+    that SKU's row in /flipkart-profit/'s sku_wise and sku_payment_list tables.
+
+    One order_item_id can settle across several rows (e.g. the main sale on
+    one NEFT batch and a separate "offer" reimbursement on another), so rows
+    are grouped by order_item_id and costed once per group — never once per
+    row, which would double-charge a unit's cost on its second instalment and
+    show a loss that was never real. Each group's raw settlement rows are
+    still returned in full under "payments", for "every payment one by one".
     Params: sku (required), date_from / date_to (YYYY-MM-DD).
     """
     business = get_authorized_business(request, business_id)
@@ -3278,10 +3327,19 @@ def flipkart_profit_sku_payments(request, business_id):
     if date_to:
         qs = qs.filter(order_date__lte=date_to)
 
-    payments = []
-    for row in qs.order_by("-order_date", "-payment_date"):
-        returned = bool(row.return_type) and row.return_type.strip().upper() != "NA"
-        settlement = row.settlement_value or Decimal("0")
+    order_groups = {}
+    for row in qs:
+        order_groups.setdefault(row.order_item_id, []).append(row)
+
+    orders = []
+    for order_item_id, group_rows in order_groups.items():
+        primary = max(group_rows, key=lambda r: abs(r.sale_amount or Decimal("0")))
+        sku_id = primary.seller_sku or sku_param
+        settlement = sum((r.settlement_value or Decimal("0") for r in group_rows), Decimal("0"))
+        returned = any(bool(r.return_type) and r.return_type.strip().upper() != "NA" for r in group_rows)
+        order_date = primary.order_date or next((r.order_date for r in group_rows if r.order_date), None)
+        quantity = primary.quantity or next((r.quantity for r in group_rows if r.quantity), 1)
+
         cost = Decimal("0")
         net = settlement
         excluded_reason = None
@@ -3289,53 +3347,41 @@ def flipkart_profit_sku_payments(request, business_id):
         if returned:
             if settlement >= 0:
                 excluded_reason = "non_loss_return"
-        elif _sku_key(row.seller_sku) not in known_skus:
+        elif _sku_key(sku_id) not in known_skus:
             excluded_reason = "missing_price"
         else:
-            item_price, packaging_cost, tax_pct = get_price(row.seller_sku, row.order_date)
+            item_price, packaging_cost, tax_pct = get_price(sku_id, order_date)
             item_price = Decimal(str(item_price or 0))
             packaging_cost = Decimal(str(packaging_cost or 0))
             tax_pct = Decimal(str(tax_pct or 0))
-            qty_d = Decimal(str(row.quantity or 1))
+            qty_d = Decimal(str(quantity or 1))
             purchase_cost = item_price * qty_d
             tax_cost = purchase_cost * tax_pct / Decimal("100")
             packaging = _packaging_charge(BusinessCostSetting.DELIVERED, packaging_cost, cost_setting)
             cost = purchase_cost + tax_cost + packaging
             net = settlement - cost
 
-        payments.append({
-            "order_id": row.order_id,
-            "order_item_id": row.order_item_id,
-            "neft_id": row.neft_id,
-            "order_date": str(row.order_date) if row.order_date else None,
-            "payment_date": str(row.payment_date) if row.payment_date else None,
-            "dispatch_date": str(row.dispatch_date) if row.dispatch_date else None,
-            "quantity": row.quantity,
-            "fulfilment_type": row.fulfilment_type,
-            "product_sub_category": row.product_sub_category,
-            "return_type": row.return_type,
-            "item_return_status": row.item_return_status,
-            "sale_amount": _to_num(row.sale_amount or Decimal("0")),
-            "total_offer_amount": _to_num(row.total_offer_amount or Decimal("0")),
-            "my_share": _to_num(row.my_share or Decimal("0")),
-            "marketplace_fee": _to_num(row.marketplace_fee or Decimal("0")),
-            "taxes": _to_num(row.taxes or Decimal("0")),
-            "offer_adjustments": _to_num(row.offer_adjustments or Decimal("0")),
-            "protection_fund": _to_num(row.protection_fund or Decimal("0")),
-            "refund": _to_num(row.refund or Decimal("0")),
-            "tcs": _to_num(row.tcs or Decimal("0")),
-            "tds": _to_num(row.tds or Decimal("0")),
-            "gst_on_mp_fees": _to_num(row.gst_on_mp_fees or Decimal("0")),
-            "settlement_value": _to_num(settlement),
+        group_rows.sort(key=lambda r: r.payment_date or r.order_date or date_cls.min, reverse=True)
+        order_entry = {
+            "order_item_id": order_item_id,
+            "order_id": primary.order_id,
+            "order_date": str(order_date) if order_date else None,
+            "quantity": quantity,
+            "fulfilment_type": primary.fulfilment_type,
+            "product_sub_category": primary.product_sub_category,
+            "is_return": returned,
+            "return_type": next((r.return_type for r in group_rows if r.return_type and r.return_type.strip().upper() != "NA"), "NA"),
+            "excluded_reason": excluded_reason,
             "cost": _to_num(cost),
             "net_profit": _to_num(net),
-            "is_return": returned,
-            "excluded_reason": excluded_reason,
-            "invoice_id": row.invoice_id,
-            "invoice_date": str(row.invoice_date) if row.invoice_date else None,
-        })
+        }
+        for f in _FLIPKART_PAYMENT_COMPONENTS:
+            order_entry[f] = _to_num(sum((getattr(r, f) or Decimal("0") for r in group_rows), Decimal("0")))
+        order_entry["payments"] = [_flipkart_payment_row_dict(r) for r in group_rows]
+        orders.append(order_entry)
 
-    return Response({"sku": sku_param, "count": len(payments), "payments": payments})
+    orders.sort(key=lambda o: (o["order_date"] or "", o["order_item_id"]), reverse=True)
+    return Response({"sku": sku_param, "count": len(orders), "orders": orders})
 
 
 @api_view(["GET"])
@@ -5135,12 +5181,13 @@ def upload_final_price(request, business_id):
 @api_view(["GET"])
 def download_final_price(request, business_id):
     """
-    Download all SKU pricing rows as an Excel sheet.
+    Download all SKU pricing rows as an Excel sheet, plus a read-only "Price
+    History" sheet of every dated price change their parents have had.
 
-    The column headers normalize (lower-cased, spaces -> underscores) to
-    exactly the columns `upload_final_price` expects, so a downloaded file
-    can be edited and re-uploaded as-is. An empty DB yields a header-only
-    template.
+    The "SKU Pricing" sheet's column headers normalize (lower-cased, spaces ->
+    underscores) to exactly the columns `upload_final_price` expects, so a
+    downloaded file can be edited and re-uploaded as-is. An empty DB yields a
+    header-only template.
     """
     from io import BytesIO
     from django.http import HttpResponse
@@ -5149,6 +5196,11 @@ def download_final_price(request, business_id):
 
     business = get_authorized_business(request, business_id)
     qs = FinalPrice.objects.filter(business=business).select_related("parent").order_by("sku_id")
+    history = (
+        ParentPriceHistory.objects.filter(business=business)
+        .select_related("parent")
+        .order_by("parent__item_id", "effective_from")
+    )
 
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -5159,10 +5211,13 @@ def download_final_price(request, business_id):
 
     header_fill = PatternFill("solid", fgColor="4F46E5")
     header_font = Font(bold=True, color="FFFFFF")
-    for cell in ws[1]:
-        cell.fill = header_fill
-        cell.font = header_font
-        cell.alignment = Alignment(horizontal="center")
+
+    def style_header(sheet):
+        for cell in sheet[1]:
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center")
+        sheet.freeze_panes = "A2"
 
     for fp in qs:
         ws.append([
@@ -5179,7 +5234,17 @@ def download_final_price(request, business_id):
     col_widths = [30, 14, 14, 16, 14, 20]
     for i, w in enumerate(col_widths, 1):
         ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
-    ws.freeze_panes = "A2"
+    style_header(ws)
+
+    ws_h = wb.create_sheet("Price History")
+    ws_h.append(["Parent ID", "Effective From", "Item Price", "Tax Percent", "Packaging Cost", "Final Price", "Notes"])
+    for h in history:
+        ws_h.append([
+            h.parent.item_id, h.effective_from, h.item_price, h.tax_percent, h.packaging_cost, h.final_price, h.notes,
+        ])
+    for i, w in enumerate([30, 16, 14, 14, 16, 14, 30], 1):
+        ws_h.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
+    style_header(ws_h)
 
     buf = BytesIO()
     wb.save(buf)
@@ -5198,12 +5263,16 @@ def download_pricing_workbook(request, business_id):
     """
     Download parents AND child SKUs together in a single Excel workbook.
 
-    Two sheets:
-      - "Parents": Item ID, Item Price, Tax Percent, Packaging Cost, Final Price
-      - "SKUs":    SKU ID, Item Price, Tax Percent, Packaging Cost, Final Price, Parent ID
+    Three sheets:
+      - "Parents":       Item ID, Item Price, Tax Percent, Packaging Cost, Final Price
+      - "SKUs":           SKU ID, Item Price, Tax Percent, Packaging Cost, Final Price, Parent ID
+      - "Price History":  Parent ID, Effective From, Item Price, Tax Percent, Packaging Cost,
+                          Final Price, Notes — every dated price change a parent has ever had
+                          (see pricing_history.py / signals.py for how these entries get written),
+                          read-only (not re-imported by upload_pricing_workbook).
 
-    Column headers normalize to the columns `upload_pricing_workbook` expects,
-    so a downloaded file can be edited and re-uploaded as-is. Empty tables
+    "Parents"/"SKUs" column headers normalize to the columns `upload_pricing_workbook`
+    expects, so a downloaded file can be edited and re-uploaded as-is. Empty tables
     yield header-only sheets (a blank template).
     """
     from io import BytesIO
@@ -5214,6 +5283,11 @@ def download_pricing_workbook(request, business_id):
     business = get_authorized_business(request, business_id)
     parents = ParentItemPrice.objects.filter(business=business).order_by("item_id")
     skus = FinalPrice.objects.filter(business=business).select_related("parent").order_by("sku_id")
+    history = (
+        ParentPriceHistory.objects.filter(business=business)
+        .select_related("parent")
+        .order_by("parent__item_id", "effective_from")
+    )
 
     header_fill = PatternFill("solid", fgColor="4F46E5")
     header_font = Font(bold=True, color="FFFFFF")
@@ -5246,6 +5320,16 @@ def download_pricing_workbook(request, business_id):
     for i, w in enumerate([30, 14, 14, 16, 14, 20], 1):
         ws_s.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
     style_header(ws_s)
+
+    ws_h = wb.create_sheet("Price History")
+    ws_h.append(["Parent ID", "Effective From", "Item Price", "Tax Percent", "Packaging Cost", "Final Price", "Notes"])
+    for h in history:
+        ws_h.append([
+            h.parent.item_id, h.effective_from, h.item_price, h.tax_percent, h.packaging_cost, h.final_price, h.notes,
+        ])
+    for i, w in enumerate([30, 16, 14, 14, 16, 14, 30], 1):
+        ws_h.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
+    style_header(ws_h)
 
     buf = BytesIO()
     wb.save(buf)

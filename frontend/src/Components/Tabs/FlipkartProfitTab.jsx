@@ -413,15 +413,20 @@ const PAYMENT_LIST_COLUMNS = [
   { key: 'gst_on_mp_fees', label: 'GST' },
 ];
 
-// Individual order-item payments for one SKU, shown inline when its row in
+// Individual order items for one SKU, shown inline when its row in
 // SkuPaymentListTable is expanded — "all payments one by one" behind that
-// SKU's aggregate.
+// SKU's aggregate. One Flipkart order item can settle across several raw
+// rows (e.g. the main sale on one NEFT batch and a separate "offer"
+// reimbursement on another) — those are grouped server-side and costed once
+// per order item, so a follow-up installment never gets charged the unit's
+// cost a second time. The raw installments are still listed underneath each
+// order when there's more than one, for full transparency.
 function SkuPaymentDetailRows({ sku, dateQuery, colSpan }) {
-  const [state, setState] = useState({ loading: true, error: null, payments: [] });
+  const [state, setState] = useState({ loading: true, error: null, orders: [] });
 
   useEffect(() => {
     let dead = false;
-    setState({ loading: true, error: null, payments: [] });
+    setState({ loading: true, error: null, orders: [] });
     const params = new URLSearchParams(dateQuery);
     params.set('sku', sku);
     fetch(`${API}/flipkart-profit/sku-payments/?${params}`)
@@ -429,11 +434,11 @@ function SkuPaymentDetailRows({ sku, dateQuery, colSpan }) {
       .then(({ ok, d }) => {
         if (dead) return;
         setState(
-          ok ? { loading: false, error: null, payments: d.payments || [] } : { loading: false, error: d.error || 'Failed to load', payments: [] },
+          ok ? { loading: false, error: null, orders: d.orders || [] } : { loading: false, error: d.error || 'Failed to load', orders: [] },
         );
       })
       .catch(() => {
-        if (!dead) setState({ loading: false, error: 'Network error', payments: [] });
+        if (!dead) setState({ loading: false, error: 'Network error', orders: [] });
       });
     return () => {
       dead = true;
@@ -462,7 +467,7 @@ function SkuPaymentDetailRows({ sku, dateQuery, colSpan }) {
           {!state.loading && !state.error && (
             <div style={{ overflowX: 'auto' }}>
               <p style={{ fontSize: 11, fontWeight: 700, color: C.gray500, marginBottom: 6 }}>
-                {state.payments.length} payment{state.payments.length === 1 ? '' : 's'} for {sku}
+                {state.orders.length} order{state.orders.length === 1 ? '' : 's'} for {sku}
               </p>
               <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 1280 }}>
                 <thead>
@@ -475,50 +480,71 @@ function SkuPaymentDetailRows({ sku, dateQuery, colSpan }) {
                       <th key={c.key} style={thD}>{c.label}</th>
                     ))}
                     <th style={{ ...thD, color: C.gray700 }}>Settlement</th>
+                    <th style={{ ...thD, color: C.red }}>Cost</th>
                     <th style={{ ...thD, color: C.gray700 }}>Net P&L</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {state.payments.length === 0 && (
+                  {state.orders.length === 0 && (
                     <tr>
-                      <td colSpan={17} style={{ padding: 16, textAlign: 'center', color: C.gray400, fontSize: 11.5 }}>
-                        No individual payments found for this period.
+                      <td colSpan={18} style={{ padding: 16, textAlign: 'center', color: C.gray400, fontSize: 11.5 }}>
+                        No orders found for this period.
                       </td>
                     </tr>
                   )}
-                  {state.payments.map((p) => (
-                    <tr key={p.order_item_id} style={{ borderBottom: '1px solid #F1F5F9' }}>
-                      <td style={{ padding: '5px 8px', fontFamily: 'monospace', fontSize: 10.5, color: C.gray600, whiteSpace: 'nowrap' }}>
-                        {p.order_id}
-                      </td>
-                      <td style={{ padding: '5px 8px', fontSize: 10.5, color: C.gray500, whiteSpace: 'nowrap' }}>
-                        {p.order_date || '—'}
-                      </td>
-                      <td style={tdD}>{p.quantity}</td>
-                      <td style={{ padding: '5px 8px', fontSize: 10.5, whiteSpace: 'nowrap' }}>
-                        {p.is_return ? (
-                          <span style={{ color: C.red }}>↩ {p.return_type}</span>
-                        ) : (
-                          <span style={{ color: C.green }}>✅ Delivered</span>
-                        )}
-                        {p.excluded_reason && (
-                          <span style={{ marginLeft: 4, color: C.gray400, fontStyle: 'italic' }}>
-                            ({p.excluded_reason === 'missing_price' ? 'no price set' : 'not a loss'})
-                          </span>
-                        )}
-                      </td>
-                      {PAYMENT_LIST_COLUMNS.map((c) => (
-                        <td key={c.key} style={{ ...tdD, color: p[c.key] < 0 ? C.red : C.gray600 }}>
-                          {fmt(p[c.key])}
+                  {state.orders.map((o) => (
+                    <React.Fragment key={o.order_item_id}>
+                      <tr style={{ borderBottom: o.payments.length > 1 ? 'none' : '1px solid #F1F5F9' }}>
+                        <td style={{ padding: '5px 8px', fontFamily: 'monospace', fontSize: 10.5, color: C.gray600, whiteSpace: 'nowrap' }}>
+                          {o.order_id}
                         </td>
-                      ))}
-                      <td style={{ ...tdD, fontWeight: 700, color: p.settlement_value >= 0 ? C.green : C.red }}>
-                        {fmt(p.settlement_value)}
-                      </td>
-                      <td style={{ ...tdD, fontWeight: 800, color: p.net_profit >= 0 ? C.green : C.red }}>
-                        {fmt(p.net_profit)}
-                      </td>
-                    </tr>
+                        <td style={{ padding: '5px 8px', fontSize: 10.5, color: C.gray500, whiteSpace: 'nowrap' }}>
+                          {o.order_date || '—'}
+                        </td>
+                        <td style={tdD}>{o.quantity}</td>
+                        <td style={{ padding: '5px 8px', fontSize: 10.5, whiteSpace: 'nowrap' }}>
+                          {o.is_return ? (
+                            <span style={{ color: C.red }}>↩ {o.return_type}</span>
+                          ) : (
+                            <span style={{ color: C.green }}>✅ Delivered</span>
+                          )}
+                          {o.excluded_reason && (
+                            <span style={{ marginLeft: 4, color: C.gray400, fontStyle: 'italic' }}>
+                              ({o.excluded_reason === 'missing_price' ? 'no price set' : 'not a loss'})
+                            </span>
+                          )}
+                        </td>
+                        {PAYMENT_LIST_COLUMNS.map((c) => (
+                          <td key={c.key} style={{ ...tdD, color: o[c.key] < 0 ? C.red : C.gray600 }}>
+                            {fmt(o[c.key])}
+                          </td>
+                        ))}
+                        <td style={{ ...tdD, fontWeight: 700, color: o.settlement_value >= 0 ? C.green : C.red }}>
+                          {fmt(o.settlement_value)}
+                        </td>
+                        <td style={{ ...tdD, color: o.cost > 0 ? C.red : C.gray300 }}>{o.cost ? `−${fmt(o.cost)}` : '—'}</td>
+                        <td style={{ ...tdD, fontWeight: 800, color: o.net_profit >= 0 ? C.green : C.red }}>
+                          {fmt(o.net_profit)}
+                        </td>
+                      </tr>
+                      {o.payments.length > 1 && (
+                        <tr style={{ borderBottom: '1px solid #F1F5F9' }}>
+                          <td colSpan={18} style={{ padding: '2px 8px 8px 28px' }}>
+                            <span style={{ fontSize: 10, color: C.gray400 }}>
+                              settled across {o.payments.length} instalments:{' '}
+                              {o.payments.map((p, i) => (
+                                <span key={p.neft_id}>
+                                  {i > 0 && ', '}
+                                  {fmt(p.settlement_value)}
+                                  {p.sale_amount ? ' (sale)' : p.total_offer_amount ? ' (offer)' : ''} on {p.payment_date || '—'}
+                                </span>
+                              ))}
+                              — cost is charged once against the combined total, not per instalment
+                            </span>
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
                   ))}
                 </tbody>
               </table>

@@ -137,6 +137,23 @@ def object_size(key):
     return int(head.get("ContentLength") or 0)
 
 
+def get_object_bytes(key):
+    """An object's full bytes, or None if it isn't in the bucket. Used to
+    build a zip of a parent's images server-side — a direct authenticated
+    read, not the public url, so it works even if the bucket's public-read
+    policy is ever tightened."""
+    from botocore.exceptions import ClientError
+
+    try:
+        obj = _client().get_object(Bucket=settings.S3_BUCKET, Key=key)
+    except ClientError as exc:
+        code = str(exc.response.get("Error", {}).get("Code", ""))
+        if code in ("404", "NoSuchKey", "NotFound"):
+            return None
+        raise
+    return obj["Body"].read()
+
+
 _KNOWN_ERRORS = {
     "NoSuchBucket": "the bucket name is wrong, or the token is scoped to a different bucket",
     "InvalidAccessKeyId": "the Access Key ID is wrong",

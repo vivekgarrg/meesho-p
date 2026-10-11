@@ -56,6 +56,8 @@ import LoginPage from './Components/Login/LoginPage';
 import LandingPage from './Components/Landing/LandingPage';
 import BusinessProfilePage from './Components/BusinessProfile/BusinessProfilePage';
 import BusinessSwitcher from './Components/BusinessSwitcher';
+import CombinedViewToggle from './Components/CombinedViewToggle';
+import CombinedViewBanner from './Components/CombinedViewBanner';
 import { useBusiness } from './contexts/BusinessContext';
 import { DateFilterProvider } from './contexts/DateFilterContext';
 import { GlobalDateFilterBar } from './Components/shared/GlobalDateFilterBar';
@@ -1097,6 +1099,7 @@ function TopBar({ isMobile, showMenuButton, onOpenMenu }) {
           </button>
         )}
         <BusinessSwitcher />
+        <CombinedViewToggle />
         {/* The breadcrumb duplicates the page's own <h1> — drop it on mobile
             where the row has no room to spare. */}
         {!isMobile && (
@@ -1209,6 +1212,7 @@ function AppShell() {
             WebkitOverflowScrolling: 'touch',
           }}
         >
+          <CombinedViewBanner />
           <ErrorBoundary resetKey={loc.pathname} label={loc.pathname}>
             <RouteGuard>
               <Routes>

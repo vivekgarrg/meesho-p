@@ -7,6 +7,9 @@ import { AppLineChart } from '../Charts/AppLineChart';
 import { AppPieChart } from '../Charts/AppPieChart';
 import { API, C, fmt, btn, Tag } from '../../App';
 import { useDateFilter } from '../../contexts/DateFilterContext';
+import { useBusiness } from '../../contexts/BusinessContext';
+import { useCombinedView } from '../../contexts/CombinedViewContext';
+import { mergeProfitResponses, mergeDashboardResponses } from '../../lib/combinedMerge';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Design tokens
@@ -708,6 +711,8 @@ function TaxCard({ profit, settings, onSave, saving }) {
 export function OverviewTab() {
   const navigate = useNavigate();
   const { range: activeRange, label: filterLabel } = useDateFilter();
+  const { businesses } = useBusiness();
+  const combined = useCombinedView();
   const [profit, setProfit] = useState(null);
   const [dash, setDash] = useState(null);
   const [settings, setSettings] = useState(null);
@@ -737,20 +742,32 @@ export function OverviewTab() {
     return () => ctrl.abort();
   }, []);
 
+  // Combined mode: fan out profit/ and dashboard/ to every ticked business and
+  // merge (see lib/combinedMerge.js) into an object shaped exactly like one
+  // business's response, so none of this tab's rendering below needs to know
+  // the difference. cost-settings/ is a per-business policy, not data — always
+  // the active business's own, combined or not.
+  const combinedIds = combined.active ? combined.selectedIds : null;
+
   useEffect(() => {
     const ctrl = new AbortController();
     setLoading(true);
     const qs = Object.keys(activeRange).length ? `?${new URLSearchParams(activeRange)}` : '';
+    const ids = combinedIds;
+    const profitUrls = ids ? ids.map((id) => `/api/business/${id}/profit/${qs}`) : [`${API}/profit/${qs}`];
+    const dashUrls = ids ? ids.map((id) => `/api/business/${id}/dashboard/${qs}`) : [`${API}/dashboard/${qs}`];
+    const getJson = (url) => fetch(url, { signal: ctrl.signal }).then((r) => r.json());
     Promise.all([
-      fetch(`${API}/profit/${qs}`, { signal: ctrl.signal }).then((r) => r.json()),
-      fetch(`${API}/dashboard/${qs}`, { signal: ctrl.signal }).then((r) => r.json()),
+      Promise.all(profitUrls.map(getJson)),
+      Promise.all(dashUrls.map(getJson)),
       fetch(`${API}/cost-settings/`, { signal: ctrl.signal })
         .then((r) => (r.ok ? r.json() : null))
         .catch(() => null),
     ])
-      .then(([p, d, s]) => {
-        setProfit(p);
-        setDash(d);
+      .then(([profits, dashes, s]) => {
+        const bizList = ids ? ids.map((id) => businesses.find((b) => b.id === id)) : null;
+        setProfit(ids ? mergeProfitResponses(profits, bizList) : profits[0]);
+        setDash(ids ? mergeDashboardResponses(dashes, bizList) : dashes[0]);
         if (s) setSettings(s);
         setLoading(false);
       })
@@ -758,7 +775,8 @@ export function OverviewTab() {
         if (e.name !== 'AbortError') setLoading(false);
       });
     return () => ctrl.abort();
-  }, [JSON.stringify(activeRange), reloadKey]); // eslint-disable-line
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [JSON.stringify(activeRange), reloadKey, combinedIds?.join(',')]);
 
   // Profit is computed on read, so a policy change has to re-pull it — the
   // packaging and GST figures move the moment the setting does.
@@ -1029,6 +1047,17 @@ export function OverviewTab() {
                 }}
               >
                 Net P&L — {filterLabel}
+                {combinedIds && (
+                  <span
+                    style={{
+                      marginLeft: 8, fontSize: 10.5, fontWeight: 800, color: C.orange,
+                      background: '#FFF7ED', border: '1px solid #FDBA74', borderRadius: 20,
+                      padding: '2px 8px', textTransform: 'none', letterSpacing: 0,
+                    }}
+                  >
+                    🧩 combined · {combinedIds.length} businesses
+                  </span>
+                )}
               </p>
               <p
                 style={{

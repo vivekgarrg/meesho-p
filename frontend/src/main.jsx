@@ -11,6 +11,7 @@ import { swrFetcher } from "./lib/swr.js";
 import { AuthProvider } from "./contexts/AuthContext.jsx";
 import { BusinessProvider } from "./contexts/BusinessContext.jsx";
 import { AccessProvider } from "./contexts/AccessContext.jsx";
+import { CombinedViewProvider } from "./contexts/CombinedViewContext.jsx";
 import "./index.css";
 
 ReactDOM.createRoot(document.getElementById("root")).render(
@@ -34,11 +35,12 @@ ReactDOM.createRoot(document.getElementById("root")).render(
           <CssBaseline />
           <AuthProvider>
             <BusinessProvider>
-              {/* Inside BusinessProvider: access rules are resolved per business,
-                  so this needs to know which one is active. */}
-              <AccessProvider>
-                <App />
-              </AccessProvider>
+              {/* Inside BusinessProvider: both need to know which businesses exist. */}
+              <CombinedViewProvider>
+                <AccessProvider>
+                  <App />
+                </AccessProvider>
+              </CombinedViewProvider>
             </BusinessProvider>
           </AuthProvider>
         </ThemeProvider>

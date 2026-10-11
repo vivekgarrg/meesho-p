@@ -36,6 +36,13 @@ class StorageMock:
             "presign_put": lambda key, ct: f"https://signed.example/{key}?ct={ct}",
             "object_size": lambda key: self.present.get(key),
             "public_url": lambda key: f"https://images.rudam.in/{key}",
+            # "bytes" of an object are just its key, repeated to its recorded
+            # size — enough to prove the zip downloader fetched the right
+            # keys with the right content, with no real bucket involved.
+            "get_object_bytes": lambda key: (
+                (key.encode() * (self.present[key] // max(len(key), 1) + 1))[: self.present[key]]
+                if key in self.present else None
+            ),
         }.items():
             p = mock.patch(f"{base}.{name}", side_effect=fn)
             p.start()
@@ -694,3 +701,51 @@ class DirectParentUploadTests(ListingImageTestCase):
         ParentItemPrice.objects.create(business=self.business, item_id="BRASS-DIYA", item_price="40")
         r = self.presign("BRASS-DIYA", create=False, product="BRASS-DIYA")
         self.assertEqual(r.status_code, 200)
+
+
+class DownloadZipTests(ListingImageTestCase):
+    """"Download SKU image folder" — every uploaded image of one parent, zipped."""
+
+    def upload_to(self, parent_id, files):
+        r = self.presign(parent_id, create=False, product=parent_id, files=files)
+        self.assertEqual(r.status_code, 200, r.data)
+        self.upload(r.data["results"])
+        self.confirm([x["id"] for x in r.data["results"]])
+        return r.data
+
+    def download(self, parent_id):
+        return self.client.get(f"{self.base}/listing-images/download/", {"parent_id": parent_id})
+
+    def test_zip_contains_every_uploaded_image_for_the_parent(self):
+        import zipfile
+        from io import BytesIO
+
+        ParentItemPrice.objects.create(business=self.business, item_id="BRASS-DIYA", item_price="40")
+        self.upload_to("BRASS-DIYA", [file(SHA_A), file(SHA_B, "image/png")])
+
+        r = self.download("BRASS-DIYA")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r["Content-Type"], "application/zip")
+        self.assertIn('filename="BRASS-DIYA.zip"', r["Content-Disposition"])
+
+        zf = zipfile.ZipFile(BytesIO(r.content))
+        self.assertEqual(sorted(zf.namelist()), [
+            "BRASS-DIYA-1.jpg",
+            "BRASS-DIYA-2.png",
+        ])
+
+    def test_pending_unconfirmed_images_are_not_included(self):
+        ParentItemPrice.objects.create(business=self.business, item_id="BRASS-DIYA", item_price="40")
+        r = self.presign("BRASS-DIYA", create=False, product="BRASS-DIYA", files=[file(SHA_A)])
+        self.upload(r.data["results"])  # in the bucket, but never confirmed
+
+        resp = self.download("BRASS-DIYA")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_unknown_parent_is_a_404_not_an_empty_zip(self):
+        resp = self.download("NO-SUCH-PARENT")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_missing_parent_id_is_a_400(self):
+        resp = self.client.get(f"{self.base}/listing-images/download/")
+        self.assertEqual(resp.status_code, 400)

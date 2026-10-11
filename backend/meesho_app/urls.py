@@ -205,6 +205,7 @@ urlpatterns = [
     path("listing-images/presign/", listing_images_views.listing_images_presign, name="listing_images_presign"),
     path("listing-images/confirm/", listing_images_views.listing_images_confirm, name="listing_images_confirm"),
     path("listing-images/",         listing_images_views.listing_images_list,    name="listing_images_list"),
+    path("listing-images/download/", listing_images_views.listing_images_download, name="listing_images_download"),
     path("bulk-listing/field-sources/",
          bulk_listing_views.bulk_listing_field_sources, name="bulk_listing_field_sources"),
     path("bulk-listing/flipkart-presets/",

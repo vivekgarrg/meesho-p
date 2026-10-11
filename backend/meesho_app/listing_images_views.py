@@ -20,10 +20,13 @@ Nothing about the bucket lives here — see object_storage.py.
 
 import re
 import uuid
+import zipfile
+from io import BytesIO
 
 from django.conf import settings
 from django.db import transaction
 from django.db.models import Count, Q
+from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.decorators import api_view
@@ -492,3 +495,59 @@ def listing_images_list(request, business_id):
             cond |= Q(image_no=int(q.lstrip("#")))
         qs = qs.filter(cond)
     return Response({"results": [_image_dict(img) for img in qs[:300]]})
+
+
+@api_view(["GET"])
+def listing_images_download(request, business_id):
+    """
+    Every uploaded image of one parent, zipped — "download the SKU image
+    folder" from SKU Pricing, so a seller gets every photo in one file
+    instead of opening each one individually. ?parent_id= required.
+
+    Images are fetched straight from the bucket (not the public url), so this
+    still works if the bucket's public-read policy is ever tightened. A
+    partial fetch (some objects since deleted from the bucket) still returns
+    whatever did come back; only a total failure is an error.
+    """
+    business = get_authorized_business(request, business_id)
+    if not object_storage.is_ready():
+        return _storage_unavailable()
+
+    parent_id = str(request.GET.get("parent_id") or "").strip()
+    if not parent_id:
+        return Response({"error": "parent_id is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        parent = ParentItemPrice.objects.get(business=business, item_id__iexact=parent_id)
+    except ParentItemPrice.DoesNotExist:
+        return Response({"error": f"No parent named '{parent_id}'."}, status=status.HTTP_404_NOT_FOUND)
+
+    images = list(
+        ListingImage.objects
+        .filter(business=business, parent=parent, status=ListingImage.STATUS_UPLOADED)
+        .order_by("image_no")
+    )
+    if not images:
+        return Response({"error": "This parent has no uploaded images yet."}, status=status.HTTP_404_NOT_FOUND)
+
+    buf = BytesIO()
+    fetched = 0
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for img in images:
+            data = object_storage.get_object_bytes(img.key)
+            if data is None:
+                continue
+            fetched += 1
+            zf.writestr(img.key.rsplit("/", 1)[-1], data)
+
+    if fetched == 0:
+        return Response(
+            {"error": "None of this parent's images could be fetched from storage — they may have been deleted."},
+            status=status.HTTP_502_BAD_GATEWAY,
+        )
+
+    buf.seek(0)
+    folder_name = _file_base(images[0].folder or parent.item_id) or "images"
+    response = HttpResponse(buf.read(), content_type="application/zip")
+    response["Content-Disposition"] = f'attachment; filename="{folder_name}.zip"'
+    return response

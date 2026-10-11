@@ -419,6 +419,29 @@ function ParentCard({ parent, notify, onLink, dragging, unlinked = [], onOptOut,
     invalidatePricing();   // photo count, and the parent's picture if it had none
   };
 
+  const [photosZipBusy, setPhotosZipBusy] = useState(false);
+
+  /** Every uploaded photo of this parent, zipped — "download the SKU image folder". */
+  const downloadPhotosZip = async () => {
+    setPhotosZipBusy(true);
+    try {
+      const res = await fetch(`${API}/listing-images/download/?parent_id=${idPath}`);
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        notify("err", d.error || "Could not build the zip.");
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${parent.item_id.replace(/[^A-Za-z0-9._-]+/g, "_")}.zip`;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+    } catch { notify("err", "Could not build the zip."); }
+    finally { setPhotosZipBusy(false); }
+  };
+
   const children = childrenData?.results ?? null;
   const histories = historyData ? (Array.isArray(historyData) ? historyData : historyData.results || []) : null;
   const suggestions = suggestData?.results ?? null;
@@ -1171,15 +1194,22 @@ function ParentCard({ parent, notify, onLink, dragging, unlinked = [], onOptOut,
                 <ActionPanel accent={C.blue} icon="📷" title="Photos" right={
                   <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
                     {photos?.length ? (
-                      <button
-                        onClick={() => {
-                          navigator.clipboard?.writeText(photos.map((ph) => ph.public_url).join("\n"))
-                            .then(() => notify("ok", `Copied ${photos.length} link(s) — paste them into Bulk Listing.`))
-                            .catch(() => notify("err", "Could not copy — your browser blocked clipboard access."));
-                        }}
-                        style={{ ...btn("ghost", "sm"), fontSize: 11 }}>
-                        Copy all links
-                      </button>
+                      <>
+                        <button
+                          onClick={() => {
+                            navigator.clipboard?.writeText(photos.map((ph) => ph.public_url).join("\n"))
+                              .then(() => notify("ok", `Copied ${photos.length} link(s) — paste them into Bulk Listing.`))
+                              .catch(() => notify("err", "Could not copy — your browser blocked clipboard access."));
+                          }}
+                          style={{ ...btn("ghost", "sm"), fontSize: 11 }}>
+                          Copy all links
+                        </button>
+                        <button onClick={downloadPhotosZip} disabled={photosZipBusy}
+                          title={`Download all ${photos.length} photo(s) as one zip`}
+                          style={{ ...btn("ghost", "sm"), fontSize: 11, opacity: photosZipBusy ? 0.6 : 1 }}>
+                          {photosZipBusy ? "Zipping…" : "⬇ Download all"}
+                        </button>
+                      </>
                     ) : null}
                     {storageConfig?.enabled && (
                       <button onClick={() => photoInputRef.current?.click()} disabled={!!photoUpload?.active}

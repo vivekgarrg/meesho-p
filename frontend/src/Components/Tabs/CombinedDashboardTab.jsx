@@ -2,37 +2,35 @@ import React, { useEffect, useMemo, useState } from "react";
 import { C, S, btn, fmt, StatCard, SectionHeader, useIsMobile } from "../../App";
 import { useBusiness } from "../../contexts/BusinessContext";
 import { useDateFilter } from "../../contexts/DateFilterContext";
+import { useCombinedView } from "../../contexts/CombinedViewContext";
 import { AppBarChart } from "../Charts/AppBarChart";
 import { AppPieChart } from "../Charts/AppPieChart";
+import { CombinedBusinessPicker } from "../CombinedBusinessPicker";
 
 /*
  * COMBINED DASHBOARD
  *
  * Every other analytics tab is scoped to whichever business is active in the
  * sidebar switcher (see BusinessContext / lib/apiBase.js) — this is the one
- * screen that deliberately isn't. It fetches profit/ directly per business id
+ * screen that deliberately isn't. It fetches profit/, full-orders/analytics/
+ * and orders/grouped/ (just its "kpi" summary) directly per business id
  * (bypassing the shared API_BASE) for however many businesses the seller ticks
- * below, and rolls the numbers up three ways:
+ * below, and rolls the numbers up five ways:
  *   1. Headline + cost totals — plain sums, since each business's own cost
  *      settings (transport deduction, packaging policy, …) are already baked
  *      into the numbers profit/ returns for it.
- *   2. Order-outcome mix (delivered/returned/RTO/claim/exchange) as a pie.
- *   3. Every SKU across every selected business, flattened into one list —
+ *   2. Order-outcome mix (delivered/returned/RTO/claim/exchange) as a pie —
+ *      from profit/, so this is *settled* orders only.
+ *   3. Orders — from full-orders/analytics/, every order regardless of
+ *      settlement status (includes still-in-transit/unsettled ones profit/
+ *      never sees), by status with listed/discounted price totals.
+ *   4. Payments — from orders/grouped/'s kpi (requested with page_size=1 so
+ *      only the summary comes back, not every row), settlement amount by
+ *      status — the money dimension the outcome-mix pie doesn't carry.
+ *   5. Every SKU across every selected business, flattened into one list —
  *      the "which SKUs are actually losing money" view nothing else in the
  *      app shows across more than one business at a time.
  */
-
-const SELECTION_KEY = "combined_dashboard_business_ids";
-
-function loadSelection() {
-  try {
-    const raw = localStorage.getItem(SELECTION_KEY);
-    const parsed = raw ? JSON.parse(raw) : null;
-    return Array.isArray(parsed) ? parsed : null;
-  } catch {
-    return null;
-  }
-}
 
 // Fields worth adding up across businesses. net_revenue (not net_profit_loss)
 // is the true bottom line — the backend has already folded ads spend,
@@ -88,6 +86,53 @@ function aggregateOutcomes(rows) {
   return totals;
 }
 
+function titleCase(s) {
+  return String(s || "Unknown").replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+// full-orders/analytics/ per business -> total order count + status mix
+// (listed/discounted price totals), summed. Covers every order regardless of
+// settlement status — profit/'s order_count only counts settled ones.
+function aggregateOrdersAnalytics(rows) {
+  let total = 0;
+  const byStatus = {};
+  rows.forEach((r) => {
+    if (!r) return;
+    total += Number(r.total) || 0;
+    (r.by_status || []).forEach((s) => {
+      const key = titleCase(s.reason_for_credit_entry);
+      const cur = byStatus[key] || { status: key, count: 0, total_listed: 0, total_discounted: 0 };
+      cur.count += Number(s.count) || 0;
+      cur.total_listed += Number(s.total_listed) || 0;
+      cur.total_discounted += Number(s.total_discounted) || 0;
+      byStatus[key] = cur;
+    });
+  });
+  return { total, byStatus: Object.values(byStatus).sort((a, b) => b.count - a.count) };
+}
+
+// orders/grouped/'s kpi per business -> settlement amount by status, summed —
+// the money dimension behind the order-outcome mix pie above.
+function aggregatePaymentsKpi(rows) {
+  let totalGroups = 0;
+  let totalSettlement = 0;
+  const byStatus = {};
+  rows.forEach((r) => {
+    const kpi = r?.kpi;
+    if (!kpi) return;
+    totalGroups += Number(kpi.total_groups) || 0;
+    totalSettlement += Number(kpi.total_settlement) || 0;
+    (kpi.by_status || []).forEach((s) => {
+      const key = titleCase(s.status);
+      const cur = byStatus[key] || { status: key, count: 0, settlement: 0 };
+      cur.count += Number(s.count) || 0;
+      cur.settlement += Number(s.settlement) || 0;
+      byStatus[key] = cur;
+    });
+  });
+  return { totalGroups, totalSettlement, byStatus: Object.values(byStatus).sort((a, b) => b.count - a.count) };
+}
+
 // Every SKU from every loaded business's sku_wise_profit, flattened into one
 // list and tagged with which business it belongs to — two businesses using
 // the same SKU code are still two different rows here, deliberately never
@@ -118,43 +163,23 @@ export function CombinedDashboardTab() {
   const isMobile = useIsMobile();
   const { businesses } = useBusiness();
   const { range, label: filterLabel } = useDateFilter();
+  // Shared with the global "Combined" toggle in the header (CombinedViewToggle)
+  // and every other tab that reads it — one selection, not a page-local one.
+  const { selected, toggleBusiness, setSelected, selectedIds, enabled, setEnabled } = useCombinedView();
 
-  const [selected, setSelected] = useState(() => {
-    const stored = loadSelection();
-    const validStored = stored?.filter((id) => businesses.some((b) => b.id === id));
-    if (validStored?.length) return new Set(validStored);
-    return new Set(businesses.map((b) => b.id));
-  });
-
-  // A business added or removed after the page first loaded shouldn't leave
-  // the selection referencing an id that no longer exists, or stuck empty.
+  // This page is what "combined" actually means, so opening it should always
+  // show combined numbers — flip the global switch on if it wasn't already,
+  // rather than making the seller do that twice in two different places.
   useEffect(() => {
-    setSelected((prev) => {
-      const validIds = new Set(businesses.map((b) => b.id));
-      const kept = [...prev].filter((id) => validIds.has(id));
-      if (kept.length === prev.size) return prev;
-      return new Set(kept.length ? kept : businesses.map((b) => b.id));
-    });
+    if (!enabled) setEnabled(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [businesses.map((b) => b.id).join(",")]);
+  }, []);
 
-  useEffect(() => {
-    localStorage.setItem(SELECTION_KEY, JSON.stringify([...selected]));
-  }, [selected]);
-
-  const toggleBusiness = (id) =>
-    setSelected((s) => {
-      const next = new Set(s);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-
-  const [results, setResults] = useState({}); // business id -> profit/ response
+  // business id -> { profit, ordersAnalytics, paymentsKpi } — the three
+  // endpoints fetched per business (see the file header comment).
+  const [results, setResults] = useState({});
   const [failedIds, setFailedIds] = useState([]);
   const [loading, setLoading] = useState(false);
-
-  const selectedIds = useMemo(() => [...selected].sort((a, b) => a - b), [selected]);
 
   useEffect(() => {
     if (!selectedIds.length) {
@@ -165,12 +190,20 @@ export function CombinedDashboardTab() {
     const ctrl = new AbortController();
     setLoading(true);
     const qs = Object.keys(range).length ? `?${new URLSearchParams(range)}` : "";
+    // page_size=1: orders/grouped/ computes its kpi summary over every group
+    // before paginating, so this is the cheapest way to get just that summary.
+    const paymentsQs = new URLSearchParams({ ...range, page_size: "1" });
+    const getJson = (url) => fetch(url, { signal: ctrl.signal }).then((r) => {
+      if (!r.ok) throw new Error(`request to ${url} failed`);
+      return r.json();
+    });
     Promise.allSettled(
       selectedIds.map((id) =>
-        fetch(`/api/business/${id}/profit/${qs}`, { signal: ctrl.signal }).then((r) => {
-          if (!r.ok) throw new Error(`business ${id} failed`);
-          return r.json();
-        })
+        Promise.all([
+          getJson(`/api/business/${id}/profit/${qs}`),
+          getJson(`/api/business/${id}/full-orders/analytics/${qs}`),
+          getJson(`/api/business/${id}/orders/grouped/?${paymentsQs}`),
+        ]).then(([profit, ordersAnalytics, paymentsKpi]) => ({ profit, ordersAnalytics, paymentsKpi }))
       )
     ).then((outcomes) => {
       const nextResults = {};
@@ -189,15 +222,22 @@ export function CombinedDashboardTab() {
   }, [selectedIds.join(","), JSON.stringify(range)]);
 
   const loadedBusinesses = businesses.filter((b) => selected.has(b.id) && results[b.id]);
-  const loadedData = loadedBusinesses.map((b) => results[b.id]);
+  const loadedData = loadedBusinesses.map((b) => results[b.id].profit);
+  const ordersData = loadedBusinesses.map((b) => results[b.id].ordersAnalytics);
+  const paymentsData = loadedBusinesses.map((b) => results[b.id].paymentsKpi);
 
   const totals = useMemo(() => aggregateTotals(loadedData), [loadedData]);
   const outcomes = useMemo(() => aggregateOutcomes(loadedData), [loadedData]);
-  const skuRows = useMemo(() => aggregateSkuRows(loadedBusinesses, results), [loadedBusinesses, results]);
+  const ordersAnalytics = useMemo(() => aggregateOrdersAnalytics(ordersData), [ordersData]);
+  const paymentsKpi = useMemo(() => aggregatePaymentsKpi(paymentsData), [paymentsData]);
+  const skuRows = useMemo(
+    () => aggregateSkuRows(loadedBusinesses, Object.fromEntries(loadedBusinesses.map((b) => [b.id, results[b.id].profit]))),
+    [loadedBusinesses, results]
+  );
   const taxWithheld = totals.total_tcs + totals.total_tds;
 
   const compareRows = loadedBusinesses
-    .map((b) => ({ business: b, data: results[b.id] }))
+    .map((b) => ({ business: b, data: results[b.id].profit }))
     .sort((a, b) => (b.data.net_revenue ?? 0) - (a.data.net_revenue ?? 0));
 
   const failedBusinesses = businesses.filter((b) => failedIds.includes(b.id));
@@ -213,12 +253,12 @@ export function CombinedDashboardTab() {
           <h1 style={{ fontSize: isMobile ? 17 : 19, fontWeight: 800, color: C.gray800 }}>Combined Dashboard</h1>
         </div>
         <p style={{ fontSize: 12, color: C.gray400, marginTop: 3, maxWidth: 680 }}>
-          Profit, loss, order outcomes and SKU-level detail — rolled up across every business you tick
+          Profit, loss, orders, payments and SKU-level detail — rolled up across every business you tick
           below, instead of the one active in the sidebar. Respects the period filter above ({filterLabel}).
         </p>
       </div>
 
-      <BusinessPicker
+      <CombinedBusinessPicker
         businesses={businesses}
         selected={selected}
         onToggle={toggleBusiness}
@@ -282,6 +322,22 @@ export function CombinedDashboardTab() {
             </div>
           </section>
 
+          {/* ── Orders ────────────────────────────────────────────────────── */}
+          <section>
+            <SectionHeader title="Orders" />
+            <div style={S.card}>
+              <OrdersSection analytics={ordersAnalytics} isMobile={isMobile} />
+            </div>
+          </section>
+
+          {/* ── Payments ──────────────────────────────────────────────────── */}
+          <section>
+            <SectionHeader title="Payments" />
+            <div style={S.card}>
+              <PaymentsSection kpi={paymentsKpi} isMobile={isMobile} />
+            </div>
+          </section>
+
           {/* ── By business ───────────────────────────────────────────────── */}
           <section>
             <SectionHeader title="By Business" count={compareRows.length} />
@@ -307,66 +363,6 @@ export function CombinedDashboardTab() {
             <SkuAnalyticsSection rows={skuRows} isMobile={isMobile} />
           </section>
         </>
-      )}
-    </div>
-  );
-}
-
-function BusinessPicker({ businesses, selected, onToggle, onSelectAll, onSelectNone }) {
-  if (businesses.length === 0) {
-    return (
-      <div style={{ ...S.card, fontSize: 12.5, color: C.gray400 }}>No businesses on this account yet.</div>
-    );
-  }
-  return (
-    <div style={S.card}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
-        <p style={{ ...S.cardTitle, marginBottom: 0 }}>
-          {selected.size} of {businesses.length} business{businesses.length === 1 ? "" : "es"} selected
-        </p>
-        <div style={{ display: "flex", gap: 6 }}>
-          <button onClick={onSelectAll} style={btn("ghost", "sm")}>Select all</button>
-          <button onClick={onSelectNone} style={btn("ghost", "sm")}>Clear</button>
-        </div>
-      </div>
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-        {businesses.map((b) => {
-          const on = selected.has(b.id);
-          return (
-            <button
-              key={b.id}
-              onClick={() => onToggle(b.id)}
-              style={{
-                display: "flex", alignItems: "center", gap: 7,
-                padding: "7px 12px", borderRadius: 20, fontSize: 12.5, fontWeight: 700,
-                cursor: "pointer", fontFamily: "inherit",
-                background: on ? C.orangeLight : C.white,
-                color: on ? C.orange : C.gray500,
-                border: `1.5px solid ${on ? C.orangeBorder : C.gray200}`,
-                transition: "background 0.14s, border-color 0.14s, color 0.14s",
-              }}
-            >
-              <span
-                style={{
-                  width: 15, height: 15, borderRadius: 4, flexShrink: 0,
-                  display: "flex", alignItems: "center", justifyContent: "center",
-                  fontSize: 10, color: "#fff",
-                  background: on ? C.orange : "transparent",
-                  border: `1.5px solid ${on ? C.orange : C.gray300}`,
-                }}
-              >
-                {on ? "✓" : ""}
-              </span>
-              {b.name}
-            </button>
-          );
-        })}
-      </div>
-      {businesses.length === 1 && (
-        <p style={{ fontSize: 11, color: C.gray400, marginTop: 8 }}>
-          Only one business on this account right now — this page will show the same numbers as
-          Overview until there's a second one to combine.
-        </p>
       )}
     </div>
   );
@@ -459,6 +455,93 @@ function OutcomesSection({ outcomes, isMobile }) {
           );
         })}
         <p style={{ fontSize: 11, color: C.gray400, marginTop: 4 }}>{total.toLocaleString("en-IN")} settled orders total.</p>
+      </div>
+    </div>
+  );
+}
+
+/** Every order regardless of settlement status, by status, combined across
+ * every selected business — unlike Order Outcomes above (settled only). */
+function OrdersSection({ analytics, isMobile }) {
+  if (analytics.total === 0) {
+    return <p style={{ fontSize: 12.5, color: C.gray400 }}>No orders in this period.</p>;
+  }
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr 1fr" : "repeat(auto-fit, minmax(170px, 1fr))", gap: 12 }}>
+        <StatCard label="Total Orders" value={null} sub={analytics.total.toLocaleString("en-IN")} icon="📦" accent={C.gray600} />
+        <StatCard
+          label="Listed Price"
+          value={analytics.byStatus.reduce((s, r) => s + r.total_listed, 0)}
+          icon="🏷"
+          accent={C.blue}
+        />
+        <StatCard
+          label="Discounted Price"
+          value={analytics.byStatus.reduce((s, r) => s + r.total_discounted, 0)}
+          icon="💸"
+          accent={C.blue}
+        />
+      </div>
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+          <thead>
+            <tr>
+              <th style={S.th}>Status</th>
+              <th style={{ ...S.th, textAlign: "right" }}>Orders</th>
+              <th style={{ ...S.th, textAlign: "right" }}>Listed Price</th>
+              <th style={{ ...S.th, textAlign: "right" }}>Discounted Price</th>
+            </tr>
+          </thead>
+          <tbody>
+            {analytics.byStatus.map((r, i) => (
+              <tr key={r.status} style={{ background: i % 2 ? C.gray50 : C.white }}>
+                <td style={{ ...S.td, fontWeight: 700 }}>{r.status}</td>
+                <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace" }}>{r.count.toLocaleString("en-IN")}</td>
+                <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace" }}>{fmt(r.total_listed)}</td>
+                <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace" }}>{fmt(r.total_discounted)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+/** Settlement amount by status, combined across every selected business —
+ * the money dimension behind the Order Outcomes mix above. */
+function PaymentsSection({ kpi, isMobile }) {
+  if (kpi.totalGroups === 0) {
+    return <p style={{ fontSize: 12.5, color: C.gray400 }}>No payments in this period.</p>;
+  }
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr 1fr" : "repeat(auto-fit, minmax(170px, 1fr))", gap: 12 }}>
+        <StatCard label="Total Settlement" value={kpi.totalSettlement} icon="🏦" accent={C.blue} />
+        <StatCard label="Order Groups" value={null} sub={kpi.totalGroups.toLocaleString("en-IN")} icon="📑" accent={C.gray600} />
+      </div>
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+          <thead>
+            <tr>
+              <th style={S.th}>Status</th>
+              <th style={{ ...S.th, textAlign: "right" }}>Orders</th>
+              <th style={{ ...S.th, textAlign: "right" }}>Settlement</th>
+            </tr>
+          </thead>
+          <tbody>
+            {kpi.byStatus.map((r, i) => (
+              <tr key={r.status} style={{ background: i % 2 ? C.gray50 : C.white }}>
+                <td style={{ ...S.td, fontWeight: 700 }}>{r.status}</td>
+                <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace" }}>{r.count.toLocaleString("en-IN")}</td>
+                <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", fontWeight: 700, color: r.settlement >= 0 ? C.green : C.red }}>
+                  {fmt(r.settlement)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
     </div>
   );
