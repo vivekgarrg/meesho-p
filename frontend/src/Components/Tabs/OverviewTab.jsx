@@ -708,6 +708,435 @@ function TaxCard({ profit, settings, onSave, saving }) {
   );
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Percentage insights — ROI, return/RTO rates, month-over-month movement
+// ─────────────────────────────────────────────────────────────────────────────
+const DAY_MS = 86400000;
+const parseYmd = (s) => {
+  const [y, m, d] = String(s).split('-').map(Number);
+  return new Date(y, m - 1, d);
+};
+const toYmd = (dt) =>
+  `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+
+/** The period right before `range`: the previous calendar month when the range
+ *  is a whole month, otherwise an equally long span ending the day before. */
+function previousRange(range) {
+  if (!range?.date_from || !range?.date_to) return null;
+  const from = parseYmd(range.date_from);
+  const to = parseYmd(range.date_to);
+  const wholeMonth =
+    from.getDate() === 1 &&
+    to.getFullYear() === from.getFullYear() &&
+    to.getMonth() === from.getMonth() &&
+    new Date(to.getFullYear(), to.getMonth() + 1, 0).getDate() === to.getDate();
+  if (wholeMonth) {
+    const pf = new Date(from.getFullYear(), from.getMonth() - 1, 1);
+    const pt = new Date(from.getFullYear(), from.getMonth(), 0);
+    return { date_from: toYmd(pf), date_to: toYmd(pt) };
+  }
+  const len = Math.round((to - from) / DAY_MS) + 1;
+  return { date_from: toYmd(new Date(from.getTime() - len * DAY_MS)), date_to: toYmd(new Date(from.getTime() - DAY_MS)) };
+}
+
+/** Number of days a period covers — capped at today so a month in progress
+ *  isn't averaged over days that haven't happened. */
+function periodDays(range, dash) {
+  let from;
+  let to;
+  if (range?.date_from && range?.date_to) {
+    from = parseYmd(range.date_from);
+    to = parseYmd(range.date_to);
+  } else {
+    const ds = (dash?.order_stats?.daily || []).map((r) => String(r.order_date)).sort();
+    if (!ds.length) return 1;
+    from = parseYmd(ds[0]);
+    to = parseYmd(ds[ds.length - 1]);
+  }
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  if (to > today && from <= today) to = today;
+  return Math.max(1, Math.round((to - from) / DAY_MS) + 1);
+}
+
+const ratio = (n, d) => (Number(d) > 0 ? (Number(n) / Number(d)) * 100 : null);
+
+function periodMetrics(profit, dash, days) {
+  if (!profit) return null;
+  const os = profit.order_summary || {};
+  const packed = dash?.order_stats?.total || profit.order_count || 0;
+  const net = Number(profit.net_revenue ?? 0);
+  const invested = Number(profit.total_purchase_cost ?? 0);
+  const gross = Number(profit.gross_revenue ?? 0);
+  const nRet = os.return_summary?.order_count ?? 0;
+  const nRTO = os.rto_summary?.order_count ?? 0;
+  const nDel = os.delivered_summary?.order_count ?? 0;
+  return {
+    packed,
+    days,
+    net,
+    roi: ratio(net, invested),
+    margin: ratio(net, gross),
+    returnPct: ratio(nRet, packed),
+    rtoPct: ratio(nRTO, packed),
+    deliveredPct: ratio(nDel, packed),
+    adsPct: ratio(Math.abs(Number(profit.total_ads_cost ?? 0)), gross),
+    ordersPerDay: packed / days,
+    profitPerDay: net / days,
+    profitPerOrder: packed > 0 ? net / packed : null,
+  };
+}
+
+const fmtPct = (v) => (v == null || Number.isNaN(v) ? '—' : `${v.toFixed(1)}%`);
+const fmtNum = (v) => (v == null || Number.isNaN(v) ? '—' : v.toLocaleString('en-IN', { maximumFractionDigits: 1 }));
+
+/** Change vs the previous period. `mode` 'pct' → relative %, 'pts' → percentage points.
+ *  `goodWhenDown` flips the colour for metrics where lower is better (returns, RTO). */
+function Delta({ cur, prev, mode = 'pct', goodWhenDown }) {
+  if (cur == null || prev == null || (mode === 'pct' && prev === 0)) {
+    return <span style={{ fontSize: 12, color: C.gray400 }}>—</span>;
+  }
+  const diff = mode === 'pct' ? ((cur - prev) / Math.abs(prev)) * 100 : cur - prev;
+  if (Math.abs(diff) < 0.05) return <span style={{ fontSize: 12, color: C.gray400 }}>no change</span>;
+  const up = diff > 0;
+  const good = goodWhenDown ? !up : up;
+  return (
+    <span style={{ fontSize: 12, fontWeight: 700, fontFamily: 'monospace', color: good ? C.green : C.red }}>
+      {up ? '▲' : '▼'} {Math.abs(diff).toFixed(1)}
+      {mode === 'pct' ? '%' : ' pts'}
+    </span>
+  );
+}
+
+function PercentageInsights({ cur, prev, prevLabel, hasPeriod }) {
+  if (!cur) return null;
+  const roiColor = cur.roi == null ? C.gray800 : cur.roi >= 0 ? C.green : C.red;
+  const rows = [
+    { label: 'Orders packed', cur: cur.packed, prev: prev?.packed, f: fmtNum, mode: 'pct' },
+    { label: 'Net profit', cur: cur.net, prev: prev?.net, f: fmt, mode: 'pct' },
+    { label: 'ROI', cur: cur.roi, prev: prev?.roi, f: fmtPct, mode: 'pts' },
+    { label: 'Profit margin', cur: cur.margin, prev: prev?.margin, f: fmtPct, mode: 'pts' },
+    { label: 'Delivered %', cur: cur.deliveredPct, prev: prev?.deliveredPct, f: fmtPct, mode: 'pts' },
+    { label: 'Return %', cur: cur.returnPct, prev: prev?.returnPct, f: fmtPct, mode: 'pts', down: true },
+    { label: 'RTO %', cur: cur.rtoPct, prev: prev?.rtoPct, f: fmtPct, mode: 'pts', down: true },
+    { label: 'Ads cost % of revenue', cur: cur.adsPct, prev: prev?.adsPct, f: fmtPct, mode: 'pts', down: true },
+    { label: 'Avg orders / day', cur: cur.ordersPerDay, prev: prev?.ordersPerDay, f: fmtNum, mode: 'pct' },
+    { label: 'Avg profit / day', cur: cur.profitPerDay, prev: prev?.profitPerDay, f: fmt, mode: 'pct' },
+    { label: 'Avg profit / order', cur: cur.profitPerOrder, prev: prev?.profitPerOrder, f: (v) => (v == null ? '—' : fmt(v)), mode: 'pct' },
+  ];
+  return (
+    <SectionCard title="Percentage Insights">
+      <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginBottom: 18 }}>
+        <KPICard
+          label="ROI"
+          value={fmtPct(cur.roi)}
+          color={roiColor}
+          icon="📈"
+          sub="net profit ÷ purchase cost"
+        />
+        <KPICard
+          label="Return % of packed"
+          value={fmtPct(cur.returnPct)}
+          color={C.red}
+          icon="↩"
+          sub={`${fmtNum(cur.packed)} orders packed`}
+        />
+        <KPICard label="RTO %" value={fmtPct(cur.rtoPct)} color={C.orange} icon="🔄" sub="of orders packed" />
+        <KPICard
+          label="Orders vs last period"
+          value={prev ? <Delta cur={cur.packed} prev={prev.packed} /> : '—'}
+          icon="📦"
+          sub={prev ? `${fmtNum(prev.packed)} → ${fmtNum(cur.packed)} orders` : hasPeriod ? 'no earlier data' : 'select a month to compare'}
+        />
+        <KPICard
+          label="Avg orders / day"
+          value={fmtNum(cur.ordersPerDay)}
+          icon="🗓️"
+          sub={`over ${cur.days} day${cur.days === 1 ? '' : 's'}`}
+        />
+        <KPICard
+          label="Avg profit / day"
+          value={fmt(cur.profitPerDay)}
+          color={cur.profitPerDay >= 0 ? C.green : C.red}
+          icon="💰"
+          sub={cur.profitPerOrder == null ? undefined : `${fmt(cur.profitPerOrder)} per order`}
+        />
+      </div>
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+          <thead>
+            <tr>
+              {['Metric', 'This period', prev ? `Previous (${prevLabel})` : 'Previous', 'Change'].map((h, i) => (
+                <th
+                  key={h}
+                  style={{ ...T.label, textAlign: i === 0 ? 'left' : 'right', padding: '6px 10px', borderBottom: '1px solid #E2E8F0' }}
+                >
+                  {h}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.label} style={{ borderBottom: '1px solid #F1F5F9' }}>
+                <td style={{ padding: '8px 10px', color: C.gray500 }}>{r.label}</td>
+                <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'monospace', fontWeight: 700, color: C.gray800 }}>
+                  {r.f(r.cur)}
+                </td>
+                <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'monospace', color: C.gray500 }}>
+                  {prev ? r.f(r.prev) : '—'}
+                </td>
+                <td style={{ padding: '8px 10px', textAlign: 'right' }}>
+                  <Delta cur={r.cur} prev={r.prev} mode={r.mode} goodWhenDown={r.down} />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p style={{ fontSize: 10.5, color: C.gray400, marginTop: 10, lineHeight: 1.6 }}>
+        Percentages are of orders packed in the period. Rate changes are in percentage points; profit and order changes
+        are relative. A month still in progress is compared with the full previous month — use the per-day averages for a
+        like-for-like view.
+      </p>
+    </SectionCard>
+  );
+}
+
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const shortDate = (d) => String(d).slice(5);
+
+/** Sum the per-day rows of several businesses into one, keyed by date. */
+function mergeDailyRows(responses) {
+  const byDate = {};
+  responses.forEach((r) =>
+    (r?.days || []).forEach((row) => {
+      const acc = (byDate[row.date] ||= { date: row.date });
+      Object.entries(row).forEach(([k, v]) => {
+        if (k !== 'date' && typeof v === 'number') acc[k] = (acc[k] || 0) + v;
+      });
+    }),
+  );
+  return Object.values(byDate).sort((a, b) => (a.date > b.date ? 1 : -1));
+}
+
+function InsightsPanel({ cur, prev, prevLabel, hasPeriod, profit, dash, daily, dailyLoading, isAllTime }) {
+  const os = profit?.order_summary || {};
+
+  const dailyRows = (() => {
+    let running = 0;
+    return (daily || []).map((d) => {
+      running += Number(d.net_profit || 0);
+      const shipped = Number(d.shipped_count || 0);
+      return {
+        date: d.date,
+        net_profit: Number(d.net_profit || 0),
+        cumulative: Math.round(running * 100) / 100,
+        shipped,
+        delivered: Number(d.delivered_count || 0),
+        returns: Number(d.return_count || 0),
+        rto: Number(d.rto_count || 0),
+        returnPct: shipped > 0 ? Math.round(((Number(d.return_count || 0) + Number(d.rto_count || 0)) / shipped) * 1000) / 10 : 0,
+      };
+    });
+  })();
+
+  const outcomeMix = [
+    { label: 'Delivered', value: os.delivered_summary?.order_count ?? 0, color: C.green },
+    { label: 'Return', value: os.return_summary?.order_count ?? 0, color: C.red },
+    { label: 'RTO', value: os.rto_summary?.order_count ?? 0, color: C.orange },
+    { label: 'Exchanged', value: os.exchanged_summary?.order_count ?? 0, color: C.amber },
+    { label: 'Claim', value: os.claim_summary?.order_count ?? 0, color: '#7C3AED' },
+    { label: 'Shipped', value: os.shipped_summary?.order_count ?? 0, color: C.blue },
+    { label: 'Unknown', value: os.unknown_summary?.order_count ?? 0, color: C.gray400 },
+  ].filter((d) => d.value > 0);
+
+  const net = Number(profit?.net_revenue ?? 0);
+  const moneySplit = [
+    { label: 'Net profit', value: Math.max(net, 0), color: C.green },
+    { label: 'Purchase cost', value: Math.abs(Number(profit?.total_purchase_cost ?? 0)), color: C.blue },
+    { label: 'Commission', value: Math.abs(Number(profit?.total_commission_paid ?? 0)), color: C.amber },
+    { label: 'Ads', value: Math.abs(Number(profit?.total_ads_cost ?? 0)), color: C.orange },
+    { label: 'TCS + TDS', value: Math.abs(Number(profit?.total_tcs ?? 0)) + Math.abs(Number(profit?.total_tds ?? 0)), color: C.gray400 },
+    { label: 'Shipping', value: Math.abs(Number(profit?.total_shipping_cost ?? 0)), color: '#7C3AED' },
+  ].filter((d) => d.value > 0.01);
+
+  const profitByStatus = [
+    ['Delivered', os.delivered_summary],
+    ['Return', os.return_summary],
+    ['RTO', os.rto_summary],
+    ['Exchanged', os.exchanged_summary],
+    ['Claim', os.claim_summary],
+    ['Unknown', os.unknown_summary],
+  ]
+    .filter(([, v]) => v && (v.order_count ?? 0) > 0)
+    .map(([label, v]) => ({ status: label, profit: Math.round(Number(v.net_profit_loss || 0)) }));
+
+  const weekdayData = (() => {
+    const tot = Array(7).fill(0);
+    const occ = Array(7).fill(0);
+    (dash?.order_stats?.daily || []).forEach(({ order_date, count }) => {
+      const wd = parseYmd(String(order_date)).getDay();
+      tot[wd] += count;
+      occ[wd] += 1;
+    });
+    return WEEKDAYS.map((day, i) => ({ day, orders: occ[i] ? Math.round((tot[i] / occ[i]) * 10) / 10 : 0 }));
+  })();
+
+  const rateCompare = prev
+    ? [
+        { metric: 'Delivered %', This: cur.deliveredPct ?? 0, Previous: prev.deliveredPct ?? 0 },
+        { metric: 'Return %', This: cur.returnPct ?? 0, Previous: prev.returnPct ?? 0 },
+        { metric: 'RTO %', This: cur.rtoPct ?? 0, Previous: prev.rtoPct ?? 0 },
+        { metric: 'Margin %', This: cur.margin ?? 0, Previous: prev.margin ?? 0 },
+        { metric: 'ROI %', This: cur.roi ?? 0, Previous: prev.roi ?? 0 },
+      ].map((r) => ({ ...r, This: Math.round(r.This * 10) / 10, Previous: Math.round(r.Previous * 10) / 10 }))
+    : [];
+
+  const chartCard = { flex: '1 1 340px', minWidth: 0 };
+  const hint = (t) => <p style={{ fontSize: 11, color: C.gray400, marginBottom: 10, lineHeight: 1.6 }}>{t}</p>;
+  const noData = <p style={{ fontSize: 12, color: C.gray400, padding: '30px 0', textAlign: 'center' }}>No data for this period.</p>;
+
+  return (
+    <>
+      <PercentageInsights cur={cur} prev={prev} prevLabel={prevLabel} hasPeriod={hasPeriod} />
+
+      <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap' }}>
+        <SectionCard title="Outcome Mix (orders)" style={chartCard}>
+          {hint('How the period’s orders ended up — the share that stuck vs came back.')}
+          {outcomeMix.length ? <AppPieChart data={outcomeMix} height={230} showLegend /> : noData}
+        </SectionCard>
+        <SectionCard title="Where the Money Goes" style={chartCard}>
+          {hint('Net profit next to each cost and deduction, as a share of the total.')}
+          {moneySplit.length ? <AppPieChart data={moneySplit} height={230} showLegend valueFormatter={fmt} /> : noData}
+        </SectionCard>
+        <SectionCard title="Net Profit by Order Status" style={chartCard}>
+          {hint('Which outcomes earn money and which lose it.')}
+          {profitByStatus.length ? (
+            <AppBarChart
+              dataset={profitByStatus}
+              indexKey="status"
+              series={[{ dataKey: 'profit', label: 'Net profit' }]}
+              diverging
+              height={230}
+              valueFormatter={fmt}
+            />
+          ) : (
+            noData
+          )}
+        </SectionCard>
+      </div>
+
+      <SectionCard title="Daily Net Profit & Cumulative Profit">
+        {hint(
+          `By ship day${isAllTime ? ' — last 30 days (pick a month for a full view)' : ''}. Recent days are still settling, so they firm up over the following weeks.`,
+        )}
+        {dailyLoading ? (
+          <div style={{ textAlign: 'center', padding: 30 }}><CircularProgress size={22} /></div>
+        ) : dailyRows.length ? (
+          <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap' }}>
+            <div style={{ flex: '1 1 340px', minWidth: 0 }}>
+              <p style={{ ...T.label, marginBottom: 6 }}>Profit per day</p>
+              <AppBarChart
+                dataset={dailyRows}
+                indexKey="date"
+                series={[{ dataKey: 'net_profit', label: 'Net profit' }]}
+                diverging
+                height={240}
+                maxTicks={12}
+                valueFormatter={fmt}
+                indexFormatter={shortDate}
+              />
+            </div>
+            <div style={{ flex: '1 1 340px', minWidth: 0 }}>
+              <p style={{ ...T.label, marginBottom: 6 }}>Cumulative profit</p>
+              <AppLineChart
+                dataset={dailyRows}
+                indexKey="date"
+                series={[{ dataKey: 'cumulative', label: 'Cumulative profit', color: C.green }]}
+                height={240}
+                maxTicks={12}
+                valueFormatter={fmt}
+                indexFormatter={shortDate}
+              />
+            </div>
+          </div>
+        ) : (
+          noData
+        )}
+      </SectionCard>
+
+      {dailyRows.length > 0 && (
+        <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap' }}>
+          <SectionCard title="Orders Packed vs Delivered vs Returned" style={{ flex: '1 1 380px', minWidth: 0 }}>
+            {hint('Per ship day. The gap between packed and delivered is returns, RTOs and orders still in transit.')}
+            <AppLineChart
+              dataset={dailyRows}
+              indexKey="date"
+              series={[
+                { dataKey: 'shipped', label: 'Packed', color: C.blue },
+                { dataKey: 'delivered', label: 'Delivered', color: C.green },
+                { dataKey: 'returns', label: 'Return', color: C.red },
+                { dataKey: 'rto', label: 'RTO', color: C.orange },
+              ]}
+              height={250}
+              maxTicks={12}
+              indexFormatter={shortDate}
+            />
+          </SectionCard>
+          <SectionCard title="Return + RTO % by Ship Day" style={{ flex: '1 1 380px', minWidth: 0 }}>
+            {hint('Share of each day’s packed orders that came back. Very recent days read low until returns land.')}
+            <AppLineChart
+              dataset={dailyRows}
+              indexKey="date"
+              series={[{ dataKey: 'returnPct', label: 'Return + RTO %', color: C.red }]}
+              height={250}
+              maxTicks={12}
+              valueFormatter={(v) => `${v}%`}
+              indexFormatter={shortDate}
+            />
+          </SectionCard>
+        </div>
+      )}
+
+      <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap' }}>
+        <SectionCard title="Average Orders by Weekday" style={chartCard}>
+          {hint('Which days of the week bring the most orders.')}
+          {weekdayData.some((d) => d.orders > 0) ? (
+            <AppBarChart
+              dataset={weekdayData}
+              indexKey="day"
+              series={[{ dataKey: 'orders', label: 'Avg orders', color: C.blue }]}
+              height={230}
+            />
+          ) : (
+            noData
+          )}
+        </SectionCard>
+        <SectionCard title={`Rates: This Period vs ${prev ? prevLabel : 'Previous'}`} style={chartCard}>
+          {hint('Delivered, return, RTO, margin and ROI side by side.')}
+          {rateCompare.length ? (
+            <AppBarChart
+              dataset={rateCompare}
+              indexKey="metric"
+              series={[
+                { dataKey: 'Previous', label: prevLabel || 'Previous', color: C.gray300 },
+                { dataKey: 'This', label: 'This period', color: C.blue },
+              ]}
+              height={230}
+              valueFormatter={(v) => `${v}%`}
+            />
+          ) : (
+            <p style={{ fontSize: 12, color: C.gray400, padding: '30px 0', textAlign: 'center' }}>
+              {hasPeriod ? 'No earlier data to compare.' : 'Select a month to compare with the previous one.'}
+            </p>
+          )}
+        </SectionCard>
+      </div>
+    </>
+  );
+}
+
 export function OverviewTab() {
   const navigate = useNavigate();
   const { range: activeRange, label: filterLabel } = useDateFilter();
@@ -719,6 +1148,11 @@ export function OverviewTab() {
   const [savingSettings, setSavingSettings] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [prevData, setPrevData] = useState(null);
+  const [subTab, setSubTab] = useState('overview');
+  const [daily, setDaily] = useState(null);
+  const [dailyLoading, setDailyLoading] = useState(false);
+  const onInsights = subTab === 'insights';
   // Today's (business-day, noon cutoff) labels count — independent of the
   // page's date-range filter above, since "how many will the courier pick up
   // today" is always about right now, not whatever period is selected.
@@ -777,6 +1211,60 @@ export function OverviewTab() {
     return () => ctrl.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [JSON.stringify(activeRange), reloadKey, combinedIds?.join(',')]);
+
+  // Previous period (last month when a month is selected) for the comparison
+  // in Percentage Insights. Best-effort: a failure just hides the comparison.
+  const prevRange = previousRange(activeRange);
+  useEffect(() => {
+    if (!prevRange || !onInsights) {
+      setPrevData(null);
+      return undefined;
+    }
+    const ctrl = new AbortController();
+    const qs = `?${new URLSearchParams(prevRange)}`;
+    const ids = combinedIds;
+    const getJson = (url) => fetch(url, { signal: ctrl.signal }).then((r) => r.json());
+    const profitUrls = ids ? ids.map((id) => `/api/business/${id}/profit/${qs}`) : [`${API}/profit/${qs}`];
+    const dashUrls = ids ? ids.map((id) => `/api/business/${id}/dashboard/${qs}`) : [`${API}/dashboard/${qs}`];
+    Promise.all([Promise.all(profitUrls.map(getJson)), Promise.all(dashUrls.map(getJson))])
+      .then(([profits, dashes]) => {
+        const bizList = ids ? ids.map((id) => businesses.find((b) => b.id === id)) : null;
+        setPrevData({
+          profit: ids ? mergeProfitResponses(profits, bizList) : profits[0],
+          dash: ids ? mergeDashboardResponses(dashes, bizList) : dashes[0],
+          range: prevRange,
+        });
+      })
+      .catch((e) => {
+        if (e.name !== 'AbortError') setPrevData(null);
+      });
+    return () => ctrl.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [JSON.stringify(activeRange), reloadKey, combinedIds?.join(','), onInsights]);
+
+  // Per-day profit for the Insights charts. /profit/daily/ is capped at 92 days
+  // and defaults to the last 30 when no range is given (i.e. "All time").
+  useEffect(() => {
+    if (!onInsights) return undefined;
+    const ctrl = new AbortController();
+    setDailyLoading(true);
+    const qs = Object.keys(activeRange).length ? `?${new URLSearchParams(activeRange)}` : '';
+    const urls = combinedIds ? combinedIds.map((id) => `/api/business/${id}/profit/daily/${qs}`) : [`${API}/profit/daily/${qs}`];
+    Promise.all(urls.map((u) => fetch(u, { signal: ctrl.signal }).then((r) => (r.ok ? r.json() : null))))
+      .then((rs) => {
+        setDaily(mergeDailyRows(rs));
+        setDailyLoading(false);
+      })
+      .catch((e) => {
+        if (e.name !== 'AbortError') {
+          setDaily([]);
+          setDailyLoading(false);
+        }
+      });
+    return () => ctrl.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [JSON.stringify(activeRange), reloadKey, combinedIds?.join(','), onInsights]);
+
 
   // Profit is computed on read, so a policy change has to re-pull it — the
   // packaging and GST figures move the moment the setting does.
@@ -853,6 +1341,10 @@ export function OverviewTab() {
   const tdsPct = pct2(tdsAmt, grossRev);
   const commPct = pct2(commAmt, grossRev);
   const totalDeductPct = taxSummary.total_deduction_rate_pct?.toFixed(2) ?? '0.00';
+
+  const curMetrics = periodMetrics(profit, dash, periodDays(activeRange, dash));
+  const prevMetrics = prevData ? periodMetrics(prevData.profit, prevData.dash, periodDays(prevData.range, prevData.dash)) : null;
+  const prevLabel = prevRange ? fmtShort(prevRange.date_from.slice(0, 7)) : '';
 
   const matchPieData = [
     { id: 0, value: join_stats?.matched_count ?? 0, label: 'Matched', color: C.green },
@@ -1020,6 +1512,32 @@ export function OverviewTab() {
 
       {!loading && profit && (
         <>
+          <div style={{ display: 'flex', gap: 6, borderBottom: '1px solid #E2E8F0' }}>
+            {[
+              ['overview', '📊 Overview'],
+              ['insights', '📈 Insights & Charts'],
+            ].map(([key, label]) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setSubTab(key)}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  borderBottom: `3px solid ${subTab === key ? C.orange : 'transparent'}`,
+                  padding: '10px 18px',
+                  fontSize: 13,
+                  fontWeight: subTab === key ? 800 : 600,
+                  color: subTab === key ? C.gray800 : C.gray500,
+                  cursor: 'pointer',
+                  marginBottom: -1,
+                }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
           {/* ── 2. Hero banner ─────────────────────────────────────────────── */}
           <div
             style={{
@@ -1181,6 +1699,22 @@ export function OverviewTab() {
             </div>
           )}
 
+          {onInsights && (
+            <InsightsPanel
+              cur={curMetrics}
+              prev={prevMetrics && prevMetrics.packed > 0 ? prevMetrics : null}
+              prevLabel={prevLabel}
+              hasPeriod={!!prevRange}
+              profit={profit}
+              dash={dash}
+              daily={daily}
+              dailyLoading={dailyLoading}
+              isAllTime={!prevRange}
+            />
+          )}
+
+          {!onInsights && (
+          <>
           <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap' }}>
             {
               // `Object.keys(undefined)` throws — the optional chain after the call
@@ -2292,6 +2826,8 @@ export function OverviewTab() {
                 </p>
               </div>
             </SectionCard>
+          )}
+          </>
           )}
         </>
       )}
