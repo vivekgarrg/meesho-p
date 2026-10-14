@@ -59,6 +59,7 @@ const PAYMENT_TYPE_OPTIONS = [
   { value: "advance", label: "Advance" },
   { value: "bonus", label: "Bonus" },
   { value: "reimbursement", label: "Reimbursement" },
+  { value: "spent", label: "Spent (owner draw)" },
   { value: "other", label: "Other" },
 ];
 const METHOD_OPTIONS = [
@@ -1096,6 +1097,8 @@ export function EmployeesTab() {
                      : "all closed months settled"} />
           <KpiCard label="Paid This Month" value={fmt2(summary.total_paid_this_month)} color={C.orange} bg="#FFFBEB" />
           <KpiCard label="Paid All Time" value={fmt2(summary.total_paid_all_time)} color={C.green} bg="#ECFDF5" />
+          <KpiCard label="Owner Spent" value={fmt2(summary.spent_this_month)} color={C.red} bg="#FFF1F2"
+                   sub={`this month · ${fmt2(summary.spent_all_time)} all time`} />
         </div>
       )}
 
@@ -1241,13 +1244,13 @@ export function EmployeesTab() {
             <div style={{ overflowX: "auto" }}>
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
                 <thead>
-                  <tr>{["Name", "Designation", "Salary", "Weekly Off", "Paid Leave", "Status", "Total Paid", "Last Payment", ""].map((h, i) => (
+                  <tr>{["Name", "Designation", "Salary", "Weekly Off", "Paid Leave", "Status", "Total Paid", "Spent", "Last Payment", ""].map((h, i) => (
                     <th key={h || i} style={{ ...S.th, fontSize: 10, whiteSpace: "nowrap" }}>{h}</th>
                   ))}</tr>
                 </thead>
                 <tbody>
                   {employees.length === 0 ? (
-                    <tr><td colSpan={9} style={{ ...S.td, textAlign: "center", padding: 40, color: C.gray400 }}>No employees yet. Click "+ Add employee" to add one.</td></tr>
+                    <tr><td colSpan={10} style={{ ...S.td, textAlign: "center", padding: 40, color: C.gray400 }}>No employees yet. Click "+ Add employee" to add one.</td></tr>
                   ) : employees.map((emp, idx) => (
                     <tr key={emp.id} style={{ background: idx % 2 === 0 ? C.white : C.gray50, borderBottom: `1px solid ${C.gray100}`, cursor: "pointer" }} onClick={() => setDetailEmp(emp)}>
                       <td style={{ ...S.td, fontWeight: 600, color: C.gray800 }}>
@@ -1267,6 +1270,9 @@ export function EmployeesTab() {
                           sx={{ background: emp.status === "active" ? "#ECFDF5" : C.gray100, color: emp.status === "active" ? C.green : C.gray500, fontWeight: 700, fontSize: 10 }} />
                       </td>
                       <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", fontWeight: 700, color: C.gray800 }}>{fmt2(emp.total_paid)}</td>
+                      <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", fontWeight: 700, color: Number(emp.spent) > 0 ? C.red : C.gray400 }}>
+                        {Number(emp.spent) > 0 ? fmt2(emp.spent) : "—"}
+                      </td>
                       <td style={{ ...S.td, color: C.gray500 }}>{emp.last_payment_date || "—"}</td>
                       <td style={{ ...S.td, whiteSpace: "nowrap" }} onClick={(e) => e.stopPropagation()}>
                         <Tooltip title="Payslip, attendance & payments"><IconButton size="small" onClick={() => setDetailEmp(emp)}><PaymentsIcon fontSize="small" /></IconButton></Tooltip>

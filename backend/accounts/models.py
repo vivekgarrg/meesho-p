@@ -197,6 +197,13 @@ class BusinessProfile(models.Model):
         default=False,
         help_text="Subtract employee salaries (incl. extra pay) from profit for this business",
     )
+    # When on, money the owner took out of the business — recorded as "Spent"
+    # payments against an employee row in the Employees tab — is subtracted
+    # from profit for the period. Not salary: it is kept out of payroll.
+    deduct_owner_spent = models.BooleanField(
+        default=False,
+        help_text="Subtract the owner's spent/drawn amount (Employees tab) from profit for this business",
+    )
 
     # ── Access ────────────────────────────────────────────────────────────
     # Which areas of the app this business shows. Empty = no override, so the

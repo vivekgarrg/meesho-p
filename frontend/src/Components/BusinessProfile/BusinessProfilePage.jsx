@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from "react";
-import { C, S, btn, CHART_COLORS, SectionHeader } from "../../App";
+import { API, C, S, btn, CHART_COLORS, SectionHeader } from "../../App";
 import { useAuth } from "../../contexts/AuthContext";
 import { useBusiness } from "../../contexts/BusinessContext";
 
@@ -29,6 +29,40 @@ const PROFILE_FIELDS = [
   { key: "notes",          label: "Notes", type: "textarea" },
 ];
 
+// Every on/off switch that changes how this business's profit is calculated —
+// the one place to find them. Profile flags save with the business; the cost
+// flags below save through /cost-settings/.
+const PROFIT_FLAGS = [
+  {
+    key: "deduct_transport_charges",
+    title: "Deduct transportation charges from profit",
+    help: "When on, the daily transport charges recorded under Expenses are subtracted from this business's net profit for the selected period. Off by default — the charges are always shown either way.",
+  },
+  {
+    key: "deduct_employee_salaries",
+    title: "Deduct employee salaries from profit",
+    help: "When on, this business's salary cost for the selected period — earned salary from the Payroll Run, plus extra pay (Sunday / weekly-off working, overtime) and bonuses — is subtracted from net profit. A month counts in proportion to how much of it falls in the period. Off by default.",
+  },
+  {
+    key: "deduct_owner_spent",
+    title: "Deduct owner spent from profit",
+    help: "When on, the money the owner took out of the business — recorded as \"Spent (owner draw)\" payments in the Employees tab — is subtracted from net profit for the selected period. It is never counted as salary. Off by default.",
+  },
+];
+
+const COST_FLAGS = [
+  {
+    key: "exchange_uses_two_packets",
+    title: "Exchange uses two packets",
+    help: "An exchange ships twice, so it consumes two boxes. Turn off if you reuse the customer's original packaging.",
+  },
+  {
+    key: "sale_price_includes_gst",
+    title: "Sale price includes GST",
+    help: "Meesho's sale figures are GST-inclusive, so the tax is the slice already inside the price. Turn off only if your sale amounts are pre-tax.",
+  },
+];
+
 function initialsOf(name) {
   return (name || "?")
     .split(/\s+/)
@@ -52,6 +86,43 @@ export default function BusinessProfilePage() {
   const [profile, setProfile] = useState(null);
   const [profileSaving, setProfileSaving] = useState(false);
   const [profileMsg, setProfileMsg] = useState(null);
+
+  // Cost settings — packaging outcomes and GST/exchange switches (per business).
+  const [cost, setCost] = useState(null);
+  const loadCost = useCallback(async () => {
+    if (!activeBusinessId) return;
+    try {
+      const res = await fetch(`${API}/cost-settings/`);
+      if (res.ok) setCost(await res.json());
+    } catch { /* section just stays hidden */ }
+  }, [activeBusinessId]);
+  useEffect(() => { loadCost(); }, [loadCost]);
+
+  const saveCost = async (patch) => {
+    setProfileSaving(true);
+    setProfileMsg(null);
+    setCost((c) => ({ ...(c || {}), ...patch }));
+    try {
+      const res = await fetch(`${API}/cost-settings/`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        setProfileMsg({ type: "error", text: data?.error || "Could not save." });
+        loadCost();
+        return;
+      }
+      setCost(data);
+      setProfileMsg({ type: "success", text: "Saved." });
+    } catch {
+      setProfileMsg({ type: "error", text: "Network error while saving." });
+      loadCost();
+    } finally {
+      setProfileSaving(false);
+    }
+  };
 
   const loadProfile = useCallback(async () => {
     if (!activeBusinessId) return;
@@ -165,58 +236,79 @@ export default function BusinessProfilePage() {
 
       {/* ── Calculation settings ───────────────────────────────────────── */}
       <div style={S.card}>
-        <SectionHeader title="Profit calculation" />
-        <label style={{
-          display: "flex", alignItems: "flex-start", gap: 12, cursor: canEdit ? "pointer" : "default",
-          padding: "12px 14px", borderRadius: 10,
-          border: `1px solid ${profile?.deduct_transport_charges ? C.greenBorder : C.border}`,
-          background: profile?.deduct_transport_charges ? C.greenLight : C.gray50,
-          opacity: canEdit ? 1 : 0.75,
-        }}>
-          <input
-            type="checkbox"
-            disabled={!canEdit || profileSaving}
-            checked={!!profile?.deduct_transport_charges}
-            onChange={(e) => saveProfile({ deduct_transport_charges: e.target.checked })}
-            style={{ width: 18, height: 18, marginTop: 2, cursor: canEdit ? "pointer" : "default", flexShrink: 0 }}
-          />
-          <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: 14, fontWeight: 700, color: C.gray800 }}>
-              Deduct transportation charges from profit
-            </div>
-            <div style={{ fontSize: 12, color: C.gray500, marginTop: 3 }}>
-              When on, the daily transport charges recorded under Expenses are subtracted
-              from this business's net profit for the selected period. Off by default, and
-              set per business — the charges are always shown either way.
-            </div>
-          </div>
-        </label>
-        <label style={{
-          display: "flex", alignItems: "flex-start", gap: 12, cursor: canEdit ? "pointer" : "default",
-          padding: "12px 14px", borderRadius: 10, marginTop: 10,
-          border: `1px solid ${profile?.deduct_employee_salaries ? C.greenBorder : C.border}`,
-          background: profile?.deduct_employee_salaries ? C.greenLight : C.gray50,
-          opacity: canEdit ? 1 : 0.75,
-        }}>
-          <input
-            type="checkbox"
-            disabled={!canEdit || profileSaving}
-            checked={!!profile?.deduct_employee_salaries}
-            onChange={(e) => saveProfile({ deduct_employee_salaries: e.target.checked })}
-            style={{ width: 18, height: 18, marginTop: 2, cursor: canEdit ? "pointer" : "default", flexShrink: 0 }}
-          />
-          <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: 14, fontWeight: 700, color: C.gray800 }}>
-              Deduct employee salaries from profit
-            </div>
-            <div style={{ fontSize: 12, color: C.gray500, marginTop: 3 }}>
-              When on, this business's salary cost for the selected period — earned salary from the
-              Payroll Run, plus extra pay (Sunday / weekly-off working, overtime) and bonuses — is
-              subtracted from net profit. A month counts in proportion to how much of it falls in the
-              period. Off by default, and set per business — the salary cost is always shown either way.
-            </div>
-          </div>
-        </label>
+        <SectionHeader title="Profit calculation — all switches" />
+        {(() => {
+          const FlagRow = ({ checked, onChange, title, help, first }) => (
+            <label style={{
+              display: "flex", alignItems: "flex-start", gap: 12, cursor: canEdit ? "pointer" : "default",
+              padding: "12px 14px", borderRadius: 10, marginTop: first ? 0 : 10,
+              border: `1px solid ${checked ? C.greenBorder : C.border}`,
+              background: checked ? C.greenLight : C.gray50,
+              opacity: canEdit ? 1 : 0.75,
+            }}>
+              <input
+                type="checkbox"
+                disabled={!canEdit || profileSaving}
+                checked={checked}
+                onChange={(e) => onChange(e.target.checked)}
+                style={{ width: 18, height: 18, marginTop: 2, cursor: canEdit ? "pointer" : "default", flexShrink: 0 }}
+              />
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 14, fontWeight: 700, color: C.gray800 }}>{title}</div>
+                <div style={{ fontSize: 12, color: C.gray500, marginTop: 3 }}>{help}</div>
+              </div>
+            </label>
+          );
+          return (
+            <>
+              <div style={{ fontSize: 11, fontWeight: 700, color: C.gray400, letterSpacing: "0.07em", textTransform: "uppercase", marginBottom: 8 }}>
+                Deductions from net profit
+              </div>
+              {PROFIT_FLAGS.map((f, i) => (
+                <FlagRow key={f.key} first={i === 0} title={f.title} help={f.help}
+                         checked={!!profile?.[f.key]} onChange={(v) => saveProfile({ [f.key]: v })} />
+              ))}
+              {cost && (
+                <>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: C.gray400, letterSpacing: "0.07em", textTransform: "uppercase", margin: "18px 0 8px" }}>
+                    Packaging & tax
+                  </div>
+                  <div style={{
+                    padding: "12px 14px", borderRadius: 10, border: `1px solid ${C.border}`,
+                    background: C.gray50, opacity: canEdit ? 1 : 0.75,
+                  }}>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: C.gray800 }}>Charge packaging on these order outcomes</div>
+                    <div style={{ fontSize: 12, color: C.gray500, margin: "3px 0 10px" }}>
+                      A box is used the moment an order is packed. Tick the outcomes whose packaging cost counts against profit.
+                    </div>
+                    <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+                      {(cost.available_statuses || []).map(({ value, label }) => {
+                        const on = (cost.packaging_statuses || []).includes(value);
+                        return (
+                          <label key={value} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: C.gray800, cursor: canEdit ? "pointer" : "default" }}>
+                            <input
+                              type="checkbox" checked={on} disabled={!canEdit || profileSaving}
+                              onChange={(e) => saveCost({
+                                packaging_statuses: e.target.checked
+                                  ? [...(cost.packaging_statuses || []), value]
+                                  : (cost.packaging_statuses || []).filter((x) => x !== value),
+                              })}
+                            />
+                            {label}
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  {COST_FLAGS.map((f) => (
+                    <FlagRow key={f.key} title={f.title} help={f.help}
+                             checked={!!cost[f.key]} onChange={(v) => saveCost({ [f.key]: v })} />
+                  ))}
+                </>
+              )}
+            </>
+          );
+        })()}
         {!canEdit && (
           <div style={{ fontSize: 12, color: C.gray400, marginTop: 8 }}>
             Only a super admin can change these settings.

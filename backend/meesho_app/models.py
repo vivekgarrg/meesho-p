@@ -942,6 +942,10 @@ class EmployeePayment(models.Model):
         ("advance", "Advance"),
         ("bonus", "Bonus"),
         ("reimbursement", "Reimbursement"),
+        # Money the owner took out of the business — not a wage. Kept out of
+        # payroll and "total paid"; only reduces profit when the business's
+        # deduct_owner_spent switch is on.
+        ("spent", "Spent (owner draw)"),
         ("other", "Other"),
     ]
     METHOD_CHOICES = [

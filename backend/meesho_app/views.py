@@ -2142,9 +2142,17 @@ def profit_summary(request, business_id):
     deduct_salaries = bool(profile and profile.deduct_employee_salaries)
     salary_deducted = salary["total"] if deduct_salaries else Decimal("0")
 
+    # ── Owner spent ───────────────────────────────────────────────────────────
+    # What the owner took out of the business ("Spent" payments in Employees).
+    # Same rule again: always reported, subtracted only when the switch is on.
+    owner_spent_total = _owner_spent(business, date_from, date_to)
+    deduct_owner_spent = bool(profile and profile.deduct_owner_spent)
+    owner_spent_deducted = owner_spent_total if deduct_owner_spent else Decimal("0")
+
     # Order-level result: settlement less item cost. `ads` is already negative.
     net_profit_loss = revenue - total_purchase_cost
-    net_revenue = revenue - total_purchase_cost + ads + comp_recovery - transport_deducted - salary_deducted
+    net_revenue = (revenue - total_purchase_cost + ads + comp_recovery
+                   - transport_deducted - salary_deducted - owner_spent_deducted)
 
     # Ensure sum(sku.net_profit) == revenue - total_purchase_cost by absorbing the gap
     # (settlement from missing-SKU orders) into a synthetic __unattributed__ bucket.
@@ -2200,6 +2208,8 @@ def profit_summary(request, business_id):
             "months":        salary["months"],
         },
         "salary_cost_deducted":      deduct_salaries,
+        "total_owner_spent":         round(owner_spent_total, 2),
+        "owner_spent_deducted":      deduct_owner_spent,
         "net_profit_loss": round(float(net_profit_loss), 2),
         "order_summary": order_status_summary,
         "total_loss":             round(total_loss, 2),
@@ -10131,8 +10141,13 @@ def expenses_summary(request, business_id):
 def _employee_to_dict(emp):
     """Serialize an Employee (with prefetched payments) + computed totals."""
     total_paid = Decimal("0")
+    spent = Decimal("0")
     last_payment_date = None
     for p in emp.payments.all():
+        # Owner draws aren't wages — keep them out of "total paid".
+        if p.payment_type == "spent":
+            spent += p.amount
+            continue
         total_paid += p.amount
         if last_payment_date is None or p.paid_on > last_payment_date:
             last_payment_date = p.paid_on
@@ -10164,6 +10179,7 @@ def _employee_to_dict(emp):
         "emergency_contact_phone": emp.emergency_contact_phone,
         "notes": emp.notes,
         "total_paid": str(total_paid),
+        "spent": str(spent),
         "last_payment_date": str(last_payment_date) if last_payment_date else None,
         "created_at": emp.created_at.isoformat(),
     }
@@ -10319,7 +10335,8 @@ def employee_payments_list(request, business_id, employee_id):
         rows = list(emp.payments.all())
         return Response({
             "results": [_employee_payment_to_dict(p) for p in rows],
-            "total_paid": str(sum((p.amount for p in rows), Decimal("0"))),
+            "total_paid": str(sum((p.amount for p in rows if p.payment_type != "spent"), Decimal("0"))),
+            "spent": str(sum((p.amount for p in rows if p.payment_type == "spent"), Decimal("0"))),
         })
 
     if not _is_admin(request.user):
@@ -10388,11 +10405,15 @@ def employees_summary(request, business_id):
     business = get_authorized_business(request, business_id)
     active_count = Employee.objects.filter(business=business, status="active").count()
 
-    payments = EmployeePayment.objects.filter(business=business)
+    all_payments = EmployeePayment.objects.filter(business=business)
+    payments = all_payments.exclude(payment_type="spent")
     all_time = payments.aggregate(s=Sum("amount"))["s"] or Decimal("0")
 
     start, end = _month_range(timezone.localdate().strftime("%Y-%m"))
     this_month = payments.filter(paid_on__gte=start, paid_on__lt=end).aggregate(s=Sum("amount"))["s"] or Decimal("0")
+    spent_qs = all_payments.filter(payment_type="spent")
+    spent_all_time = spent_qs.aggregate(s=Sum("amount"))["s"] or Decimal("0")
+    spent_this_month = spent_qs.filter(paid_on__gte=start, paid_on__lt=end).aggregate(s=Sum("amount"))["s"] or Decimal("0")
 
     by_type = {}
     for ptype, total in payments.values_list("payment_type").annotate(s=Sum("amount")):
@@ -10402,6 +10423,8 @@ def employees_summary(request, business_id):
         "active_employees": active_count,
         "total_paid_this_month": str(this_month),
         "total_paid_all_time": str(all_time),
+        "spent_this_month": str(spent_this_month),
+        "spent_all_time": str(spent_all_time),
         "by_payment_type": by_type,
     })
 
@@ -10678,6 +10701,16 @@ def _payroll_register(business, month_start, employees=None):
         )
         for emp in employees
     ]
+
+
+def _owner_spent(business, date_from="", date_to=""):
+    """Total of "spent" (owner draw) payments paid on a day inside the range."""
+    qs = EmployeePayment.objects.filter(business=business, payment_type="spent")
+    if date_from:
+        qs = qs.filter(paid_on__gte=date_from)
+    if date_to:
+        qs = qs.filter(paid_on__lte=date_to)
+    return qs.aggregate(t=Sum("amount"))["t"] or Decimal("0")
 
 
 def _salary_cost(business, date_from="", date_to=""):

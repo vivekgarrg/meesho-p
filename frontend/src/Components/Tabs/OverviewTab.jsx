@@ -1848,6 +1848,15 @@ export function OverviewTab() {
                     note="turn on 'Deduct employee salaries' in Business Profile to subtract this" />
                 );
               })()}
+              {Number(profit.total_owner_spent || 0) !== 0 && (
+                profit.owner_spent_deducted ? (
+                  <FormulaStep sign="−" label="Owner Spent" value={profit.total_owner_spent} color={C.orange}
+                    note="amount taken by the owner (Employees → Spent)" />
+                ) : (
+                  <FormulaStep sign="·" label="Owner Spent (not deducted)" value={profit.total_owner_spent} color={C.gray400}
+                    note="turn on 'Deduct owner spent' in Business Profile to subtract this" />
+                )
+              )}
               <FormulaStep
                 sign="="
                 label="NET P&L (Final)"
