@@ -658,6 +658,10 @@ class LabelOrder(models.Model):
     order_date    = models.DateField(null=True, blank=True)        # from invoice section
     uploaded_date = models.DateField(db_index=True)                # date PDF was processed
 
+    # Which marketplace printed the label. The Meesho and Flipkart tabs each show
+    # only their own, so couriers, history and customers never mix.
+    platform = models.CharField(max_length=10, default="meesho", db_index=True)
+
     # Packing tracking
     is_packed     = models.BooleanField(default=False, db_index=True)
     packed_at     = models.DateTimeField(null=True, blank=True)
@@ -689,10 +693,13 @@ class LabelDayReset(models.Model):
     business      = models.ForeignKey("accounts.Business", on_delete=models.CASCADE)
     business_date = models.DateField(db_index=True)
     reset_at      = models.DateTimeField(auto_now=True)
+    # "all" for the combined dashboard count, else "meesho" / "flipkart" — each
+    # marketplace's "today" is reset on its own.
+    platform      = models.CharField(max_length=10, default="all")
 
     class Meta:
         db_table = "label_day_resets"
-        unique_together = [("business", "business_date")]
+        unique_together = [("business", "business_date", "platform")]
         ordering = ["-business_date"]
 
     def __str__(self):

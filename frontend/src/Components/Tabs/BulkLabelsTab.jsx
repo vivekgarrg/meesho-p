@@ -25,6 +25,7 @@ import WhatsAppIcon from '@mui/icons-material/WhatsApp';
 import LocalPrintshopIcon from '@mui/icons-material/LocalPrintshop';
 import { C, API, useIsMobile } from '../../App';
 import { ParentSkuCell } from './ParentLinkInline';
+import { PlatformToggle, SkippedPagesNote, PLATFORMS, useLabelPlatform } from '../PlatformToggle';
 
 /*
  * BULK LABELS (shown to the user simply as "Labels")
@@ -261,7 +262,12 @@ export function BulkLabelsTab() {
   const [batchDate, setBatchDate] = useState(businessDateISO());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [result, setResult] = useState(null);
+  // Meesho and Flipkart are sorted apart, each with its own result on screen, so
+  // switching never mixes the two stacks or loses the other's batch.
+  const [platform, setPlatform] = useLabelPlatform();
+  const [results, setResults] = useState({ meesho: null, flipkart: null });
+  const result = results[platform];
+  const setResult = useCallback((v) => setResults((r) => ({ ...r, [platform]: v })), [platform]);
   const [extracting, setExtracting] = useState(null); // key of the group/row currently downloading
   const [extractError, setExtractError] = useState('');
   const [awbSearch, setAwbSearch] = useState('');
@@ -295,26 +301,30 @@ export function BulkLabelsTab() {
   const loadHistory = useCallback(async () => {
     setHistoryLoading(true);
     try {
-      const res = await fetch(`${API}/bulk-labels/history/`);
+      const res = await fetch(`${API}/bulk-labels/history/?platform=${platform}`);
       if (res.ok) setHistory(await res.json());
     } catch {
       // silent — the current-batch view still works without history
     }
     setHistoryLoading(false);
-  }, []);
+  }, [platform]);
 
   const loadTodaySummary = useCallback(async () => {
     setTodayLoading(true);
     try {
-      const res = await fetch(`${API}/bulk-labels/today/`);
+      const res = await fetch(`${API}/bulk-labels/today/?platform=${platform}`);
       if (res.ok) setTodaySummary(await res.json());
     } catch {
       // silent — banner just stays blank
     }
     setTodayLoading(false);
-  }, []);
+  }, [platform]);
 
   useEffect(() => {
+    // Drop the other marketplace's numbers straight away rather than showing
+    // them until the new ones arrive.
+    setHistory(null);
+    setTodaySummary(null);
     loadHistory();
     loadTodaySummary();
   }, [loadHistory, loadTodaySummary]);
@@ -323,7 +333,11 @@ export function BulkLabelsTab() {
   const resetTodayCount = async () => {
     setResetting(true);
     try {
-      const res = await fetch(`${API}/bulk-labels/today/reset/`, { method: 'POST' });
+      const res = await fetch(`${API}/bulk-labels/today/reset/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ platform }),
+      });
       if (res.ok) setTodaySummary(await res.json());
     } catch {
       // silent — banner keeps its last known value
@@ -372,6 +386,7 @@ export function BulkLabelsTab() {
     const form = new FormData();
     pending.forEach((f) => form.append('files', f));
     form.append('upload_date', batchDate);
+    form.append('platform', platform);
     try {
       const res = await fetch(`${API}/bulk-labels/parse/`, { method: 'POST', body: form });
       const data = await res.json();
@@ -513,10 +528,12 @@ export function BulkLabelsTab() {
         <Box sx={{ display: 'flex', alignItems: 'center', gap: '9px' }}>
           <UploadFileIcon sx={{ color: C.orange, fontSize: 21 }} />
           <Typography sx={{ fontSize: 19, fontWeight: 800, color: C.gray800 }}>Labels</Typography>
+          <PlatformToggle platform={platform} onChange={setPlatform} disabled={loading} />
         </Box>
         <Typography sx={{ fontSize: 12, color: C.gray400, mt: '3px' }}>
-          Upload several labels PDFs at once (e.g. one export per Meesho account) — they're merged into one batch and
-          sorted by business the same way a single upload already is.
+          Upload several {PLATFORMS[platform].label} labels PDFs at once (e.g. one export per account) — they're merged
+          into one batch and sorted by business the same way a single upload already is. {PLATFORMS[platform].label}{' '}
+          labels are kept apart from {platform === 'meesho' ? 'Flipkart' : 'Meesho'} ones.
         </Typography>
       </Box>
 
@@ -687,7 +704,7 @@ export function BulkLabelsTab() {
             {loading ? 'Merging & parsing…' : `Merge & upload ${pending.length ? `(${pending.length})` : ''}`}
           </Button>
           {result?.sorted_pdf_b64 && (
-            <Tooltip title="Full pages, merged and sorted most-dispatched-first — ready to print as-is">
+            <Tooltip title={platform === 'flipkart' ? 'Flipkart labels only (tax invoice cropped off), merged and sorted most-dispatched-first' : 'Full pages, merged and sorted most-dispatched-first — ready to print as-is'}>
               <Button
                 onClick={() => downloadSortedPDF(result.sorted_pdf_b64, batchDate)}
                 sx={{
@@ -729,6 +746,7 @@ export function BulkLabelsTab() {
           {error}
         </Alert>
       )}
+      {result && <SkippedPagesNote skipped={result.skipped_pages} />}
 
       {loading && (
         <Paper

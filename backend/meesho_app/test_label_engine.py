@@ -179,3 +179,125 @@ class FlipkartLabelTests(TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(sorted(d["platform"] for d in r.data["page_details"]), ["flipkart", "flipkart", "meesho"])
         self.assertEqual(r.data["page_details"][r.data["page_order"][0]]["sku"], "fk-sku")  # 2 labels beats 1
+
+
+class MixedLabelsBase(TestCase):
+    """A business with one file holding 2 Meesho and 1 Flipkart label (no tests of its own)."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username="o", password="pw", role=User.ROLE_SUPER_ADMIN)
+        self.business = Business.objects.create(name="B")
+        Membership.objects.create(user=self.user, business=self.business)
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+        from pypdf import PdfReader, PdfWriter
+        w = PdfWriter()
+        for blob in (make_labels_pdf([("m-sku", "300_1", "A"), ("m-sku", "300_2", "B")]),
+                     make_flipkart_pdf([("f-sku", "OD555555555555555555", 1)])):
+            for p in PdfReader(io.BytesIO(blob)).pages:
+                w.add_page(p)
+        buf = io.BytesIO()
+        w.write(buf)
+        self.mixed = buf.getvalue()
+
+    def post(self, data, platform, url="labels/parse/"):
+        return self.client.post(f"/api/business/{self.business.id}/{url}",
+                                {"file": SimpleUploadedFile("l.pdf", data, content_type="application/pdf"),
+                                 "platform": platform}, format="multipart")
+
+
+
+class PlatformSeparationTests(MixedLabelsBase):
+    """Meesho and Flipkart trays are processed apart: each tab only ever sorts,
+    saves and crops its own marketplace's labels."""
+
+    def test_meesho_tab_ignores_flipkart_pages(self):
+        r = self.post(self.mixed, "meesho")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.data["total_labels"], 2)
+        self.assertEqual({d["platform"] for d in r.data["page_details"]}, {"meesho"})
+        self.assertEqual(r.data["skipped_pages"], {"flipkart": 1})
+        self.assertFalse(LabelOrder.objects.filter(order_id__startswith="OD").exists())
+        from pypdf import PdfReader
+        import base64
+        self.assertEqual(len(PdfReader(io.BytesIO(base64.b64decode(r.data["cropped_pdf_b64"]))).pages), 2)
+
+    def test_flipkart_tab_ignores_meesho_pages(self):
+        r = self.post(self.mixed, "flipkart")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.data["total_labels"], 1)
+        self.assertEqual(r.data["skipped_pages"], {"meesho": 2})
+        self.assertEqual(list(LabelOrder.objects.values_list("order_id", flat=True)), ["OD555555555555555555"])
+
+    def test_wrong_tab_gets_a_clear_error_and_saves_nothing(self):
+        r = self.post(make_labels_pdf([("m", "400_1", "A")]), "flipkart")
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("Use the Meesho tab", r.data["error"])
+        self.assertEqual(LabelOrder.objects.count(), 0)
+
+    def test_bulk_labels_honours_platform(self):
+        r = self.client.post(f"/api/business/{self.business.id}/bulk-labels/parse/",
+                             {"files": [SimpleUploadedFile("l.pdf", self.mixed, content_type="application/pdf")],
+                              "platform": "flipkart"}, format="multipart")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.data["total_labels"], 1)
+        self.assertEqual(r.data["skipped_pages"], {"meesho": 2})
+
+    def test_bulk_flipkart_is_cropped_to_the_label_but_bulk_meesho_stays_full_page(self):
+        import base64
+        from pypdf import PdfReader
+
+        def first_box(platform):
+            r = self.client.post(f"/api/business/{self.business.id}/bulk-labels/parse/",
+                                 {"files": [SimpleUploadedFile("l.pdf", self.mixed, content_type="application/pdf")],
+                                  "platform": platform}, format="multipart")
+            return PdfReader(io.BytesIO(base64.b64decode(r.data["sorted_pdf_b64"]))).pages[0].cropbox
+
+        fk = first_box("flipkart")
+        self.assertLess(float(fk.height), 450)      # tax-invoice half removed
+        self.assertLess(float(fk.width), 300)
+        self.assertGreater(float(first_box("meesho").height), 800)   # untouched full page
+
+    def test_no_platform_still_takes_everything(self):
+        r = self.client.post(f"/api/business/{self.business.id}/labels/parse/",
+                             {"file": SimpleUploadedFile("l.pdf", self.mixed, content_type="application/pdf")},
+                             format="multipart")
+        self.assertEqual(r.data["total_labels"], 3)
+
+
+class PlatformViewsTests(MixedLabelsBase):
+    """Once saved, each marketplace's labels show up only under its own tab."""
+
+    def setUp(self):
+        super().setUp()
+        r = self.client.post(f"/api/business/{self.business.id}/labels/parse/",
+                             {"file": SimpleUploadedFile("l.pdf", self.mixed, content_type="application/pdf")},
+                             format="multipart")
+        assert r.status_code == 200
+        self.base = f"/api/business/{self.business.id}"
+
+    def get(self, path, platform=None):
+        return self.client.get(f"{self.base}{path}", {"platform": platform} if platform else {})
+
+    def test_rows_are_tagged_with_their_platform(self):
+        self.assertEqual(LabelOrder.objects.filter(platform="meesho").count(), 2)
+        self.assertEqual(LabelOrder.objects.filter(platform="flipkart").count(), 1)
+
+    def test_order_list_courier_summary_and_history_are_separate(self):
+        fk = self.get("/labels/orders/", "flipkart").data
+        rows = fk["results"] if isinstance(fk, dict) else fk
+        self.assertEqual({r["courier_name"] for r in rows}, {"Ekart"})
+        ms = self.get("/labels/orders/", "meesho").data
+        rows = ms["results"] if isinstance(ms, dict) else ms
+        self.assertEqual({r["courier_name"] for r in rows}, {"Valmo"})
+        self.assertEqual(self.get("/labels/summary/", "flipkart").data["total"], 1)
+        self.assertEqual(self.get("/bulk-labels/history/", "flipkart").data["total_labels"], 1)
+        self.assertEqual(self.get("/bulk-labels/history/", "meesho").data["total_labels"], 2)
+        self.assertEqual(self.get("/bulk-labels/history/").data["total_labels"], 3)   # combined
+
+    def test_today_count_and_reset_are_per_platform(self):
+        t = self.get("/bulk-labels/today/", "flipkart").data
+        self.assertEqual([c["courier_name"] for c in t["couriers"]], ["Ekart"])
+        self.client.post(f"{self.base}/bulk-labels/today/reset/", {"platform": "flipkart"}, format="json")
+        self.assertEqual(self.get("/bulk-labels/today/", "flipkart").data["total"], 0)
+        self.assertEqual(self.get("/bulk-labels/today/", "meesho").data["total"], 2)   # untouched

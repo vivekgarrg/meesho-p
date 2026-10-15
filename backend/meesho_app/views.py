@@ -6233,6 +6233,29 @@ def _parse_flipkart_label(label_text, full_text):
     return r
 
 
+def _label_view_platform(request):
+    """The marketplace a Labels screen is showing ("meesho" / "flipkart"), read
+    from ?platform= (or the body of a POST) — None means every label, which is
+    what the combined dashboard wants."""
+    value = request.GET.get("platform", "")
+    if not value and isinstance(getattr(request, "data", None), dict):
+        value = request.data.get("platform", "")
+    value = str(value or "").strip().lower()
+    return value if value in ("meesho", "flipkart") else None
+
+
+def _scope_labels(request, qs):
+    """Narrow a LabelOrder queryset to the marketplace the screen is showing."""
+    platform = _label_view_platform(request)
+    return qs.filter(platform=platform) if platform else qs
+
+
+def _label_platform_param(request):
+    """"meesho" / "flipkart" from the upload form, else None (take every page)."""
+    value = str(request.data.get("platform", "") or "").strip().lower()
+    return value if value in ("meesho", "flipkart") else None
+
+
 def _parse_label_any(label_text, full_text, tables):
     """Parse a label page whichever marketplace printed it."""
     if _is_flipkart_label(full_text):
@@ -6338,10 +6361,11 @@ def upload_labels_pdf(request, business_id):
     pdf_bytes = file.read()
 
     upload_date_str = request.data.get("upload_date", "").strip()
-    return _process_labels_upload(request, business, pdf_bytes, upload_date_str)
+    return _process_labels_upload(request, business, pdf_bytes, upload_date_str,
+                                  platform=_label_platform_param(request))
 
 
-def _process_labels_upload(request, business, pdf_bytes, upload_date_str, crop_labels=True):
+def _process_labels_upload(request, business, pdf_bytes, upload_date_str, crop_labels=True, platform=None):
     """
     Parse, business-sort, DB-write and crop a (possibly just-merged) labels
     PDF. Lifted verbatim out of upload_labels_pdf so upload_bulk_labels_pdf
@@ -6351,7 +6375,14 @@ def _process_labels_upload(request, business, pdf_bytes, upload_date_str, crop_l
 
     crop_labels=False (used by Bulk Labels) still sorts pages the same way —
     most-dispatched parent/SKU group first — but returns them full-page,
-    ready to print as-is, instead of cropped to the label-only region.
+    ready to print as-is, instead of cropped to the label-only region. The one
+    exception is platform="flipkart", which is cropped either way.
+
+    platform ("meesho" | "flipkart" | None): when set, only that marketplace's
+    labels are processed — saved, sorted and cropped — and pages from the other
+    one are left out and reported in `skipped_pages`. Keeping the two apart means
+    a Meesho tray and a Flipkart tray are never sorted into one stack. None keeps
+    the original behaviour of taking every page.
     """
     import io, re, base64
 
@@ -6384,6 +6415,8 @@ def _process_labels_upload(request, business, pdf_bytes, upload_date_str, crop_l
     page_details   = []
     crop_y_list    = []   # pdfplumber top-y for TAX INVOICE, per page
     crop_box_list  = []   # (x0, x1, top) of the label's own edges — Flipkart pages only
+    kept_idx       = []   # original PDF page index of each page that was kept
+    skipped_pages  = {}   # platform -> pages left out because they belong to the other one
     pl_heights     = []   # pdfplumber page heights
     db_rows        = []   # parsed dicts ready for LabelOrder.update_or_create
     total_pages    = 0
@@ -6416,6 +6449,11 @@ def _process_labels_upload(request, business, pdf_bytes, upload_date_str, crop_l
                 parsed = _parse_extracted(pg)
                 extract_meta["rechecked_pages"] = extract_meta.get("rechecked_pages", 0) + 1
 
+            if platform and parsed.get("platform") != platform:
+                other = parsed.get("platform") or "unknown"
+                skipped_pages[other] = skipped_pages.get(other, 0) + 1
+                continue
+            kept_idx.append(pg["index"])
             pl_heights.append(pg["height"])
             crop_y_list.append(pg["crop_y"])
             crop_box_list.append(pg.get("label_bbox") if parsed.get("platform") == "flipkart" else None)
@@ -6465,11 +6503,22 @@ def _process_labels_upload(request, business, pdf_bytes, upload_date_str, crop_l
                     "color":           parsed["color"],
                     "order_date":      parsed["order_date"],
                     "uploaded_date":   today,
+                    "platform":        parsed["platform"],
                 })
 
     except Exception as exc:
         return Response({"error": f"Could not parse PDF: {exc}"},
                         status=status.HTTP_400_BAD_REQUEST)
+
+    if platform and not kept_idx:
+        names = {"meesho": "Meesho", "flipkart": "Flipkart"}
+        others = ", ".join(f"{n} {names.get(k, k)}" for k, n in skipped_pages.items())
+        hint = next((names[k] for k in skipped_pages if k in names), None)
+        return Response(
+            {"error": f"No {names[platform]} labels found in this file"
+                      + (f" — it has {others} label(s). Use the {hint} tab for it." if hint else ".")},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
     # ── Save parsed rows to DB ────────────────────────────────────────────────
     # Rule: uploaded_date is SET only when a record is FIRST created.
@@ -6549,7 +6598,7 @@ def _process_labels_upload(request, business, pdf_bytes, upload_date_str, crop_l
                             "customer_name", "customer_address", "customer_city",
                             "customer_state", "customer_pincode", "courier_name",
                             "awb_number", "payment_type", "pickup_date",
-                            "sku", "size", "qty", "color", "order_date", "updated_at",
+                            "sku", "size", "qty", "color", "order_date", "platform", "updated_at",
                         ],
                         batch_size=500,
                     )
@@ -6608,7 +6657,7 @@ def _process_labels_upload(request, business, pdf_bytes, upload_date_str, crop_l
             reader = PdfReader(io.BytesIO(pdf_bytes))
             writer = PdfWriter()
             page_order = sorted(
-                range(len(reader.pages)),
+                range(len(kept_idx)),
                 key=lambda i: (
                     parent_rank.get(
                         sku_to_parent.get(
@@ -6624,12 +6673,14 @@ def _process_labels_upload(request, business, pdf_bytes, upload_date_str, crop_l
                 ),
             )
             for i in page_order:
-                pg = reader.pages[i]
+                pg = reader.pages[kept_idx[i]]
                 # crop_labels=False (Bulk Labels — see upload_bulk_labels_pdf)
                 # skips the cropbox adjustment below and keeps the full page
                 # (tax invoice half included) — sorted, not cropped, since
                 # that batch is going straight to print as-is.
-                if crop_labels:
+                # Flipkart labels are always cropped: its sheet is the label on top
+                # and the tax invoice below, and only the label goes on the parcel.
+                if crop_labels or platform == "flipkart":
                     ph   = float(pg.mediabox.height)
                     pw   = float(pg.mediabox.width)
                     pl_h = pl_heights[i] if i < len(pl_heights) else ph
@@ -6844,6 +6895,9 @@ def _process_labels_upload(request, business, pdf_bytes, upload_date_str, crop_l
         # Which engine read the PDF and how long it took (and any page that had
         # to be re-read the slow way) — for spotting a deploy that lost the fast path.
         "extract":                 extract_meta,
+        "platform":                platform or "all",
+        # Pages left out because they belong to the other marketplace.
+        "skipped_pages":           skipped_pages,
     })
 
 
@@ -6923,7 +6977,8 @@ def upload_bulk_labels_pdf(request, business_id):
         merged_bytes = buf.getvalue()
 
     upload_date_str = request.data.get("upload_date", "").strip()
-    response = _process_labels_upload(request, business, merged_bytes, upload_date_str, crop_labels=False)
+    response = _process_labels_upload(request, business, merged_bytes, upload_date_str, crop_labels=False,
+                                      platform=_label_platform_param(request))
     if response.status_code == 200:
         response.data["files_merged"] = len(files)
         # Renamed from cropped_pdf_b64 (the shared helper's own field name,
@@ -7006,7 +7061,7 @@ def label_orders_list(request, business_id):
     search      = request.GET.get("q", "").strip()
     sort        = (request.GET.get("sort") or "").strip()
 
-    qs = LabelOrder.objects.filter(business=business)
+    qs = _scope_labels(request, LabelOrder.objects.filter(business=business))
 
     if date_single:
         qs = qs.filter(uploaded_date=date_single)
@@ -7098,7 +7153,7 @@ def label_couriers_summary(request, business_id):
     date_from   = request.GET.get("date_from", "")
     date_to     = request.GET.get("date_to", "")
 
-    qs = LabelOrder.objects.filter(business=business)
+    qs = _scope_labels(request, LabelOrder.objects.filter(business=business))
     if date_single:
         qs = qs.filter(uploaded_date=date_single)
         filter_label = date_single
@@ -7129,8 +7184,7 @@ def label_couriers_summary(request, business_id):
     )
 
     available_dates = list(
-        LabelOrder.objects
-        .filter(business=business)
+        _scope_labels(request, LabelOrder.objects.filter(business=business))
         .values_list("uploaded_date", flat=True)
         .distinct()
         .order_by("-uploaded_date")
@@ -7161,7 +7215,7 @@ def label_batch_history(request, business_id):
     date_from = request.GET.get("date_from", "")
     date_to   = request.GET.get("date_to", "")
 
-    qs = LabelOrder.objects.filter(business=business)
+    qs = _scope_labels(request, LabelOrder.objects.filter(business=business))
     if date_from:
         qs = qs.filter(uploaded_date__gte=date_from)
     if date_to:
@@ -7210,7 +7264,7 @@ def _current_business_date():
     return now.date() if now.hour >= 12 else now.date() - timedelta(days=1)
 
 
-def _compute_label_today_summary(business, business_date):
+def _compute_label_today_summary(business, business_date, platform=None):
     """
     Labels processed for `business_date`, honouring a manual reset checkpoint
     if one was set for that date (see label_today_reset) — in that case only
@@ -7220,21 +7274,25 @@ def _compute_label_today_summary(business, business_date):
     separate batches make it up — so the KPI doesn't drop to a misleading 0
     the moment the clock crosses into a new business day with nothing in it.
     """
-    reset = LabelDayReset.objects.filter(business=business, business_date=business_date).first()
+    # Each marketplace has its own "today" and its own reset; platform=None is
+    # the combined count the dashboard shows.
+    scope = {"platform": platform} if platform else {}
+    reset = LabelDayReset.objects.filter(
+        business=business, business_date=business_date, platform=platform or "all").first()
     if reset:
         target_date = business_date
         qs = LabelOrder.objects.filter(
-            business=business, uploaded_date=business_date, updated_at__gte=reset.reset_at,
+            business=business, uploaded_date=business_date, updated_at__gte=reset.reset_at, **scope,
         )
     else:
         target_date = (
             LabelOrder.objects
-            .filter(business=business, uploaded_date__lte=business_date)
+            .filter(business=business, uploaded_date__lte=business_date, **scope)
             .aggregate(d=Max("uploaded_date"))["d"]
         )
         if target_date is None:
             return {"business_date": business_date.isoformat(), "total": 0, "total_items": 0, "couriers": [], "reset_at": None}
-        qs = LabelOrder.objects.filter(business=business, uploaded_date=target_date)
+        qs = LabelOrder.objects.filter(business=business, uploaded_date=target_date, **scope)
 
     courier_rows = list(
         qs.values("courier_name")
@@ -7267,7 +7325,8 @@ def label_today_summary(request, business_id):
     _current_business_date / _compute_label_today_summary for the rules.
     """
     business = get_authorized_business(request, business_id)
-    return Response(_compute_label_today_summary(business, _current_business_date()))
+    return Response(_compute_label_today_summary(business, _current_business_date(),
+                                                 _label_view_platform(request)))
 
 
 @api_view(["POST"])
@@ -7282,8 +7341,10 @@ def label_today_reset(request, business_id):
     """
     business = get_authorized_business(request, business_id)
     business_date = _current_business_date()
-    LabelDayReset.objects.update_or_create(business=business, business_date=business_date)
-    return Response(_compute_label_today_summary(business, business_date))
+    platform = _label_view_platform(request)
+    LabelDayReset.objects.update_or_create(
+        business=business, business_date=business_date, platform=platform or "all")
+    return Response(_compute_label_today_summary(business, business_date, platform))
 
 
 @api_view(["GET"])
@@ -7302,7 +7363,7 @@ def label_duplicate_customers(request, business_id):
     date_to   = request.GET.get("date_to",   "")
 
     # Step 1: addresses that appear in the selected period
-    period_qs = LabelOrder.objects.filter(business=business).exclude(customer_pincode="").exclude(customer_city="")
+    period_qs = _scope_labels(request, LabelOrder.objects.filter(business=business)).exclude(customer_pincode="").exclude(customer_city="")
     if date_from:
         period_qs = period_qs.filter(uploaded_date__gte=date_from)
     if date_to:
@@ -7321,7 +7382,7 @@ def label_duplicate_customers(request, business_id):
     for pin, city, state in period_addrs:
         addr_filter |= Q(customer_pincode=pin, customer_city=city, customer_state=state)
 
-    all_time_qs = LabelOrder.objects.filter(addr_filter, business=business)
+    all_time_qs = _scope_labels(request, LabelOrder.objects.filter(addr_filter, business=business))
 
     # Aggregate per address
     addr_agg = list(
@@ -7388,7 +7449,7 @@ def label_customer_history(request, business_id):
     if not name and not pincode and not address:
         return Response({"error": "Provide at least name, pincode or address."}, status=400)
 
-    qs = LabelOrder.objects.filter(business=business)
+    qs = _scope_labels(request, LabelOrder.objects.filter(business=business))
     if name:
         qs = qs.filter(customer_name__iexact=name)
     if pincode:
@@ -8661,7 +8722,7 @@ def label_bulk_pack(request, business_id):
 def label_unpacked(request, business_id):
     """List unpacked LabelOrders, optionally filtered by uploaded_date."""
     business = get_authorized_business(request, business_id)
-    qs = LabelOrder.objects.filter(business=business, is_packed=False)
+    qs = _scope_labels(request, LabelOrder.objects.filter(business=business, is_packed=False))
     date = request.GET.get("date", "").strip()
     if date:
         qs = qs.filter(uploaded_date=date)
@@ -16043,7 +16104,7 @@ def label_customers(request, business_id):
                "courier_name", "awb_number", "payment_type", "order_date",
                "uploaded_date")
 
-    all_rows = list(LabelOrder.objects.filter(business=business).values(*_FIELDS))
+    all_rows = list(_scope_labels(request, LabelOrder.objects.filter(business=business)).values(*_FIELDS))
 
     # Which customers fall inside the requested window — their history stays
     # all-time so you can see everything they've ever ordered.

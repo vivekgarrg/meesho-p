@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { PlatformToggle, SkippedPagesNote, PLATFORMS, useLabelPlatform } from "../PlatformToggle";
 import {
   Alert, Box, Button, Chip, Collapse, IconButton, LinearProgress,
   Paper, Table, TableBody, TableCell, TableHead, TableRow,
@@ -39,15 +40,20 @@ import { ParentSkuCell } from "./ParentLinkInline";
 // ── Batch persistence (unchanged storage contract) ───────────────────────────
 const LS_PREFIX = "labels_parse_";
 
-function saveParseResult(date, fileName, result) {
+// Meesho and Flipkart batches are stored separately so the two never share a
+// pack queue. Meesho keeps the original key, so batches saved before this
+// switch existed are still found.
+const lsKey = (platform, date) => (platform === "flipkart" ? `${LS_PREFIX}flipkart_${date}` : LS_PREFIX + date);
+
+function saveParseResult(platform, date, fileName, result) {
   try {
-    localStorage.setItem(LS_PREFIX + date, JSON.stringify({ fileName, result, savedAt: Date.now() }));
+    localStorage.setItem(lsKey(platform, date), JSON.stringify({ fileName, result, savedAt: Date.now() }));
   } catch { /* quota — the batch just won't be restored after a reload */ }
 }
 
-function loadParseResult(date) {
+function loadParseResult(platform, date) {
   try {
-    const raw = localStorage.getItem(LS_PREFIX + date);
+    const raw = localStorage.getItem(lsKey(platform, date));
     return raw ? JSON.parse(raw) : null;
   } catch { return null; }
 }
@@ -76,6 +82,7 @@ function downloadCroppedPDF(b64, fileName) {
 // A courier should be recognisable without reading.
 const COURIER_COLORS = {
   "valmo":       { bg: "#EEF2FF", fg: "#4338CA" },
+  "ekart":       { bg: "#DBEAFE", fg: "#2874F0" },
   "shadowfax":   { bg: "#FEF3C7", fg: "#B45309" },
   "delhivery":   { bg: "#FCE7F3", fg: "#BE185D" },
   "xpress bees": { bg: "#DBEAFE", fg: "#1D4ED8" },
@@ -331,7 +338,7 @@ function PackPanel({ orders, onToggle, onMarkAll }) {
 // BATCH VIEW
 // ══════════════════════════════════════════════════════════════════════════════
 function BatchView({
-  batchDate, setBatchDate, result, fileName, loading, error, onPickFile, onReset, packedCount, pendingCount, onGoPack,
+  platform, batchDate, setBatchDate, result, fileName, loading, error, onPickFile, onReset, packedCount, pendingCount, onGoPack,
 }) {
   const isMobile = useIsMobile();
   const [skuSearch, setSkuSearch] = useState("");
@@ -432,16 +439,17 @@ function BatchView({
                 "&:hover": { borderColor: C.orange, bgcolor: C.orangeLight } }}>
           <UploadFileIcon sx={{ fontSize: 40, color: C.gray300 }} />
           <Typography sx={{ fontSize: 15, fontWeight: 700, color: C.gray700, mt: "8px" }}>
-            Upload the Meesho or Flipkart labels PDF
+            Upload the {PLATFORMS[platform].label} labels PDF
           </Typography>
           <Typography sx={{ fontSize: 12, color: C.gray400, mt: "4px" }}>
-            Nothing recorded for {batchDate} yet · Meesho and Flipkart labels can be mixed in one file
+            Nothing recorded for {batchDate} yet · {PLATFORMS[platform].label} labels are sorted and cropped on their own
           </Typography>
         </Paper>
       )}
 
       {result && !loading && (
         <>
+          <SkippedPagesNote skipped={result.skipped_pages} />
           {/* Only-when-wrong alerts */}
           {blocked.length > 0 && (
             <Alert severity="error" sx={{ borderRadius: "10px" }}>
@@ -691,7 +699,7 @@ const SORTS = [
   ["sku", "SKU"], ["-qty", "Qty"], ["name", "Customer"],
 ];
 
-function LabelsView({ onViewCustomer }) {
+function LabelsView({ onViewCustomer, platform }) {
   const { range, label: periodLabel } = useDateFilter();
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -699,10 +707,12 @@ function LabelsView({ onViewCustomer }) {
   const [q, setQ] = useState("");
   const [courier, setCourier] = useState("");
   const [allCouriers, setAllCouriers] = useState([]);
+  // Couriers differ per marketplace (Valmo vs Ekart), so start fresh on a switch.
+  useEffect(() => { setCourier(""); setAllCouriers([]); }, [platform]);
 
   const load = useCallback(async () => {
     setLoading(true);
-    const p = new URLSearchParams({ page_size: 1000, sort });
+    const p = new URLSearchParams({ page_size: 1000, sort, platform });
     if (range?.date_from) p.set("date_from", range.date_from);
     if (range?.date_to) p.set("date_to", range.date_to);
     if (q.trim()) p.set("q", q.trim());
@@ -719,7 +729,7 @@ function LabelsView({ onViewCustomer }) {
         }
       }
     } finally { setLoading(false); }
-  }, [sort, q, courier, JSON.stringify(range)]); // eslint-disable-line
+  }, [sort, q, courier, platform, JSON.stringify(range)]); // eslint-disable-line
 
   useEffect(() => {
     const t = setTimeout(load, q ? 300 : 0);   // debounce typing only
@@ -846,7 +856,7 @@ function LabelsView({ onViewCustomer }) {
 // ══════════════════════════════════════════════════════════════════════════════
 // CUSTOMERS VIEW
 // ══════════════════════════════════════════════════════════════════════════════
-function CustomersView() {
+function CustomersView({ platform }) {
   const { range } = useDateFilter();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -859,7 +869,7 @@ function CustomersView() {
 
   const load = useCallback(async () => {
     setLoading(true);
-    const p = new URLSearchParams({ min_orders: String(minOrders), sort, page: String(page), page_size: String(PER) });
+    const p = new URLSearchParams({ min_orders: String(minOrders), sort, page: String(page), page_size: String(PER), platform });
     if (q.trim()) p.set("q", q.trim());
     if (range?.date_from) p.set("date_from", range.date_from);
     if (range?.date_to) p.set("date_to", range.date_to);
@@ -867,7 +877,7 @@ function CustomersView() {
       const r = await fetch(`${API}/labels/customers/?${p}`);
       if (r.ok) setData(await r.json());
     } finally { setLoading(false); }
-  }, [minOrders, sort, page, q, JSON.stringify(range)]); // eslint-disable-line
+  }, [minOrders, sort, page, q, platform, JSON.stringify(range)]); // eslint-disable-line
 
   useEffect(() => {
     const t = setTimeout(load, q ? 300 : 0);
@@ -1064,12 +1074,12 @@ function CustomersView() {
 // ══════════════════════════════════════════════════════════════════════════════
 // CUSTOMER HISTORY DRAWER — opened from a label row
 // ══════════════════════════════════════════════════════════════════════════════
-function CustomerHistoryDrawer({ query, onClose }) {
+function CustomerHistoryDrawer({ query, onClose, platform }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const p = new URLSearchParams();
+    const p = new URLSearchParams({ platform });
     if (query.name) p.set("name", query.name);
     if (query.pincode) p.set("pincode", query.pincode);
     // Address disambiguates two customers who share a name.
@@ -1079,7 +1089,7 @@ function CustomerHistoryDrawer({ query, onClose }) {
       .then(r => r.json())
       .then(d => { setData(d); setLoading(false); })
       .catch(() => setLoading(false));
-  }, [query.name, query.pincode, query.address]);
+  }, [query.name, query.pincode, query.address, platform]);
 
   const orders = data?.orders || [];
   const s = data?.summary || {};
@@ -1170,6 +1180,7 @@ const SUBTITLE = {
 export function LabelsTab() {
   const isMobile = useIsMobile();
   const [view, setView] = useState("batch");
+  const [platform, setPlatform] = useLabelPlatform();
 
   const [batchDate, setBatchDate] = useState(todayISO());
   const [result, setResult] = useState(null);
@@ -1191,7 +1202,7 @@ export function LabelsTab() {
 
   // Restore a previously parsed batch for this date.
   useEffect(() => {
-    const saved = loadParseResult(batchDate);
+    const saved = loadParseResult(platform, batchDate);
     if (saved) {
       setResult(saved.result);
       setFileName(saved.fileName);
@@ -1200,7 +1211,7 @@ export function LabelsTab() {
       setResult(null); setFileName(""); setPackingOrders([]);
     }
     setError("");
-  }, [batchDate]);
+  }, [batchDate, platform]);
 
   const handleFile = async (file) => {
     if (!file) return;
@@ -1209,6 +1220,7 @@ export function LabelsTab() {
     const form = new FormData();
     form.append("file", file);
     form.append("upload_date", batchDate);
+    form.append("platform", platform);
     try {
       const res = await fetch(`${API}/labels/parse/`, { method: "POST", body: form });
       const data = await res.json();
@@ -1216,7 +1228,7 @@ export function LabelsTab() {
         setError(data.error || "Could not parse that PDF.");
       } else {
         setResult(data);
-        saveParseResult(batchDate, file.name, data);
+        saveParseResult(platform, batchDate, file.name, data);
         setPackingOrders(packQueueFrom(data));
       }
     } catch {
@@ -1247,19 +1259,22 @@ export function LabelsTab() {
   // Clears only the locally-cached batch view; parsed labels stay in the
   // database and remain visible under the Labels view.
   const resetBatch = () => {
-    try { localStorage.removeItem(LS_PREFIX + batchDate); } catch { /* ignore */ }
+    try { localStorage.removeItem(lsKey(platform, batchDate)); } catch { /* ignore */ }
     setResult(null); setFileName(""); setPackingOrders([]); setError("");
   };
 
   return (
     <Box sx={{ display: "flex", flexDirection: "column", gap: "16px" }}>
-      {historyQuery && <CustomerHistoryDrawer query={historyQuery} onClose={() => setHistoryQuery(null)} />}
+      {historyQuery && <CustomerHistoryDrawer platform={platform} query={historyQuery} onClose={() => setHistoryQuery(null)} />}
       <input ref={fileRef} type="file" accept="application/pdf" style={{ display: "none" }}
         onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; handleFile(f); }} />
 
       <Box sx={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: "12px", flexWrap: "wrap" }}>
         <Box>
-          <Typography sx={{ fontSize: 20, fontWeight: 800, color: C.gray800 }}>Labels</Typography>
+          <Box sx={{ display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap" }}>
+            <Typography sx={{ fontSize: 20, fontWeight: 800, color: C.gray800 }}>Labels</Typography>
+            <PlatformToggle platform={platform} onChange={setPlatform} disabled={loading} />
+          </Box>
           <Typography sx={{ fontSize: 12, color: C.gray400, mt: "2px" }}>{SUBTITLE[view]}</Typography>
         </Box>
         <Box sx={{ display: "flex", gap: "3px", bgcolor: C.gray100, borderRadius: "10px", p: "4px",
@@ -1286,6 +1301,7 @@ export function LabelsTab() {
 
       {view === "batch" && (
         <BatchView
+          platform={platform}
           batchDate={batchDate} setBatchDate={setBatchDate}
           result={result} fileName={fileName} loading={loading} error={error}
           onPickFile={() => fileRef.current?.click()}
@@ -1303,8 +1319,8 @@ export function LabelsTab() {
           onGoBatch={() => setView("batch")}
         />
       )}
-      {view === "labels" && <LabelsView onViewCustomer={setHistoryQuery} />}
-      {view === "customers" && <CustomersView />}
+      {view === "labels" && <LabelsView platform={platform} onViewCustomer={setHistoryQuery} />}
+      {view === "customers" && <CustomersView platform={platform} />}
     </Box>
   );
 }
