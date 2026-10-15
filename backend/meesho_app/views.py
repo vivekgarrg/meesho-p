@@ -21,6 +21,7 @@ from PIL import Image
 from .helpers.helper import status_wise_summary, strip_html
 from accounts.models import Business, User
 from .permissions import get_authorized_business, accessible_businesses
+from .helpers import label_pdf
 from .helpers.label_pdf import extract_all_pages
 from . import master_pricing, pricing_sync
 
@@ -6111,6 +6112,138 @@ def _parse_label_page(label_text, full_text, tables):
     return r
 
 
+# ── Flipkart labels ───────────────────────────────────────────────────────────
+# Flipkart ships its own label sheet: the shipping label on the top half of the
+# page (E-Kart / courier block, customer address, "SKU ID | Description | QTY"
+# table) and the tax invoice below a dashed line — the same two-part page as
+# Meesho's, so they share the crop/sort machinery and differ only in how the
+# fields are read.
+
+_IN_STATE_CODES = {
+    "AN": "Andaman and Nicobar Islands", "AP": "Andhra Pradesh", "AR": "Arunachal Pradesh",
+    "AS": "Assam", "BR": "Bihar", "CH": "Chandigarh", "CG": "Chhattisgarh",
+    "DD": "Daman and Diu", "DL": "Delhi", "DN": "Dadra and Nagar Haveli", "GA": "Goa",
+    "GJ": "Gujarat", "HP": "Himachal Pradesh", "HR": "Haryana", "JH": "Jharkhand",
+    "JK": "Jammu and Kashmir", "KA": "Karnataka", "KL": "Kerala", "LA": "Ladakh",
+    "LD": "Lakshadweep", "MH": "Maharashtra", "ML": "Meghalaya", "MN": "Manipur",
+    "MP": "Madhya Pradesh", "MZ": "Mizoram", "NL": "Nagaland", "OD": "Odisha",
+    "OR": "Odisha", "PB": "Punjab", "PY": "Puducherry", "RJ": "Rajasthan",
+    "SK": "Sikkim", "TN": "Tamil Nadu", "TR": "Tripura", "TS": "Telangana",
+    "UK": "Uttarakhand", "UP": "Uttar Pradesh", "WB": "West Bengal",
+}
+
+
+def _is_flipkart_label(full_text):
+    return bool(re.search(r"SKU ID\s*\|\s*Description", full_text)) or "E-Kart" in full_text
+
+
+def _parse_flipkart_label(label_text, full_text):
+    """Fields from one Flipkart label page, in the same shape as _parse_label_page."""
+    from datetime import datetime as _dt
+
+    r = {
+        "customer_name": "", "customer_address": "",
+        "customer_city": "", "customer_state": "", "customer_pincode": "",
+        "courier_name": "", "awb_number": "", "payment_type": "", "pickup_date": "",
+        "sku": "", "size": "", "qty": 1, "color": "", "order_id": "", "order_date": None,
+    }
+    lines = [l.strip() for l in label_text.split("\n") if l.strip()]
+
+    # Order id + payment mode: "OD438885307422194100 COD"
+    m = re.search(r"\b(OD\d{15,25})\b", label_text)
+    if m:
+        r["order_id"] = m.group(1)
+    pm = re.search(r"\b(COD|PREPAID)\b", label_text)
+    if pm:
+        r["payment_type"] = "COD" if pm.group(1) == "COD" else "Prepaid"
+
+    # Courier: Flipkart's own logistics prints "E-Kart Logistics".
+    if re.search(r"E-?Kart", label_text, re.I):
+        r["courier_name"] = "Ekart"
+    else:
+        for c in ("Shadowfax", "Delhivery", "Xpress Bees", "Valmo", "BlueDart", "Ekart", "DTDC"):
+            if re.search(r"\b" + re.escape(c) + r"\b", label_text, re.I):
+                r["courier_name"] = c
+                break
+
+    # AWB: the rotated "AWB No." text is broken into fragments by the line
+    # grouping, so take the first tracking-looking token after "No." (skipping
+    # the zone code in brackets). The code under the barcode is the fallback.
+    awb_pat = re.compile(r"^(?:[A-Z]{3,5})?\d{10,16}$")
+    for i, l in enumerate(lines):
+        if l == "No." or l.endswith("WB No.") or l == "WB No.":
+            for tok in " ".join(lines[i + 1:i + 6]).split():
+                if awb_pat.match(tok) and not tok.startswith("OD"):
+                    r["awb_number"] = tok
+                    break
+            break
+    if not r["awb_number"]:
+        for l in reversed(lines):
+            if awb_pat.match(l):
+                r["awb_number"] = l
+                break
+
+    # Handover-by date: "HBD: 15 - 10"
+    hm = re.search(r"HBD:\s*(\d{1,2})\s*-\s*(\d{1,2})", label_text)
+    if hm:
+        r["pickup_date"] = f"{int(hm.group(1)):02d}/{int(hm.group(2)):02d}"
+
+    # Customer block: between "Shipping/Customer address:" and "Sold By:".
+    start = next((i for i, l in enumerate(lines) if "Shipping/Customer address" in l), -1)
+    end = next((i for i, l in enumerate(lines) if i > start and l.startswith("Sold By")), len(lines))
+    if start >= 0:
+        block = []
+        for l in lines[start + 1:end]:
+            # HBD / CPD dates sit beside the address and land on its lines.
+            l = re.sub(r"\b(?:HBD|CPD):\s*\d+\s*-\s*\d+", "", l).strip()
+            if l:
+                block.append(l)
+        if block:
+            first = re.sub(r"^Name:\s*", "", block[0])
+            r["customer_name"] = first.split(",")[0].strip()
+            rest = block[1:]
+            tail = first.split(",", 1)[1].strip() if "," in first else ""
+            if tail:
+                rest = [tail] + rest
+            r["customer_address"] = "\n".join(rest)
+            for l in reversed(block):
+                cm = re.match(r"^(.*?)\s*-\s*(\d{6}),\s*IN-([A-Z]{2})\b", l)
+                if cm:
+                    r["customer_city"] = re.sub(r"\s+District$", "", cm.group(1).split(",")[-1].strip())
+                    r["customer_pincode"] = cm.group(2)
+                    r["customer_state"] = _IN_STATE_CODES.get(cm.group(3), cm.group(3))
+                    break
+
+    # Product row: "1 pooja-thali-2katori-006 | rudam Brass Pooja Small Thali Brass 1"
+    for l in lines:
+        pm2 = re.match(r"^\d\s*(.+?)\s*\|\s*(.*)$", l)
+        if pm2 and not l.startswith("SKU ID"):
+            r["sku"] = " ".join(pm2.group(1).split())
+            qm = re.search(r"\s(\d{1,3})$", pm2.group(2))
+            if qm:
+                r["qty"] = max(1, int(qm.group(1)))
+            break
+
+    dm = re.search(r"Order Date:\s*(\d{2})-(\d{2})-(\d{4})", full_text)
+    if dm:
+        try:
+            r["order_date"] = _dt.strptime("-".join(dm.groups()), "%d-%m-%Y").date()
+        except ValueError:
+            pass
+    return r
+
+
+def _parse_label_any(label_text, full_text, tables):
+    """Parse a label page whichever marketplace printed it."""
+    if _is_flipkart_label(full_text):
+        parsed = _parse_flipkart_label(label_text, full_text)
+        parsed["platform"] = "flipkart"
+    else:
+        parsed = _parse_label_page(label_text, full_text, tables)
+        parsed["platform"] = "meesho"
+    return parsed
+
+
 # ── Meesho Labels PDF upload ──────────────────────────────────────────────────
 
 def _sku_business_owners(businesses, sku_ids, default):
@@ -6250,6 +6383,7 @@ def _process_labels_upload(request, business, pdf_bytes, upload_date_str, crop_l
     sku_data = {}
     page_details   = []
     crop_y_list    = []   # pdfplumber top-y for TAX INVOICE, per page
+    crop_box_list  = []   # (x0, x1, top) of the label's own edges — Flipkart pages only
     pl_heights     = []   # pdfplumber page heights
     db_rows        = []   # parsed dicts ready for LabelOrder.update_or_create
     total_pages    = 0
@@ -6264,18 +6398,27 @@ def _process_labels_upload(request, business, pdf_bytes, upload_date_str, crop_l
         total_pages = extract_meta["total_pages"]
 
         for page_num, pg in enumerate(extracted, 1):
-            pl_heights.append(pg["height"])
-            crop_y_list.append(pg["crop_y"])
-
-            tables    = pg["tables"]
-            full_text = pg["full_text"]
-
-            # Derive label-only text by splitting at "TAX INVOICE"
-            tax_pos    = full_text.upper().find("TAX INVOICE")
-            label_text = full_text[:tax_pos].strip() if tax_pos > 0 else full_text
+            def _parse_extracted(page):
+                full_text = page["full_text"]
+                # Derive label-only text by splitting at "TAX INVOICE"
+                tax_pos    = full_text.upper().find("TAX INVOICE")
+                label_text = full_text[:tax_pos].strip() if tax_pos > 0 else full_text
+                return _parse_label_any(label_text, full_text, page["tables"])
 
             # ── Parse all fields via helper ───────────────────────────────
-            parsed = _parse_label_page(label_text, full_text, tables)
+            parsed = _parse_extracted(pg)
+            # The fast engine reads every known label layout identically to
+            # pdfplumber, but a page it can't find an order or SKU on is re-read
+            # the slow, thorough way before being trusted — an unfamiliar layout
+            # costs time, never a wrong or missing label.
+            if pg.get("fast") and not (parsed["sku"] and parsed["order_id"]):
+                pg = label_pdf.extract_page_exact(pdf_bytes, pg["index"])
+                parsed = _parse_extracted(pg)
+                extract_meta["rechecked_pages"] = extract_meta.get("rechecked_pages", 0) + 1
+
+            pl_heights.append(pg["height"])
+            crop_y_list.append(pg["crop_y"])
+            crop_box_list.append(pg.get("label_bbox") if parsed.get("platform") == "flipkart" else None)
 
             # ── Accumulate SKU analytics ──────────────────────────────────
             sku, qty = parsed["sku"], parsed["qty"]
@@ -6300,6 +6443,7 @@ def _process_labels_upload(request, business, pdf_bytes, upload_date_str, crop_l
                 "customer_address": parsed["customer_address"],
                 "customer_city":    parsed["customer_city"],
                 "customer_state":   parsed["customer_state"],
+                "platform":         parsed["platform"],
             })
 
             # ── Queue DB row (only if we have an order_id) ────────────────
@@ -6492,8 +6636,18 @@ def _process_labels_upload(request, business, pdf_bytes, upload_date_str, crop_l
                     scale = ph / pl_h if pl_h else 1.0
                     crop  = crop_y_list[i] if i < len(crop_y_list) else ph * 0.54
                     y_bot = max(0.0, ph - crop * scale)
-                    pg.cropbox.lower_left  = (0, y_bot)
-                    pg.cropbox.upper_right = (pw, ph)
+                    box   = crop_box_list[i] if i < len(crop_box_list) else None
+                    if box:
+                        # A Flipkart label sits in the middle of an A4 page, so
+                        # trim its sides and top to the label's own edges too.
+                        pad = 10.0
+                        y_bot = min(ph, y_bot + 4.0)   # keep the dashed cut line out of the print
+                        pg.cropbox.lower_left  = (max(0.0, box[0] * scale - pad), y_bot)
+                        pg.cropbox.upper_right = (min(pw, box[1] * scale + pad),
+                                                  min(ph, ph - box[2] * scale + pad))
+                    else:
+                        pg.cropbox.lower_left  = (0, y_bot)
+                        pg.cropbox.upper_right = (pw, ph)
                 writer.add_page(pg)
             buf = io.BytesIO()
             writer.write(buf)
@@ -6594,8 +6748,6 @@ def _process_labels_upload(request, business, pdf_bytes, upload_date_str, crop_l
         for _key, _prior in _prior_by_customer.items():
             if not _prior:
                 continue
-            print("Missing key:", repr(_key))
-            print("Available keys:")
             # _bc = batch_customers[_key]
 
             # Resolve status for each prior order
@@ -6689,6 +6841,9 @@ def _process_labels_upload(request, business, pdf_bytes, upload_date_str, crop_l
         "db_updated":       updated,
         "blocked_customers_found": blocked_in_batch,
         "repeated_customers":      repeated_customers,
+        # Which engine read the PDF and how long it took (and any page that had
+        # to be re-read the slow way) — for spotting a deploy that lost the fast path.
+        "extract":                 extract_meta,
     })
 
 
@@ -6735,18 +6890,37 @@ def upload_bulk_labels_pdf(request, business_id):
                         status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     import io
-    writer = PdfWriter()
-    for f in files:
+    blobs = [(f.name, f.read()) for f in files]
+    merged_bytes = None
+    # pdfium appends pages ~7× faster than pypdf; any trouble with it just
+    # falls through to the pypdf merge below, which reports unreadable files.
+    if label_pdf.pdfium_available():
         try:
-            reader = PdfReader(io.BytesIO(f.read()))
-            for page in reader.pages:
-                writer.add_page(page)
-        except Exception as exc:
-            return Response({"error": f"Could not read '{f.name}': {exc}"},
-                            status=status.HTTP_400_BAD_REQUEST)
-    buf = io.BytesIO()
-    writer.write(buf)
-    merged_bytes = buf.getvalue()
+            import pypdfium2 as pdfium
+            dst = pdfium.PdfDocument.new()
+            for _name, data in blobs:
+                src = pdfium.PdfDocument(data)
+                dst.import_pages(src)
+                src.close()
+            buf = io.BytesIO()
+            dst.save(buf)
+            dst.close()
+            merged_bytes = buf.getvalue()
+        except Exception:  # noqa: BLE001
+            merged_bytes = None
+    if merged_bytes is None:
+        writer = PdfWriter()
+        for name, data in blobs:
+            try:
+                reader = PdfReader(io.BytesIO(data))
+                for page in reader.pages:
+                    writer.add_page(page)
+            except Exception as exc:
+                return Response({"error": f"Could not read '{name}': {exc}"},
+                                status=status.HTTP_400_BAD_REQUEST)
+        buf = io.BytesIO()
+        writer.write(buf)
+        merged_bytes = buf.getvalue()
 
     upload_date_str = request.data.get("upload_date", "").strip()
     response = _process_labels_upload(request, business, merged_bytes, upload_date_str, crop_labels=False)
@@ -11647,78 +11821,168 @@ def return_deliveries_list(request, business_id):
     })
 
 
-def _return_action(row):
+# Customer-return reason → decision bucket. Order matters: the first match wins,
+# so Meesho's "Received wrong product (different color / size / product)" lands
+# in Wrong item rather than Size/fit.
+_RETURN_REASON_GROUPS = [
+    ("wrong_missing", "Wrong / missing item",  ("wrong", "incorrect", "missing", "incomplete", "not received", "empty", "different product", "other item")),
+    ("size_fit",      "Size / fit",            ("size", "fit", "small", "large", "tight", "loose", "length", "short", "long")),
+    ("quality",       "Quality / damaged",     ("defect", "damag", "quality", "broken", "torn", "poor", "faulty", "not working", "stain", "crack", "leak", "dirty", "used")),
+    ("not_as_listed", "Not as described",      ("not as", "different", "description", "image", "picture", "photo", "colour", "color", "design", "looks", "expect")),
+    ("changed_mind",  "Changed mind",          ("no longer", "anymore", "changed", "don't want", "dont want", "don't need", "dont need", "not need", "no need", "mistake", "better price", "do not like", "don't like", "not like")),
+    ("delivery",      "Delivery issue",        ("late", "delay", "delivery", "courier", "too long")),
+]
+_RETURN_REASON_GROUP_LABEL = {k: l for k, l, _ in _RETURN_REASON_GROUPS}
+_RETURN_REASON_GROUP_LABEL.update({"unspecified": "Not specified", "other": "Other"})
+
+# What to do about each kind of return reason.
+_RETURN_REASON_FIX = {
+    "size_fit":      "add or correct the size chart and measurements, and say clearly how it fits",
+    "wrong_missing": "tighten packing/QC so the right item and full set ships — check the dispatch checklist",
+    "quality":       "inspect the supplier batch and QC before dispatch; consider switching supplier or packaging",
+    "not_as_listed": "refresh the photos, colour and description so they match what arrives",
+    "changed_mind":  "mostly buyer remorse — little to fix on the listing; watch the share of prepaid vs COD",
+    "delivery":      "courier/delivery speed issue — not a product problem",
+}
+
+
+# Payment-sheet text that is a fee label or a note about the parcel that came
+# back to us — neither is the customer's reason for returning.
+_NOT_A_RETURN_REASON = ("return assurance program fees", "affiliate fee")
+
+
+def _clean_return_reason(text):
+    t = (text or "").strip()
+    low = t.lower()
+    if not t or low in _NOT_A_RETURN_REASON or "for awb" in low or "returned order" in low:
+        return ""
+    return t
+
+
+def _return_reason_group(reason):
+    r = (reason or "").strip().lower()
+    if not r or r == "not specified":
+        return "unspecified"
+    for key, _label, words in _RETURN_REASON_GROUPS:
+        if any(w in r for w in words):
+            return key
+    return "other"
+
+
+def _return_trend(month_map):
+    """Latest vs previous month return rate, from {month: {orders, returns}}.
+
+    Needs a few orders in the month to mean anything; returns None otherwise.
     """
-    Turn one parent-SKU's return numbers into a plain-English "what to do next".
-    Returns {level, text}; level drives the colour on the card (high | warn | ok).
+    pts = [(m, v) for m, v in sorted(month_map.items()) if v.get("orders", 0) >= 5]
+    if len(pts) < 2:
+        return None
+    (pm, pv), (lm, lv) = pts[-2], pts[-1]
+    prev_rate = pv["returns"] * 100.0 / pv["orders"]
+    last_rate = lv["returns"] * 100.0 / lv["orders"]
+    return {
+        "latest_month": lm, "prev_month": pm,
+        "latest_rate": round(last_rate, 1), "prev_rate": round(prev_rate, 1),
+        "delta_pts": round(last_rate - prev_rate, 1),
+    }
+
+
+def _return_action(row, avg_rate):
     """
-    rate      = row.get("return_rate") or 0
-    rto_share = row.get("rto_share") or 0
-    parts, level = [], "ok"
+    Turn one parent/SKU's customer-return numbers into a decision: a verdict
+    (fix / watch / healthy / star), the money at stake, and what to do about
+    the dominant reason. `avg_rate` is the whole business's return rate for the
+    period, so "high" means high *for this business*, not against a fixed bar.
+    """
+    rate    = row.get("return_rate")
+    orders  = row["orders_total"]
+    trend   = row.get("trend") or {}
+    group   = row.get("top_reason_group") or ""
+    parts, level, verdict = [], "ok", "healthy"
+    enough = orders >= 10 and rate is not None
 
-    if rate >= 30 and row["orders_total"] >= 10:
-        parts.append(f"Return rate {rate}% on {row['orders_total']} orders — review quality/sizing, fix the listing photos & description, or pause ads on this product.")
-        level = "high"
-    elif rate >= 15 and row["orders_total"] >= 10:
-        parts.append(f"Return rate {rate}% is above a healthy level — check the top reason and tighten the listing.")
-        level = "warn"
+    if enough and rate >= max(25.0, avg_rate * 1.5):
+        level, verdict = "high", "fix"
+        parts.append(f"{rate}% of {orders} delivered orders come back — {rate / avg_rate:.1f}× your average ({avg_rate}%).")
+    elif enough and rate >= max(15.0, avg_rate * 1.2):
+        level, verdict = "warn", "watch"
+        parts.append(f"{rate}% return rate is above your {avg_rate}% average.")
 
-    if rto_share >= 50 and row["returns"] >= 5:
-        parts.append(f"{rto_share:.0f}% are RTO (never delivered) — verify pincode serviceability and consider prepaid-only or address confirmation.")
-        level = "high"
+    if (trend.get("delta_pts") or 0) >= 5 and level != "high":
+        level = "warn" if level == "ok" else level
+        verdict = "watch" if verdict == "healthy" else verdict
+        parts.append(f"Getting worse: {trend['prev_rate']}% → {trend['latest_rate']}% last month.")
 
+    if row["excess_loss"] > 0:
+        parts.append(f"Bringing it to your average would save about ₹{row['excess_loss']:,.0f} ({row['excess_returns']:.0f} fewer returns).")
+
+    if row["net_settlement"] < 0 and level == "ok":
+        level, verdict = "warn", "watch"
     if row["net_settlement"] < 0:
-        parts.append(f"Losing ₹{abs(row['net_settlement']):,.0f} net on these returns.")
-        if level == "ok":
-            level = "warn"
+        parts.append(f"Returns cost ₹{abs(row['net_settlement']):,.0f} net so far.")
 
     if row["return_shipping_cost"] and row["claim_recovered"] <= 0:
-        parts.append(f"₹{abs(row['return_shipping_cost']):,.0f} spent on return shipping with nothing recovered — raise claims within 7 days of delivery.")
-        if level == "ok":
-            level = "warn"
+        parts.append(f"₹{abs(row['return_shipping_cost']):,.0f} return shipping with nothing claimed back — raise claims within 7 days of delivery.")
 
-    tr = row.get("top_reason") or ""
-    if tr and tr != "Not specified":
-        parts.append(f"Most common reason: “{tr}”.")
+    if level != "ok" and group in _RETURN_REASON_FIX:
+        parts.append(f"Main cause is “{_RETURN_REASON_GROUP_LABEL[group]}” — {_RETURN_REASON_FIX[group]}.")
+    elif row.get("top_reason") and row["top_reason"] != "Not specified" and level != "ok":
+        parts.append(f"Most common reason: “{row['top_reason']}”.")
+
+    if level == "ok" and enough and rate <= avg_rate * 0.6 and orders >= 20:
+        verdict = "star"
+        parts.append(f"Only {rate}% return rate on {orders} orders — well below your {avg_rate}% average. A safe product to push and advertise.")
 
     if not parts:
-        parts.append("Returns are within a normal range — keep monitoring.")
-    return {"level": level, "text": " ".join(parts)}
+        parts.append("Within a normal range — keep monitoring." if enough else "Too few orders to judge yet.")
+    return {"level": level, "verdict": verdict, "text": " ".join(parts)}
 
 
 @api_view(["GET"])
 def return_analysis(request, business_id):
     """
-    Analytics over returned orders, driven by the payment/order data so every
-    month that has payments is covered — not just the ones with a Returns CSV
-    uploaded. An order counts as a return when any of its OrderPayment rows
-    carries a RETURN / RTO status; RTO_COMPLETE and RETURNED are folded in.
+    Customer-return analytics at parent-SKU and SKU level, built for decisions.
 
-    Shows which products come back most, how often (return rate vs orders sold),
-    why (reason from the Returns sheet where present, else the payment sheet's
-    own recovery/claims reason), the customer-return vs RTO split, and the net
-    settlement each returned product landed at — so a loss-making SKU stands out.
+    Customer returns only — RTO (parcels that never reached the buyer) is
+    deliberately left out, both from the counts and from the denominator, since
+    an RTO says nothing about the product. An order is a customer return when
+    any of its payment rows is RETURN/RETURNED and none is RTO.
 
-    Business-scoped; the date range applies to order_date, matching the other
-    returns/claims screens.
+    Return rate = returns ÷ orders that reached the customer (delivered +
+    returned + exchanged); in-transit, cancelled and RTO orders are excluded so
+    they can't dilute the rate.
+
+    Per parent and per SKU: rate vs the business average, month-on-month trend,
+    reason groups (size, quality, …), net money lost, the "excess loss" a
+    product costs over an average one, and a verdict with a concrete action.
+
+    Business-scoped; the date range applies to order_date.
     """
     business = get_authorized_business(request, business_id)
 
     date_from = request.GET.get("date_from", "").strip()
     date_to   = request.GET.get("date_to", "").strip()
     try:
-        limit = min(100, max(1, int(request.GET.get("limit", 20))))
+        limit = min(200, max(1, int(request.GET.get("limit", 60))))
     except (TypeError, ValueError):
-        limit = 20
+        limit = 60
 
-    RETURN_STATUSES = ["RETURN", "RETURNED", "RTO", "RTO_COMPLETE"]
-    RTO_SET      = {"RTO", "RTO_COMPLETE"}
+    RETURN_STATUSES = sorted(_RETURN_STATUSES)
+    RTO_SET         = {"RTO", "RTO_COMPLETE", "RTO_LOCKED", "RTO_OFD"}
+    REACHED         = sorted(_DELIVERED_STATUSES | _RETURN_STATUSES | _EXCHANGE_STATUSES)
+
+    def _status_q(names):
+        q = DQ()
+        for n in names:
+            q |= DQ(live_order_status__iexact=n)
+        return q
+
+    status_q  = _status_q(RETURN_STATUSES)
+    reached_q = _status_q(REACHED)
 
     base = OrderPayment.objects.filter(business=business)
-    # Filter on the raw datetime, not order_date__date: this MySQL has no named
-    # timezone tables loaded, so a __date lookup compiles to CONVERT_TZ() which
-    # returns NULL there and silently matches zero rows. Aware day-bounds avoid
-    # CONVERT_TZ entirely and give an inclusive [from, to] range.
+    # Raw datetime bounds, not order_date__date — see the MySQL CONVERT_TZ note
+    # in the earlier version: a __date lookup silently matches zero rows here.
     if date_from:
         try:
             base = base.filter(order_date__gte=timezone.make_aware(datetime.strptime(date_from, "%Y-%m-%d")))
@@ -11731,30 +11995,28 @@ def return_analysis(request, business_id):
         except ValueError:
             pass
 
-    total_orders = base.values("sub_order_no").distinct().count()
+    # Orders that reached the customer — the return-rate denominator.
+    reached_rows = list(base.filter(reached_q).values_list("sub_order_no", "supplier_sku", "order_date"))
+    reached = {}
+    for so, sku, od in reached_rows:
+        cur = reached.get(so)
+        if cur is None:
+            reached[so] = [sku or "", od]
+        elif od and (cur[1] is None or od < cur[1]):
+            cur[1] = od
+    total_orders = len(reached)
+    orders_per_sku = {}
+    for sku, _od in reached.values():
+        orders_per_sku[sku] = orders_per_sku.get(sku, 0) + 1
 
-    # Case-insensitive: the sheet writes "Return"/"RTO", older data "RETURN".
-    status_q = DQ()
-    for st_name in RETURN_STATUSES:
-        status_q |= DQ(live_order_status__iexact=st_name)
-    ret_sub_orders = list(
-        base.filter(status_q).values_list("sub_order_no", flat=True).distinct()
-    )
+    ret_sub_orders = list(base.filter(status_q).values_list("sub_order_no", flat=True).distinct())
 
-    # Real return reasons live in the Returns CSV; use them where uploaded.
     rd_reason = {}
     for so, reason in (ReturnDelivery.objects
                        .filter(business=business, suborder_no__in=ret_sub_orders)
                        .exclude(return_reason="")
                        .values_list("suborder_no", "return_reason")):
         rd_reason.setdefault(so, reason)
-
-    # Orders sold per SKU in the period, so each product's return rate is
-    # "returns ÷ orders", not just a raw count that punishes bestsellers.
-    orders_per_sku = {
-        (r["supplier_sku"] or ""): r["n"]
-        for r in base.values("supplier_sku").annotate(n=Count("sub_order_no", distinct=True))
-    }
 
     rows = OrderPayment.objects.filter(
         business=business, sub_order_no__in=ret_sub_orders
@@ -11764,9 +12026,6 @@ def return_analysis(request, business_id):
         "claims", "quantity", "claims_reason", "recovery_reason",
     )
 
-    # Collapse each returned order's payment rows into one record. Settlement
-    # and claims sum over every row (a claim credit often lands on its own
-    # blank-status row); product/qty/reason come off the return leg.
     orders = {}
     for r in rows:
         so = r["sub_order_no"]
@@ -11792,16 +12051,17 @@ def return_analysis(request, business_id):
         if r["order_date"] and (o["order_date"] is None or r["order_date"] < o["order_date"]):
             o["order_date"] = r["order_date"]
         if not o["reason"]:
-            o["reason"] = (r["recovery_reason"] or r["claims_reason"] or "").strip()
+            o["reason"] = _clean_return_reason(r["recovery_reason"]) or _clean_return_reason(r["claims_reason"])
 
+    # Customer returns only: an order that also went RTO never reached the buyer.
+    orders = {so: o for so, o in orders.items() if not (o["statuses"] & RTO_SET)}
     for so, o in orders.items():
-        o["type"]   = "rto" if (o["statuses"] & RTO_SET) else "customer"
         o["reason"] = rd_reason.get(so) or o["reason"] or "Not specified"
+        o["group"]  = _return_reason_group(o["reason"])
 
-    total_returns    = len(orders)
-    customer_returns = sum(1 for o in orders.values() if o["type"] == "customer")
-    rto_returns      = sum(1 for o in orders.values() if o["type"] == "rto")
-    total_qty        = sum(o["qty"] for o in orders.values())
+    total_returns = len(orders)
+    total_qty     = sum(o["qty"] for o in orders.values())
+    overall_rate  = round(total_returns * 100.0 / total_orders, 1) if total_orders else 0.0
 
     net_return_settlement  = round(sum(o["net_settlement"] for o in orders.values()), 2)
     return_shipping_cost   = round(sum(o["return_shipping"] for o in orders.values()), 2)
@@ -11817,28 +12077,26 @@ def return_analysis(request, business_id):
         if p is None:
             p = prod[key] = {
                 "sku": o["sku"], "product_name": o["product_name"],
-                "returns": 0, "qty": 0, "customer": 0, "rto": 0,
-                "net_settlement": 0.0, "return_shipping": 0.0, "claims": 0.0,
-                "reasons": {},
+                "returns": 0, "qty": 0, "net_settlement": 0.0, "return_shipping": 0.0,
+                "claims": 0.0, "refunded": 0.0, "reasons": {}, "groups": {},
             }
-        p["returns"]        += 1
-        p["qty"]            += o["qty"]
-        p["customer"]       += 1 if o["type"] == "customer" else 0
-        p["rto"]            += 1 if o["type"] == "rto" else 0
-        p["net_settlement"] += o["net_settlement"]
+        p["returns"]         += 1
+        p["qty"]             += o["qty"]
+        p["net_settlement"]  += o["net_settlement"]
         p["return_shipping"] += o["return_shipping"]
-        p["claims"]         += o["claims"]
+        p["claims"]          += o["claims"]
+        p["refunded"]        += o["refunded"]
         if not p["product_name"] and o["product_name"]:
             p["product_name"] = o["product_name"]
         p["reasons"][o["reason"]] = p["reasons"].get(o["reason"], 0) + 1
+        p["groups"][o["group"]]   = p["groups"].get(o["group"], 0) + 1
 
-    # ── SKU → parent resolution (same maps the profit screen uses) ────────
+    # ── SKU → parent resolution ───────────────────────────────────────────
     _fp = list(FinalPrice.objects.filter(business=business).only("sku_id", "parent_id"))
     sku_parent_map = _SkuMap((fp.sku_id, fp.parent_id) for fp in _fp if fp.parent_id)
     parent_item_id = {pp.id: pp.item_id for pp in ParentItemPrice.objects.filter(business=business).only("item_id")}
 
     def _group_of(sku):
-        """(group key, is_real_parent): a linked parent's item_id, else the SKU alone."""
         pk = sku_parent_map.get(sku or "")
         if pk and pk in parent_item_id:
             return parent_item_id[pk], True
@@ -11846,152 +12104,196 @@ def return_analysis(request, business_id):
 
     _iso = lambda d: d.date().isoformat() if d else None
 
-    # ── All-time lifecycle: first/last order date + full monthly history ──
-    # Deliberately NOT date-filtered — "first/last order" and "monthly history"
-    # are lifecycle facts, so a single-month period filter shouldn't hide them.
+    # ── All-time lifecycle + monthly history (deliberately not date-filtered) ─
     sku_list  = [p["sku"] for p in prod.values() if p["sku"]]
-    sku_first = _SkuMap()
-    sku_last  = _SkuMap()
-    sku_month = {}   # canonical sku -> { "YYYY-MM": {returns, customer, rto} }
+    sku_first, sku_last = _SkuMap(), _SkuMap()
+    sku_month = {}   # canonical sku -> {"YYYY-MM": {orders, returns}}
     if sku_list:
-        for r in (OrderPayment.objects.filter(business=business, supplier_sku__in=sku_list)
-                  .exclude(order_date__isnull=True)
+        life = OrderPayment.objects.filter(business=business, supplier_sku__in=sku_list)
+        for r in (life.exclude(order_date__isnull=True)
                   .values("supplier_sku").annotate(first=Min("order_date"), last=Max("order_date"))):
             sku_first[r["supplier_sku"]] = r["first"]
             sku_last[r["supplier_sku"]]  = r["last"]
 
-        # One return = one sub-order; fold its rows together (an RTO can show as
-        # RTO then RTO_COMPLETE) before bucketing into the month it was ordered.
-        agg = {}   # (canonical sku, sub_order) -> {date, rto}
-        for r in (OrderPayment.objects.filter(business=business, supplier_sku__in=sku_list)
-                  .filter(status_q)
-                  .exclude(order_date__isnull=True)
-                  .values("supplier_sku", "sub_order_no", "order_date", "live_order_status")):
-            ck   = _sku_key(r["supplier_sku"] or "")
-            k    = (ck, r["sub_order_no"])
-            isr  = (r["live_order_status"] or "").upper() in RTO_SET
-            a = agg.get(k)
-            if a is None:
-                agg[k] = {"date": r["order_date"], "rto": isr, "ck": ck}
-            else:
-                a["rto"] = a["rto"] or isr
-                if r["order_date"] < a["date"]:
-                    a["date"] = r["order_date"]
-        for a in agg.values():
-            m = a["date"].date().replace(day=1).isoformat()
-            bucket = sku_month.setdefault(a["ck"], {}).setdefault(m, {"returns": 0, "customer": 0, "rto": 0})
-            bucket["returns"] += 1
-            bucket["rto" if a["rto"] else "customer"] += 1
+        # One order = one sub-order: fold its rows together before bucketing
+        # into the month it was ordered.
+        seen_orders = {}
+        for r in (life.filter(reached_q).exclude(order_date__isnull=True)
+                  .values("supplier_sku", "sub_order_no", "order_date")):
+            ck = _sku_key(r["supplier_sku"] or "")
+            k = (ck, r["sub_order_no"])
+            if k not in seen_orders or r["order_date"] < seen_orders[k]:
+                seen_orders[k] = r["order_date"]
+        for (ck, _so), od in seen_orders.items():
+            b = sku_month.setdefault(ck, {}).setdefault(od.date().replace(day=1).isoformat(), {"orders": 0, "returns": 0})
+            b["orders"] += 1
 
-    # ── Group SKUs into parents, carrying their children ──────────────────
+        seen_returns = {}
+        for r in (life.filter(status_q).exclude(order_date__isnull=True)
+                  .values("supplier_sku", "sub_order_no", "order_date")):
+            ck = _sku_key(r["supplier_sku"] or "")
+            k = (ck, r["sub_order_no"])
+            if k not in seen_returns or r["order_date"] < seen_returns[k]:
+                seen_returns[k] = r["order_date"]
+        # An order that went RTO isn't a customer return — drop it here too.
+        rto_orders = set(OrderPayment.objects.filter(business=business, supplier_sku__in=sku_list)
+                         .filter(_status_q(sorted(RTO_SET))).values_list("sub_order_no", flat=True))
+        for (ck, so), od in seen_returns.items():
+            if so in rto_orders:
+                continue
+            b = sku_month.setdefault(ck, {}).setdefault(od.date().replace(day=1).isoformat(), {"orders": 0, "returns": 0})
+            b["returns"] += 1
+
+    def _top(d):
+        return max(d.items(), key=lambda kv: kv[1])[0] if d else ""
+
+    # ── Group SKUs into parents ───────────────────────────────────────────
     parents = {}
+    sku_rows = []
     for p in prod.values():
         gkey, is_parent = _group_of(p["sku"])
         pg = parents.get(gkey)
         if pg is None:
             pg = parents[gkey] = {
                 "parent": gkey, "is_grouped": is_parent, "product_name": "",
-                "returns": 0, "qty": 0, "customer": 0, "rto": 0,
-                "net_settlement": 0.0, "return_shipping": 0.0, "claims": 0.0,
-                "orders_total": 0, "reasons": {}, "children": [],
-                "first": None, "last": None, "month": {},
+                "returns": 0, "qty": 0, "net_settlement": 0.0, "return_shipping": 0.0,
+                "claims": 0.0, "refunded": 0.0, "orders_total": 0, "reasons": {}, "groups": {},
+                "children": [], "first": None, "last": None, "month": {},
             }
-        pg["returns"]        += p["returns"]
-        pg["qty"]            += p["qty"]
-        pg["customer"]       += p["customer"]
-        pg["rto"]            += p["rto"]
-        pg["net_settlement"] += p["net_settlement"]
-        pg["return_shipping"] += p["return_shipping"]
-        pg["claims"]         += p["claims"]
+        for f in ("returns", "qty", "net_settlement", "return_shipping", "claims", "refunded"):
+            pg[f] += p[f]
         for rk, rv in p["reasons"].items():
             pg["reasons"][rk] = pg["reasons"].get(rk, 0) + rv
+        for gk, gv in p["groups"].items():
+            pg["groups"][gk] = pg["groups"].get(gk, 0) + gv
         if not pg["product_name"] and p["product_name"]:
             pg["product_name"] = p["product_name"]
 
         sku = p["sku"]
-        c_orders_total = orders_per_sku.get(sku, 0)
-        pg["orders_total"] += c_orders_total
-        c_first = sku_first.get(sku)
-        c_last  = sku_last.get(sku)
+        c_orders = orders_per_sku.get(sku or "", 0)
+        pg["orders_total"] += c_orders
+        c_first, c_last = sku_first.get(sku), sku_last.get(sku)
         if c_first and (pg["first"] is None or c_first < pg["first"]):
             pg["first"] = c_first
         if c_last and (pg["last"] is None or c_last > pg["last"]):
             pg["last"] = c_last
-        for m, mv in sku_month.get(_sku_key(sku or ""), {}).items():
-            b = pg["month"].setdefault(m, {"returns": 0, "customer": 0, "rto": 0})
-            b["returns"]  += mv["returns"]
-            b["customer"] += mv["customer"]
-            b["rto"]      += mv["rto"]
+        child_month = sku_month.get(_sku_key(sku or ""), {})
+        for m, mv in child_month.items():
+            b = pg["month"].setdefault(m, {"orders": 0, "returns": 0})
+            b["orders"]  += mv["orders"]
+            b["returns"] += mv["returns"]
 
-        c_reason = max(p["reasons"].items(), key=lambda kv: kv[1])[0] if p["reasons"] else ""
-        pg["children"].append({
-            "sku": sku or "—",
+        rate = round(p["returns"] * 100.0 / c_orders, 1) if c_orders else None
+        loss_per = (-p["net_settlement"] / p["returns"]) if p["returns"] and p["net_settlement"] < 0 else 0.0
+        excess_ret = max(0.0, p["returns"] - overall_rate * c_orders / 100.0) if c_orders >= 10 else 0.0
+        child = {
+            "sku": sku or "—", "parent": gkey,
             "product_name": p["product_name"] or "",
-            "returns": p["returns"], "qty": p["qty"],
-            "customer": p["customer"], "rto": p["rto"],
-            "orders_total": c_orders_total,
-            "return_rate": round(p["returns"] * 100.0 / c_orders_total, 1) if c_orders_total else None,
-            "top_reason": c_reason,
+            "returns": p["returns"], "qty": p["qty"], "orders_total": c_orders,
+            "return_rate": rate,
+            "vs_avg": round(rate / overall_rate, 2) if rate is not None and overall_rate else None,
+            "top_reason": _top(p["reasons"]), "top_reason_group": _top(p["groups"]),
+            "reason_groups": [{"group": g, "label": _RETURN_REASON_GROUP_LABEL.get(g, g), "count": c}
+                              for g, c in sorted(p["groups"].items(), key=lambda kv: kv[1], reverse=True)],
             "net_settlement": round(p["net_settlement"], 2),
+            "refunded": round(p["refunded"], 2),
+            "loss_per_return": round(loss_per, 2),
             "return_shipping_cost": round(p["return_shipping"], 2),
             "claim_recovered": round(p["claims"], 2),
-            "first_order_date": _iso(c_first),
-            "last_order_date": _iso(c_last),
-        })
+            "excess_returns": round(excess_ret, 1),
+            "excess_loss": round(excess_ret * loss_per, 2),
+            "trend": _return_trend(child_month),
+            "first_order_date": _iso(c_first), "last_order_date": _iso(c_last),
+        }
+        child["action"] = _return_action(child, overall_rate)
+        pg["children"].append(child)
+        sku_rows.append(child)
 
-    parent_list = []
-    for gkey, pg in sorted(parents.items(), key=lambda kv: kv[1]["returns"], reverse=True)[:limit]:
-        rate       = round(pg["returns"] * 100.0 / pg["orders_total"], 1) if pg["orders_total"] else None
-        rto_share  = round(pg["rto"] * 100.0 / pg["returns"], 1) if pg["returns"] else 0
-        top_reason = max(pg["reasons"].items(), key=lambda kv: kv[1])[0] if pg["reasons"] else ""
+    parent_all = []
+    for gkey, pg in parents.items():
+        rate = round(pg["returns"] * 100.0 / pg["orders_total"], 1) if pg["orders_total"] else None
+        loss_per = (-pg["net_settlement"] / pg["returns"]) if pg["returns"] and pg["net_settlement"] < 0 else 0.0
+        excess_ret = max(0.0, pg["returns"] - overall_rate * pg["orders_total"] / 100.0) if pg["orders_total"] >= 10 else 0.0
+        top_reasons_p = sorted(pg["reasons"].items(), key=lambda kv: kv[1], reverse=True)[:3]
         row = {
-            "parent": gkey,
-            "is_grouped": pg["is_grouped"],
-            "child_count": len(pg["children"]),
+            "parent": gkey, "is_grouped": pg["is_grouped"], "child_count": len(pg["children"]),
             "product_name": pg["product_name"] or "",
-            "returns": pg["returns"], "qty": pg["qty"],
-            "customer": pg["customer"], "rto": pg["rto"],
-            "rto_share": rto_share,
-            "orders_total": pg["orders_total"],
+            "returns": pg["returns"], "qty": pg["qty"], "orders_total": pg["orders_total"],
             "return_rate": rate,
-            "top_reason": top_reason,
+            "vs_avg": round(rate / overall_rate, 2) if rate is not None and overall_rate else None,
+            "top_reason": _top(pg["reasons"]), "top_reason_group": _top(pg["groups"]),
+            "top_reasons": [{"reason": k, "count": v} for k, v in top_reasons_p],
+            "reason_groups": [{"group": g, "label": _RETURN_REASON_GROUP_LABEL.get(g, g), "count": c}
+                              for g, c in sorted(pg["groups"].items(), key=lambda kv: kv[1], reverse=True)],
             "net_settlement": round(pg["net_settlement"], 2),
+            "refunded": round(pg["refunded"], 2),
+            "loss_per_return": round(loss_per, 2),
             "return_shipping_cost": round(pg["return_shipping"], 2),
             "claim_recovered": round(pg["claims"], 2),
-            "first_order_date": _iso(pg["first"]),
-            "last_order_date": _iso(pg["last"]),
-            "monthly": [{"month": m, **pg["month"][m]} for m in sorted(pg["month"])],
+            "excess_returns": round(excess_ret, 1),
+            "excess_loss": round(excess_ret * loss_per, 2),
+            "trend": _return_trend(pg["month"]),
+            "first_order_date": _iso(pg["first"]), "last_order_date": _iso(pg["last"]),
+            "monthly": [{"month": m, "orders": pg["month"][m]["orders"], "returns": pg["month"][m]["returns"],
+                         "rate": round(pg["month"][m]["returns"] * 100.0 / pg["month"][m]["orders"], 1)
+                                 if pg["month"][m]["orders"] else 0}
+                        for m in sorted(pg["month"])],
             "children": sorted(pg["children"], key=lambda c: c["returns"], reverse=True),
         }
-        row["action"] = _return_action(row)
-        parent_list.append(row)
+        row["action"] = _return_action(row, overall_rate)
+        parent_all.append(row)
+    parent_all.sort(key=lambda r: r["returns"], reverse=True)
 
-    # Prioritised, plain-English to-do list across the worst parents.
+    # Prioritised to-do list: biggest money first.
+    def _priority(r):
+        return (r["action"]["level"] != "high", -r["excess_loss"], -r["returns"])
     insights = [
         {"parent": r["parent"], "returns": r["returns"], "return_rate": r["return_rate"],
-         "net_settlement": r["net_settlement"], "level": r["action"]["level"], "text": r["action"]["text"]}
-        for r in parent_list if r["action"]["level"] in ("high", "warn")
-    ][:6]
+         "net_settlement": r["net_settlement"], "excess_loss": r["excess_loss"],
+         "level": r["action"]["level"], "text": r["action"]["text"]}
+        for r in sorted(parent_all, key=_priority) if r["action"]["level"] in ("high", "warn")
+    ][:8]
+    stars = [
+        {"parent": r["parent"], "orders_total": r["orders_total"], "return_rate": r["return_rate"],
+         "product_name": r["product_name"]}
+        for r in sorted((r for r in parent_all if r["action"]["verdict"] == "star"),
+                        key=lambda r: -r["orders_total"])
+    ][:5]
+    # Stars can have zero returns and so never appear in `parent_all`; that's fine —
+    # they only show here when they do have some returns but a low rate.
 
-    # ── Reasons ───────────────────────────────────────────────────────────
-    reason_counts = {}
+    parent_list = parent_all[:limit]
+    sku_rows.sort(key=lambda r: r["returns"], reverse=True)
+
+    # ── Reasons (overall) ─────────────────────────────────────────────────
+    reason_counts, group_counts = {}, {}
     for o in orders.values():
         reason_counts[o["reason"]] = reason_counts.get(o["reason"], 0) + 1
+        group_counts[o["group"]]   = group_counts.get(o["group"], 0) + 1
     top_reasons = [
         {"reason": k, "count": v, "pct": round(v * 100.0 / total_returns, 1) if total_returns else 0}
         for k, v in sorted(reason_counts.items(), key=lambda kv: kv[1], reverse=True)[:15]
     ]
+    reason_groups = [
+        {"group": g, "label": _RETURN_REASON_GROUP_LABEL.get(g, g), "count": c,
+         "pct": round(c * 100.0 / total_returns, 1) if total_returns else 0}
+        for g, c in sorted(group_counts.items(), key=lambda kv: kv[1], reverse=True)
+    ]
 
-    # ── Trend by month (order_date, within the selected period) ───────────
+    # ── Monthly trend (order_date, within the period): orders, returns, rate ─
     month_map = {}
+    for _sku, od in reached.values():
+        if od:
+            month_map.setdefault(od.date().replace(day=1).isoformat(), {"orders": 0, "returns": 0})["orders"] += 1
     for o in orders.values():
-        if not o["order_date"]:
-            continue
-        m = o["order_date"].date().replace(day=1).isoformat()
-        b = month_map.setdefault(m, {"returns": 0, "customer": 0, "rto": 0})
-        b["returns"] += 1
-        b[o["type"]] += 1
-    trend = [{"month": m, **month_map[m]} for m in sorted(month_map)]
+        if o["order_date"]:
+            month_map.setdefault(o["order_date"].date().replace(day=1).isoformat(), {"orders": 0, "returns": 0})["returns"] += 1
+    trend = [{"month": m, "orders": v["orders"], "returns": v["returns"],
+              "rate": round(v["returns"] * 100.0 / v["orders"], 1) if v["orders"] else 0}
+             for m, v in sorted(month_map.items())]
+
+    excess_loss_total = round(sum(r["excess_loss"] for r in parent_all), 2)
+    avg_loss_per_return = round(-net_return_settlement / total_returns, 2) if total_returns and net_return_settlement < 0 else 0.0
 
     return Response({
         "period": {"date_from": date_from, "date_to": date_to},
@@ -11999,26 +12301,26 @@ def return_analysis(request, business_id):
             "total_orders": total_orders,
             "total_returns": total_returns,
             "total_qty": total_qty,
-            "return_rate": round(total_returns * 100.0 / total_orders, 1) if total_orders else 0,
-            "customer_returns": customer_returns,
-            "rto_returns": rto_returns,
-            "customer_pct": round(customer_returns * 100.0 / total_returns, 1) if total_returns else 0,
-            "rto_pct": round(rto_returns * 100.0 / total_returns, 1) if total_returns else 0,
+            "return_rate": overall_rate,
             "distinct_products": len(parents),
+            "distinct_skus": len(sku_rows),
             "distinct_reasons": len([k for k in reason_counts if k and k != "Not specified"]),
             "net_return_settlement": net_return_settlement,
+            "avg_loss_per_return": avg_loss_per_return,
+            "excess_loss_total": excess_loss_total,
             "return_shipping_cost": return_shipping_cost,
             "refunded_amount": refunded_amount,
             "claim_recovered_amount": claims_recovered,
             "claim_recovered_count": claims_recovered_count,
+            "fix_now_count": sum(1 for r in parent_all if r["action"]["verdict"] == "fix"),
+            "watch_count": sum(1 for r in parent_all if r["action"]["verdict"] == "watch"),
         },
         "insights": insights,
+        "stars": stars,
         "parents": parent_list,
+        "skus": sku_rows[:limit * 3],
         "top_reasons": top_reasons,
-        "type_breakdown": [
-            {"label": "Customer Return", "count": customer_returns},
-            {"label": "Courier Return (RTO)", "count": rto_returns},
-        ],
+        "reason_groups": reason_groups,
         "trend": trend,
     })
 

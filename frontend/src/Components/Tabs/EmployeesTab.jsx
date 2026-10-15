@@ -748,7 +748,7 @@ function PayslipBreakdown({ slip }) {
 }
 
 // ── Employee detail: payslip + attendance + payment ledger ──
-function EmployeeDetailDialog({ open, employee, canEdit, onClose, onChanged }) {
+function EmployeeDetailDialog({ open, employee, canEdit, startSpent, onClose, onChanged }) {
   const [tab, setTab] = useState(0);
   const [month, setMonth] = useState(lastMonth());
   const [slip, setSlip] = useState(null);
@@ -773,7 +773,14 @@ function EmployeeDetailDialog({ open, employee, canEdit, onClose, onChanged }) {
   }, [employee, month]);
 
   useEffect(() => { if (open) { load(); setErr(""); } }, [open, load]);
-  useEffect(() => { if (open) { setTab(0); setMonth(lastMonth()); setForm(emptyPayment()); } }, [open, employee]);
+  // "Record spent" from the list opens straight on Payments with the type preset.
+  useEffect(() => {
+    if (open) {
+      setTab(startSpent ? 2 : 0);
+      setMonth(lastMonth());
+      setForm(startSpent ? { ...emptyPayment(), payment_type: "spent" } : emptyPayment());
+    }
+  }, [open, employee, startSpent]);
 
   const recordPayment = async (override) => {
     const body = { ...form, ...(override || {}) };
@@ -908,6 +915,11 @@ function EmployeeDetailDialog({ open, employee, canEdit, onClose, onChanged }) {
                         {saving ? "Saving…" : "+ Add payment"}
                       </button>
                     </div>
+                    {form.payment_type === "spent" && (
+                      <div style={{ fontSize: 11.5, color: C.orange, marginTop: 8, fontWeight: 600 }}>
+                        Owner spent — money taken out of the business. Not salary; it reduces profit only when "Deduct owner spent" is on in Business Profile.
+                      </div>
+                    )}
                     <div style={{ fontSize: 11.5, color: C.gray400, marginTop: 8 }}>
                       Salary is paid in arrears — a payment made on the 1st settles the previous month, which is what "For month" defaults to.
                     </div>
@@ -995,6 +1007,7 @@ export function EmployeesTab() {
   const [empDialogOpen, setEmpDialogOpen] = useState(false);
   const [editingEmp, setEditingEmp] = useState(null);
   const [detailEmp, setDetailEmp] = useState(null);
+  const [detailSpent, setDetailSpent] = useState(false);
   const [holidayDialogOpen, setHolidayDialogOpen] = useState(false);
 
   const [ownerDialogOpen, setOwnerDialogOpen] = useState(false);
@@ -1252,7 +1265,7 @@ export function EmployeesTab() {
                   {employees.length === 0 ? (
                     <tr><td colSpan={10} style={{ ...S.td, textAlign: "center", padding: 40, color: C.gray400 }}>No employees yet. Click "+ Add employee" to add one.</td></tr>
                   ) : employees.map((emp, idx) => (
-                    <tr key={emp.id} style={{ background: idx % 2 === 0 ? C.white : C.gray50, borderBottom: `1px solid ${C.gray100}`, cursor: "pointer" }} onClick={() => setDetailEmp(emp)}>
+                    <tr key={emp.id} style={{ background: idx % 2 === 0 ? C.white : C.gray50, borderBottom: `1px solid ${C.gray100}`, cursor: "pointer" }} onClick={() => { setDetailSpent(false); setDetailEmp(emp); }}>
                       <td style={{ ...S.td, fontWeight: 600, color: C.gray800 }}>
                         <PersonIcon fontSize="inherit" style={{ marginRight: 6, verticalAlign: "middle", color: C.gray400 }} />
                         {emp.full_name}
@@ -1272,10 +1285,16 @@ export function EmployeesTab() {
                       <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", fontWeight: 700, color: C.gray800 }}>{fmt2(emp.total_paid)}</td>
                       <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", fontWeight: 700, color: Number(emp.spent) > 0 ? C.red : C.gray400 }}>
                         {Number(emp.spent) > 0 ? fmt2(emp.spent) : "—"}
+                        {canEdit && (
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setDetailSpent(true); setDetailEmp(emp); }}
+                            style={{ ...btn("secondary", "sm"), marginLeft: 8, padding: "1px 8px" }}
+                          >+ Spent</button>
+                        )}
                       </td>
                       <td style={{ ...S.td, color: C.gray500 }}>{emp.last_payment_date || "—"}</td>
                       <td style={{ ...S.td, whiteSpace: "nowrap" }} onClick={(e) => e.stopPropagation()}>
-                        <Tooltip title="Payslip, attendance & payments"><IconButton size="small" onClick={() => setDetailEmp(emp)}><PaymentsIcon fontSize="small" /></IconButton></Tooltip>
+                        <Tooltip title="Payslip, attendance & payments"><IconButton size="small" onClick={() => { setDetailSpent(false); setDetailEmp(emp); }}><PaymentsIcon fontSize="small" /></IconButton></Tooltip>
                         {canEdit && (
                           <>
                             <Tooltip title="Edit"><IconButton size="small" onClick={() => { setEditingEmp(emp); setEmpDialogOpen(true); }}><EditIcon fontSize="small" /></IconButton></Tooltip>
@@ -1370,7 +1389,7 @@ export function EmployeesTab() {
       <EmployeeFormDialog open={empDialogOpen} initial={editingEmp} onClose={() => setEmpDialogOpen(false)} onSaved={refreshEverything} />
       <OwnerFormDialog open={ownerDialogOpen} initial={editingOwner} onClose={() => setOwnerDialogOpen(false)} onSaved={loadAll} />
       <HolidayFormDialog open={holidayDialogOpen} employees={employees} onClose={() => setHolidayDialogOpen(false)} onSaved={refreshEverything} />
-      <EmployeeDetailDialog open={!!detailEmp} employee={detailEmp} canEdit={canEdit} onClose={() => setDetailEmp(null)} onChanged={refreshEverything} />
+      <EmployeeDetailDialog open={!!detailEmp} employee={detailEmp} canEdit={canEdit} startSpent={detailSpent} onClose={() => setDetailEmp(null)} onChanged={refreshEverything} />
     </div>
   );
 }

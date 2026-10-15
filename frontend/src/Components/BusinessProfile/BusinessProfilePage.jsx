@@ -124,6 +124,45 @@ export default function BusinessProfilePage() {
     }
   };
 
+  // Data cache — answers are kept until something is uploaded or edited; this
+  // lets the owner force a fresh recompute.
+  const [cacheInfo, setCacheInfo] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [cacheMsg, setCacheMsg] = useState(null);
+  const loadCacheInfo = useCallback(async () => {
+    if (!activeBusinessId) return;
+    try {
+      const res = await fetch(`${API}/cache/status/`);
+      if (res.ok) setCacheInfo(await res.json());
+    } catch { /* card just shows no timestamp */ }
+  }, [activeBusinessId]);
+  useEffect(() => { loadCacheInfo(); }, [loadCacheInfo]);
+
+  const refreshData = async (scope) => {
+    setRefreshing(true);
+    setCacheMsg(null);
+    try {
+      const res = await fetch(`${API}/cache/refresh/`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ scope }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        setCacheMsg({ type: "error", text: data?.error || "Could not refresh." });
+        return;
+      }
+      setCacheMsg({ type: "success", text: "Refreshed — reloading with fresh data…" });
+      // Every screen fetched its numbers earlier; a reload makes all of them
+      // ask again rather than leaving stale figures on the open page.
+      setTimeout(() => window.location.reload(), 700);
+    } catch {
+      setCacheMsg({ type: "error", text: "Network error while refreshing." });
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
   const loadProfile = useCallback(async () => {
     if (!activeBusinessId) return;
     try {
@@ -320,6 +359,52 @@ export default function BusinessProfilePage() {
             color: profileMsg.type === "success" ? C.green : C.red,
           }}>
             {profileMsg.text}
+          </div>
+        )}
+      </div>
+
+      {/* ── Data & cache ───────────────────────────────────────────────── */}
+      <div style={S.card}>
+        <SectionHeader
+          title="Data & speed"
+          actions={(
+            <button
+              onClick={() => refreshData("business")}
+              disabled={refreshing}
+              style={{ ...btn("primary", "md"), opacity: refreshing ? 0.7 : 1 }}
+            >
+              {refreshing ? "Refreshing…" : "🔄 Refresh data"}
+            </button>
+          )}
+        />
+        <div style={{ fontSize: 13, color: C.gray600, lineHeight: 1.7 }}>
+          To keep screens fast, answers are remembered until your data changes. They refresh
+          <b> automatically </b>after every upload, order update or edit, and expire on their own
+          after {cacheInfo ? Math.round(cacheInfo.ttl_seconds / 60) : 15} minutes. If a number ever looks out of date, press
+          <b> Refresh data </b>to recompute everything for this business now.
+        </div>
+        <div style={{ fontSize: 12, color: C.gray400, marginTop: 8 }}>
+          {cacheInfo?.enabled === false
+            ? "Caching is switched off on this server."
+            : cacheInfo?.last_change
+              ? `Data last changed: ${new Date(cacheInfo.last_change * 1000).toLocaleString("en-IN")}`
+              : ""}
+        </div>
+        {user?.role === "super_admin" && (
+          <button
+            onClick={() => { if (window.confirm("Refresh data for every business?")) refreshData("all"); }}
+            disabled={refreshing}
+            style={{ ...btn("secondary", "sm"), marginTop: 10, opacity: refreshing ? 0.7 : 1 }}
+          >
+            Refresh all businesses
+          </button>
+        )}
+        {cacheMsg && (
+          <div style={{
+            marginTop: 10, fontSize: 12, fontWeight: 600,
+            color: cacheMsg.type === "success" ? C.green : C.red,
+          }}>
+            {cacheMsg.text}
           </div>
         )}
       </div>

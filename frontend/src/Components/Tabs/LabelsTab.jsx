@@ -432,10 +432,10 @@ function BatchView({
                 "&:hover": { borderColor: C.orange, bgcolor: C.orangeLight } }}>
           <UploadFileIcon sx={{ fontSize: 40, color: C.gray300 }} />
           <Typography sx={{ fontSize: 15, fontWeight: 700, color: C.gray700, mt: "8px" }}>
-            Upload the Meesho labels PDF
+            Upload the Meesho or Flipkart labels PDF
           </Typography>
           <Typography sx={{ fontSize: 12, color: C.gray400, mt: "4px" }}>
-            Nothing recorded for {batchDate} yet
+            Nothing recorded for {batchDate} yet · Meesho and Flipkart labels can be mixed in one file
           </Typography>
         </Paper>
       )}
@@ -614,7 +614,7 @@ function BatchView({
                       <TableCell sx={{ fontSize: 11, fontFamily: "monospace", fontWeight: 700 }}>{p.sku || "—"}</TableCell>
                       <TableCell sx={{ fontSize: 11, fontFamily: "monospace", fontWeight: 800,
                                        color: (p.qty || 1) > 1 ? C.amber : C.gray700 }}>{p.qty || 1}</TableCell>
-                      <TableCell sx={{ fontSize: 11 }}>{p.courier || "—"}</TableCell>
+                      <TableCell sx={{ fontSize: 11 }}>{p.courier || "—"}{p.platform === "flipkart" ? " · Flipkart" : ""}</TableCell>
                       <TableCell sx={{ fontSize: 11, maxWidth: 150, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                         {p.customer_name || "—"}
                       </TableCell>

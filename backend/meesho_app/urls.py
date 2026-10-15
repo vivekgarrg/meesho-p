@@ -1,9 +1,12 @@
 from django.urls import path
 from . import views
+from . import api_cache
 from . import bulk_listing_views
 from . import listing_images_views
 
 urlpatterns = [
+    path("cache/status/", api_cache.cache_status, name="cache_status"),
+    path("cache/refresh/", api_cache.cache_refresh, name="cache_refresh"),
     path("upload/", views.upload_excel, name="upload_excel"),
     path("profit/available-months/", views.available_months, name="available_months"),
     path("profit/daily/", views.profit_daily_summary, name="profit_daily_summary"),

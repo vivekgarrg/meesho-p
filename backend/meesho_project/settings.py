@@ -2,6 +2,7 @@ from datetime import timedelta
 from pathlib import Path
 import mimetypes
 import os
+import sys
 
 try:
     import dj_database_url
@@ -77,6 +78,10 @@ MIDDLEWARE = [
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
 
+# Response cache for the business API (see meesho_app/api_cache.py). Last in the
+# list so CORS and the other outer middleware still decorate cached responses.
+MIDDLEWARE.append("meesho_app.api_cache.ApiCacheMiddleware")
+
 try:
     import whitenoise  # noqa: F401
     MIDDLEWARE.insert(2, "whitenoise.middleware.WhiteNoiseMiddleware")
@@ -84,6 +89,25 @@ except ImportError:
     pass
 
 ROOT_URLCONF = "meesho_project.urls"
+
+# ── API response cache ───────────────────────────────────────────────────────
+# A shared on-disk store, not process memory: gunicorn runs several workers and
+# a cache invalidation in one has to be seen by all. Switched off under `manage.py
+# test` (tests change data straight through the ORM) and with API_CACHE_ENABLED=0.
+API_CACHE_ENABLED = os.environ.get("API_CACHE_ENABLED", "1") != "0"
+API_CACHE_TTL = int(os.environ.get("API_CACHE_TTL", "900"))
+if "test" in sys.argv[1:2]:
+    _API_CACHE = {"BACKEND": "django.core.cache.backends.dummy.DummyCache"}
+else:
+    _API_CACHE = {
+        "BACKEND": "django.core.cache.backends.filebased.FileBasedCache",
+        "LOCATION": os.environ.get("API_CACHE_DIR", str(BASE_DIR / ".api_cache")),
+        "OPTIONS": {"MAX_ENTRIES": 3000, "CULL_FREQUENCY": 4},
+    }
+CACHES = {
+    "default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"},
+    "api": _API_CACHE,
+}
 
 TEMPLATES = [
     {

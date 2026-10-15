@@ -13,6 +13,8 @@ xlutils>=2.0
 pandas>=2.0
 numpy>=1.26
 pdfplumber>=0.11
+# Fast PDF text engine for shipping labels (~10x quicker than pdfplumber).
+pypdfium2>=4.30
 pypdf>=4.0
 reportlab>=4.0
 requests>=2.31

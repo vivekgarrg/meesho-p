@@ -7,6 +7,8 @@ class MeeshoAppConfig(AppConfig):
 
     def ready(self):
         from . import signals  # noqa: F401  (registers the receivers)
+        from . import api_cache
+        api_cache.connect_signals()
 
         # runserver reloads on .py changes but not on backend/.env, so an edited
         # key silently kept the old value until a manual restart. Watching it
