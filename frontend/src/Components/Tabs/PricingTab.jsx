@@ -389,6 +389,24 @@ function ParentCard({ parent, notify, onLink, dragging, unlinked = [], onOptOut,
   const { data: storageConfig } = useSWR(panel === "photos" ? `${API}/listing-images/config/` : null);
   const photoInputRef = useRef(null);
   const [photoUpload, setPhotoUpload] = useState(null); // { active, done, total } | { result }
+  // The picture can also be a pasted link (e.g. a Meesho catalog image) instead of an upload.
+  const [photoLink, setPhotoLink] = useState(parent.image_url || "");
+  const [savingLink, setSavingLink] = useState(false);
+  useEffect(() => { setPhotoLink(parent.image_url || ""); }, [parent.image_url]);
+  const saveImageLink = async () => {
+    const url = photoLink.trim();
+    if (!/^https?:\/\/\S+$/i.test(url)) { notify("err", "The image link must start with http:// or https://."); return; }
+    setSavingLink(true);
+    try {
+      const res = await fetch(`${API}/parent-prices/${idPath}/`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ image_url: url }),
+      });
+      if (res.ok) { notify("ok", "Image link saved."); invalidatePricing(); }
+      else { const e = await res.json().catch(() => ({})); notify("err", e.image_url?.[0] || e.detail || e.error || `Could not save (${res.status}).`); }
+    } catch { notify("err", "Could not save — network error."); }
+    finally { setSavingLink(false); }
+  };
 
   // Closing the tab mid-upload kills it; the browser's own prompt is the only
   // warning that survives a close.
@@ -803,8 +821,9 @@ function ParentCard({ parent, notify, onLink, dragging, unlinked = [], onOptOut,
             />
           ) : (
             <span
-              title={imageBroken ? "Image URL didn't load" : "No photo added yet"}
-              style={{ width: 34, height: 34, borderRadius: 8, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", background: C.gray100, color: C.gray300, border: `1px solid ${C.gray200}`, fontSize: 14 }}
+              title={imageBroken ? "Image URL didn't load — click to fix" : "No photo yet — click to add a link or upload"}
+              onClick={(e) => { e.stopPropagation(); setOpen(true); setPanel("photos"); }}
+              style={{ cursor: "pointer", width: 34, height: 34, borderRadius: 8, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", background: C.gray100, color: C.gray300, border: `1px solid ${C.gray200}`, fontSize: 14 }}
             >
               📷
             </span>
@@ -1230,6 +1249,19 @@ function ParentCard({ parent, notify, onLink, dragging, unlinked = [], onOptOut,
                       style={{ display: "none" }} onChange={(e) => uploadPhotos(e.target.files)} />
                   </div>
                 }>
+                  {/* Picture by link — alongside the upload button, so a parent can have either. */}
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
+                    <label style={{ ...S.label, margin: 0 }}>Image link</label>
+                    <input value={photoLink} onChange={(e) => setPhotoLink(e.target.value)}
+                      placeholder="https://images.meesho.com/images/products/…"
+                      onKeyDown={(e) => { if (e.key === "Enter") saveImageLink(); }}
+                      style={{ ...S.inp, flex: "1 1 280px", fontFamily: "monospace", fontSize: 12 }} />
+                    <ImageUrlPreview url={photoLink} size={36} />
+                    <button onClick={saveImageLink} disabled={savingLink || photoLink.trim() === (parent.image_url || "")}
+                      style={{ ...btn("success", "sm"), opacity: (savingLink || photoLink.trim() === (parent.image_url || "")) ? 0.5 : 1 }}>
+                      {savingLink ? "Saving…" : "Save link"}
+                    </button>
+                  </div>
                   {storageConfig && !storageConfig.enabled && (
                     <p style={{ fontSize: 11.5, color: storageConfig.problem ? C.red : C.gray500, marginBottom: 10 }}>
                       {storageConfig.problem
