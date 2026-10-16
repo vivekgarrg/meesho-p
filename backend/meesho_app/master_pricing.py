@@ -93,6 +93,7 @@ def push_children_and_mirror(parent):
         tax_percent=parent.tax_percent,
         packaging_cost=parent.packaging_cost,
         final_price=parent.final_price,
+        buffer_amount=parent.buffer_amount,
     )
     pricing_sync.sync_parent_and_children(parent.business, parent.item_id)
 

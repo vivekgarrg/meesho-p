@@ -677,7 +677,7 @@ def _return_assurance_total(adj_rows):
 # ── Per-order profit formula ───────────────────────────────────────────────────
 
 def compute_order_net(payment_rows, sku_final_price, sku_packaging_price, quantity, unique_statuses,
-                      sku_item_price=None, sku_tax_percent=None, cost_setting=None):
+                      sku_item_price=None, sku_tax_percent=None, cost_setting=None, buffer_per_unit=None):
     # list(["Cancelled", "Delivered", "Return", "RTO", "Shipped", "Exchange", "Unknown"])
 
     ZERO = Decimal("0")
@@ -690,6 +690,9 @@ def compute_order_net(payment_rows, sku_final_price, sku_packaging_price, quanti
     # rate must NOT be multiplied by qty a second time. (It used to be, which
     # squared the quantity and overstated cost on every multi-unit order.)
     tax_cost       = purchase_cost * Decimal(str(sku_tax_percent or 0)) / Decimal("100")
+    # Loss-recovery buffer: a set-aside on every unit that actually sells, so it
+    # follows the same outcomes as the item cost (not returns / RTO).
+    buffer_cost    = Decimal(str(buffer_per_unit or 0)) * qty
 
     # Which outcomes consume a box is the owner's call, not a property of the
     # data — see BusinessCostSetting and _packaging_charge.
@@ -723,6 +726,7 @@ def compute_order_net(payment_rows, sku_final_price, sku_packaging_price, quanti
     # Packaging actually charged to this order, so the totals can report what
     # was deducted rather than what the SKU's rate happens to be.
     packaging_applied = ZERO
+    buffer_applied = ZERO
 
     if unknown_rows:
         final_purchasing  = 0
@@ -731,12 +735,14 @@ def compute_order_net(payment_rows, sku_final_price, sku_packaging_price, quanti
 
     elif claimed_orders:
         packaging_applied = packaging_for(BusinessCostSetting.CLAIM)
-        final_purchasing = purchase_cost + packaging_applied
+        buffer_applied = buffer_cost
+        final_purchasing = purchase_cost + packaging_applied + buffer_applied
         net = total_settlement - final_purchasing
         status = unique_statuses[0]
     elif exchange_orders:
         packaging_applied = packaging_for(BusinessCostSetting.EXCHANGE)
-        final_purchasing = purchase_cost + packaging_applied + tax_cost
+        buffer_applied = buffer_cost
+        final_purchasing = purchase_cost + packaging_applied + tax_cost + buffer_applied
         net = total_settlement - final_purchasing
         status = unique_statuses[-2]
     elif return_orders:
@@ -753,7 +759,8 @@ def compute_order_net(payment_rows, sku_final_price, sku_packaging_price, quanti
         status = unique_statuses[-4]
     elif delivered_orders:
         packaging_applied = packaging_for(BusinessCostSetting.DELIVERED)
-        final_purchasing =  purchase_cost + packaging_applied + tax_cost
+        buffer_applied = buffer_cost
+        final_purchasing =  purchase_cost + packaging_applied + tax_cost + buffer_applied
         net = total_settlement - final_purchasing
         status = unique_statuses[-6]
     elif shipped_orders:
@@ -765,7 +772,8 @@ def compute_order_net(payment_rows, sku_final_price, sku_packaging_price, quanti
         # This "net" is intentionally kept out of net_profit at the caller —
         # see accumulate_sku_profit / profit_summary's revenue exclusion.
         packaging_applied = packaging_for(BusinessCostSetting.DELIVERED)
-        final_purchasing = purchase_cost + packaging_applied + tax_cost
+        buffer_applied = buffer_cost
+        final_purchasing = purchase_cost + packaging_applied + tax_cost + buffer_applied
         net = total_settlement - final_purchasing
         status = "Shipped"
     else:
@@ -783,6 +791,8 @@ def compute_order_net(payment_rows, sku_final_price, sku_packaging_price, quanti
         "packaging_rate": packaging_cost,
         "packaging_cost": packaging_applied,
         "tax_cost": tax_cost,
+        # The loss-recovery buffer actually charged to this order (0 on a return/RTO).
+        "buffer_cost": buffer_applied,
         "quantity": qty,
         "sub_order_no": sub_order_no,
         "affiliate_fees": affiliate_fees,
@@ -806,6 +816,7 @@ def _init_sku_bucket(key, loss_or_profit, sku):
         sku[f"{key}_quantity"]        = 0
         sku[f"{key}_final_purchase_cost"] = 0
         sku[f"{key}_tax_cost"] = 0
+        sku[f"{key}_buffer_cost"] = 0
         sku[f"{key}_total_settlement"] = 0
         sku[f"{key}_payment_rows"] = []
 
@@ -850,6 +861,7 @@ def _inject_order_into_bucket(sku, result, net):
     _inc(sku, f"{raw}_quantity",       result["quantity"])
     _inc(sku, f"{raw}_final_purchase_cost", result["final_purchase_cost"])
     _inc(sku, f"{raw}_tax_cost", result["tax_cost"])
+    _inc(sku, f"{raw}_buffer_cost", result.get("buffer_cost", 0))
     _inc(sku, f"{raw}_total_settlement", result["total_settlement"])
 
 
@@ -900,6 +912,9 @@ def accumulate_sku_profit(sku_id, obj, result, price_map, packaging_map, unique_
         + Decimal(sku.get("return_final_purchase_cost", 0))
         + Decimal(sku.get("rto_final_purchase_cost", 0))
     )
+    sku["total_buffer_cost"] = (Decimal(sku.get("delivered_buffer_cost", 0))
+                                + Decimal(sku.get("exchange_buffer_cost", 0))
+                                + Decimal(sku.get("claim_buffer_cost", 0)))
     sku["total_tax_cost"] = Decimal(sku.get("delivered_tax_cost", 0)) +  Decimal(sku.get("exchange_tax_cost", 0)) +  Decimal(sku.get("claim_tax_cost", 0))
     sku["total_packaging_cost"] = Decimal(sku.get("delivered_packaging_cost", 0)) +  Decimal(sku.get("exchange_packaging_cost", 0)) +  Decimal(sku.get("claim_packaging_cost", 0))
     sku["total_packaging_cost_for_returns"] = Decimal(sku.get("return_packaging_cost", 0)) + Decimal(sku.get("rto_packaging_cost", 0))
@@ -1713,11 +1728,38 @@ def _profit_payments_qs(business, date_from, date_to, request):
     return qs
 
 
+class _BufferResolver:
+    """Loss-recovery buffer (₹ per unit) for each SKU of one business.
+
+    Follows the same rule as _PriceResolver.effective_price: a SKU under a parent
+    that carries an item price uses the PARENT's buffer; any other SKU uses its own.
+    Not dated — unlike prices, the buffer always reads its current value.
+    """
+
+    def __init__(self, business):
+        fps = list(FinalPrice.objects.filter(business=business).only("sku_id", "parent_id", "buffer_amount"))
+        self.sku_buffer = _SkuMap((fp.sku_id, fp.buffer_amount or Decimal("0")) for fp in fps)
+        self.sku_parent = _SkuMap((fp.sku_id, fp.parent_id) for fp in fps if fp.parent_id)
+        self.parent_buffer = {
+            p.id: (p.buffer_amount or Decimal("0"))
+            for p in ParentItemPrice.objects.filter(business=business).only("item_price", "buffer_amount")
+            if p.item_price
+        }
+
+    def for_sku(self, sku_id):
+        pid = self.sku_parent.get(sku_id)
+        if pid and pid in self.parent_buffer:
+            return self.parent_buffer[pid]
+        return self.sku_buffer.get(sku_id, Decimal("0"))
+
+
 class _PriceResolver:
     """Pricing for one business, loaded once, as used by the settled-profit engine."""
 
     def __init__(self, business):
         from collections import defaultdict
+
+        self.buffers = _BufferResolver(business)
 
         # Load pricing once (include item_price + tax_percent for tax cost calculation)
         _fp_all = list(FinalPrice.objects.filter(business=business).only("sku_id", "final_price", "packaging_cost", "parent_id", "item_price", "tax_percent"))
@@ -1850,7 +1892,7 @@ def sku_order_payments(request, business_id):
         qty = order.get("quantity") or primary.quantity
         eff_price, eff_pkg, eff_item_price, eff_tax_pct = pricing.effective_price(sku, primary.order_date)
         result = compute_order_net(payments, eff_price, eff_pkg, qty, unique_statuses,
-                                   eff_item_price, eff_tax_pct, cost_setting=cost_setting)
+                                   eff_item_price, eff_tax_pct, cost_setting=cost_setting, buffer_per_unit=pricing.buffers.for_sku(sku))
         order_date = order.get("order_date") or (primary.order_date.date() if primary.order_date else None)
         orders.append({
             "sub_order_no":        sub_no,
@@ -1862,6 +1904,7 @@ def sku_order_payments(request, business_id):
             "purchase_cost":       round(Decimal(result["purchase_cost"]), 2),
             "packaging_cost":      round(Decimal(result["packaging_cost"]), 2),
             "tax_cost":            round(Decimal(result["tax_cost"]), 2),
+            "buffer_cost":         round(Decimal(result["buffer_cost"]), 2),
             "final_purchase_cost": round(Decimal(result["final_purchase_cost"]), 2),
             "net":                 round(Decimal(result["net"]), 2),
             "payments":            [serialized[p.pk] for p in payments],
@@ -1951,7 +1994,7 @@ def profit_summary(request, business_id):
 
         eff_price, eff_pkg, eff_item_price, eff_tax_pct = get_eff_price(sku, primary.order_date)
         result = compute_order_net(payments, eff_price, eff_pkg, qty, unique_statuses,
-                                   eff_item_price, eff_tax_pct, cost_setting=cost_setting)
+                                   eff_item_price, eff_tax_pct, cost_setting=cost_setting, buffer_per_unit=pricing.buffers.for_sku(sku))
         accumulate_sku_profit(canonical_sku.get(sku, sku), order_wise_profit, result, price_map, packaging_map, unique_statuses)
         orders_with_price += 1
 
@@ -1975,6 +2018,7 @@ def profit_summary(request, business_id):
     total_packaging_cost_for_return = sum(Decimal(str(v.get("total_packaging_cost_for_returns", 0) or 0)) for v in order_wise_profit.values())
     total_packaging_cost_all = sum(Decimal(str(v.get("total_packaging_cost_all", 0) or 0)) for v in order_wise_profit.values())
     total_tax_cost = sum(Decimal(str(v.get("total_tax_cost", 0) or 0)) for v in order_wise_profit.values())
+    total_buffer_cost = sum(Decimal(str(v.get("total_buffer_cost", 0) or 0)) for v in order_wise_profit.values())
 
     # ── GST position ─────────────────────────────────────────────────────────
     # What was collected on sales, less what was already paid on the stock that
@@ -2199,6 +2243,9 @@ def profit_summary(request, business_id):
         "packaging_statuses":     list(cost_setting.packaging_statuses or []),
         "gst_summary":            gst_summary,
         "total_tax_cost":         round(total_tax_cost, 2),
+        # Loss-recovery buffer set aside on the units sold — already inside
+        # total_purchase_cost, listed so it can be shown on its own.
+        "total_buffer_cost":      round(total_buffer_cost, 2),
         "total_transport_charges":   round(transport_total, 2),
         "transport_charges_deducted": deduct_transport,
         "total_salary_cost":         round(salary["total"], 2),
@@ -2327,6 +2374,7 @@ def profit_daily_summary(request, business_id):
     _fp_all = list(FinalPrice.objects.filter(business=business).only(
         "sku_id", "final_price", "packaging_cost", "parent_id", "item_price", "tax_percent"))
     price_map      = _SkuMap((fp.sku_id, fp.final_price    or Decimal("0")) for fp in _fp_all)
+    buffers        = _BufferResolver(business)
     packaging_map  = _SkuMap((fp.sku_id, fp.packaging_cost or Decimal("0")) for fp in _fp_all)
     item_price_map = _SkuMap((fp.sku_id, fp.item_price     or Decimal("0")) for fp in _fp_all)
     tax_map        = _SkuMap((fp.sku_id, fp.tax_percent    or 0)            for fp in _fp_all)
@@ -2429,7 +2477,7 @@ def profit_daily_summary(request, business_id):
 
         eff_price, eff_pkg, eff_item_price, eff_tax_pct = get_eff_price(sku, primary.order_date)
         result = compute_order_net(group, eff_price, eff_pkg, qty, unique_statuses,
-                                   eff_item_price, eff_tax_pct, cost_setting=cost_setting)
+                                   eff_item_price, eff_tax_pct, cost_setting=cost_setting, buffer_per_unit=buffers.for_sku(sku))
         key = STATUS_TO_KEY.get(result["status"], "unknown")
 
         # compute_order_net's own status sets are narrower than what the rest
@@ -2575,6 +2623,9 @@ def _estimated_profit_pricing_lookup(business):
             tax_map.get(sku_id, 0),
         )
 
+    # The loss-recovery buffer rides along on the closure so every caller can
+    # charge it without a second lookup function.
+    get_price.buffer_for = _BufferResolver(business).for_sku
     return get_price, known_skus, canonical_sku
 
 
@@ -2697,18 +2748,20 @@ def _compute_estimated_profit_summary(business, date_from=None, date_to=None):
         # purchase_cost already carries × qty, so the rate must not be
         # multiplied by qty again — same fix as compute_order_net().
         tax_cost = purchase_cost * tax_pct / Decimal("100")
+        # Loss-recovery buffer, charged on every unit that actually sold.
+        buffer_cost = Decimal(str(get_price.buffer_for(sku_id) or 0)) * qty_d
 
         if claim_approved:
             bucket = "claim"
-            final_cost = purchase_cost + tax_cost + _packaging_charge(
+            final_cost = purchase_cost + tax_cost + buffer_cost + _packaging_charge(
                 BusinessCostSetting.CLAIM, packaging_cost, cost_setting)
         elif order_status == "exchanged":
             bucket = "exchange"
-            final_cost = purchase_cost + tax_cost + _packaging_charge(
+            final_cost = purchase_cost + tax_cost + buffer_cost + _packaging_charge(
                 BusinessCostSetting.EXCHANGE, packaging_cost, cost_setting)
         elif order_status == "delivered":
             bucket = "delivered"
-            final_cost = purchase_cost + tax_cost + _packaging_charge(
+            final_cost = purchase_cost + tax_cost + buffer_cost + _packaging_charge(
                 BusinessCostSetting.DELIVERED, packaging_cost, cost_setting)
         else:
             bucket = "other"  # cancelled / anything else
@@ -3203,7 +3256,8 @@ def _compute_flipkart_profit_summary(business, date_from=None, date_to=None):
             purchase_cost = item_price * qty_d
             tax_cost = purchase_cost * tax_pct / Decimal("100")
             packaging = _packaging_charge(BusinessCostSetting.DELIVERED, packaging_cost, cost_setting)
-            cost = purchase_cost + tax_cost + packaging
+            buffer_cost = Decimal(str(get_price.buffer_for(sku_id) or 0)) * qty_d
+            cost = purchase_cost + tax_cost + packaging + buffer_cost
             gross, net = settlement, settlement - cost
 
         processed_count += 1
@@ -3407,7 +3461,8 @@ def flipkart_profit_sku_payments(request, business_id):
             purchase_cost = item_price * qty_d
             tax_cost = purchase_cost * tax_pct / Decimal("100")
             packaging = _packaging_charge(BusinessCostSetting.DELIVERED, packaging_cost, cost_setting)
-            cost = purchase_cost + tax_cost + packaging
+            buffer_cost = Decimal(str(get_price.buffer_for(sku_id) or 0)) * qty_d
+            cost = purchase_cost + tax_cost + packaging + buffer_cost
             net = settlement - cost
 
         group_rows.sort(key=lambda r: r.payment_date or r.order_date or date_cls.min, reverse=True)
@@ -3457,6 +3512,7 @@ def ads_sku_analysis(request, business_id):
     # Pricing lookups — mirrors profit_summary
     _fp_all        = list(FinalPrice.objects.filter(business=business).only("sku_id", "final_price", "packaging_cost", "parent_id", "item_price", "tax_percent"))
     price_map      = _SkuMap((fp.sku_id, fp.final_price    or Decimal("0")) for fp in _fp_all)
+    buffers        = _BufferResolver(business)
     packaging_map  = _SkuMap((fp.sku_id, fp.packaging_cost or Decimal("0")) for fp in _fp_all)
     item_price_map = _SkuMap((fp.sku_id, fp.item_price     or Decimal("0")) for fp in _fp_all)
     tax_map        = _SkuMap((fp.sku_id, fp.tax_percent    or 0)            for fp in _fp_all)
@@ -3566,7 +3622,7 @@ def ads_sku_analysis(request, business_id):
 
         eff_price, eff_pkg, eff_item_price, eff_tax_pct = get_eff_price(sku, primary.order_date)
         result = compute_order_net(payments, eff_price, eff_pkg, qty, unique_statuses,
-                                   eff_item_price, eff_tax_pct, cost_setting=cost_setting)
+                                   eff_item_price, eff_tax_pct, cost_setting=cost_setting, buffer_per_unit=buffers.for_sku(sku))
 
         is_ad = sub_no in ad_sub_orders
         bucket = ad_profit if is_ad else org_profit
@@ -4033,6 +4089,9 @@ def parent_price_list(request, business_id):
         return Response({"results": list(rows), "slim": True})
 
     pricing, errors = clean_new_parent_pricing(request.data)
+    image_error = parent_image_error(request.data)
+    if image_error:
+        errors = {**errors, "image_url": [image_error]}
     if errors:
         return Response(errors, status=status.HTTP_400_BAD_REQUEST)
     data = request.data.copy() if hasattr(request.data, "copy") else dict(request.data)
@@ -4043,6 +4102,24 @@ def parent_price_list(request, business_id):
     serializer.is_valid(raise_exception=True)
     serializer.save(business=business)
     return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+def parent_image_error(data):
+    """A parent SKU needs a picture: either a pasted image link, or an upload.
+
+    `image_upload_pending` is how the form says "the file goes up right after
+    this" — the upload needs the parent to exist first, so the link isn't there
+    yet. Returns a message, or None when the parent is fine.
+    """
+    pending = str(data.get("image_upload_pending") or "").strip().lower() in ("1", "true", "yes")
+    url = str(data.get("image_url") or "").strip()
+    if pending and not url:
+        return None
+    if not url:
+        return "Add an image link, or upload an image — every parent SKU needs one."
+    if not re.match(r"^https?://\S+$", url, re.I):
+        return "The image link must start with http:// or https://."
+    return None
 
 
 def clean_new_parent_pricing(data):
@@ -4699,6 +4776,10 @@ def create_parent_from_sku(request, business_id):
             status=status.HTTP_409_CONFLICT,
         )
 
+    image_error = parent_image_error(request.data)
+    if image_error:
+        return Response({"error": image_error, "image_url": [image_error]}, status=status.HTTP_400_BAD_REQUEST)
+
     existing = FinalPrice.objects.filter(business=business, sku_id=sku_id).first()
 
     def pick(key, default):
@@ -4723,6 +4804,7 @@ def create_parent_from_sku(request, business_id):
             tax_percent=tax_percent or 0,
             packaging_cost=packaging_cost or 0,
             final_price=final_price,
+            image_url=str(request.data.get("image_url") or "").strip() or None,
         )
         _bulk_link_skus_to_parent(business=business, parent=parent, sku_ids=[sku_id])
 
@@ -4857,6 +4939,7 @@ def _bulk_link_skus_to_parent(*, business, parent, sku_ids):
         row.tax_percent = parent.tax_percent
         row.packaging_cost = parent.packaging_cost
         row.final_price = parent.final_price
+        row.buffer_amount = parent.buffer_amount
 
     created = 0
     updated = 0
@@ -4864,7 +4947,7 @@ def _bulk_link_skus_to_parent(*, business, parent, sku_ids):
         if to_update:
             FinalPrice.objects.bulk_update(
                 to_update,
-                ["parent", "item_price", "tax_percent", "packaging_cost", "final_price"],
+                ["parent", "item_price", "tax_percent", "packaging_cost", "final_price", "buffer_amount"],
                 batch_size=500,
             )
             updated = len(to_update)
@@ -4879,6 +4962,7 @@ def _bulk_link_skus_to_parent(*, business, parent, sku_ids):
                     tax_percent=parent.tax_percent,
                     packaging_cost=parent.packaging_cost,
                     final_price=parent.final_price,
+                    buffer_amount=parent.buffer_amount,
                 )
                 for sku in to_create_ids
             ]
@@ -4897,6 +4981,7 @@ def _bulk_link_skus_to_parent(*, business, parent, sku_ids):
                             tax_percent=parent.tax_percent,
                             packaging_cost=parent.packaging_cost,
                             final_price=parent.final_price,
+                            buffer_amount=parent.buffer_amount,
                         )
                         created += 1
                     except IntegrityError:

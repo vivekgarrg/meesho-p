@@ -12,6 +12,12 @@ class ParentItemPrice(models.Model):
     tax_percent = models.IntegerField(null=True, blank=True)
     packaging_cost = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     final_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    # Loss-recovery buffer, ₹ per unit sold. Not part of the price the product is
+    # bought at — it is an extra amount set aside on every unit that sells, to
+    # recover what returns and other losses cost. Profit deducts it (as part of
+    # the item cost) on delivered / exchanged / claimed orders; see
+    # views.compute_order_net.
+    buffer_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     # A pasted Meesho catalog image URL — not an upload, so there's nothing to
     # store or serve ourselves. Left blank, the parent just has no photo yet;
     # the frontend shows a "no image" badge instead of a broken thumbnail.
@@ -132,6 +138,9 @@ class FinalPrice(models.Model):
                                     db_column="parent_id",
                                 )
     final_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    # Loss-recovery buffer (₹ per unit) for a SKU that has no priced parent. A
+    # SKU under a priced parent uses the parent's buffer instead.
+    buffer_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
 
     # Some SKUs genuinely have no parent and never will — a one-off, a sample, a
     # discontinued line. Without a way to say so they sit in the "unlinked" pile

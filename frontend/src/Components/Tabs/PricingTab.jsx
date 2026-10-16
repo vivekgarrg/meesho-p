@@ -6,6 +6,7 @@ import { useSearchParams } from "react-router-dom";
 import { AppBarChart } from "../Charts/AppBarChart";
 import { AppPieChart } from "../Charts/AppPieChart";
 import { ImageUrlPreview, ImageUrlThumb } from "../shared/ImageUrlPreview";
+import { ParentImageInput, emptyImage, imageFields, imageProblem, uploadParentImage } from "../shared/ParentImagePicker";
 import { UPLOADABLE_TYPES, rejectReason, uploadListingImages } from "../../lib/listingImageUpload";
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -344,8 +345,9 @@ function ParentCard({ parent, notify, onLink, dragging, unlinked = [], onOptOut,
     item_price: parent.item_price != null ? String(parent.item_price) : "",
     tax_percent: parent.tax_percent != null ? String(parent.tax_percent) : "0",
     packaging_cost: parent.packaging_cost != null ? String(parent.packaging_cost) : "0",
+    buffer_amount: parent.buffer_amount != null ? String(parent.buffer_amount) : "0",
     image_url: parent.image_url || "",
-  }), [parent.item_price, parent.tax_percent, parent.packaging_cost, parent.image_url]);
+  }), [parent.item_price, parent.tax_percent, parent.packaging_cost, parent.buffer_amount, parent.image_url]);
   const [editForm, setEditForm] = useState(formFromParent);
   const [imageBroken, setImageBroken] = useState(false);
   const [renameValue, setRenameValue] = useState(parent.item_id);
@@ -815,6 +817,12 @@ function ParentCard({ parent, notify, onLink, dragging, unlinked = [], onOptOut,
           <span style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 16, color: C.gray900, whiteSpace: "nowrap" }}>
             {fmt(parent.final_price)}
           </span>
+          {Number(parent.buffer_amount) > 0 && (
+            <span title="Loss-recovery buffer set aside on every unit sold. Cost per unit including it is shown here; profit deducts it."
+              style={{ fontSize: 11, fontWeight: 700, color: C.amber, background: C.amberLight, border: `1px solid ${C.amberBorder}`, padding: "2px 8px", borderRadius: 20, whiteSpace: "nowrap" }}>
+              + {fmt(parent.buffer_amount)} buffer = {fmt(Number(parent.final_price || 0) + Number(parent.buffer_amount))}
+            </span>
+          )}
 
           {trajectory && (
             <span style={{ fontSize: 11, color: C.gray400, fontFamily: "monospace", whiteSpace: "nowrap" }}>
@@ -1302,14 +1310,16 @@ function ParentCard({ parent, notify, onLink, dragging, unlinked = [], onOptOut,
               {panel === "edit" && (
                 <ActionPanel accent={C.amber} icon="✏️" title="Direct Price Override" right={
                   <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                    <span style={{ fontSize: 12, color: C.gray500 }}>Preview: <strong style={{ fontFamily: "monospace", color: C.orange }}>{fmt(calcFinal(editForm.item_price, editForm.tax_percent, editForm.packaging_cost))}</strong></span>
+                    <span style={{ fontSize: 12, color: C.gray500 }}>Preview: <strong style={{ fontFamily: "monospace", color: C.orange }}>{fmt(calcFinal(editForm.item_price, editForm.tax_percent, editForm.packaging_cost))}</strong>
+                      {Number(editForm.buffer_amount) > 0 && <> · with buffer <strong style={{ fontFamily: "monospace", color: C.amber }}>{fmt(calcFinal(editForm.item_price, editForm.tax_percent, editForm.packaging_cost) + Number(editForm.buffer_amount))}</strong></>}
+                    </span>
                     <button onClick={saveEdit} disabled={savingEdit} style={btn("success", "sm")}>
                       {savingEdit ? "Saving…" : "Save"}
                     </button>
                   </div>
                 }>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
-                    {[["Item Price (₹)", "item_price"], ["Tax %", "tax_percent"], ["Packaging (₹)", "packaging_cost"]].map(([label, key]) => {
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 8 }}>
+                    {[["Item Price (₹)", "item_price"], ["Tax %", "tax_percent"], ["Packaging (₹)", "packaging_cost"], ["Loss buffer (₹/unit)", "buffer_amount"]].map(([label, key]) => {
                       const autoPriced = key === "item_price" && hasComponents;
                       return (
                         <div key={key}>
@@ -1328,6 +1338,11 @@ function ParentCard({ parent, notify, onLink, dragging, unlinked = [], onOptOut,
                     📅 Applies to orders placed from <b>today ({new Date().toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })})</b>.
                     Orders placed before today keep the price they were sold at — both are kept in this
                     parent's price history. To date a change differently, use <b>Add Price Entry</b>.
+                  </p>
+                  <p style={{ fontSize: 11, color: C.gray500, marginTop: 4, lineHeight: 1.6 }}>
+                    🛟 <b>Loss buffer</b> is an extra amount set aside on every unit that sells, to recover returns and
+                    other losses. Profit deducts it with the item cost. Unlike the price it is not dated — it applies to
+                    all orders using the current value.
                   </p>
                   {hasComponents && (
                     <p style={{ fontSize: 10.5, color: C.gray500, marginTop: 6 }}>
@@ -1550,7 +1565,9 @@ function AddParentForm({ onSaved, onCancel, notify }) {
   // Tax and packaging start EMPTY, not "0": pre-filled zeros counted as
   // "filled in" without anyone having decided them. A parent's price is what
   // every SKU under it is costed at, so all three must be chosen.
-  const [form, setForm] = useState({ item_id: "", item_price: "", tax_percent: "", packaging_cost: "", image_url: "" });
+  const [form, setForm] = useState({ item_id: "", item_price: "", tax_percent: "", packaging_cost: "", buffer_amount: "" });
+  // Every parent needs a picture: a pasted link, or a file uploaded right after it is created.
+  const [img, setImg] = useState(emptyImage);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState(null);
   const [fieldErrs, setFieldErrs] = useState({});
@@ -1566,6 +1583,9 @@ function AddParentForm({ onSaved, onCancel, notify }) {
     if (form.tax_percent === "") p.tax_percent = "Choose the tax rate";
     const pk = Number(form.packaging_cost);
     if (form.packaging_cost.trim() === "" || !Number.isFinite(pk) || pk < 0) p.packaging_cost = "Enter packaging (0 if none)";
+    if (form.buffer_amount.trim() !== "" && (!Number.isFinite(Number(form.buffer_amount)) || Number(form.buffer_amount) < 0)) p.buffer_amount = "0 or more";
+    const ie = imageProblem(img);
+    if (ie) p.image_url = ie;
     return p;
   };
   const ready = Object.keys(problems()).length === 0;
@@ -1581,10 +1601,24 @@ function AddParentForm({ onSaved, onCancel, notify }) {
         // final_price is not sent: the server computes it from these three.
         body: JSON.stringify({
           item_id: form.item_id.trim(), item_price: form.item_price, tax_percent: form.tax_percent,
-          packaging_cost: form.packaging_cost, image_url: form.image_url.trim(),
+          packaging_cost: form.packaging_cost, buffer_amount: form.buffer_amount.trim() || "0",
+          ...imageFields(img),
         }),
       });
-      if (res.ok) { notify("ok", `"${form.item_id.trim()}" created.`); onSaved(); return; }
+      if (res.ok) {
+        const name = form.item_id.trim();
+        if (img.file) {
+          const up = await uploadParentImage(name, img.file);
+          if (!up.ok) {
+            notify("err", `"${name}" was created, but its image didn't upload (${up.error}). Paste a link in Direct Price Override to finish.`);
+            onSaved();
+            return;
+          }
+        }
+        notify("ok", `"${name}" created.`);
+        onSaved();
+        return;
+      }
       const e = await res.json().catch(() => ({}));
       setFieldErrs(Object.fromEntries(Object.entries(e).map(([k, v]) => [k, [].concat(v).join(" ")])));
       setErr(Object.values(e).flat().join(" ") || `Could not create (${res.status}).`);
@@ -1606,14 +1640,16 @@ function AddParentForm({ onSaved, onCancel, notify }) {
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14, flexWrap: "wrap", gap: 10 }}>
         <p style={{ fontSize: 14, fontWeight: 700, color: C.gray800 }}>➕ New Parent SKU</p>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <span style={{ fontSize: 13, color: C.gray500 }}>Final price: <strong style={{ fontFamily: "monospace", color: C.orange, fontSize: 16 }}>{ready ? fmt(preview) : "—"}</strong></span>
+          <span style={{ fontSize: 13, color: C.gray500 }}>Final price: <strong style={{ fontFamily: "monospace", color: C.orange, fontSize: 16 }}>{ready ? fmt(preview) : "—"}</strong>
+            {ready && Number(form.buffer_amount) > 0 && <> · with buffer <strong style={{ fontFamily: "monospace", color: C.amber }}>{fmt(preview + Number(form.buffer_amount))}</strong></>}
+          </span>
           <button onClick={onCancel} style={btn("ghost")}>Cancel</button>
           <button onClick={save} disabled={saving} style={{ ...btn("primary"), ...(!ready ? { opacity: 0.55 } : {}) }}>
             {saving ? "Creating…" : "Create Parent"}
           </button>
         </div>
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1fr", gap: 12 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1fr 1fr", gap: 12 }}>
         <div>
           <label style={S.label}>Parent ID *</label>
           <input value={form.item_id} onChange={set("item_id")} placeholder="e.g. copper_bottle" style={fieldStyle("item_id")} />
@@ -1638,15 +1674,16 @@ function AddParentForm({ onSaved, onCancel, notify }) {
             placeholder="0 if none" style={fieldStyle("packaging_cost")} />
           {fieldErr("packaging_cost")}
         </div>
-      </div>
-      <div style={{ display: "flex", gap: 10, alignItems: "flex-end", marginTop: 12 }}>
-        <div style={{ flex: 1 }}>
-          <label style={S.label}>Photo — Meesho catalog image URL</label>
-          <input value={form.image_url} onChange={set("image_url")}
-            placeholder="https://images.meesho.com/images/products/... (optional)"
-            style={{ ...S.inp, fontFamily: "monospace" }} />
+        <div>
+          <label style={S.label} title="Extra ₹ set aside on every unit sold, to recover returns and other losses">Loss buffer (₹/unit)</label>
+          <input type="text" inputMode="decimal" value={form.buffer_amount} onChange={set("buffer_amount")}
+            placeholder="0 if none" style={fieldStyle("buffer_amount")} />
+          {fieldErr("buffer_amount")}
         </div>
-        <ImageUrlPreview url={form.image_url} />
+      </div>
+      <div style={{ marginTop: 12 }}>
+        <ParentImageInput value={img} error={fieldErrs.image_url}
+          onChange={(v) => { setImg(v); setFieldErrs((fe) => ({ ...fe, image_url: undefined })); }} />
       </div>
       {err && <p style={{ color: C.red, fontSize: 12, marginTop: 8 }}>{err}</p>}
     </div>
@@ -1699,6 +1736,7 @@ function CreateParentFromSkuModal({ sku, onSaved, onCancel }) {
   });
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState(null);
+  const [img, setImg] = useState(emptyImage);
   const preview = calcFinal(form.item_price, form.tax_percent, form.packaging_cost);
 
   const set = (key, v) => setForm(f => ({ ...f, [key]: v }));
@@ -1706,6 +1744,8 @@ function CreateParentFromSkuModal({ sku, onSaved, onCancel }) {
   const save = async () => {
     if (!form.parent_id.trim()) return setErr("Parent name is required.");
     if (!form.item_price || parseFloat(form.item_price) <= 0) return setErr("Item price is required.");
+    const ie = imageProblem(img);
+    if (ie) return setErr(ie);
     setSaving(true); setErr(null);
     try {
       const res = await fetch(`${API}/parent-from-sku/`, {
@@ -1717,9 +1757,18 @@ function CreateParentFromSkuModal({ sku, onSaved, onCancel }) {
           tax_percent: form.tax_percent,
           packaging_cost: form.packaging_cost,
           final_price: preview.toFixed(2),
+          ...imageFields(img),
         }),
       });
-      if (res.ok) { onSaved(form.parent_id.trim()); return; }
+      if (res.ok) {
+        const name = form.parent_id.trim();
+        if (img.file) {
+          const up = await uploadParentImage(name, img.file);
+          if (!up.ok) notify("err", `"${name}" was created, but its image didn't upload (${up.error}). Paste a link in Direct Price Override to finish.`);
+        }
+        onSaved(name);
+        return;
+      }
       const e = await res.json().catch(() => ({}));
       setErr(e.error || Object.values(e).flat().join(" ") || "Could not create parent.");
     } catch {
@@ -1762,6 +1811,9 @@ function CreateParentFromSkuModal({ sku, onSaved, onCancel }) {
                 <input type="number" step="0.01" value={form[key]} onChange={e => set(key, e.target.value)} style={{ ...S.inp, fontSize: 12 }} />
               </div>
             ))}
+          </div>
+          <div style={{ marginTop: 12 }}>
+            <ParentImageInput value={img} onChange={(v) => { setImg(v); setErr(null); }} />
           </div>
           {err && <p style={{ color: C.red, fontSize: 12, marginTop: 10 }}>{err}</p>}
         </div>
@@ -2056,6 +2108,7 @@ export function PricingTab() {
     if (attention === "no_history") rows = rows.filter(p => (p.history_count || 0) === 0);
     else if (attention === "never_sold") rows = rows.filter(p => !(sales[p.item_id]?.units_sold));
     else if (attention === "no_price") rows = rows.filter(p => !p.final_price || Number(p.final_price) <= 0);
+    else if (attention === "no_image") rows = rows.filter(p => !(p.image_url || "").trim());
 
     const sorted = [...rows];
     if (sortBy === "units") sorted.sort((a, b) => (sales[b.item_id]?.units_sold || 0) - (sales[a.item_id]?.units_sold || 0));
@@ -2246,7 +2299,7 @@ export function PricingTab() {
                 border: `1px solid ${C.amberBorder}`, background: C.amberLight, color: C.amber,
                 fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 20, fontFamily: "inherit",
               }}>
-              {{ no_history: "⏳ No price history", never_sold: "😴 Never sold", no_price: "⚠ No price set" }[attention]} ✕
+              {{ no_history: "⏳ No price history", never_sold: "😴 Never sold", no_price: "⚠ No price set", no_image: "📷 No image" }[attention]} ✕
             </button>
           )}
           {trueUnlinkedCount > 0 && (
@@ -2512,6 +2565,7 @@ export function PricingTab() {
           { label: "Linked SKUs", value: totalSkus, color: C.blue, icon: "🔗" },
           { label: "Never Sold", value: neverSold, color: C.amber, icon: "😴", go: () => goFix("never_sold"), cta: "show in SKU Pricing" },
           { label: "No History", value: noHistory, color: C.gray500, icon: "⏳", go: () => goFix("no_history"), cta: "show in SKU Pricing" },
+          { label: "No Image", value: allParents.filter(p => !(p.image_url || "").trim()).length, color: C.red, icon: "📷", go: () => goFix("no_image"), cta: "show in SKU Pricing" },
           { label: "Unlinked SKUs", value: trueUnlinkedCount, color: C.red, icon: "⚠️", go: () => setView("link"), cta: "open SKU Link" },
           ...(missingSkus.length ? [{ label: "Unpriced SKUs", value: missingSkus.length, color: C.red, icon: "🏷️",
             go: () => { setShowMissing(true); setView("pricing"); }, cta: "show in SKU Pricing" }] : []),

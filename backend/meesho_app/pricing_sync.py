@@ -58,8 +58,8 @@ def linked_businesses(business):
     )
 
 
-_PARENT_SYNCED_FIELDS = ("item_price", "tax_percent", "packaging_cost", "final_price", "image_url")
-_FINAL_SYNCED_FIELDS = ("item_price", "tax_percent", "packaging_cost", "final_price", "parent_opt_out")
+_PARENT_SYNCED_FIELDS = ("item_price", "tax_percent", "packaging_cost", "final_price", "buffer_amount", "image_url")
+_FINAL_SYNCED_FIELDS = ("item_price", "tax_percent", "packaging_cost", "final_price", "buffer_amount", "parent_opt_out")
 
 
 def sync_parent_saved(parent):

@@ -375,7 +375,9 @@ class NewParentPricingTests(ListingImageTestCase):
     cropper and on SKU Pricing — because every child SKU is costed at it."""
 
     def create_via_pricing(self, **fields):
-        body = {"item_id": "NEW-P", **fields}
+        # Every parent also needs a picture (link or upload) — supplied by default
+        # so these tests stay about pricing; test_loss_buffer covers the image rule.
+        body = {"item_id": "NEW-P", "image_url": "https://img.example/p.jpg", **fields}
         return self.client.post(f"{self.base}/parent-prices/", body, format="json")
 
     def test_sku_pricing_form_requires_every_field(self):

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Box, Button, TextField, Typography } from "@mui/material";
 import { C, API } from "../../App";
+import { ParentImageInput, emptyImage, imageFields, imageProblem, uploadParentImage } from "../shared/ParentImagePicker";
 
 /*
  * Shared by LabelsTab and BulkLabelsTab: the inline "link this SKU to a
@@ -52,6 +53,8 @@ export function ParentLinkInline({ sku, currentParent, onDone }) {
   const [name, setName] = useState(sku || "");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  // A new parent needs a picture — link or upload.
+  const [img, setImg] = useState(emptyImage);
 
   useEffect(() => {
     if (!open) return;
@@ -69,14 +72,22 @@ export function ParentLinkInline({ sku, currentParent, onDone }) {
     const linking = mode === "link";
     const parent_id = (linking ? choice : name).trim();
     if (!parent_id) { setErr(linking ? "Pick a parent." : "Enter a name."); return; }
+    if (!linking) {
+      const ie = imageProblem(img);
+      if (ie) { setErr(ie); return; }
+    }
     setBusy(true); setErr("");
     try {
       const res = await fetch(`${API}/${linking ? "link-sku" : "parent-from-sku"}/`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sku_id: sku, parent_id }),
+        body: JSON.stringify(linking ? { sku_id: sku, parent_id } : { sku_id: sku, parent_id, ...imageFields(img) }),
       });
       const d = await res.json().catch(() => ({}));
       if (!res.ok) { setErr(d.error || `Could not ${linking ? "link" : "create"}.`); return; }
+      if (!linking && img.file) {
+        const up = await uploadParentImage(parent_id, img.file);
+        if (!up.ok) { setErr(`Parent created, but its image didn't upload (${up.error}). Add a link under SKU Pricing.`); }
+      }
       if (!linking) loadParents(true);   // new parent — everyone else can pick it now
       setOpen(false);
       onDone?.(sku, parent_id);
@@ -130,6 +141,11 @@ export function ParentLinkInline({ sku, currentParent, onDone }) {
           placeholder="New parent name"
           onKeyDown={(e) => { if (e.key === "Enter") save(); if (e.key === "Escape") setOpen(false); }}
           sx={{ minWidth: 170, "& input": { fontSize: 11.5, py: "5px" } }} />
+      )}
+      {mode === "create" && (
+        <Box sx={{ minWidth: 230 }}>
+          <ParentImageInput value={img} onChange={(v) => { setImg(v); setErr(""); }} />
+        </Box>
       )}
 
       <Box sx={{ display: "flex", gap: "4px", alignItems: "center" }}>
