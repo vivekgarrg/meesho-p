@@ -8,93 +8,72 @@ import PhotoCameraIcon from "@mui/icons-material/PhotoCamera";
 import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import ErrorOutlineIcon from "@mui/icons-material/ErrorOutlineOutlined";
-import AssignmentTurnedInIcon from "@mui/icons-material/AssignmentTurnedIn";
-import AccessTimeIcon from "@mui/icons-material/AccessTime";
-import KeyboardReturnIcon from "@mui/icons-material/KeyboardReturn";
+import SearchIcon from "@mui/icons-material/Search";
 import OpenInNewIcon from "@mui/icons-material/OpenInNew";
 import CloseIcon from "@mui/icons-material/Close";
 import { CircularProgress } from "@mui/material";
 
-const PAGE_SIZE = 40;
+/*
+ * Returns Received & Claims.
+ *
+ * One return at a time, shown the same way on every screen: its photo, SKU,
+ * quantity and the reason it came back — the four things you compare against
+ * the parcel in your hand — then the claim decision.
+ *
+ *   Phone  — Scan → the return → "Scan next". Nothing else on screen.
+ *   Desktop — one search box that keeps the cursor (a machine scan + Enter opens
+ *            the return and clears the box; typing filters the list), a clean list
+ *            on the left and the selected return on the right.
+ *
+ * When a claim is required, the packet id off the parcel is the next step: it is
+ * different on every return, so it is stored against that return (and finds it
+ * again later).
+ */
 
-// Claim window presentation — one place so the card, the chip and the table
-// row all describe the same state in the same words and colour.
-const URGENCY_META = {
-  ok:       { color: C.green,   bg: C.greenLight, border: C.greenBorder },
-  warning:  { color: C.amber,   bg: C.amberLight, border: C.amberBorder },
-  last_day: { color: C.red,     bg: C.redLight,   border: C.redBorder },
-  expired:  { color: C.red,     bg: C.redLight,   border: C.redBorder },
-  none:     { color: C.gray500, bg: C.gray100,    border: C.gray200 },
-  unknown:  { color: C.gray500, bg: C.gray100,    border: C.gray200 },
-};
+const PAGE_SIZE = 30;
 
 const CLAIM_LABELS = {
-  UNREVIEWED:   "Not reviewed",
-  NOT_REQUIRED: "No claim needed",
-  REQUIRED:     "Claim required",
-  RAISED:       "Claim raised",
-  APPROVED:     "Claim approved",
-  REJECTED:     "Claim rejected",
+  UNREVIEWED: "Not reviewed", NOT_REQUIRED: "No claim needed", REQUIRED: "Claim required",
+  RAISED: "Claim raised", APPROVED: "Claim approved", REJECTED: "Claim rejected",
 };
-
 const CLAIM_TAG = {
-  UNREVIEWED: "gray", NOT_REQUIRED: "gray", REQUIRED: "amber",
-  RAISED: "blue", APPROVED: "green", REJECTED: "red",
+  UNREVIEWED: "gray", NOT_REQUIRED: "gray", REQUIRED: "amber", RAISED: "blue", APPROVED: "green", REJECTED: "red",
+};
+const URGENCY_COLOR = {
+  ok: C.green, warning: C.amber, last_day: C.red, expired: C.red, none: C.gray500, unknown: C.gray500,
 };
 
-// The packet scanned off the returned parcel, checked against what we shipped.
-// Meesho rejects claims when the order/AWB on the reverse waybill isn't legible,
-// so this verdict is the difference between a claim that sticks and one that doesn't.
-const PACKET_META = {
-  MATCH: {
-    tag: "green", accent: C.green, bg: C.greenLight, border: C.greenBorder,
-    label: "Packet matches",
-    help: "The packet you scanned is the one we shipped — good evidence for the claim.",
-  },
-  MISMATCH: {
-    tag: "red", accent: C.red, bg: C.redLight, border: C.redBorder,
-    label: "Packet does NOT match",
-    help: "This packet is not the one recorded for this sub-order. Check you're holding the right parcel before raising a claim.",
-  },
-  UNKNOWN: {
-    tag: "amber", accent: C.amber, bg: C.amberLight, border: C.amberBorder,
-    label: "Nothing to compare",
-    help: "Recorded, but we hold no AWB for this sub-order to check it against. Upload the labels PDF for this batch.",
-  },
-};
-
-function claimWindowText(row) {
-  const { claim_urgency: u, days_left: left, claim_status: cs } = row;
-  if (cs === "RAISED" || cs === "APPROVED" || cs === "REJECTED") {
-    return row.claim_raised_at
-      ? `Claim raised on ${new Date(row.claim_raised_at).toLocaleDateString("en-IN")}`
-      : CLAIM_LABELS[cs];
-  }
-  if (cs === "NOT_REQUIRED") return "Marked as no claim needed";
-  if (u === "unknown") return "No delivered date on the sheet — window unknown";
-  if (u === "expired") return `Claim window closed ${Math.abs(left)} day${Math.abs(left) === 1 ? "" : "s"} ago`;
-  if (u === "last_day") return "TODAY is the last day to raise the claim";
-  if (u === "warning") return `Only ${left} day${left === 1 ? "" : "s"} left to raise the claim`;
-  return `${left} days left to raise the claim`;
+/** One short line about the claim window — enough to know if it's urgent. */
+function windowText(row) {
+  const cs = row.claim_status;
+  if (["RAISED", "APPROVED", "REJECTED", "NOT_REQUIRED"].includes(cs)) return "";
+  const left = row.days_left;
+  if (row.claim_urgency === "unknown" || left == null) return "No delivered date";
+  if (left < 0) return `Window missed by ${Math.abs(left)}d`;
+  if (left === 0) return "Last day to claim — today";
+  return `${left} day${left === 1 ? "" : "s"} left to claim`;
 }
 
-function ClaimWindowChip({ row, big }) {
-  const meta = URGENCY_META[row.claim_urgency] || URGENCY_META.unknown;
-  const urgent = row.claim_urgency === "warning" || row.claim_urgency === "last_day" || row.claim_urgency === "expired";
+const isRTO = (row) => (row.type_of_return || "").toLowerCase().includes("rto");
+
+// ── Pieces ────────────────────────────────────────────────────────────────────
+
+function Photo({ url, size = 64, radius = 10 }) {
+  const [broken, setBroken] = useState(false);
+  useEffect(() => setBroken(false), [url]);
+  const box = {
+    width: size, height: size, borderRadius: radius, flexShrink: 0, overflow: "hidden",
+    border: `1px solid ${C.gray200}`, background: C.gray50,
+    display: "flex", alignItems: "center", justifyContent: "center", color: C.gray300,
+  };
+  if (!url || broken) return <div style={{ ...box, fontSize: size * 0.4 }}>📷</div>;
+  return <div style={box}><img src={url} alt="" onError={() => setBroken(true)} style={{ width: "100%", height: "100%", objectFit: "cover" }} /></div>;
+}
+
+function Label({ children }) {
   return (
-    <div style={{
-      display: "inline-flex", alignItems: "center", gap: 8,
-      background: meta.bg, color: meta.color,
-      border: `1px solid ${meta.border}`,
-      borderRadius: 10, padding: big ? "10px 16px" : "5px 11px",
-      fontSize: big ? 15 : 12, fontWeight: 700,
-    }}>
-      {urgent ? <WarningAmberIcon style={{ fontSize: big ? 20 : 15 }} />
-              : <AccessTimeIcon style={{ fontSize: big ? 20 : 15 }} />}
-      {claimWindowText(row)}
-      {row.claim_deadline && row.claim_urgency !== "none" && (
-        <span style={{ fontWeight: 500, opacity: 0.75 }}>· by {row.claim_deadline}</span>
-      )}
+    <div style={{ fontSize: 10.5, fontWeight: 700, color: C.gray400, letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 3 }}>
+      {children}
     </div>
   );
 }
@@ -102,9 +81,7 @@ function ClaimWindowChip({ row, big }) {
 function Field({ label, value, mono }) {
   return (
     <div>
-      <div style={{ fontSize: 10, fontWeight: 700, color: C.gray400, letterSpacing: "0.07em", textTransform: "uppercase", marginBottom: 3 }}>
-        {label}
-      </div>
+      <Label>{label}</Label>
       <div style={{ fontSize: 13, color: C.gray800, fontWeight: 600, fontFamily: mono ? "monospace" : "inherit", wordBreak: "break-word" }}>
         {value || <span style={{ color: C.gray300, fontWeight: 400 }}>—</span>}
       </div>
@@ -112,458 +89,775 @@ function Field({ label, value, mono }) {
   );
 }
 
-function StatPill({ label, value, accent, onClick, active }) {
-  return (
-    <div
-      onClick={onClick}
-      style={{
-        background: active ? accent : C.white,
-        border: `1px solid ${active ? accent : C.border}`,
-        borderTop: `3px solid ${accent}`,
-        borderRadius: 12, padding: "12px 20px", minWidth: 128,
-        cursor: onClick ? "pointer" : "default",
-        display: "flex", flexDirection: "column", gap: 3,
-      }}
-    >
-      <span style={{
-        fontSize: 10, fontWeight: 700, letterSpacing: "0.07em", textTransform: "uppercase",
-        color: active ? "rgba(255,255,255,0.85)" : C.gray400,
-      }}>{label}</span>
-      <span style={{
-        fontSize: 24, fontWeight: 800, fontFamily: "monospace",
-        color: active ? C.white : C.gray800,
-      }}>{value ?? "—"}</span>
-    </div>
-  );
-}
-
-// ── The scan-and-verify card ───────────────────────────────────────────────────
-function PacketBlock({ row, onPatch, onScanPacket, saving }) {
-  const [packet, setPacket] = useState(row.packet_id ?? "");
-  useEffect(() => { setPacket(row.packet_id ?? ""); }, [row.id, row.packet_id]);
-
-  const verdict = row.packet_check ? PACKET_META[row.packet_check] : null;
-
-  return (
-    <div style={{
-      marginTop: 14, padding: "14px 16px", borderRadius: 10,
-      background: verdict ? verdict.bg : C.gray50,
-      border: `1px solid ${verdict ? verdict.border : C.border}`,
-    }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
-        <QrCodeScannerIcon style={{ fontSize: 17, color: verdict ? verdict.accent : C.gray500 }} />
-        <span style={{ fontSize: 13, fontWeight: 700, color: C.gray800 }}>
-          Scan the packet on this parcel
-        </span>
-        {verdict && <Tag variant={verdict.tag} fontSize={11.5}>{verdict.label}</Tag>}
-      </div>
-
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-        <button onClick={onScanPacket} disabled={saving} style={{ ...btn("secondary", "md"), whiteSpace: "nowrap" }}>
-          <PhotoCameraIcon style={{ fontSize: 17, verticalAlign: "-4px" }} />
-          &nbsp;Scan packet
-        </button>
-        <input
-          value={packet}
-          onChange={(e) => setPacket(e.target.value)}
-          onKeyDown={(e) => { if (e.key === "Enter") onPatch(row.id, { packet_id: packet }); }}
-          placeholder="…or type the packet / reverse AWB"
-          style={{ ...S.inp, flex: "1 1 180px", minWidth: 0, fontFamily: "monospace", fontWeight: 600 }}
-        />
-        <button onClick={() => onPatch(row.id, { packet_id: packet })}
-          disabled={saving || packet === (row.packet_id ?? "")}
-          style={{ ...btn("primary", "md"), opacity: saving || packet === (row.packet_id ?? "") ? 0.5 : 1 }}>
-          Save
-        </button>
-        {row.packet_id && (
-          <button onClick={() => onPatch(row.id, { packet_id: "" })} disabled={saving} style={btn("ghost", "md")}>
-            Clear
-          </button>
-        )}
-      </div>
-
-      {verdict && (
-        <div style={{ fontSize: 12, color: verdict.accent, fontWeight: 600, marginTop: 9, lineHeight: 1.5 }}>
-          {verdict.help}
-          {row.packet_matched_against && row.packet_check !== "UNKNOWN" && (
-            <div style={{ fontFamily: "monospace", fontSize: 11, opacity: 0.85, marginTop: 3 }}>
-              compared with {row.packet_matched_against}
-            </div>
-          )}
-        </div>
-      )}
-      {!verdict && (
-        <div style={{ fontSize: 11.5, color: C.gray500, marginTop: 8, lineHeight: 1.5 }}>
-          Meesho rejects claims when the order or AWB on the reverse waybill isn't legible — scanning it
-          here records the proof and checks it against what we shipped.
-        </div>
-      )}
-    </div>
-  );
-}
-
-function ReturnCard({ row, onPatch, saving, onClose, onScanPacket }) {
-  const isMobile = useIsMobile();
-  const [amount, setAmount]       = useState(row.claim_amount ?? "");
-  const [reference, setReference] = useState(row.claim_reference ?? "");
-  const [notes, setNotes]         = useState(row.claim_notes ?? "");
-
-  // Re-seed the claim form whenever a different return is loaded into the card.
-  useEffect(() => {
-    setAmount(row.claim_amount ?? "");
-    setReference(row.claim_reference ?? "");
-    setNotes(row.claim_notes ?? "");
-  }, [row.id]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const ctx      = row.order_context || {};
-  const shipped  = ctx.label;
-  const payments = ctx.payments;
-
-  // Cross-check: what we shipped vs what came back. Sources are the label PDF
-  // (what physically went out) and the payment sheet (what Meesho billed on).
-  const shippedSku = shipped?.sku || payments?.supplier_sku || null;
-  const shippedQty = shipped?.qty ?? payments?.quantity ?? null;
+/** What this return is: photo, SKU, qty, reason — big enough to read at arm's length. */
+function ReturnSummary({ row, compact }) {
+  const ctx = row.order_context || {};
+  const shippedSku = ctx.label?.sku || ctx.payments?.supplier_sku || null;
+  const shippedQty = ctx.label?.qty ?? ctx.payments?.quantity ?? null;
   const skuMismatch = shippedSku && shippedSku.trim().toLowerCase() !== (row.sku || "").trim().toLowerCase();
-  // Getting back fewer pieces than were shipped is a normal partial return, so
-  // only more-back-than-went-out is actually wrong.
   const qtyMismatch = shippedQty != null && Number(row.qty) > Number(shippedQty);
-  const partialReturn = shippedQty != null && Number(row.qty) < Number(shippedQty);
-
-  const isRTO   = (row.type_of_return || "").toLowerCase().includes("rto");
-  const decided = ["RAISED", "APPROVED", "REJECTED"].includes(row.claim_status);
-  const urgency = URGENCY_META[row.claim_urgency] || URGENCY_META.unknown;
+  const win = windowText(row);
 
   return (
-    <div style={{
-      ...S.card, padding: 0, overflow: "hidden",
-      borderTop: `4px solid ${urgency.color}`,
-    }}>
-      {/* ── Hero: the three things to check against the parcel in hand ── */}
-      <div style={{ padding: isMobile ? "16px 14px" : "22px 26px", background: C.gray50, borderBottom: `1px solid ${C.border}` }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, marginBottom: 18 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-            <Tag variant={isRTO ? "red" : "orange"} fontSize={12}>{row.type_of_return || "Return"}</Tag>
-            <Tag variant="gray" fontSize={12}>{row.sub_type || "—"}</Tag>
-            <Tag variant={CLAIM_TAG[row.claim_status]} fontSize={12}>{CLAIM_LABELS[row.claim_status]}</Tag>
-            {/* Which business this return belongs to — one desk receives for
-                several, and the claim window is per business. */}
-            {row.business_name && <Tag variant="blue" fontSize={12}>◈ {row.business_name}</Tag>}
-          </div>
-          <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: C.gray400, padding: 2 }}>
-            <CloseIcon style={{ fontSize: 20 }} />
-          </button>
-        </div>
-
-        {/* On a phone these three stack: the SKU gets the full width (they run
-            long, e.g. medium-small-brass-plain-lota-medium-150), then qty and
-            date share a row underneath. */}
-        <div style={{
-          display: "grid",
-          gridTemplateColumns: isMobile ? "1fr" : "minmax(240px, 2fr) 110px minmax(180px, 1fr)",
-          gap: isMobile ? 14 : 20, alignItems: "start",
-        }}>
-          {/* SKU — the main thing to eyeball against the product */}
-          <div>
-            <div style={{ fontSize: 11, fontWeight: 700, color: C.gray400, letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 6 }}>
-              SKU received back
-            </div>
-            <div style={{
-              fontSize: isMobile ? 25 : 34, fontWeight: 800, fontFamily: "monospace", lineHeight: 1.15,
-              color: skuMismatch ? C.red : C.gray900, wordBreak: "break-all",
-            }}>
-              {row.sku || "—"}
-            </div>
-            {row.variation && row.variation !== "Free Size" && (
-              <div style={{ fontSize: 14, color: C.gray600, marginTop: 4, fontWeight: 600 }}>Variation: {row.variation}</div>
-            )}
-          </div>
-
-          {/* Qty + returned-on: their own 2-up row on mobile, separate grid
-              columns on desktop. */}
+    <div>
+      <div style={{ display: "flex", gap: compact ? 14 : 18, alignItems: "flex-start" }}>
+        <Photo url={row.image_url} size={compact ? 118 : 150} radius={14} />
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <Label>SKU</Label>
           <div style={{
-            display: isMobile ? "grid" : "block",
-            gridTemplateColumns: isMobile ? "100px 1fr" : undefined,
-            gap: isMobile ? 14 : undefined,
-          }}>
+            fontFamily: "monospace", fontWeight: 800, lineHeight: 1.2, wordBreak: "break-all",
+            fontSize: compact ? 21 : 26, color: skuMismatch ? C.red : C.gray900,
+          }}>{row.sku || "—"}</div>
+          {row.variation && row.variation !== "Free Size" && (
+            <div style={{ fontSize: 13, color: C.gray600, marginTop: 3, fontWeight: 600 }}>{row.variation}</div>
+          )}
+          <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginTop: 12 }}>
             <div>
-              <div style={{ fontSize: 11, fontWeight: 700, color: C.gray400, letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 6 }}>
-                Qty
-              </div>
-              <div style={{
-                fontSize: isMobile ? 40 : 46, fontWeight: 800, fontFamily: "monospace", lineHeight: 1,
-                color: qtyMismatch ? C.red : C.gray900,
-              }}>
+              <Label>Qty</Label>
+              <div style={{ fontFamily: "monospace", fontWeight: 800, fontSize: compact ? 38 : 44, lineHeight: 1, color: qtyMismatch ? C.red : C.gray900 }}>
                 {row.qty}
               </div>
             </div>
-
-            {/* Delivered back on — rendered here on mobile so it pairs with qty */}
-            {isMobile && (
-              <div>
-                <div style={{ fontSize: 11, fontWeight: 700, color: C.gray400, letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 6 }}>
-                  Returned on
-                </div>
-                <div style={{ fontSize: 20, fontWeight: 800, color: C.gray900, fontFamily: "monospace" }}>
-                  {row.delivered_date || "—"}
-                </div>
-                {row.day_of_window != null && (
-                  <div style={{ fontSize: 12, color: C.gray500, marginTop: 4 }}>
-                    Day {row.day_of_window} of {row.claim_window_days}
-                  </div>
-                )}
-              </div>
-            )}
           </div>
-
-          {!isMobile && (
-            <div>
-              <div style={{ fontSize: 11, fontWeight: 700, color: C.gray400, letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 6 }}>
-                Returned to us on
-              </div>
-              <div style={{ fontSize: 24, fontWeight: 800, color: C.gray900, fontFamily: "monospace" }}>
-                {row.delivered_date || "—"}
-              </div>
-              {row.day_of_window != null && (
-                <div style={{ fontSize: 12, color: C.gray500, marginTop: 4 }}>
-                  Day {row.day_of_window} of {row.claim_window_days}
-                </div>
-              )}
-            </div>
-          )}
         </div>
-
-        <div style={{ fontSize: 14, color: C.gray700, marginTop: 16, fontWeight: 500 }}>
-          {row.product_name}
-        </div>
-
-        {/* Cross-check warning */}
-        {(skuMismatch || qtyMismatch) && (
-          <div style={{
-            marginTop: 14, padding: "12px 16px", borderRadius: 10,
-            background: C.redLight, border: `1px solid ${C.redBorder}`,
-            color: C.red, fontSize: 13, fontWeight: 600,
-            display: "flex", alignItems: "flex-start", gap: 8,
-          }}>
-            <ErrorOutlineIcon style={{ fontSize: 18, flexShrink: 0, marginTop: 1 }} />
-            <div>
-              Does not match what we shipped:
-              {skuMismatch && <div>· shipped SKU <strong>{shippedSku}</strong>, return sheet says <strong>{row.sku}</strong></div>}
-              {qtyMismatch && <div>· shipped qty <strong>{shippedQty}</strong>, but <strong>{row.qty}</strong> came back</div>}
-            </div>
-          </div>
-        )}
-
-        {/* Fewer pieces back than went out — expected for a partial return,
-            but worth pointing out at the desk. */}
-        {partialReturn && !skuMismatch && (
-          <div style={{
-            marginTop: 14, padding: "10px 16px", borderRadius: 10,
-            background: C.blueLight, border: "1px solid #BFDBFE",
-            color: "#1E40AF", fontSize: 13, fontWeight: 600,
-          }}>
-            Partial return — {row.qty} of {shippedQty} pieces shipped have come back.
-          </div>
-        )}
       </div>
 
-      {/* ── Claim window + decision ── */}
-      <div style={{ padding: isMobile ? "16px 14px" : "20px 26px", borderBottom: `1px solid ${C.border}` }}>
-        <div style={{ marginBottom: 16 }}>
-          <ClaimWindowChip row={row} big />
-        </div>
-
-        {row.claim_status === "UNREVIEWED" && (
-          <div>
-            <div style={{ fontSize: 13, fontWeight: 600, color: C.gray700, marginBottom: 10 }}>
-              Is a claim required for this return?
-            </div>
-            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-              <button
-                onClick={() => onPatch(row.id, { claim_status: "REQUIRED" })}
-                disabled={saving}
-                style={{ ...btn("primary", "lg") }}
-              >
-                <AssignmentTurnedInIcon style={{ fontSize: 17, verticalAlign: "-3px" }} />
-                &nbsp;Yes — claim required
-              </button>
-              <button
-                onClick={() => onPatch(row.id, { claim_status: "NOT_REQUIRED" })}
-                disabled={saving}
-                style={{ ...btn("ghost", "lg") }}
-              >
-                No claim needed
-              </button>
-            </div>
-          </div>
-        )}
-
-        {row.claim_status === "REQUIRED" && (
-          <div>
-            {/* Packet evidence comes first: it has to be captured while the
-                parcel is still in hand, before anyone starts filling in amounts. */}
-            <PacketBlock row={row} onPatch={onPatch} onScanPacket={onScanPacket} saving={saving} />
-
-            <div style={{ fontSize: 13, fontWeight: 600, color: C.gray700, margin: "18px 0 12px" }}>
-              Claim flagged — record it once raised on Meesho
-            </div>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 12, marginBottom: 12 }}>
-              <div>
-                <label style={S.label}>Claim amount (₹)</label>
-                <input value={amount} onChange={e => setAmount(e.target.value)} type="number" step="0.01"
-                  placeholder="Optional" style={S.inp} />
-              </div>
-              <div>
-                <label style={S.label}>Meesho ticket / claim ref</label>
-                <input value={reference} onChange={e => setReference(e.target.value)}
-                  placeholder="Optional" style={S.inp} />
-              </div>
-              <div style={{ gridColumn: "1 / -1" }}>
-                <label style={S.label}>Notes</label>
-                <input value={notes} onChange={e => setNotes(e.target.value)}
-                  placeholder="What was wrong, what proof was attached…" style={S.inp} />
-              </div>
-            </div>
-            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-              <button
-                onClick={() => onPatch(row.id, {
-                  claim_status: "RAISED",
-                  claim_amount: amount === "" ? null : amount,
-                  claim_reference: reference,
-                  claim_notes: notes,
-                })}
-                disabled={saving}
-                style={btn("success", "lg")}
-              >
-                <CheckCircleIcon style={{ fontSize: 17, verticalAlign: "-3px" }} />
-                &nbsp;Claim raised on Meesho
-              </button>
-              <button
-                onClick={() => onPatch(row.id, { claim_amount: amount === "" ? null : amount, claim_reference: reference, claim_notes: notes })}
-                disabled={saving}
-                style={btn("ghostOrange", "lg")}
-              >
-                Save details only
-              </button>
-              <button
-                onClick={() => onPatch(row.id, { claim_status: "NOT_REQUIRED" })}
-                disabled={saving}
-                style={btn("ghost", "lg")}
-              >
-                Actually, no claim needed
-              </button>
-            </div>
-          </div>
-        )}
-
-        {decided && (
-          <div>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 14, marginBottom: 14 }}>
-              <Field label="Claim amount" value={row.claim_amount != null ? fmt(row.claim_amount) : null} mono />
-              <Field label="Reference" value={row.claim_reference} mono />
-              <Field label="Raised at" value={row.claim_raised_at ? new Date(row.claim_raised_at).toLocaleString("en-IN") : null} />
-              <Field label="Notes" value={row.claim_notes} />
-              <Field label="Packet scanned" value={row.packet_id} mono />
-            </div>
-            {/* Still editable after raising: a claim often gets queried and the
-                packet evidence is exactly what Meesho asks for. */}
-            <PacketBlock row={row} onPatch={onPatch} onScanPacket={onScanPacket} saving={saving} />
-            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-              {row.claim_status === "RAISED" && (
-                <>
-                  <button onClick={() => onPatch(row.id, { claim_status: "APPROVED" })} disabled={saving} style={btn("success", "md")}>
-                    Mark approved
-                  </button>
-                  <button onClick={() => onPatch(row.id, { claim_status: "REJECTED" })} disabled={saving} style={btn("danger", "md")}>
-                    Mark rejected
-                  </button>
-                </>
-              )}
-              <button onClick={() => onPatch(row.id, { claim_status: "REQUIRED" })} disabled={saving} style={btn("ghost", "md")}>
-                Reopen — not actually raised
-              </button>
-            </div>
-          </div>
-        )}
-
-        {row.claim_status === "NOT_REQUIRED" && (
-          <button onClick={() => onPatch(row.id, { claim_status: "REQUIRED" })} disabled={saving} style={btn("ghostOrange", "md")}>
-            Changed my mind — claim is required
-          </button>
-        )}
-      </div>
-
-      {/* ── Physical verification ── */}
-      <div style={{ padding: isMobile ? "16px 14px" : "18px 26px", borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-        <span style={{ fontSize: 13, fontWeight: 600, color: C.gray700 }}>Product in hand:</span>
-        <button
-          onClick={() => onPatch(row.id, { verify_result: "MATCH" })}
-          disabled={saving}
-          style={{ ...btn(row.verify_result === "MATCH" ? "success" : "ghost", "md") }}
-        >
-          ✓ Correct product
-        </button>
-        <button
-          onClick={() => onPatch(row.id, { verify_result: "MISMATCH" })}
-          disabled={saving}
-          style={{ ...btn(row.verify_result === "MISMATCH" ? "danger" : "ghost", "md") }}
-        >
-          ✗ Wrong / damaged product
-        </button>
-        {row.verified_at && (
-          <span style={{ fontSize: 12, color: C.gray400 }}>
-            checked {new Date(row.verified_at).toLocaleString("en-IN")}
-          </span>
-        )}
-      </div>
-
-      {/* ── Everything else about the return ── */}
-      <div style={{ padding: isMobile ? "16px 14px" : "20px 26px", display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 18 }}>
-        <Field label="Sub-order no" value={row.suborder_no} mono />
-        <Field label="Order no" value={row.order_no} mono />
-        <Field label="AWB number" value={row.awb_number} mono />
-        <Field label="Courier" value={row.courier_partner} />
-        <Field label="Category" value={row.category} />
-        <Field label="Return price type" value={row.return_price_type} />
-        <Field label="Dispatched on" value={row.dispatch_date} mono />
-        <Field label="Return created on" value={row.return_created_date} mono />
-        <Field label="OTP verified at" value={row.otp_verified_at ? new Date(row.otp_verified_at).toLocaleString("en-IN") : null} />
-        <div style={{ gridColumn: "1 / -1" }}>
-          <Field label="Return reason" value={row.return_reason} />
+      <div style={{ marginTop: 16, padding: "12px 14px", borderRadius: 10, background: C.gray50, border: `1px solid ${C.gray200}` }}>
+        <Label>Why it was returned</Label>
+        <div style={{ fontSize: compact ? 16 : 15, fontWeight: 700, color: C.gray900, lineHeight: 1.4 }}>
+          {row.return_reason || <span style={{ color: C.gray400, fontWeight: 500 }}>No reason on the sheet</span>}
         </div>
         {row.detailed_return_reason && (
-          <div style={{ gridColumn: "1 / -1" }}>
-            <Field label="Customer said" value={row.detailed_return_reason} />
-          </div>
+          <div style={{ fontSize: 13, color: C.gray600, marginTop: 5, lineHeight: 1.5 }}>“{row.detailed_return_reason}”</div>
         )}
+      </div>
 
-        {/* What we shipped, for the cross-check */}
-        {(shipped || payments) && (
-          <div style={{ gridColumn: "1 / -1", borderTop: `1px solid ${C.gray100}`, paddingTop: 16 }}>
-            <div style={{ ...S.cardTitle, marginBottom: 12 }}>What we shipped / what Meesho settled</div>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 16 }}>
-              {shipped && <Field label="Label SKU" value={shipped.sku} mono />}
-              {shipped && <Field label="Label qty" value={shipped.qty} mono />}
-              {shipped && <Field label="Customer" value={[shipped.customer_name, shipped.customer_city].filter(Boolean).join(" · ")} />}
-              {payments && <Field label="Payment statuses" value={(payments.statuses || []).join(", ")} />}
-              {payments && <Field label="Net settlement" value={fmt(payments.net_settlement)} mono />}
-              {payments && <Field label="Claims already paid" value={fmt(payments.claims_paid)} mono />}
-              {payments && <Field label="Return shipping charge" value={fmt(payments.return_shipping_charge)} mono />}
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginTop: 12 }}>
+        <Tag variant={isRTO(row) ? "red" : "orange"}>{isRTO(row) ? "RTO" : "Customer return"}</Tag>
+        <Tag variant={CLAIM_TAG[row.claim_status]}>{CLAIM_LABELS[row.claim_status]}</Tag>
+        {row.business_name && <Tag variant="blue">◈ {row.business_name}</Tag>}
+        {win && (
+          <span style={{ fontSize: 12.5, fontWeight: 700, color: URGENCY_COLOR[row.claim_urgency] || C.gray500 }}>{win}</span>
+        )}
+      </div>
+
+      {(skuMismatch || qtyMismatch) && (
+        <div style={{
+          marginTop: 12, padding: "10px 14px", borderRadius: 10, background: C.redLight, border: `1px solid ${C.redBorder}`,
+          color: C.red, fontSize: 13, fontWeight: 600, display: "flex", gap: 8, alignItems: "flex-start",
+        }}>
+          <ErrorOutlineIcon style={{ fontSize: 18, flexShrink: 0 }} />
+          <div>
+            Doesn't match what we shipped:
+            {skuMismatch && <div>· shipped <strong>{shippedSku}</strong>, sheet says <strong>{row.sku}</strong></div>}
+            {qtyMismatch && <div>· shipped <strong>{shippedQty}</strong>, but <strong>{row.qty}</strong> came back</div>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The packet id on the returned parcel. It's different on every return, so when a
+ * claim is required it is stored against that return — scan it (or type it) and
+ * press Enter. `autoFocus` puts the cursor here so a machine scan lands in it.
+ */
+function PacketStep({ row, onPatch, saving, onScanPacket, onDone, autoFocus, isMobile }) {
+  const [packet, setPacket] = useState(row.packet_id ?? "");
+  const input = useRef(null);
+  useEffect(() => { setPacket(row.packet_id ?? ""); }, [row.id, row.packet_id]);
+  useEffect(() => { if (autoFocus && !isMobile) input.current?.focus(); }, [autoFocus, row.id, isMobile]);
+
+  const saved = !!row.packet_id;
+  const dup = row.packet_duplicate_of || [];
+  const save = async () => {
+    const v = packet.trim();
+    if (!v || v === (row.packet_id ?? "")) { onDone?.(); return; }
+    await onPatch(row.id, { packet_id: v });
+    onDone?.();
+  };
+
+  return (
+    <div style={{
+      padding: "14px 16px", borderRadius: 12,
+      background: saved ? C.greenLight : C.amberLight, border: `1.5px solid ${saved ? C.greenBorder : C.amberBorder}`,
+    }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+        <QrCodeScannerIcon style={{ fontSize: 19, color: saved ? C.green : C.amber }} />
+        <span style={{ fontSize: 14, fontWeight: 800, color: C.gray900 }}>
+          {saved ? "Packet ID saved" : "Scan the packet ID on this parcel"}
+        </span>
+        {saved && <CheckCircleIcon style={{ fontSize: 18, color: C.green }} />}
+      </div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        {isMobile && (
+          <button onClick={onScanPacket} disabled={saving} style={{ ...btn("secondary", "md"), flex: "1 1 100%" }}>
+            <PhotoCameraIcon style={{ fontSize: 18, verticalAlign: "-4px" }} />&nbsp;{saved ? "Scan again" : "Scan packet"}
+          </button>
+        )}
+        <input
+          ref={input}
+          value={packet}
+          onChange={(e) => setPacket(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") save(); }}
+          placeholder={isMobile ? "…or type it" : "Scan with the machine, or type it, then press Enter"}
+          autoComplete="off" spellCheck={false}
+          style={{ ...S.inp, flex: "1 1 200px", minWidth: 0, fontFamily: "monospace", fontWeight: 700, fontSize: 15, background: C.white }}
+        />
+        <button onClick={save} disabled={saving || !packet.trim()}
+          style={{ ...btn("primary", "md"), opacity: saving || !packet.trim() ? 0.5 : 1 }}>
+          Save
+        </button>
+        {saved && (
+          <button onClick={() => onPatch(row.id, { packet_id: "" })} disabled={saving} style={btn("ghost", "md")}>Clear</button>
+        )}
+      </div>
+      {dup.length > 0 && (
+        <div style={{ marginTop: 9, fontSize: 12.5, color: C.red, fontWeight: 700 }}>
+          ⚠ This packet ID is already saved on {dup.join(", ")} — every parcel's ID is different, so check you scanned the right one.
+        </div>
+      )}
+      {row.packet_check === "MISMATCH" && (
+        <div style={{ marginTop: 9, fontSize: 12.5, color: C.red, fontWeight: 700 }}>
+          This packet doesn't match what we shipped for this sub-order — check you're holding the right parcel.
+        </div>
+      )}
+      {row.packet_check === "MATCH" && (
+        <div style={{ marginTop: 9, fontSize: 12.5, color: C.green, fontWeight: 700 }}>Matches what we shipped — good evidence for the claim.</div>
+      )}
+      {!saved && (
+        <div style={{ marginTop: 9, fontSize: 12, color: "#92400E", lineHeight: 1.5 }}>
+          Meesho rejects claims when the packet's order / AWB isn't visible. Saving it here keeps the proof with this return.
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** The decision: is a claim needed, and where is it up to. */
+function ClaimPanel({ row, onPatch, saving, onScanPacket, justFlagged, onPacketDone, isMobile }) {
+  const [amount, setAmount] = useState(row.claim_amount ?? "");
+  const [reference, setReference] = useState(row.claim_reference ?? "");
+  const [notes, setNotes] = useState(row.claim_notes ?? "");
+  useEffect(() => {
+    setAmount(row.claim_amount ?? ""); setReference(row.claim_reference ?? ""); setNotes(row.claim_notes ?? "");
+  }, [row.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const cs = row.claim_status;
+  const decided = ["RAISED", "APPROVED", "REJECTED"].includes(cs);
+  const big = isMobile ? "lg" : "lg";
+
+  if (cs === "UNREVIEWED") {
+    return (
+      <div>
+        <div style={{ fontSize: 14, fontWeight: 800, color: C.gray900, marginBottom: 10 }}>Is a claim required?</div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+          <button onClick={() => onPatch(row.id, { claim_status: "REQUIRED" }, { flagged: true })} disabled={saving}
+            style={{ ...btn("primary", big), padding: "16px 10px", fontSize: 15 }}>
+            Claim required
+          </button>
+          <button onClick={() => onPatch(row.id, { claim_status: "NOT_REQUIRED" })} disabled={saving}
+            style={{ ...btn("ghost", big), padding: "16px 10px", fontSize: 15 }}>
+            No claim
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (cs === "REQUIRED") {
+    const details = { claim_amount: amount === "" ? null : amount, claim_reference: reference, claim_notes: notes };
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <PacketStep row={row} onPatch={onPatch} saving={saving} onScanPacket={onScanPacket}
+          autoFocus={justFlagged} onDone={onPacketDone} isMobile={isMobile} />
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 700, color: C.gray700, marginBottom: 8 }}>Claim details <span style={{ fontWeight: 400, color: C.gray400 }}>(optional — fill in once raised on Meesho)</span></div>
+          <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr 1fr" : "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 }}>
+            <div>
+              <label style={S.label}>Amount (₹)</label>
+              <input value={amount} onChange={(e) => setAmount(e.target.value)} type="number" step="0.01" style={S.inp} />
+            </div>
+            <div>
+              <label style={S.label}>Meesho ticket ref</label>
+              <input value={reference} onChange={(e) => setReference(e.target.value)} style={S.inp} />
+            </div>
+            <div style={{ gridColumn: "1 / -1" }}>
+              <label style={S.label}>Notes</label>
+              <input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="What was wrong, what proof was attached…" style={S.inp} />
             </div>
           </div>
-        )}
+        </div>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+          <button onClick={() => onPatch(row.id, { claim_status: "RAISED", ...details })} disabled={saving}
+            style={{ ...btn("success", "lg"), flex: isMobile ? "1 1 100%" : "none" }}>
+            <CheckCircleIcon style={{ fontSize: 17, verticalAlign: "-3px" }} />&nbsp;Claim raised on Meesho
+          </button>
+          <button onClick={() => onPatch(row.id, details)} disabled={saving} style={btn("ghostOrange", "md")}>Save details</button>
+          <button onClick={() => onPatch(row.id, { claim_status: "NOT_REQUIRED" })} disabled={saving} style={btn("ghost", "md")}>Actually, no claim</button>
+        </div>
+      </div>
+    );
+  }
 
-        <div style={{ gridColumn: "1 / -1", display: "flex", gap: 14, flexWrap: "wrap" }}>
-          {row.tracking_link && (
-            <a href={row.tracking_link} target="_blank" rel="noreferrer"
-              style={{ fontSize: 12, color: C.blue, fontWeight: 600, textDecoration: "none", display: "flex", alignItems: "center", gap: 4 }}>
-              Track return <OpenInNewIcon style={{ fontSize: 13 }} />
-            </a>
+  if (decided) {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 12 }}>
+          <Field label="Claim amount" value={row.claim_amount != null ? fmt(row.claim_amount) : null} mono />
+          <Field label="Reference" value={row.claim_reference} mono />
+          <Field label="Raised" value={row.claim_raised_at ? new Date(row.claim_raised_at).toLocaleDateString("en-IN") : null} />
+          <Field label="Packet ID" value={row.packet_id} mono />
+        </div>
+        {row.claim_notes && <Field label="Notes" value={row.claim_notes} />}
+        {!row.packet_id && (
+          <PacketStep row={row} onPatch={onPatch} saving={saving} onScanPacket={onScanPacket}
+            onDone={onPacketDone} isMobile={isMobile} />
+        )}
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+          {cs === "RAISED" && (
+            <>
+              <button onClick={() => onPatch(row.id, { claim_status: "APPROVED" })} disabled={saving} style={btn("success", "md")}>Mark approved</button>
+              <button onClick={() => onPatch(row.id, { claim_status: "REJECTED" })} disabled={saving} style={btn("danger", "md")}>Mark rejected</button>
+            </>
           )}
-          {row.proof_of_delivery && (
-            <a href={row.proof_of_delivery} target="_blank" rel="noreferrer"
-              style={{ fontSize: 12, color: C.blue, fontWeight: 600, textDecoration: "none", display: "flex", alignItems: "center", gap: 4 }}>
-              Proof of delivery <OpenInNewIcon style={{ fontSize: 13 }} />
-            </a>
+          <button onClick={() => onPatch(row.id, { claim_status: "REQUIRED" })} disabled={saving} style={btn("ghost", "md")}>Reopen</button>
+        </div>
+      </div>
+    );
+  }
+
+  // NOT_REQUIRED
+  return (
+    <button onClick={() => onPatch(row.id, { claim_status: "REQUIRED" }, { flagged: true })} disabled={saving} style={btn("ghostOrange", "md")}>
+      Claim is needed after all
+    </button>
+  );
+}
+
+/** Product-in-hand check and every other detail, tucked away until wanted. */
+function MoreDetails({ row, onPatch, saving }) {
+  const [open, setOpen] = useState(false);
+  const ctx = row.order_context || {};
+  const shipped = ctx.label;
+  const payments = ctx.payments;
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <span style={{ fontSize: 13, fontWeight: 700, color: C.gray700 }}>Product in hand:</span>
+        <button onClick={() => onPatch(row.id, { verify_result: "MATCH" })} disabled={saving}
+          style={btn(row.verify_result === "MATCH" ? "success" : "ghost", "sm")}>✓ Correct</button>
+        <button onClick={() => onPatch(row.id, { verify_result: "MISMATCH" })} disabled={saving}
+          style={btn(row.verify_result === "MISMATCH" ? "danger" : "ghost", "sm")}>✗ Wrong / damaged</button>
+      </div>
+      <button onClick={() => setOpen((o) => !o)}
+        style={{ marginTop: 12, background: "none", border: "none", padding: 0, cursor: "pointer", color: C.blue, fontWeight: 700, fontSize: 12.5, fontFamily: "inherit" }}>
+        {open ? "▾ Hide all details" : "▸ All details"}
+      </button>
+      {open && (
+        <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 14 }}>
+          <Field label="Sub-order" value={row.suborder_no} mono />
+          <Field label="Order no" value={row.order_no} mono />
+          <Field label="AWB" value={row.awb_number} mono />
+          <Field label="Courier" value={row.courier_partner} />
+          <Field label="Returned on" value={row.delivered_date} mono />
+          <Field label="Dispatched on" value={row.dispatch_date} mono />
+          <Field label="Category" value={row.category} />
+          <Field label="Product" value={row.product_name} />
+          {shipped && <Field label="Label SKU / qty" value={`${shipped.sku || "—"} × ${shipped.qty ?? "—"}`} mono />}
+          {shipped && <Field label="Customer" value={[shipped.customer_name, shipped.customer_city].filter(Boolean).join(" · ")} />}
+          {payments && <Field label="Net settlement" value={fmt(payments.net_settlement)} mono />}
+          {payments && <Field label="Return shipping" value={fmt(payments.return_shipping_charge)} mono />}
+          <div style={{ gridColumn: "1 / -1", display: "flex", gap: 14, flexWrap: "wrap" }}>
+            {row.tracking_link && (
+              <a href={row.tracking_link} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: C.blue, fontWeight: 600, textDecoration: "none" }}>
+                Track return <OpenInNewIcon style={{ fontSize: 12, verticalAlign: "-2px" }} />
+              </a>
+            )}
+            {row.proof_of_delivery && (
+              <a href={row.proof_of_delivery} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: C.blue, fontWeight: 600, textDecoration: "none" }}>
+                Proof of delivery <OpenInNewIcon style={{ fontSize: 12, verticalAlign: "-2px" }} />
+              </a>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** One return, in full — shared by the phone result screen and the desktop side panel. */
+function ReturnDetail({ row, onPatch, saving, onScanPacket, justFlagged, onPacketDone, isMobile, onClose }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+      {onClose && (
+        <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: -10 }}>
+          <button onClick={onClose} title="Close" style={{ background: "none", border: "none", cursor: "pointer", color: C.gray400, padding: 0 }}>
+            <CloseIcon style={{ fontSize: 20 }} />
+          </button>
+        </div>
+      )}
+      <ReturnSummary row={row} compact={isMobile} />
+      <div style={{ borderTop: `1px solid ${C.gray100}`, paddingTop: 16 }}>
+        <ClaimPanel row={row} onPatch={onPatch} saving={saving} onScanPacket={onScanPacket}
+          justFlagged={justFlagged} onPacketDone={onPacketDone} isMobile={isMobile} />
+      </div>
+      <div style={{ borderTop: `1px solid ${C.gray100}`, paddingTop: 14 }}>
+        <MoreDetails row={row} onPatch={onPatch} saving={saving} />
+      </div>
+    </div>
+  );
+}
+
+// ── Shared behaviour: lookup, save, list ──────────────────────────────────────
+
+function useReturnsDesk() {
+  const [active, setActive] = useState(null);
+  const [matches, setMatches] = useState([]);
+  const [saving, setSaving] = useState(false);
+  const [looking, setLooking] = useState(false);
+  const [error, setError] = useState(null);
+  const [justFlagged, setJustFlagged] = useState(null);   // id of the return just marked "claim required"
+  const [recent, setRecent] = useState([]);                // this session's scans, newest first
+
+  const lookup = async (codeRaw) => {
+    const code = (codeRaw ?? "").trim();
+    if (!code) return { found: false };
+    setLooking(true); setError(null);
+    try {
+      const res = await fetch(`${API}/returns/lookup/?q=${encodeURIComponent(code)}`);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.found) {
+        setError(data.message || data.error || "No matching return found.");
+        return { found: false };
+      }
+      setMatches(data.matches);
+      setActive(data.matches[0]);
+      setJustFlagged(null);
+      setRecent((prev) => [data.matches[0], ...prev.filter((r) => r.id !== data.matches[0].id)].slice(0, 12));
+      return { found: true, row: data.matches[0], data };
+    } catch {
+      setError("Network error — could not look that up.");
+      return { found: false };
+    } finally {
+      setLooking(false);
+    }
+  };
+
+  // A row opened from the list comes without the shipped/settlement context —
+  // fetch the full record so it reads exactly as a scan would.
+  const open = async (row) => {
+    setError(null); setJustFlagged(null); setActive(row); setMatches([row]);
+    try {
+      const res = await fetch(`${API}/returns/${row.id}/`);
+      if (!res.ok) return;
+      const data = await res.json();
+      setActive((p) => (p?.id === data.id ? data : p));
+      setMatches((p) => p.map((m) => (m.id === data.id ? data : m)));
+    } catch { /* the list row is already on screen */ }
+  };
+
+  const patch = async (id, payload, opts = {}) => {
+    setSaving(true);
+    try {
+      const res = await fetch(`${API}/returns/${id}/`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { setError(data.error || "Could not save."); return null; }
+      setActive(data);
+      setMatches((p) => p.map((m) => (m.id === data.id ? data : m)));
+      setRecent((p) => p.map((m) => (m.id === data.id ? { ...m, ...data } : m)));
+      if (opts.flagged) setJustFlagged(data.id);
+      return data;
+    } catch {
+      setError("Network error — could not save.");
+      return null;
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const clear = () => { setActive(null); setMatches([]); setJustFlagged(null); };
+  return { active, setActive, matches, saving, looking, error, setError, justFlagged, recent, lookup, open, patch, clear };
+}
+
+// ── Phone ─────────────────────────────────────────────────────────────────────
+
+function MobileReturns({ desk }) {
+  const { active, matches, setActive, saving, looking, error, setError, justFlagged, recent, lookup, open, patch, clear } = desk;
+  const [camera, setCamera] = useState(false);
+  const [packetFor, setPacketFor] = useState(null);
+  const [typed, setTyped] = useState("");
+
+  const scanned = async (code) => {
+    setCamera(false);
+    await lookup(code);
+  };
+  const flagAndScan = async (id, payload, opts) => {
+    const data = await patch(id, payload, opts);
+    // Claim required → straight into scanning the packet id.
+    if (data && payload.claim_status === "REQUIRED" && !data.packet_id) setPacketFor(id);
+    return data;
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16, paddingBottom: active ? 84 : 0 }}>
+      {camera && (
+        <BarcodeScanner title="Scan the return" hint="Scan the label on the returned parcel" busy={looking}
+          onDetected={scanned} onClose={() => setCamera(false)} />
+      )}
+      {packetFor && (
+        <BarcodeScanner title="Scan the packet ID" hint="The order / AWB on the parcel's own waybill"
+          onDetected={(code) => { const id = packetFor; setPacketFor(null); patch(id, { packet_id: code }); }}
+          onClose={() => setPacketFor(null)} />
+      )}
+
+      {!active && (
+        <>
+          <div>
+            <h1 style={{ fontSize: 20, fontWeight: 800, color: C.gray900 }}>Returns</h1>
+            <p style={{ fontSize: 12.5, color: C.gray500, marginTop: 3 }}>Scan a returned parcel to see what it is.</p>
+          </div>
+          <button onClick={() => { setError(null); setCamera(true); }}
+            style={{ ...btn("primary", "lg"), padding: "22px 20px", fontSize: 18, borderRadius: 14, width: "100%" }}>
+            <PhotoCameraIcon style={{ fontSize: 26, verticalAlign: "-7px" }} />&nbsp;Scan return
+          </button>
+          <div style={{ display: "flex", gap: 8 }}>
+            <input value={typed} onChange={(e) => setTyped(e.target.value)} placeholder="…or type AWB / sub-order"
+              onKeyDown={(e) => { if (e.key === "Enter") { lookup(typed).then((r) => r.found && setTyped("")); } }}
+              autoComplete="off" style={{ ...S.inp, flex: 1, fontFamily: "monospace" }} />
+            <button onClick={() => lookup(typed).then((r) => r.found && setTyped(""))} disabled={looking || !typed.trim()}
+              style={{ ...btn("ghostOrange", "md"), opacity: looking || !typed.trim() ? 0.5 : 1 }}>Find</button>
+          </div>
+          {error && (
+            <div style={{ padding: "11px 14px", borderRadius: 10, background: C.redLight, border: `1px solid ${C.redBorder}`, color: C.red, fontSize: 13, fontWeight: 600 }}>
+              {error}
+            </div>
+          )}
+          {recent.length > 0 && (
+            <div>
+              <Label>Scanned this session</Label>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 6 }}>
+                {recent.map((r) => (
+                  <div key={r.id} onClick={() => open(r)}
+                    style={{ ...S.card, padding: "10px 12px", display: "flex", gap: 10, alignItems: "center", cursor: "pointer" }}>
+                    <Photo url={r.image_url} size={44} radius={8} />
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 13, color: C.gray900, wordBreak: "break-all" }}>{r.sku} × {r.qty}</div>
+                      <div style={{ fontSize: 11.5, color: C.gray500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.return_reason || "No reason"}</div>
+                    </div>
+                    <Tag variant={CLAIM_TAG[r.claim_status]}>{CLAIM_LABELS[r.claim_status]}</Tag>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </>
+      )}
+
+      {active && (
+        <>
+          {matches.length > 1 && (
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              {matches.map((m) => (
+                <button key={m.id} onClick={() => setActive(m)}
+                  style={{ ...btn(active.id === m.id ? "primary" : "ghost", "sm"), fontFamily: "monospace" }}>
+                  {m.sku} ×{m.qty}
+                </button>
+              ))}
+            </div>
+          )}
+          {error && (
+            <div style={{ padding: "10px 14px", borderRadius: 10, background: C.redLight, border: `1px solid ${C.redBorder}`, color: C.red, fontSize: 13, fontWeight: 600 }}>
+              {error}
+            </div>
+          )}
+          <div style={{ ...S.card, padding: "16px 14px" }}>
+            <ReturnDetail row={active} isMobile saving={saving} onPatch={flagAndScan}
+              onScanPacket={() => setPacketFor(active.id)} justFlagged={justFlagged === active.id} />
+          </div>
+
+          {/* The one thing to do next, always in reach. */}
+          <div style={{
+            position: "fixed", left: 0, right: 0, bottom: 0, zIndex: 20, padding: "10px 14px calc(10px + env(safe-area-inset-bottom))",
+            background: "rgba(255,255,255,0.97)", borderTop: `1px solid ${C.gray200}`, display: "flex", gap: 10,
+          }}>
+            <button onClick={clear} style={{ ...btn("ghost", "lg"), padding: "14px 16px" }}>Done</button>
+            <button onClick={() => { clear(); setError(null); setCamera(true); }}
+              style={{ ...btn("primary", "lg"), flex: 1, padding: "14px 16px", fontSize: 16 }}>
+              <QrCodeScannerIcon style={{ fontSize: 22, verticalAlign: "-5px" }} />&nbsp;Scan next
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ── Desktop ───────────────────────────────────────────────────────────────────
+
+const FILTERS = [
+  { key: "all",       label: "All",              claim: "",           urgency: "" },
+  { key: "review",    label: "Needs decision",   claim: "",           urgency: "unreviewed" },
+  { key: "required",  label: "Claim required",   claim: "REQUIRED",   urgency: "" },
+  { key: "attention", label: "Closing soon",     claim: "",           urgency: "attention" },
+  { key: "raised",    label: "Raised",           claim: "RAISED",     urgency: "" },
+];
+
+function DesktopReturns({ desk }) {
+  const { range, label: periodLabel } = useDateFilter();
+  const { active, matches, setActive, saving, looking, error, setError, justFlagged, lookup, open, patch, clear } = desk;
+
+  const [query, setQuery] = useState("");
+  const [listQuery, setListQuery] = useState("");
+  const [filter, setFilter] = useState("all");
+  const [rows, setRows] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [stats, setStats] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [page, setPage] = useState(1);
+  const [notFound, setNotFound] = useState(false);
+  const [showUpload, setShowUpload] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [uploadMsg, setUploadMsg] = useState(null);
+  const search = useRef(null);
+  const fileRef = useRef(null);
+
+  const f = FILTERS.find((x) => x.key === filter);
+  // "Closing soon" and "Needs decision" are all-time: an expiring claim must never
+  // be hidden by whichever period the global date bar happens to show.
+  const ignorePeriod = !!f.urgency;
+
+  // The cursor lives in the search box. Anything that could steal it hands it back.
+  const refocus = useCallback(() => setTimeout(() => search.current?.focus(), 0), []);
+  useEffect(() => { refocus(); }, [refocus]);
+
+  // Typing filters the list (after a short pause); Enter looks the code up.
+  useEffect(() => {
+    const t = setTimeout(() => setListQuery(query.trim()), 250);
+    return () => clearTimeout(t);
+  }, [query]);
+  useEffect(() => { setPage(1); }, [listQuery, filter, range.date_from, range.date_to]);
+
+  const fetchList = useCallback(async () => {
+    setLoading(true);
+    try {
+      const p = new URLSearchParams({ page, page_size: PAGE_SIZE });
+      if (listQuery) p.set("q", listQuery);
+      if (f.claim) p.set("claim_status", f.claim);
+      if (f.urgency) p.set("urgency", f.urgency);
+      if (!ignorePeriod) {
+        if (range.date_from) p.set("date_from", range.date_from);
+        if (range.date_to) p.set("date_to", range.date_to);
+      }
+      const res = await fetch(`${API}/returns/?${p}`);
+      const data = await res.json();
+      setRows(data.results || []); setTotal(data.total ?? 0); setStats(data.stats || null);
+    } finally { setLoading(false); }
+  }, [page, listQuery, f.claim, f.urgency, ignorePeriod, range.date_from, range.date_to]);
+  useEffect(() => { fetchList(); }, [fetchList]);
+
+  const onEnter = async () => {
+    const code = query.trim();
+    if (!code) return;
+    setNotFound(false);
+    const r = await lookup(code);
+    if (r.found) {
+      setQuery(""); setListQuery("");     // scanned in: clear, ready for the next parcel
+    } else {
+      setNotFound(true);                  // typed search: keep the text, the list shows partial matches
+    }
+    refocus();
+  };
+
+  const save = async (id, payload, opts) => {
+    const data = await patch(id, payload, opts);
+    fetchList();
+    // After a decision the cursor goes back to the search — except right after
+    // "Claim required", where the packet field takes it for the machine scan.
+    if (!opts?.flagged) refocus();
+    return data;
+  };
+
+  const handleFile = async (file) => {
+    if (!file) return;
+    const form = new FormData(); form.append("file", file);
+    setUploading(true); setUploadMsg(null);
+    try {
+      const res = await fetch(`${API}/returns/upload/`, { method: "POST", body: form });
+      const data = await res.json();
+      setUploadMsg(data.success
+        ? { ok: true, text: `Uploaded — ${data.created} new, ${data.updated} updated, ${data.skipped} skipped.` }
+        : { ok: false, text: data.error || "Upload failed." });
+      if (data.success) fetchList();
+    } catch { setUploadMsg({ ok: false, text: "Network error during upload." }); }
+    finally { setUploading(false); }
+  };
+
+  const counts = {
+    all: stats?.total, review: stats?.unreviewed, required: stats?.claim_required,
+    attention: stats?.needs_attention, raised: stats?.claim_raised,
+  };
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      {/* Header */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+        <div>
+          <h1 style={{ fontSize: 20, fontWeight: 800, color: C.gray900 }}>Returns &amp; Claims</h1>
+          <p style={{ fontSize: 12, color: C.gray400, marginTop: 3 }}>
+            Scan a parcel to see what it is and decide on the claim · {ignorePeriod ? "all time" : periodLabel}
+          </p>
+        </div>
+        <button onClick={() => setShowUpload((s) => !s)} style={btn("ghostOrange", "md")}>
+          <UploadFileIcon style={{ fontSize: 16, verticalAlign: "-3px" }} />&nbsp;{showUpload ? "Hide upload" : "Upload returns sheet"}
+        </button>
+      </div>
+
+      {showUpload && (
+        <div>
+          <div onClick={() => fileRef.current?.click()}
+            onDragOver={(e) => e.preventDefault()}
+            onDrop={(e) => { e.preventDefault(); handleFile(e.dataTransfer.files[0]); }}
+            style={{ border: `2px dashed ${C.gray200}`, borderRadius: 12, padding: "20px", background: C.gray50, textAlign: "center", cursor: "pointer" }}>
+            <input ref={fileRef} type="file" accept=".csv,.xlsx,.xls" style={{ display: "none" }} onChange={(e) => handleFile(e.target.files[0])} />
+            {uploading ? <CircularProgress size={20} style={{ color: C.orange }} /> : (
+              <span style={{ fontSize: 13, color: C.gray600, fontWeight: 600 }}>
+                Drop the Meesho “Returns → Completed/Delivered” export here, or click to browse — re-uploading is safe, claim work is never overwritten.
+              </span>
+            )}
+          </div>
+          {uploadMsg && (
+            <div style={{ marginTop: 10, padding: "10px 14px", borderRadius: 10, fontSize: 13, fontWeight: 600,
+              background: uploadMsg.ok ? C.greenLight : C.redLight, color: uploadMsg.ok ? C.green : C.red,
+              border: `1px solid ${uploadMsg.ok ? C.greenBorder : C.redBorder}` }}>{uploadMsg.text}</div>
+          )}
+        </div>
+      )}
+
+      {/* The one search box — scan into it, or type to find */}
+      <div style={{ ...S.card, padding: "14px 16px", borderTop: `3px solid ${C.orange}` }}>
+        <div style={{ position: "relative" }}>
+          <SearchIcon style={{ position: "absolute", left: 14, top: "50%", transform: "translateY(-50%)", color: C.orange, fontSize: 24 }} />
+          <input
+            ref={search}
+            value={query}
+            onChange={(e) => { setQuery(e.target.value); setNotFound(false); setError(null); }}
+            onKeyDown={(e) => { if (e.key === "Enter") onEnter(); if (e.key === "Escape") { setQuery(""); setNotFound(false); } }}
+            placeholder="Scan a return, or type an AWB / sub-order / packet ID / SKU / product…"
+            autoComplete="off" spellCheck={false}
+            style={{ ...S.inp, width: "100%", boxSizing: "border-box", fontSize: 20, fontFamily: "monospace", fontWeight: 700,
+              padding: "14px 18px 14px 50px", background: C.orangeLight, borderColor: C.orangeBorder }}
+          />
+          {looking && <CircularProgress size={18} style={{ position: "absolute", right: 16, top: 16, color: C.orange }} />}
+        </div>
+        {(notFound || error) && (
+          <div style={{ marginTop: 10, fontSize: 13, fontWeight: 600, color: notFound ? C.amber : C.red }}>
+            {notFound ? "No exact match for that code — showing the closest results below." : error}
+          </div>
+        )}
+      </div>
+
+      {/* Filters */}
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+        {FILTERS.map((x) => {
+          const on = filter === x.key;
+          const n = counts[x.key];
+          const hot = x.key === "attention" && n > 0;
+          return (
+            <button key={x.key} onClick={() => { setFilter(x.key); refocus(); }}
+              style={{
+                padding: "7px 14px", borderRadius: 20, fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
+                border: `1.5px solid ${on ? C.orange : hot ? C.redBorder : C.gray200}`,
+                background: on ? C.orange : hot ? C.redLight : C.white, color: on ? "#fff" : hot ? C.red : C.gray600,
+              }}>
+              {x.label}{n != null ? ` · ${n}` : ""}
+            </button>
+          );
+        })}
+        {(stats?.expired ?? 0) > 0 && (
+          <span style={{ fontSize: 12, color: C.red, fontWeight: 600, marginLeft: 6 }}>{stats.expired} claim window(s) missed</span>
+        )}
+      </div>
+
+      {/* List + selected return */}
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(400px, 460px)", gap: 18, alignItems: "start" }}>
+        <div style={{ ...S.card, padding: 0, overflow: "hidden" }}>
+          {loading && !rows.length ? (
+            <div style={{ display: "flex", justifyContent: "center", padding: 44 }}><CircularProgress style={{ color: C.orange }} /></div>
+          ) : rows.length === 0 ? (
+            <div style={{ textAlign: "center", padding: 44, color: C.gray400, fontSize: 13 }}>
+              {stats?.total ? "No returns match." : "No returns yet — upload the Meesho returns export to get started."}
+            </div>
+          ) : (
+            rows.map((r) => {
+              const on = active?.id === r.id;
+              const win = windowText(r);
+              return (
+                <div key={r.id} onClick={() => { open(r); refocus(); }}
+                  style={{
+                    display: "flex", gap: 12, alignItems: "center", padding: "11px 16px", cursor: "pointer",
+                    borderBottom: `1px solid ${C.gray100}`, background: on ? C.orangeLight : C.white,
+                    borderLeft: `4px solid ${on ? C.orange : "transparent"}`,
+                  }}>
+                  <Photo url={r.image_url} size={52} radius={8} />
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                      <span style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 14, color: C.gray900, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {r.sku || "—"}
+                      </span>
+                      <span style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 13, color: C.orange }}>×{r.qty}</span>
+                    </div>
+                    <div style={{ fontSize: 12, color: C.gray500, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {r.return_reason || "No reason on the sheet"}
+                    </div>
+                    <div style={{ fontSize: 11, color: C.gray400, fontFamily: "monospace", marginTop: 2 }}>
+                      {r.suborder_no}{r.packet_id ? ` · packet ${r.packet_id}` : ""}
+                    </div>
+                  </div>
+                  <div style={{ textAlign: "right", flexShrink: 0 }}>
+                    <Tag variant={CLAIM_TAG[r.claim_status]}>{CLAIM_LABELS[r.claim_status]}</Tag>
+                    {win && <div style={{ fontSize: 11, fontWeight: 700, marginTop: 4, color: URGENCY_COLOR[r.claim_urgency] || C.gray500 }}>{win}</div>}
+                  </div>
+                </div>
+              );
+            })
+          )}
+          {total > PAGE_SIZE && (
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 16px", borderTop: `1px solid ${C.gray100}` }}>
+              <span style={{ fontSize: 12, color: C.gray400 }}>{(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, total)} of {total}</span>
+              <div style={{ display: "flex", gap: 6 }}>
+                <button onClick={() => setPage((p) => p - 1)} disabled={page === 1} style={{ ...btn("ghost", "sm"), opacity: page === 1 ? 0.4 : 1 }}>← Prev</button>
+                <button onClick={() => setPage((p) => p + 1)} disabled={page >= totalPages} style={{ ...btn("ghost", "sm"), opacity: page >= totalPages ? 0.4 : 1 }}>Next →</button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div style={{ position: "sticky", top: 12 }}>
+          {active ? (
+            <div style={{ ...S.card, padding: "18px 20px", maxHeight: "calc(100vh - 40px)", overflowY: "auto" }}>
+              {matches.length > 1 && (
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 }}>
+                  {matches.map((m) => (
+                    <button key={m.id} onClick={() => setActive(m)}
+                      style={{ ...btn(active.id === m.id ? "primary" : "ghost", "sm"), fontFamily: "monospace" }}>{m.sku} ×{m.qty}</button>
+                  ))}
+                </div>
+              )}
+              <ReturnDetail row={active} isMobile={false} saving={saving} onPatch={save}
+                onScanPacket={() => {}} justFlagged={justFlagged === active.id}
+                onPacketDone={refocus} onClose={() => { clear(); refocus(); }} />
+            </div>
+          ) : (
+            <div style={{ ...S.card, padding: "44px 24px", textAlign: "center", color: C.gray400 }}>
+              <QrCodeScannerIcon style={{ fontSize: 44, color: C.gray300 }} />
+              <div style={{ fontSize: 15, fontWeight: 700, color: C.gray600, marginTop: 8 }}>Scan a return to see it here</div>
+              <div style={{ fontSize: 12.5, marginTop: 4 }}>or pick one from the list</div>
+            </div>
           )}
         </div>
       </div>
@@ -573,575 +867,7 @@ function ReturnCard({ row, onPatch, saving, onClose, onScanPacket }) {
 
 // ── Tab ───────────────────────────────────────────────────────────────────────
 export function ReturnScanTab() {
-  const { range, label: periodLabel } = useDateFilter();
-
-  const [scan, setScan]           = useState("");
-  const [scanning, setScanning]   = useState(false);
-  const [scanError, setScanError] = useState(null);
-  const [matches, setMatches]     = useState([]);   // >1 when an order no covers several sub-orders
-  const [active, setActive]       = useState(null);
-  const [saving, setSaving]       = useState(false);
-  const scanRef                   = useRef(null);
-
-  const [rows, setRows]     = useState([]);
-  const [total, setTotal]   = useState(0);
-  const [stats, setStats]   = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [page, setPage]     = useState(1);
-  const [search, setSearch] = useState("");
-  const [claimFilter, setClaimFilter]     = useState("");   // "" | OPEN | REQUIRED | RAISED | …
-  const [urgencyFilter, setUrgencyFilter] = useState("");   // "" | attention | expired | unreviewed
-
-  const [cameraOpen, setCameraOpen] = useState(false);
-  // A second, single-shot camera for capturing the packet on the parcel in hand.
-  // Kept separate from the main scanner so a packet scan can never be mistaken
-  // for "look up the next return".
-  const [packetCameraFor, setPacketCameraFor] = useState(null);
-  const [feed, setFeed]             = useState([]);
-  const feedSeq                     = useRef(0);
-  const [showUpload, setShowUpload] = useState(false);
-  const [uploading, setUploading]   = useState(false);
-  const [uploadMsg, setUploadMsg]   = useState(null);
-  const [dragging, setDragging]     = useState(false);
-  const fileRef = useRef(null);
-
-  // An urgency filter is deliberately all-time: a claim about to expire must
-  // never be hidden by whatever period is selected in the global date bar.
-  const ignorePeriod = !!urgencyFilter;
-
-  const fetchList = useCallback(async () => {
-    setLoading(true);
-    try {
-      const params = new URLSearchParams();
-      params.set("page", page);
-      params.set("page_size", PAGE_SIZE);
-      if (search.trim())  params.set("q", search.trim());
-      if (claimFilter)    params.set("claim_status", claimFilter);
-      if (urgencyFilter)  params.set("urgency", urgencyFilter);
-      if (!ignorePeriod) {
-        if (range.date_from) params.set("date_from", range.date_from);
-        if (range.date_to)   params.set("date_to", range.date_to);
-      }
-      const res  = await fetch(`${API}/returns/?${params}`);
-      const data = await res.json();
-      setRows(data.results || []);
-      setTotal(data.total ?? 0);
-      setStats(data.stats || null);
-    } finally {
-      setLoading(false);
-    }
-  }, [page, search, claimFilter, urgencyFilter, ignorePeriod, range.date_from, range.date_to]);
-
-  useEffect(() => { fetchList(); }, [fetchList]);
-  useEffect(() => { setPage(1); }, [search, claimFilter, urgencyFilter, range.date_from, range.date_to]);
-  useEffect(() => { scanRef.current?.focus(); }, []);
-
-  /** One line in the in-camera feed, so continuous scanning needs no glancing away. */
-  const pushFeed = (entry) =>
-    setFeed((prev) => [{ id: ++feedSeq.current, ...entry }, ...prev].slice(0, 30));
-
-  const doLookup = async (codeRaw) => {
-    const code = (codeRaw ?? "").trim();
-    if (!code) return;
-    setScanning(true);
-    setScanError(null);
-    try {
-      const res  = await fetch(`${API}/returns/lookup/?q=${encodeURIComponent(code)}`);
-      const data = await res.json();
-      if (!res.ok || !data.found) {
-        setMatches([]);
-        setActive(null);
-        const msg = data.message || data.error || "No matching return found.";
-        setScanError(msg);
-        pushFeed({ code, kind: "err", title: "No matching return", lines: [msg] });
-      } else {
-        setMatches(data.matches);
-        setActive(data.matches[0]);
-        setScan("");
-
-        // Summarise the verdict in the camera: what came back, and whether a
-        // claim is owed — the two things that decide what happens to the parcel.
-        const m = data.matches[0];
-        const owed = m.claim_status === "UNREVIEWED" || m.claim_status === "REQUIRED";
-        const urgent = ["warning", "last_day", "expired"].includes(m.claim_urgency);
-        const lines = [`${m.sku || "unknown SKU"} × ${m.qty}`, CLAIM_LABELS[m.claim_status]];
-        if (m.days_left != null && owed) {
-          lines.push(m.days_left < 0
-            ? `Claim window missed by ${Math.abs(m.days_left)}d`
-            : m.days_left === 0 ? "TODAY is the last day to claim"
-            : `${m.days_left}d left to claim`);
-        }
-        if (data.cross_business) lines.push(`◈ belongs to ${data.business_name}`);
-        if (data.matches.length > 1) lines.push(`${data.matches.length} sub-orders match — pick one below`);
-        pushFeed({
-          code: m.suborder_no,
-          kind: urgent && owed ? "warn" : "ok",
-          title: owed ? "Needs a claim decision" : "Found",
-          lines,
-        });
-      }
-    } catch {
-      setScanError("Network error — could not look up that code.");
-      pushFeed({ code, kind: "err", title: "Network error", lines: ["Could not look up that code."] });
-    } finally {
-      setScanning(false);
-      // Hand focus straight back so the next parcel can be scanned immediately.
-      setTimeout(() => scanRef.current?.focus(), 0);
-    }
-  };
-
-  // Table rows come from the list endpoint, which omits the shipped/settlement
-  // cross-check context — refetch the single row so clicking a row shows
-  // exactly what scanning it would.
-  const loadRow = async (row) => {
-    setScanError(null);
-    setActive(row);
-    setMatches([row]);
-    try {
-      const res = await fetch(`${API}/returns/${row.id}/`);
-      if (!res.ok) return;
-      const data = await res.json();
-      setActive(prev => (prev?.id === data.id ? data : prev));
-      setMatches(prev => prev.map(m => (m.id === data.id ? data : m)));
-    } catch { /* the list row is already shown — context just stays absent */ }
-  };
-
-  const patchClaim = async (id, payload) => {
-    setSaving(true);
-    try {
-      const res  = await fetch(`${API}/returns/${id}/`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setScanError(data.error || "Could not save.");
-        return;
-      }
-      setActive(data);
-      setMatches(prev => prev.map(m => (m.id === data.id ? data : m)));
-      fetchList();
-    } catch {
-      setScanError("Network error — could not save.");
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const handleFile = async (file) => {
-    if (!file) return;
-    const form = new FormData();
-    form.append("file", file);
-    setUploading(true);
-    setUploadMsg(null);
-    try {
-      const res  = await fetch(`${API}/returns/upload/`, { method: "POST", body: form });
-      const data = await res.json();
-      if (data.success) {
-        const extra = data.without_delivered_date
-          ? ` ${data.without_delivered_date} row(s) had no delivered date — no claim window for those.`
-          : "";
-        setUploadMsg({
-          type: "success",
-          text: `Uploaded — ${data.created} new, ${data.updated} updated, ${data.skipped} skipped.${extra}`,
-        });
-        fetchList();
-      } else {
-        setUploadMsg({ type: "error", text: data.error || "Upload failed." });
-      }
-    } catch {
-      setUploadMsg({ type: "error", text: "Network error during upload." });
-    } finally {
-      setUploading(false);
-    }
-  };
-
-  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
-  const attention  = stats?.needs_attention ?? 0;
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 22 }}>
-
-      {/* ── Camera scanner overlay ──
-          Continuous: working through a stack of returned parcels means scan,
-          read the verdict, set it aside, scan the next — closing the camera each
-          time made that four taps per parcel. The feed carries the verdict. */}
-      {cameraOpen && (
-        <BarcodeScanner
-          continuous
-          title="Scan returns"
-          hint="Scan each returned parcel — verdicts appear below"
-          results={feed}
-          busy={scanning}
-          onDetected={(code) => doLookup(code)}
-          onClose={() => setCameraOpen(false)}
-        />
-      )}
-
-      {/* ── Packet capture: single-shot, so it closes and shows the match ── */}
-      {packetCameraFor && (
-        <BarcodeScanner
-          title="Scan the packet on this parcel"
-          hint="The order / AWB printed on the reverse waybill"
-          onDetected={(code) => {
-            setPacketCameraFor(null);
-            patchClaim(packetCameraFor, { packet_id: code });
-          }}
-          onClose={() => setPacketCameraFor(null)}
-        />
-      )}
-
-      {/* ── Header ── */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
-        <div>
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <KeyboardReturnIcon style={{ color: C.orange, fontSize: 22 }} />
-            <h1 style={{ fontSize: 20, fontWeight: 800, color: C.gray800 }}>Returns Received &amp; Claims</h1>
-          </div>
-          <p style={{ fontSize: 12, color: C.gray400, marginTop: 4 }}>
-            Scan a returned parcel to verify it, then track the 7-day claim window · period: {periodLabel}
-          </p>
-        </div>
-        <button onClick={() => setShowUpload(s => !s)} style={btn("ghostOrange", "md")}>
-          <UploadFileIcon style={{ fontSize: 16, verticalAlign: "-3px" }} />
-          &nbsp;{showUpload ? "Hide upload" : "Upload returns sheet"}
-        </button>
-      </div>
-
-      {/* ── Claim-expiry alerts ── */}
-      {stats && (attention > 0 || stats.expired > 0 || stats.unreviewed_expiring > 0) && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          {attention > 0 && (
-            <div style={{
-              padding: "14px 18px", borderRadius: 12,
-              background: C.amberLight, border: `1px solid ${C.amberBorder}`,
-              color: "#92400E", fontSize: 14, fontWeight: 600,
-              display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
-            }}>
-              <WarningAmberIcon style={{ fontSize: 20, color: C.amber }} />
-              <span>
-                {attention} claim{attention === 1 ? " is" : "s are"} flagged but not yet raised, with
-                {stats.last_day > 0 && <strong> {stats.last_day} on the last day</strong>}
-                {stats.last_day > 0 && stats.expiring > 0 && " and"}
-                {stats.expiring > 0 && <strong> {stats.expiring} expiring in 1–2 days</strong>}.
-              </span>
-              <button onClick={() => { setUrgencyFilter("attention"); setClaimFilter(""); }}
-                style={{ ...btn("primary", "sm"), marginLeft: "auto" }}>
-                Show them
-              </button>
-            </div>
-          )}
-          {stats.unreviewed_expiring > 0 && (
-            <div style={{
-              padding: "12px 18px", borderRadius: 12,
-              background: C.blueLight, border: "1px solid #BFDBFE",
-              color: "#1E40AF", fontSize: 13, fontWeight: 600,
-              display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
-            }}>
-              <ErrorOutlineIcon style={{ fontSize: 18, color: C.blue }} />
-              <span>{stats.unreviewed_expiring} received return(s) are at day 5 or later and still not reviewed — decide whether a claim is needed.</span>
-              <button onClick={() => { setUrgencyFilter("unreviewed"); setClaimFilter(""); }}
-                style={{ ...btn("ghost", "sm"), marginLeft: "auto" }}>
-                Review
-              </button>
-            </div>
-          )}
-          {stats.expired > 0 && (
-            <div style={{
-              padding: "12px 18px", borderRadius: 12,
-              background: C.redLight, border: `1px solid ${C.redBorder}`,
-              color: C.red, fontSize: 13, fontWeight: 600,
-              display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
-            }}>
-              <ErrorOutlineIcon style={{ fontSize: 18 }} />
-              <span>{stats.expired} flagged claim(s) passed the 7-day window without being raised.</span>
-              <button onClick={() => { setUrgencyFilter("expired"); setClaimFilter(""); }}
-                style={{ ...btn("ghost", "sm"), marginLeft: "auto" }}>
-                Show
-              </button>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* ── Upload panel ── */}
-      {showUpload && (
-        <div>
-          <div
-            onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
-            onDragLeave={() => setDragging(false)}
-            onDrop={(e) => { e.preventDefault(); setDragging(false); handleFile(e.dataTransfer.files[0]); }}
-            onClick={() => fileRef.current?.click()}
-            style={{
-              border: `2px dashed ${dragging ? C.orange : C.gray200}`,
-              borderRadius: 14, padding: "26px 20px",
-              background: dragging ? C.orangeLight : C.gray50,
-              textAlign: "center", cursor: "pointer",
-            }}
-          >
-            <input ref={fileRef} type="file" accept=".csv,.xlsx,.xls" style={{ display: "none" }}
-              onChange={(e) => handleFile(e.target.files[0])} />
-            {uploading ? (
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10 }}>
-                <CircularProgress size={20} style={{ color: C.orange }} />
-                <span style={{ color: C.gray500, fontSize: 14 }}>Uploading…</span>
-              </div>
-            ) : (
-              <>
-                <UploadFileIcon style={{ fontSize: 34, color: C.gray300, marginBottom: 6 }} />
-                <p style={{ fontSize: 14, fontWeight: 600, color: C.gray600 }}>
-                  Drop the Meesho “Returns → Completed/Delivered” export here, or click to browse
-                </p>
-                <p style={{ fontSize: 12, color: C.gray400, marginTop: 4 }}>
-                  Re-uploading an overlapping export is safe — rows are matched on sub-order + AWB and updated in place, and your claim notes are never overwritten.
-                </p>
-              </>
-            )}
-          </div>
-          {uploadMsg && (
-            <div style={{
-              marginTop: 12, padding: "12px 18px", borderRadius: 10, fontSize: 13, fontWeight: 500,
-              background: uploadMsg.type === "success" ? C.greenLight : C.redLight,
-              color:      uploadMsg.type === "success" ? C.green : C.red,
-              border: `1px solid ${uploadMsg.type === "success" ? C.greenBorder : C.redBorder}`,
-              display: "flex", alignItems: "center", gap: 8,
-            }}>
-              {uploadMsg.type === "success" ? <CheckCircleIcon style={{ fontSize: 18 }} /> : <WarningAmberIcon style={{ fontSize: 18 }} />}
-              {uploadMsg.text}
-              <button onClick={() => setUploadMsg(null)}
-                style={{ marginLeft: "auto", background: "none", border: "none", cursor: "pointer", color: "inherit", fontSize: 16 }}>×</button>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* ── Scanner ── */}
-      <div style={{ ...S.card, borderTop: `4px solid ${C.orange}` }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
-          <QrCodeScannerIcon style={{ color: C.orange, fontSize: 20 }} />
-          <span style={{ fontSize: 14, fontWeight: 700, color: C.gray800 }}>Scan the return label</span>
-          <span style={{ fontSize: 12, color: C.gray400 }}>AWB, sub-order or order number — or type it and press Enter</span>
-        </div>
-
-        {/* Phone camera scan — the primary action on a phone, and a convenience
-            on desktop where a USB/bluetooth scanner types into the box instead. */}
-        <button onClick={() => { setFeed([]); setCameraOpen(true); }}
-          style={{ ...btn("secondary", "lg"), width: "100%", marginBottom: 12, padding: "14px 20px", fontSize: 15 }}>
-          <PhotoCameraIcon style={{ fontSize: 20, verticalAlign: "-5px" }} />
-          &nbsp;Camera — keeps scanning
-        </button>
-
-        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-          <input
-            ref={scanRef}
-            value={scan}
-            onChange={e => setScan(e.target.value)}
-            onKeyDown={e => { if (e.key === "Enter") doLookup(scan); }}
-            placeholder="Waiting for scan…"
-            autoComplete="off"
-            spellCheck={false}
-            style={{
-              ...S.inp, flex: "1 1 200px", minWidth: 0, fontSize: 22, fontFamily: "monospace", fontWeight: 700,
-              padding: "14px 18px", letterSpacing: "0.03em",
-              borderColor: C.orangeBorder, background: C.orangeLight,
-            }}
-          />
-          <button onClick={() => doLookup(scan)} disabled={scanning || !scan.trim()}
-            style={{ ...btn("primary", "lg"), opacity: scanning || !scan.trim() ? 0.5 : 1 }}>
-            {scanning ? <CircularProgress size={16} style={{ color: "#fff" }} /> : "Look up"}
-          </button>
-        </div>
-        {scanError && (
-          <div style={{
-            marginTop: 12, padding: "11px 16px", borderRadius: 10,
-            background: C.redLight, border: `1px solid ${C.redBorder}`, color: C.red,
-            fontSize: 13, fontWeight: 600, display: "flex", alignItems: "center", gap: 8,
-          }}>
-            <ErrorOutlineIcon style={{ fontSize: 17 }} />
-            {scanError}
-            <button onClick={() => setScanError(null)}
-              style={{ marginLeft: "auto", background: "none", border: "none", cursor: "pointer", color: "inherit", fontSize: 16 }}>×</button>
-          </div>
-        )}
-      </div>
-
-      {/* ── Multiple sub-orders behind one scanned order number ── */}
-      {matches.length > 1 && (
-        <div style={{ ...S.card, padding: "14px 20px" }}>
-          <div style={{ ...S.cardTitle, marginBottom: 10 }}>
-            {matches.length} returns match that code — pick one
-          </div>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            {matches.map(m => (
-              <button key={m.id} onClick={() => setActive(m)}
-                style={{ ...btn(active?.id === m.id ? "primary" : "ghost", "sm"), fontFamily: "monospace" }}>
-                {m.suborder_no} · {m.sku} ×{m.qty}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* ── Active return ── */}
-      {active && (
-        <>
-          <ReturnCard
-            row={active}
-            onPatch={patchClaim}
-            saving={saving}
-            onScanPacket={() => setPacketCameraFor(active.id)}
-            onClose={() => { setActive(null); setMatches([]); scanRef.current?.focus(); }}
-          />
-          {/* One tap back into the camera, so working through a stack of
-              parcels is scan → verify → decide → scan next. */}
-          <button onClick={() => setCameraOpen(true)}
-            style={{ ...btn("secondary", "lg"), alignSelf: "flex-start" }}>
-            <PhotoCameraIcon style={{ fontSize: 18, verticalAlign: "-4px" }} />
-            &nbsp;Scan next parcel
-          </button>
-        </>
-      )}
-
-      {/* ── Stats (all-time, click to filter) ── */}
-      {stats && (
-        <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
-          <StatPill label="Returns received" value={stats.total} accent={C.orange}
-            onClick={() => { setUrgencyFilter(""); setClaimFilter(""); }}
-            active={!urgencyFilter && !claimFilter} />
-          <StatPill label="Not reviewed" value={stats.unreviewed} accent={C.gray400}
-            onClick={() => { setUrgencyFilter("unreviewed"); setClaimFilter(""); }}
-            active={urgencyFilter === "unreviewed"} />
-          <StatPill label="Claim required" value={stats.claim_required} accent={C.amber}
-            onClick={() => { setUrgencyFilter(""); setClaimFilter("REQUIRED"); }}
-            active={claimFilter === "REQUIRED"} />
-          <StatPill label="Needs action now" value={stats.needs_attention} accent={C.red}
-            onClick={() => { setUrgencyFilter("attention"); setClaimFilter(""); }}
-            active={urgencyFilter === "attention"} />
-          <StatPill label="Claims raised" value={stats.claim_raised} accent={C.green}
-            onClick={() => { setUrgencyFilter(""); setClaimFilter("RAISED"); }}
-            active={claimFilter === "RAISED"} />
-          <StatPill label="Window missed" value={stats.expired} accent={C.gray600}
-            onClick={() => { setUrgencyFilter("expired"); setClaimFilter(""); }}
-            active={urgencyFilter === "expired"} />
-        </div>
-      )}
-
-      {/* ── Filters ── */}
-      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-        <input value={search} onChange={e => setSearch(e.target.value)}
-          placeholder="Search sub-order / AWB / SKU / product…"
-          style={{ ...S.inp, maxWidth: 320 }} />
-        <select value={claimFilter} onChange={e => { setClaimFilter(e.target.value); setUrgencyFilter(""); }}
-          style={{ ...S.inp, maxWidth: 200 }}>
-          <option value="">All claim states</option>
-          <option value="OPEN">Claim still owed</option>
-          <option value="UNREVIEWED">Not reviewed</option>
-          <option value="REQUIRED">Claim required</option>
-          <option value="RAISED">Claim raised</option>
-          <option value="APPROVED">Claim approved</option>
-          <option value="REJECTED">Claim rejected</option>
-          <option value="NOT_REQUIRED">No claim needed</option>
-        </select>
-        {(urgencyFilter || claimFilter) && (
-          <button onClick={() => { setUrgencyFilter(""); setClaimFilter(""); }} style={btn("ghost", "sm")}>
-            Clear filters
-          </button>
-        )}
-        {ignorePeriod && (
-          <span style={{ fontSize: 12, color: C.gray400 }}>
-            Showing all time — the period filter is ignored so nothing urgent is hidden.
-          </span>
-        )}
-      </div>
-
-      {/* ── Table ── */}
-      <div style={{ ...S.card, padding: 0, overflow: "hidden" }}>
-        {loading ? (
-          <div style={{ display: "flex", justifyContent: "center", padding: 44 }}>
-            <CircularProgress style={{ color: C.orange }} />
-          </div>
-        ) : (
-          <>
-            <div style={{ overflowX: "auto" }}>
-              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-                <thead>
-                  <tr>
-                    {["Returned on", "SKU", "Qty", "Type", "Reason", "Claim", "Claim window", "Sub-order"].map(h => (
-                      <th key={h} style={S.th}>{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {rows.length === 0 ? (
-                    <tr><td colSpan={8} style={{ ...S.td, textAlign: "center", padding: 44, color: C.gray400 }}>
-                      {stats?.total ? "No returns match these filters" : "No returns yet — upload the Meesho returns export to get started"}
-                    </td></tr>
-                  ) : rows.map((r, idx) => {
-                    const meta = URGENCY_META[r.claim_urgency] || URGENCY_META.unknown;
-                    const rowBg = active?.id === r.id ? C.orangeLight : idx % 2 === 0 ? C.white : C.gray50;
-                    return (
-                      <tr key={r.id}
-                        onClick={() => loadRow(r)}
-                        style={{ background: rowBg, cursor: "pointer" }}>
-                        <td style={{ ...S.td, fontFamily: "monospace", fontWeight: 600, whiteSpace: "nowrap" }}>
-                          {r.delivered_date || "—"}
-                        </td>
-                        <td style={{ ...S.td, maxWidth: 220 }}>
-                          <div style={{ fontFamily: "monospace", fontSize: 12, fontWeight: 700, color: C.orange }}>{r.sku || "—"}</div>
-                          <div style={{ fontSize: 11, color: C.gray400, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 210 }}
-                            title={r.product_name}>{r.product_name}</div>
-                        </td>
-                        <td style={{ ...S.td, fontFamily: "monospace", fontWeight: 700 }}>{r.qty}</td>
-                        <td style={S.td}>
-                          <Tag variant={(r.type_of_return || "").toLowerCase().includes("rto") ? "red" : "orange"}>
-                            {(r.type_of_return || "").toLowerCase().includes("rto") ? "RTO" : "Customer"}
-                          </Tag>
-                        </td>
-                        <td style={{ ...S.td, maxWidth: 200, fontSize: 12, color: C.gray600 }}>
-                          <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 190 }}
-                            title={r.return_reason}>{r.return_reason || "—"}</div>
-                        </td>
-                        <td style={S.td}>
-                          <Tag variant={CLAIM_TAG[r.claim_status]}>{CLAIM_LABELS[r.claim_status]}</Tag>
-                        </td>
-                        <td style={{ ...S.td, whiteSpace: "nowrap" }}>
-                          <span style={{ color: meta.color, fontWeight: 700, fontSize: 12 }}>
-                            {r.claim_urgency === "none" ? "—"
-                              : r.claim_urgency === "unknown" ? "no date"
-                              : r.days_left < 0 ? `missed by ${Math.abs(r.days_left)}d`
-                              : r.days_left === 0 ? "last day!"
-                              : `${r.days_left}d left`}
-                          </span>
-                          {r.claim_deadline && r.claim_urgency !== "none" && (
-                            <div style={{ fontSize: 10, color: C.gray400, fontFamily: "monospace" }}>by {r.claim_deadline}</div>
-                          )}
-                        </td>
-                        <td style={{ ...S.td, fontFamily: "monospace", fontSize: 11, color: C.gray500 }}>{r.suborder_no}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-
-            {total > PAGE_SIZE && (
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 20px", borderTop: `1px solid ${C.gray100}` }}>
-                <span style={{ fontSize: 12, color: C.gray400 }}>
-                  {(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, total)} of {total}
-                </span>
-                <div style={{ display: "flex", gap: 6 }}>
-                  <button onClick={() => setPage(p => p - 1)} disabled={page === 1}
-                    style={{ ...btn("ghost", "sm"), opacity: page === 1 ? 0.4 : 1 }}>← Prev</button>
-                  <span style={{ fontSize: 12, color: C.gray500, padding: "0 6px", alignSelf: "center" }}>Page {page} / {totalPages}</span>
-                  <button onClick={() => setPage(p => p + 1)} disabled={page >= totalPages}
-                    style={{ ...btn("ghost", "sm"), opacity: page >= totalPages ? 0.4 : 1 }}>Next →</button>
-                </div>
-              </div>
-            )}
-          </>
-        )}
-      </div>
-    </div>
-  );
+  const isMobile = useIsMobile();
+  const desk = useReturnsDesk();
+  return isMobile ? <MobileReturns desk={desk} /> : <DesktopReturns desk={desk} />;
 }

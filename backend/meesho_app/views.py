@@ -22,6 +22,7 @@ from .helpers.helper import status_wise_summary, strip_html
 from accounts.models import Business, User
 from .permissions import get_authorized_business, accessible_businesses
 from .helpers import label_pdf
+from .return_images import return_image_map
 from .helpers.label_pdf import extract_all_pages
 from . import master_pricing, pricing_sync
 
@@ -11906,6 +11907,7 @@ def return_deliveries_list(request, business_id):
             DQ(suborder_no__icontains=search) |
             DQ(order_no__icontains=search) |
             DQ(awb_number__icontains=search) |
+            DQ(packet_id__icontains=search) |
             DQ(sku__icontains=search) |
             DQ(product_name__icontains=search)
         )
@@ -11961,7 +11963,7 @@ def return_deliveries_list(request, business_id):
         "total": total,
         "page": page,
         "page_size": page_size,
-        "results": ReturnDeliverySerializer(rows, many=True).data,
+        "results": ReturnDeliverySerializer(rows, many=True, context={"image_map": return_image_map(rows)}).data,
         "stats": _return_claim_stats(business),
         "claim_window_days": window,
     })
@@ -12496,6 +12498,10 @@ def return_delivery_lookup(request, business_id):
         rows = list(base.filter(awb_number__iexact=code))
         if rows:
             return rows, "awb"
+        # A packet id stored earlier (for a claim) finds the same return again.
+        rows = list(base.filter(packet_id__iexact=code))
+        if rows:
+            return rows, "packet"
         rows = list(base.filter(suborder_no__iexact=code))
         if rows:
             return rows, "suborder"
@@ -12540,8 +12546,9 @@ def return_delivery_lookup(request, business_id):
         }, status=status.HTTP_404_NOT_FOUND)
 
     matches = []
+    image_map = return_image_map(rows)
     for row in rows:
-        data = ReturnDeliverySerializer(row).data
+        data = ReturnDeliverySerializer(row, context={"image_map": image_map}).data
         data["order_context"] = _order_context(owner, row.suborder_no)
         matches.append(data)
 
@@ -12643,6 +12650,13 @@ def return_delivery_detail(request, business_id, pk):
 
     data = ReturnDeliverySerializer(row).data
     data["order_context"] = _order_context(business, row.suborder_no)
+    if row.packet_id:
+        # Every parcel's packet id is different — the same one on two returns means
+        # a mis-scan (or the same parcel scanned against the wrong row).
+        data["packet_duplicate_of"] = list(
+            ReturnDelivery.objects.filter(business=business, packet_id__iexact=row.packet_id)
+            .exclude(pk=row.pk).values_list("suborder_no", flat=True)[:5]
+        )
     return Response(data)
 
 

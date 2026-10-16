@@ -227,6 +227,9 @@ class ReturnDeliverySerializer(serializers.ModelSerializer):
     claim_urgency  = serializers.SerializerMethodField()
     claim_window_days = serializers.IntegerField(source="CLAIM_WINDOW_DAYS", read_only=True)
     business_name  = serializers.CharField(source="business.name", read_only=True, default=None)
+    # The product's photo, via its parent SKU. A list passes `image_map` in the
+    # context so a page costs one query per business; a lone row works it out itself.
+    image_url      = serializers.SerializerMethodField()
 
     class Meta:
         model = ReturnDelivery
@@ -241,6 +244,13 @@ class ReturnDeliverySerializer(serializers.ModelSerializer):
 
     def get_claim_urgency(self, obj):
         return obj.claim_urgency()
+
+    def get_image_url(self, obj):
+        from .return_images import return_image_map, _norm
+        image_map = self.context.get("image_map")
+        if image_map is None:
+            image_map = return_image_map([obj])
+        return image_map.get((obj.business_id, _norm(obj.sku)))
 
 
 class ScannedOrderSerializer(serializers.ModelSerializer):
