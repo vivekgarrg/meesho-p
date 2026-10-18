@@ -2450,7 +2450,7 @@ export function OverviewTab() {
                   {
                     label: 'Missing Price',
                     value: (profit.orders_missing_price ?? 0).toLocaleString(),
-                    sub: 'SKUs without pricing',
+                    sub: 'no unit price (₹0 or missing) — not in profit',
                     accent: C.amber,
                   },
                   { label: 'Pure Returns', value: nRet.toLocaleString(), sub: 'no claim taken', accent: C.red },

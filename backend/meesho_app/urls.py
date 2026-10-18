@@ -3,12 +3,23 @@ from . import views
 from . import api_cache
 from . import bulk_listing_views
 from . import listing_images_views
+from . import insights
+from . import insights_ai
+from . import listing_hub
 
 urlpatterns = [
     path("cache/status/", api_cache.cache_status, name="cache_status"),
     path("cache/refresh/", api_cache.cache_refresh, name="cache_refresh"),
     path("upload/", views.upload_excel, name="upload_excel"),
     path("profit/available-months/", views.available_months, name="available_months"),
+    path("listing-hub/search/", listing_hub.hub_search, name="listing_hub_search"),
+    path("listing-hub/product/", listing_hub.hub_product, name="listing_hub_product"),
+    path("listing-hub/price/", listing_hub.hub_price, name="listing_hub_price"),
+    path("listing-hub/photo/", listing_hub.hub_photo, name="listing_hub_photo"),
+    path("listing-hub/photos.zip", listing_hub.hub_photos_zip, name="listing_hub_photos_zip"),
+    path("insights/ai/", insights_ai.insights_ai_report, name="insights_ai_report"),
+    path("insights/ai/ask/", insights_ai.insights_ai_ask, name="insights_ai_ask"),
+    path("insights/", insights.insights_view, name="insights"),
     path("profit/daily/", views.profit_daily_summary, name="profit_daily_summary"),
     path("profit/", views.profit_summary, name="profit_summary"),
     path("profit/sku-orders/", views.sku_order_payments, name="sku_order_payments"),

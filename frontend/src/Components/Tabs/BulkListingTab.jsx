@@ -1443,6 +1443,29 @@ export function BulkListingTab() {
     });
   };
 
+  // Arriving from the Listing Hub: ?parent=<id> picks the product,
+  // ?platform=flipkart opens Flipkart, ?duplicate=<batch id> starts from a
+  // previous Meesho sheet of it. Read once, then cleared from the address bar
+  // so a refresh doesn't apply it again.
+  useEffect(() => {
+    const q = new URLSearchParams(window.location.search);
+    if (![...q.keys()].some((k) => ["parent", "platform", "duplicate"].includes(k))) return;
+    if (q.get("platform") === "flipkart") setPlatform("flipkart");
+    const parent = q.get("parent");
+    // Keep the product chosen even if loading the old sheet resets the form.
+    const pick = () => parent && setParentChoice((cur) => (cur?.picked ? cur : { ...emptyParentChoice(), picked: parent }));
+    pick();
+    if (parent && !q.get("duplicate")) {
+      setMsg({ type: "info", text: `Listing “${parent}” from the Listing Hub — the product is already picked. Choose a template to start.` });
+    }
+    if (q.get("duplicate")) {
+      Promise.resolve(duplicateBatch({ id: Number(q.get("duplicate")), platform: "meesho",
+        filename: q.get("filename") || "the previous listing" })).finally(pick);
+    }
+    window.history.replaceState(null, "", window.location.pathname);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const setField = (key) => (value) => setShared((s) => ({ ...s, [key]: value }));
 
   const imageUrls = useMemo(

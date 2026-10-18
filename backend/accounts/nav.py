@@ -23,6 +23,7 @@ NAV_CATALOG = [
     {"path": "/daily-profit",      "label": "Daily Profit",      "group": "Analytics"},
     {"path": "/return-analysis",   "label": "Return Analysis",   "group": "Analytics"},
     {"path": "/customer-insights", "label": "Customer Insights", "group": "Analytics"},
+    {"path": "/insights",          "label": "Business Insights", "group": "Analytics"},
 
     {"path": "/orders",            "label": "Orders",            "group": "Operations"},
     {"path": "/order-scan",        "label": "Order Scan",        "group": "Operations"},
@@ -37,6 +38,7 @@ NAV_CATALOG = [
     {"path": "/tasks",             "label": "Team Tasks",        "group": "Operations"},
     {"path": "/employees",         "label": "Employees",         "group": "Operations"},
 
+    {"path": "/listing-hub",       "label": "Listing Hub",       "group": "Catalog"},
     {"path": "/pricing",           "label": "SKU Pricing",       "group": "Catalog"},
     {"path": "/master-pricing",    "label": "Master Pricing",    "group": "Catalog"},
     {"path": "/tax-check",         "label": "Tax Check",         "group": "Catalog"},
@@ -101,7 +103,9 @@ API_OWNERSHIP = {
     "returns/analysis/":     ["/return-analysis", "/returns"],
     "returns/":              ["/returns"],
     # The claim sheet writes back onto returns, so either screen may reach it.
-    "claims/":               ["/claims", "/returns"],
+    # Business Insights has its own "Upload claims sheet" button, so it may
+    # post the same export too.
+    "claims/":               ["/claims", "/returns", "/insights"],
     # The tasks screen is the one thing a worker account needs; the API enforces
     # per-user scoping on top, so granting it exposes only their own tasks.
     "worker-tasks/":         ["/tasks"],
@@ -135,6 +139,11 @@ API_OWNERSHIP = {
     "fraud-customers/":      ["/fraud"],
     "blocked-customers/":    ["/fraud", "/labels"],
     "customer-insights/":    ["/customer-insights"],
+    # Built from the same numbers as profit/, but it is its own screen.
+    "insights/":             ["/insights"],
+    # Everything a listing manager needs for one product: photos, sheet
+    # details, SKU ids and the price to list at.
+    "listing-hub/":          ["/listing-hub"],
 
     "purchases/":            ["/purchases"],
     "consumables/":          ["/purchases", "/expenses"],

@@ -20,6 +20,7 @@ import { UnscheduledPaymentTab } from './Components/Tabs/UnscheduledPaymentTab';
 import { ExpensesTab } from './Components/Tabs/ExpensesTab';
 import { EmployeesTab } from './Components/Tabs/EmployeesTab';
 import { PricingTab } from './Components/Tabs/PricingTab';
+import { ListingHubTab } from './Components/Tabs/ListingHubTab';
 import { MasterPricingTab } from './Components/Tabs/MasterPricingTab';
 import { TaxCheckTab } from './Components/Tabs/TaxCheckTab';
 import { UploadTab } from './Components/Tabs/UploadTab';
@@ -27,6 +28,7 @@ import { SKUAnalysisTab } from './Components/Tabs/SKUProfitTab';
 import { EstimatedProfitTab } from './Components/Tabs/EstimatedProfitTab';
 import { FlipkartProfitTab } from './Components/Tabs/FlipkartProfitTab';
 import { DailyProfitTab } from './Components/Tabs/DailyProfitTab';
+import { InsightsTab } from './Components/Tabs/InsightsTab';
 import { ReturnAnalysisTab } from './Components/Tabs/ReturnAnalysisTab';
 import { LabelsTab } from './Components/Tabs/LabelsTab';
 import { BulkLabelsTab } from './Components/Tabs/BulkLabelsTab';
@@ -1234,8 +1236,10 @@ function AppShell() {
                 <Route path="/estimated-profit" element={<EstimatedProfitTab />} />
                 <Route path="/flipkart-profit" element={<FlipkartProfitTab />} />
                 <Route path="/daily-profit" element={<DailyProfitTab />} />
+                <Route path="/insights" element={<InsightsTab />} />
                 <Route path="/return-analysis" element={<ReturnAnalysisTab />} />
                 <Route path="/customer-insights" element={<CustomerInsightsTab />} />
+                <Route path="/listing-hub" element={<ListingHubTab />} />
                 <Route path="/pricing" element={<PricingTab />} />
                 <Route path="/master-pricing" element={<MasterPricingTab />} />
                 <Route path="/tax-check" element={<TaxCheckTab />} />

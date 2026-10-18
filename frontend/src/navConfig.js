@@ -22,6 +22,7 @@ export const NAV_GROUPS = [
       { path: '/daily-profit', label: 'Daily Profit', icon: '📅' },
       { path: '/return-analysis', label: 'Return Analysis', icon: '⤺' },
       { path: '/customer-insights', label: 'Customer Insights', icon: '👥' },
+      { path: '/insights', label: 'Business Insights', icon: '💡' },
     ],
   },
   {
@@ -48,6 +49,7 @@ export const NAV_GROUPS = [
     label: 'Catalog',
     color: '#60A5FA',
     items: [
+      { path: '/listing-hub', label: 'Listing Hub', icon: '🛍' },
       { path: '/pricing', label: 'SKU Pricing', icon: '⊞' },
       { path: '/master-pricing', label: 'Master Pricing', icon: '🧱' },
       { path: '/tax-check', label: 'Tax Check', icon: '%' },

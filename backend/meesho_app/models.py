@@ -2851,3 +2851,58 @@ class ListingImageCounter(models.Model):
 
     class Meta:
         db_table = "listing_image_counters"
+
+
+class InsightAIReport(models.Model):
+    """
+    One AI write-up of the Business Insights page, kept so that opening the
+    page again doesn't pay for the same analysis twice. `data_hash` is a hash
+    of exactly what was sent to the model: while the numbers haven't changed
+    the stored report is reused; a new upload changes the hash, and the next
+    request writes a fresh one.
+    """
+    business = models.ForeignKey("accounts.Business", on_delete=models.CASCADE, related_name="insight_ai_reports")
+    date_from = models.DateField()
+    date_to = models.DateField()
+    data_hash = models.CharField(max_length=64, db_index=True)
+    model_name = models.CharField(max_length=80)
+    report = models.JSONField()
+    input_tokens = models.PositiveIntegerField(default=0)
+    output_tokens = models.PositiveIntegerField(default=0)
+    created_by = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "insight_ai_reports"
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["business", "date_from", "date_to"])]
+
+
+class ListingPrice(models.Model):
+    """
+    The selling price a seller has decided on for a parent product on one
+    marketplace, set from the Listing Hub. The hub always shows a recommended
+    price worked out from cost, fees and return history; this row is the
+    manual override listing managers should use instead, when someone has set
+    one. One per parent per platform.
+    """
+    PLATFORM_MEESHO = "meesho"
+    PLATFORM_FLIPKART = "flipkart"
+    PLATFORM_CHOICES = [(PLATFORM_MEESHO, "Meesho"), (PLATFORM_FLIPKART, "Flipkart")]
+
+    business = models.ForeignKey("accounts.Business", on_delete=models.CASCADE, related_name="listing_prices")
+    parent = models.ForeignKey(ParentItemPrice, on_delete=models.CASCADE, related_name="listing_prices")
+    platform = models.CharField(max_length=20, choices=PLATFORM_CHOICES)
+    price = models.DecimalField(max_digits=10, decimal_places=2)
+    mrp = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    note = models.CharField(max_length=255, blank=True)
+    updated_by = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True, blank=True,
+                                   related_name="listing_prices_set")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "listing_prices"
+        unique_together = [("parent", "platform")]
+
+    def __str__(self):
+        return f"{self.parent.item_id} · {self.platform} · {self.price}"

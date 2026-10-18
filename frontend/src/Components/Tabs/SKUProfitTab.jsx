@@ -1660,7 +1660,7 @@ function MissingSkuPanel({ missingSkus, ordersCount, onResolved }) {
           <Typography sx={{ fontSize: 16, lineHeight: 1 }}>⚠️</Typography>
           <Box sx={{ flex: 1 }}>
             <Typography sx={{ fontWeight: 800, fontSize: 14, color: "#92400E" }}>
-              {pending.length} SKU{pending.length > 1 ? "s" : ""} missing pricing
+              {pending.length} SKU{pending.length > 1 ? "s" : ""} with no unit price (missing or ₹0)
             </Typography>
             <Typography sx={{ fontSize: 12, color: "#B45309" }}>
               {ordersCount} order{ordersCount !== 1 ? "s" : ""} excluded from profit calculations · Add a price or link to a parent SKU to fix
@@ -1936,7 +1936,7 @@ export function SKUAnalysisTab() {
 
       {/* ── Unattributed orders panel ─────────────────────────────────────── */}
       {!loading && (profitSummary?.orders_missing_price ?? 0) > 0 && (() => {
-        const uAmt = Number(profitSummary?.sku_wise_profit?.["__unattributed__"]?.net_profit ?? 0);
+        const uAmt = Number(profitSummary?.excluded_no_unit_price?.settlement ?? 0);
         const uCount = profitSummary.orders_missing_price;
         const orderNetPL = Number(profitSummary?.net_profit_loss ?? 0);
         return (
@@ -1947,11 +1947,14 @@ export function SKUAnalysisTab() {
             <Typography sx={{ fontSize: 22, lineHeight: 1, mt: 0.25 }}>📦</Typography>
             <Box sx={{ flex: 1 }}>
               <Typography sx={{ fontSize: 14, fontWeight: 700, color: "#92400E", mb: 0.5 }}>
-                Unattributed Orders — {uCount} orders with no pricing
+                Left out of profit — {uCount} orders with no unit price
               </Typography>
               <Typography sx={{ fontSize: 12, color: "#78350F", mb: 1.5 }}>
-                These orders have settled amounts but no purchase price on record, so they can't be split into per-SKU profit.
-                Their net settlement is already included in <b>Order Net P&L</b> ({fmt(orderNetPL)}) but won't appear in any SKU row.
+                Their item has no unit price (missing, or ₹0) on the order date. Costed at ₹0 their whole payout would read
+                as profit, so these orders are left out of <b>Order Net P&L</b> ({fmt(orderNetPL)}) and every SKU row until a price is added.
+                {(profitSummary?.excluded_no_unit_price?.zero_price_skus?.length ?? 0) > 0 && (
+                  <> Priced at ₹0: <b>{profitSummary.excluded_no_unit_price.zero_price_skus.join(", ")}</b>.</>
+                )}
               </Typography>
               <Box sx={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
                 <Box>
@@ -1961,7 +1964,7 @@ export function SKUAnalysisTab() {
                   </Typography>
                 </Box>
                 <Box>
-                  <Typography sx={{ fontSize: 11, color: "#92400E", fontWeight: 700, letterSpacing: 0.5 }}>NET SETTLEMENT</Typography>
+                  <Typography sx={{ fontSize: 11, color: "#92400E", fontWeight: 700, letterSpacing: 0.5 }}>PAYOUT LEFT OUT</Typography>
                   <Typography sx={{ fontFamily: "monospace", fontWeight: 800, fontSize: 22, lineHeight: 1.2, color: uAmt >= 0 ? "#059669" : "#DC2626" }}>
                     {uAmt >= 0 ? "+" : ""}{fmt(uAmt)}
                   </Typography>

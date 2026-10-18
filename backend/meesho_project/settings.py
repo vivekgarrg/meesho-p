@@ -293,3 +293,12 @@ S3_KEY_PREFIX = os.environ.get(
 OBJECT_STORAGE_READY = bool(
     S3_BUCKET and S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY and S3_PUBLIC_BASE_URL
 )
+
+# ── AI analysis on Business Insights (Claude, Anthropic API) ─────────────────
+# Optional, like object storage: with no key the Insights page still shows all
+# its statistics and simply offers no AI write-up. The key comes from
+# https://console.anthropic.com — put it in the server's env file, never in git.
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-opus-5-5")
+ANTHROPIC_BASE_URL = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
+

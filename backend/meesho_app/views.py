@@ -1672,6 +1672,8 @@ def _settlement_mode(request):
     frontend/src/lib/authFetch.js), so a view never has to thread a query
     param through just to read it.
     """
+    if request is None:
+        return SETTLEMENT_ALL
     mode = (request.headers.get("X-Settlement-Mode") or "").strip().lower()
     return SETTLEMENT_SETTLED if mode == SETTLEMENT_SETTLED else SETTLEMENT_ALL
 
@@ -1752,6 +1754,25 @@ class _BufferResolver:
         if pid and pid in self.parent_buffer:
             return self.parent_buffer[pid]
         return self.sku_buffer.get(sku_id, Decimal("0"))
+
+
+def _has_unit_price(item_price):
+    """
+    Whether an order's item has a real unit (purchase) price — the one rule
+    every profit figure uses to decide if an order belongs in it at all.
+
+    An item priced at ₹0, or not priced, would otherwise be costed at nothing:
+    its whole payout would read as profit and drag every total, margin and SKU
+    ranking upward. So such orders are left out of profit and analysis
+    entirely — revenue, cost, returns, everything — and reported separately
+    as "skipped: no unit price" so they can be priced on SKU Pricing. The
+    price is the one in effect on the order's date, so an item that had no
+    price then is skipped even if it has one now.
+    """
+    try:
+        return Decimal(str(item_price if item_price is not None else 0)) > 0
+    except (InvalidOperation, ValueError):
+        return False
 
 
 class _PriceResolver:
@@ -1892,6 +1913,8 @@ def sku_order_payments(request, business_id):
             continue
         qty = order.get("quantity") or primary.quantity
         eff_price, eff_pkg, eff_item_price, eff_tax_pct = pricing.effective_price(sku, primary.order_date)
+        if not _has_unit_price(eff_item_price):
+            continue
         result = compute_order_net(payments, eff_price, eff_pkg, qty, unique_statuses,
                                    eff_item_price, eff_tax_pct, cost_setting=cost_setting, buffer_per_unit=pricing.buffers.for_sku(sku))
         order_date = order.get("order_date") or (primary.order_date.date() if primary.order_date else None)
@@ -1924,9 +1947,17 @@ def profit_summary(request, business_id):
     OrderPayment.order_date__date if Order table has no records for range.
     """
     business = get_authorized_business(request, business_id)
+    return Response(compute_profit_summary(
+        business, request.GET.get("date_from", ""), request.GET.get("date_to", ""), request,
+    ))
+
+
+def compute_profit_summary(business, date_from="", date_to="", request=None):
+    """profit_summary's whole calculation, callable without a request — the
+    Insights engine runs it for two periods to compare them. Returns the same
+    dict the /profit/ endpoint sends. `request` only carries the global
+    Settled-only switch; without one, every payment row counts."""
     cost_setting = _cost_setting(business)
-    date_from = request.GET.get("date_from", "")
-    date_to   = request.GET.get("date_to", "")
 
     from collections import defaultdict
     qs = _profit_payments_qs(business, date_from, date_to, request)
@@ -1949,6 +1980,8 @@ def profit_summary(request, business_id):
 
     order_wise_profit   = {}
     missing_sku         = []
+    zero_price_skus     = []    # priced on file, but ₹0 — a subset of missing_sku
+    excluded_settlement = Decimal("0")
     orders_with_price   = 0
     orders_missing_price = 0
     output_gst_total     = Decimal("0")
@@ -1985,15 +2018,24 @@ def profit_summary(request, business_id):
             _cls["delivered_rows"] or _cls["return_rows"] or _cls["rto_rows"]
             or _cls["exchange_rows"] or _cls["claim_rows"]
         )
+        # No unit price (none on file, or ₹0 on the order's date): the order is
+        # left out of profit entirely — its payout too, or a ₹0 cost would let
+        # the whole payout read as profit. See _has_unit_price.
+        eff_item_price = None
+        if sku and sku in price_map:
+            eff_price, eff_pkg, eff_item_price, eff_tax_pct = get_eff_price(sku, primary.order_date)
+        if not _has_unit_price(eff_item_price):
+            missing_sku.append(sku)
+            orders_missing_price += 1
+            if sku and sku in price_map:
+                zero_price_skus.append(sku)
+            if not _is_shipped_only:
+                excluded_settlement += _resolve_settlement(_cls)
+            continue
+
         if not _is_shipped_only:
             resolved_revenue += _resolve_settlement(_cls)
 
-        if not sku or sku not in price_map:
-            missing_sku.append(sku)
-            orders_missing_price += 1
-            continue
-
-        eff_price, eff_pkg, eff_item_price, eff_tax_pct = get_eff_price(sku, primary.order_date)
         result = compute_order_net(payments, eff_price, eff_pkg, qty, unique_statuses,
                                    eff_item_price, eff_tax_pct, cost_setting=cost_setting, buffer_per_unit=pricing.buffers.for_sku(sku))
         accumulate_sku_profit(canonical_sku.get(sku, sku), order_wise_profit, result, price_map, packaging_map, unique_statuses)
@@ -2009,7 +2051,7 @@ def profit_summary(request, business_id):
             gst_order_count      += 1
 
 
-    missing_sku          = list(set(missing_sku))
+    missing_sku          = sorted(set(missing_sku), key=str)
     total_loss           = sum(Decimal(str(v.get("return_loss",      0) or 0)) for v in order_wise_profit.values())
     total_rto_loss       = sum(Decimal(str(v.get("rto_loss",         0) or 0)) for v in order_wise_profit.values())
     total_exchange_net   = sum(Decimal(str(v.get("exchange_loss",     0) or 0)) for v in order_wise_profit.values())
@@ -2233,7 +2275,7 @@ def profit_summary(request, business_id):
 
 
 
-    return Response({
+    return {
         "gross_revenue":          round(gross_revenue, 2),
         "total_settled":          round(revenue, 2), 
         "total_purchase_cost":    round(total_purchase_cost, 2),
@@ -2271,6 +2313,13 @@ def profit_summary(request, business_id):
         "sku_wise_profit":        order_wise_profit,
         "orders_with_price":      orders_with_price,
         "orders_missing_price":   orders_missing_price,
+        # Orders left out of every figure above because their item has no unit
+        # price (missing or ₹0) — see _has_unit_price.
+        "excluded_no_unit_price": {
+            "orders":          orders_missing_price,
+            "settlement":      float(excluded_settlement),
+            "zero_price_skus": sorted(set(zero_price_skus), key=str),
+        },
         "orders_missing_sku":     len(missing_sku),
         "missing_sku":            missing_sku,
         "total_ads_cost":               round(ads, 2),
@@ -2312,7 +2361,7 @@ def profit_summary(request, business_id):
             "total_deduction_rate_pct": total_deduction_rate_pct,
         },
         "payout_breakdown": _build_payout_breakdown(qs),
-    })
+    }
 
 
 @api_view(["GET"])
@@ -2471,12 +2520,14 @@ def profit_daily_summary(request, business_id):
         sku = sku or primary.supplier_sku
         qty = qty or primary.quantity
 
-        if not sku or sku not in price_map:
+        eff_item_price = None
+        if sku and sku in price_map:
+            eff_price, eff_pkg, eff_item_price, eff_tax_pct = get_eff_price(sku, primary.order_date)
+        if not _has_unit_price(eff_item_price):
             bucket["missing_price_count"] += 1
             bucket["unknown_count"] += 1
             continue
 
-        eff_price, eff_pkg, eff_item_price, eff_tax_pct = get_eff_price(sku, primary.order_date)
         result = compute_order_net(group, eff_price, eff_pkg, qty, unique_statuses,
                                    eff_item_price, eff_tax_pct, cost_setting=cost_setting, buffer_per_unit=buffers.for_sku(sku))
         key = STATUS_TO_KEY.get(result["status"], "unknown")
@@ -2716,6 +2767,14 @@ def _compute_estimated_profit_summary(business, date_from=None, date_to=None):
         elif not is_claim and order_status == "rto":
             payout_only_bucket = "rto"
 
+        # No unit price on the order's date: left out of the estimate entirely,
+        # returns and RTOs included (see _has_unit_price).
+        if _sku_key(sku_id) not in known_skus or not _has_unit_price(get_price(sku_id, row.order_date)[0]):
+            missing_price_skus_seen.append(sku_id)
+            missing_price_payout += payout_value
+            missing_price_count += 1
+            continue
+
         if payout_only_bucket:
             if payout_value > 0:
                 non_loss_payout_excluded_count += 1
@@ -2732,14 +2791,8 @@ def _compute_estimated_profit_summary(business, date_from=None, date_to=None):
             _bump_sku(sku_id, payout_only_bucket, payout_value, final_cost, net, Decimal("0"))
             continue
 
-        # Remaining rows deduct cost and need pricing: Delivered, Exchanged, an
-        # approved Claim.
-        if _sku_key(sku_id) not in known_skus:
-            missing_price_skus_seen.append(sku_id)
-            missing_price_payout += payout_value
-            missing_price_count += 1
-            continue
-
+        # Remaining rows deduct cost: Delivered, Exchanged, an approved Claim
+        # (all priced — unpriced rows were skipped above).
         item_price, packaging_cost, tax_pct = get_price(sku_id, row.order_date)
         item_price = Decimal(str(item_price or 0))
         packaging_cost = Decimal(str(packaging_cost or 0))
@@ -3235,6 +3288,14 @@ def _compute_flipkart_profit_summary(business, date_from=None, date_to=None):
             (r.product_sub_category for r in group_rows if r.product_sub_category), None)
         bucket = "return" if returned else "delivered"
 
+        # No unit price on the order's date: left out entirely, returns
+        # included (see _has_unit_price).
+        if _sku_key(sku_id) not in known_skus or not _has_unit_price(get_price(sku_id, order_date)[0]):
+            missing_price_skus_seen.append(sku_id or "(blank SKU)")
+            missing_price_settlement += settlement
+            missing_price_count += 1
+            continue
+
         if returned:
             if settlement >= 0:
                 non_loss_excluded_count += 1
@@ -3242,12 +3303,6 @@ def _compute_flipkart_profit_summary(business, date_from=None, date_to=None):
                 continue
             gross, cost, net = settlement, Decimal("0"), settlement
         else:
-            if _sku_key(sku_id) not in known_skus:
-                missing_price_skus_seen.append(sku_id or "(blank SKU)")
-                missing_price_settlement += settlement
-                missing_price_count += 1
-                continue
-
             item_price, packaging_cost, tax_pct = get_price(sku_id, order_date)
             item_price = Decimal(str(item_price or 0))
             packaging_cost = Decimal(str(packaging_cost or 0))
@@ -3448,11 +3503,11 @@ def flipkart_profit_sku_payments(request, business_id):
         net = settlement
         excluded_reason = None
 
-        if returned:
+        if _sku_key(sku_id) not in known_skus or not _has_unit_price(get_price(sku_id, order_date)[0]):
+            excluded_reason = "missing_price"
+        elif returned:
             if settlement >= 0:
                 excluded_reason = "non_loss_return"
-        elif _sku_key(sku_id) not in known_skus:
-            excluded_reason = "missing_price"
         else:
             item_price, packaging_cost, tax_pct = get_price(sku_id, order_date)
             item_price = Decimal(str(item_price or 0))
@@ -3622,6 +3677,8 @@ def ads_sku_analysis(request, business_id):
             continue
 
         eff_price, eff_pkg, eff_item_price, eff_tax_pct = get_eff_price(sku, primary.order_date)
+        if not _has_unit_price(eff_item_price):
+            continue
         result = compute_order_net(payments, eff_price, eff_pkg, qty, unique_statuses,
                                    eff_item_price, eff_tax_pct, cost_setting=cost_setting, buffer_per_unit=buffers.for_sku(sku))
 
