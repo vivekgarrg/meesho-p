@@ -43,9 +43,10 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
 from . import object_storage
+from . import listing_hub_sources as src
 from .models import (
-    BulkListingBatch, FinalPrice, FlipkartOrderPayment, ListingImage, ListingPrice, Order, OrderPayment,
-    ParentItemPrice, Product,
+    BulkListingBatch, FinalPrice, FlipkartOrderPayment, ListingHubLink, ListingHubPause, ListingImage, ListingPrice,
+    ListingTemplate, Order, OrderPayment, ParentItemPrice, Product,
 )
 from .permissions import get_authorized_business
 
@@ -79,53 +80,54 @@ def _photo_counts(business):
                 .values("parent_id").annotate(n=Count("id")).values_list("parent_id", "n"))
 
 
-def _batches_for(business, parent, skus):
-    """Listing sheets made for this product: linked to it directly, or
-    covering any of its SKU ids."""
-    sku_set = {s.lower() for s in skus}
-    out = []
-    for b in BulkListingBatch.objects.filter(business=business).select_related("product").order_by("-created_at"):
-        snap = b.payload_snapshot or {}
-        snap_parent = str(snap.get("parent") or "").lower()
-        if (snap_parent == parent.item_id.lower()
-                or (b.product_id and b.product.parent_sku_id == parent.id)
-                or any(str(s).lower() in sku_set for s in (b.sku_ids or []))):
-            out.append(b)
-    return out
+def _is_admin(request):
+    from accounts.models import User
+    return getattr(request.user, "role", None) == User.ROLE_SUPER_ADMIN
 
 
-def _listed_platforms(business):
-    """parent id -> set of platforms it has listing sheets for."""
-    sku_parent = {s.lower(): p for s, p in FinalPrice.objects.filter(business=business, parent__isnull=False)
-                  .values_list("sku_id", "parent_id")}
-    by_item = {p.item_id.lower(): p.id for p in ParentItemPrice.objects.filter(business=business).only("item_id")}
-    out = defaultdict(set)
-    for b in BulkListingBatch.objects.filter(business=business).only("platform", "sku_ids", "payload_snapshot"):
-        pid = by_item.get(str((b.payload_snapshot or {}).get("parent") or "").lower())
-        ids = {pid} if pid else {sku_parent.get(str(s).lower()) for s in (b.sku_ids or [])}
-        for p in ids - {None}:
-            out[p].add(b.platform)
-    return out
+def _paused_ids(business):
+    return set(ListingHubPause.objects.filter(business=business).values_list("parent_id", flat=True))
 
 
-def _card(p, sku_counts, photo_counts, listed, saved, matched_sku=None):
+def _batches_for(business, parent, sheet_map):
+    """Every listing sheet of this product, newest first, with how it matched."""
+    ids = {bid: how for bid, (pids, how) in sheet_map.items() if parent.id in pids}
+    batches = list(BulkListingBatch.objects.filter(id__in=ids).select_related("product").order_by("-created_at"))
+    for b in batches:
+        b.matched_by = ids[b.id]
+    return batches
+
+
+def _card(p, sku_counts, photo_counts, platforms, cats, saved, paused, matched_sku=None):
     return {
         "id": p.id, "item_id": p.item_id, "image_url": p.image_url,
         "unit_cost": _money(_d(p.final_price) + _d(p.buffer_amount)) if p.item_price else None,
         "priced": bool(p.item_price and p.item_price > 0),
         "sku_count": sku_counts.get(p.id, 0), "photo_count": photo_counts.get(p.id, 0),
-        "listed_on": sorted(listed.get(p.id, ())),
+        "listed_on": platforms.get(p.id, []),
+        "categories": cats.get(p.id, []),
         "saved_prices": saved.get(p.id, {}),
+        "paused": p.id in paused,
         "matched_sku": matched_sku,
     }
+
+
+NO_SHEET = "No listing sheet yet"
 
 
 @api_view(["GET"])
 def hub_search(request, business_id):
     """?q= matches a parent id, any SKU id under it, or its product name.
-    Empty q lists products, newest first. ?offset= pages."""
+    Empty q lists products, newest first. ?category= keeps products whose
+    sheets were saved under that category ("No listing sheet yet" for none);
+    ?status=paused lists paused products (admins only). ?offset= pages.
+
+    Paused products are left out for everyone but admins."""
     business = get_authorized_business(request, business_id)
+    admin = _is_admin(request)
     q = (request.GET.get("q") or "").strip()
+    category = (request.GET.get("category") or "").strip()
+    want_paused = admin and request.GET.get("status") == "paused"
     try:
         offset = max(0, int(request.GET.get("offset") or 0))
     except ValueError:
@@ -149,20 +151,38 @@ def hub_search(request, business_id):
         rows = sorted(parents, key=lambda p: (p.item_id.lower() != q.lower(), p.item_id.lower()))
     else:
         rows = list(parents.order_by("-id"))
+
+    paused = _paused_ids(business)
+    rows = [p for p in rows if (p.id in paused) == want_paused] if (want_paused or not admin) else rows
+    sheet_map = src.sheet_parents(business)
+    cats, platforms = src.parent_categories(business, sheet_map)
+
+    # Category counts over what this person can see (before the category filter).
+    counts = defaultdict(int)
+    for p in rows:
+        for c in cats.get(p.id) or [NO_SHEET]:
+            counts[c] += 1
+    if category:
+        rows = [p for p in rows if category in (cats.get(p.id) or [NO_SHEET])]
+
     total = len(rows)
     page = rows[offset:offset + 48]
-
     sku_counts = dict(FinalPrice.objects.filter(business=business, parent_id__in=[p.id for p in page])
                       .values("parent_id").annotate(n=Count("id")).values_list("parent_id", "n"))
     saved = defaultdict(dict)
     for lp in ListingPrice.objects.filter(business=business, parent_id__in=[p.id for p in page]):
         saved[lp.parent_id][lp.platform] = _money(lp.price)
-    listed = _listed_platforms(business)
     photos = _photo_counts(business)
+    unlinked = sum(1 for pids, _how in sheet_map.values() if not pids) if admin else 0
     return Response({
         "total": total, "offset": offset,
-        "results": [_card(p, sku_counts, photos, listed, saved, matched.get(p.id)) for p in page],
+        "results": [_card(p, sku_counts, photos, platforms, cats, saved, paused, matched.get(p.id)) for p in page],
         "skus_without_parent": sorted(set(orphan_skus))[:20],
+        "categories": sorted(({"label": k, "count": v} for k, v in counts.items()),
+                             key=lambda c: (c["label"] == NO_SHEET, -c["count"], c["label"])),
+        "is_admin": admin,
+        "paused_count": len(paused) if admin else 0,
+        "unlinked_sheets": unlinked,
     })
 
 
@@ -368,54 +388,115 @@ def _fields(d):
             if v not in (None, "") and not isinstance(v, (list, dict))]
 
 
-def _photos(business, parent, batches):
-    """Every photo of the product, uploaded ones first, without repeats."""
-    seen, out = set(), []
+def _gather(business, parent):
+    """Everything saved about this product's listings, found once per request."""
+    skus = _parent_skus(business, parent)
+    link_map = src.links(business)
+    sheet_map = src.sheet_parents(business, link_map)
+    batches = _batches_for(business, parent, sheet_map)
+    tmap = src.template_parents(business, link_map)
+    tids = {tid: how for tid, (pids, how) in tmap.items() if parent.id in pids}
+    templates = list(ListingTemplate.objects.filter(id__in=tids).order_by("-updated_at"))
+    for t in templates:
+        t.matched_by = tids[t.id]
+    return {"skus": skus, "sheet_map": sheet_map, "batches": batches, "templates": templates}
+
+
+def _photos(business, parent, batches, templates):
+    """Every photo of the product without repeats: uploaded ones on record,
+    the main image, anything else in its storage folder, then the image links
+    in its listing sheets and extension templates. Returns (photos, note)."""
+    seen, seen_keys, out = set(), set(), []
 
     def add(url, source, name, key=None):
-        if url and url not in seen and len(out) < MAX_PHOTOS:
-            seen.add(url)
-            out.append({"n": len(out) + 1, "url": url, "source": source, "name": name, "key": key})
+        # The same stored file can be written as different links (encoding),
+        # so a storage key counts as seen too.
+        if not url or url in seen or (key and key in seen_keys) or len(out) >= MAX_PHOTOS:
+            return
+        seen.add(url)
+        if key:
+            seen_keys.add(key)
+        out.append({"n": len(out) + 1, "url": url, "source": source, "name": name, "key": key})
 
     for img in (ListingImage.objects.filter(business=business, parent=parent, status=ListingImage.STATUS_UPLOADED)
                 .order_by("image_no")):
-        add(object_storage.public_url(img.key), "uploaded", img.key.rsplit("/", 1)[-1], img.key)
-    add(parent.image_url, "main", "main-image")
+        add(object_storage.public_url(img.key), "Uploaded", img.key.rsplit("/", 1)[-1], img.key)
+    add(parent.image_url, "Main photo", "main-image")
+    folder, note = src.folder_photos(business, parent)
+    for key, url in folder:
+        add(url, "Storage folder", key.rsplit("/", 1)[-1], key)
     for b in batches:
-        src = f"{b.get_platform_display()} listing"
+        label = f"{b.get_platform_display()} sheet"
         snap = b.payload_snapshot or {}
         for row in snap.get("rows", []):
             for u in row.get("images") or []:
-                add(u, src, row.get("sku_id") or "")
+                add(u, label, row.get("sku_id") or "")
         for u in snap.get("image_urls") or []:
-            add(u, src, "")
-    return out
+            add(u, label, "")
+    for t in templates:
+        for u in src.template_images(t.fields):
+            add(u, "Extension template", t.name)
+    return out, note
 
 
-def _listings(batches, skus):
-    """The newest Meesho and Flipkart listing data for this product, field by field."""
+def _sheet_rows(b, sku_set):
+    """(common fields dict, per-SKU rows) of one sheet, limited to this
+    product's SKUs when the sheet also carries other products."""
+    snap = b.payload_snapshot or {}
+    rows = snap.get("rows") or []
+    mine = [r for r in rows if str(r.get("sku_id", "")).lower() in sku_set] or rows
+    if b.platform == BulkListingBatch.PLATFORM_FLIPKART:
+        common = dict((mine[0].get("attributes") if mine else {}) or {})
+        per = [{"sku_id": r.get("sku_id"), "fields": dict(r.get("attributes") or {}), "images": r.get("images") or []}
+               for r in mine]
+    else:
+        common = dict(snap.get("shared") or {})
+        shared_imgs = snap.get("image_urls") or []
+        per = [{"sku_id": r.get("sku_id"),
+                "fields": {"product_name": r.get("product_name"), "style_id": r.get("style_id"),
+                           "group_id": r.get("group_id"), **(r.get("overrides") or {})},
+                "images": r.get("images") or shared_imgs} for r in mine]
+    return common, per
+
+
+def _listings(batches, templates, skus, pricing):
+    """Every saved listing of this product, newest first, each with its
+    details field by field and the problems found in it."""
     sku_set = {s.lower() for s in skus}
-    out = {}
+    breakeven = {k: v.get("breakeven") for k, v in (pricing.get("platforms") or {}).items()}
+    out = []
     for b in batches:
-        if b.platform in out:
-            continue
-        snap = b.payload_snapshot or {}
-        rows = snap.get("rows") or []
-        mine = [r for r in rows if str(r.get("sku_id", "")).lower() in sku_set] or rows
-        if b.platform == BulkListingBatch.PLATFORM_FLIPKART:
-            first = (mine[0].get("attributes") if mine else {}) or {}
-            per_sku = [{"sku_id": r.get("sku_id"), "fields": _fields(r.get("attributes"))} for r in mine[:30]]
-            common = _fields(first)
-        else:
-            common = _fields(snap.get("shared"))
-            per_sku = [{"sku_id": r.get("sku_id"), "fields": _fields({
-                "product_name": r.get("product_name"), "style_id": r.get("style_id"), "group_id": r.get("group_id"),
-                **(r.get("overrides") or {})})} for r in mine[:30]]
-        out[b.platform] = {
-            "batch_id": b.id, "category": b.category_label, "filename": b.filename,
-            "created_at": b.created_at, "fields": common, "skus": per_sku,
-        }
+        common, per = _sheet_rows(b, sku_set)
+        out.append({
+            "kind": "sheet", "id": b.id, "platform": b.platform, "category": b.category_label,
+            "category_short": src.short_category(b.category_label), "filename": b.filename,
+            "created_at": b.created_at, "rows": b.row_count, "matched_by": b.matched_by,
+            "fields": _fields(common),
+            "skus": [{"sku_id": r["sku_id"], "fields": _fields(r["fields"]), "images": r["images"][:12],
+                      "image_count": len(r["images"])} for r in per[:40]],
+            "issues": src.sheet_issues(b.platform, common, per, sku_set, breakeven.get(b.platform)),
+        })
+    for t in templates:
+        fields = [{"key": k, "label": (t.labels or {}).get(k) or _label(k), "value": str(v)}
+                  for k, v in (t.fields or {}).items() if v not in (None, "") and not isinstance(v, (list, dict))]
+        out.append({
+            "kind": "template", "id": t.id, "platform": "meesho", "category": "", "category_short": "Extension template",
+            "filename": t.name, "created_at": t.updated_at, "matched_by": t.matched_by, "source_url": t.source_url,
+            "fields": fields, "skus": [], "issues": [] if fields else [{"level": "error", "text": "This template has no saved values."}],
+        })
     return out
+
+
+def _parent_or_404(request, business, item_id):
+    """The product, or a 404 — paused products count as missing for anyone
+    who isn't an admin."""
+    parent = ParentItemPrice.objects.filter(business=business, item_id__iexact=(item_id or "").strip()).first()
+    if not parent:
+        return None, Response({"error": f"No product '{item_id}'."}, status=status.HTTP_404_NOT_FOUND)
+    if not _is_admin(request) and ListingHubPause.objects.filter(parent=parent).exists():
+        return None, Response({"error": "This product is paused for listing. Ask an admin if it should be listed."},
+                              status=status.HTTP_404_NOT_FOUND)
+    return parent, None
 
 
 @api_view(["GET"])
@@ -423,10 +504,9 @@ def hub_product(request, business_id):
     """?id=<parent item id> — the whole page for one product. ?target= sets
     the target profit per order (₹) for the recommended price."""
     business = get_authorized_business(request, business_id)
-    item_id = (request.GET.get("id") or "").strip()
-    parent = ParentItemPrice.objects.filter(business=business, item_id__iexact=item_id).first()
-    if not parent:
-        return Response({"error": f"No product '{item_id}'."}, status=status.HTTP_404_NOT_FOUND)
+    parent, err = _parent_or_404(request, business, request.GET.get("id"))
+    if err:
+        return err
     target = None
     if request.GET.get("target"):
         try:
@@ -434,14 +514,26 @@ def hub_product(request, business_id):
         except Exception:
             return Response({"error": "target must be a number"}, status=status.HTTP_400_BAD_REQUEST)
 
-    skus = _parent_skus(business, parent)
-    batches = _batches_for(business, parent, skus)
+    g = _gather(business, parent)
+    skus = g["skus"]
     order_stats = {r["sku"]: r for r in Order.objects.filter(business=business, sku__in=skus)
                    .values("sku").annotate(orders=Count("sub_order_no", distinct=True), last=Max("order_date"))}
+    tasks = src.task_listings(business, skus)
     try:
         product = parent.product
     except Product.DoesNotExist:
         product = None
+    pricing = _pricing(business, parent, skus, target)
+    photos, photo_note = _photos(business, parent, g["batches"], g["templates"])
+    listings = _listings(g["batches"], g["templates"], skus, pricing)
+    pause = ListingHubPause.objects.filter(parent=parent).select_related("paused_by").first()
+
+    def sku_row(sku):
+        t = tasks.get(sku.lower()) or {}
+        return {"sku_id": sku, "orders": order_stats.get(sku, {}).get("orders", 0),
+                "last_order": order_stats.get(sku, {}).get("last"),
+                "task": {k: (_money(v) if k in ("listing_price", "mrp", "wrong_defective_price") and v is not None else v)
+                         for k, v in t.items() if k != "sku_id"} or None}
 
     return Response({
         "parent": {
@@ -454,17 +546,118 @@ def hub_product(request, business_id):
             "name": product.name, "size": product.size, "weight": product.weight, "hsn_code": product.hsn_code,
             "description": product.description, "drive_link": product.drive_link,
         },
-        "skus": sorted(({"sku_id": s, "orders": order_stats.get(s, {}).get("orders", 0),
-                         "last_order": order_stats.get(s, {}).get("last")} for s in skus),
-                       key=lambda x: (-x["orders"], x["sku_id"])),
-        "photos": _photos(business, parent, batches),
+        "skus": sorted((sku_row(s) for s in skus), key=lambda x: (-x["orders"], x["sku_id"])),
+        "photos": photos,
+        "photo_note": photo_note,
         "storage_ready": object_storage.is_ready(),
-        "listings": _listings(batches, skus),
-        "batches": [{"id": b.id, "platform": b.platform, "category": b.category_label, "filename": b.filename,
-                     "rows": b.row_count, "created_at": b.created_at, "sku_ids": (b.sku_ids or [])[:10]}
-                    for b in batches[:20]],
-        "pricing": _pricing(business, parent, skus, target),
+        "listings": listings,
+        "categories": sorted({l["category_short"] for l in listings if l["kind"] == "sheet"}),
+        "issue_count": sum(1 for l in listings for i in l["issues"] if i["level"] == "error"),
+        "pricing": pricing,
+        "is_admin": _is_admin(request),
+        "paused": None if not pause else {"note": pause.note, "at": pause.paused_at,
+                                          "by": getattr(pause.paused_by, "username", None)},
     })
+
+
+@api_view(["GET"])
+def hub_photo_check(request, business_id):
+    """?id=<parent> — does every photo link of this product still open as an image?"""
+    business = get_authorized_business(request, business_id)
+    parent, err = _parent_or_404(request, business, request.GET.get("id"))
+    if err:
+        return err
+    g = _gather(business, parent)
+    photos, _note = _photos(business, parent, g["batches"], g["templates"])
+    results = src.check_links(photos, _allowed_host)
+    return Response({"results": results, "broken": sum(1 for r in results if r["ok"] is False)})
+
+
+@api_view(["POST"])
+def hub_pause(request, business_id):
+    """Admins: {id, paused: true|false, note?} — pause a product so listing
+    managers no longer see it in the hub, or resume it."""
+    business = get_authorized_business(request, business_id)
+    if not _is_admin(request):
+        return Response({"error": "Only an admin can pause or resume a product."}, status=status.HTTP_403_FORBIDDEN)
+    parent = ParentItemPrice.objects.filter(business=business, item_id__iexact=str(request.data.get("id") or "")).first()
+    if not parent:
+        return Response({"error": "No such product."}, status=status.HTTP_404_NOT_FOUND)
+    if request.data.get("paused"):
+        ListingHubPause.objects.update_or_create(parent=parent, defaults={
+            "business": business, "note": str(request.data.get("note") or "")[:255], "paused_by": request.user})
+        return Response({"paused": True})
+    ListingHubPause.objects.filter(parent=parent).delete()
+    return Response({"paused": False})
+
+
+def _listing_object(business, kind, oid):
+    if kind == ListingHubLink.KIND_SHEET:
+        return BulkListingBatch.objects.filter(business=business, pk=oid).first()
+    if kind == ListingHubLink.KIND_TEMPLATE:
+        return ListingTemplate.objects.filter(business=business, pk=oid).first()
+    return None
+
+
+@api_view(["POST"])
+def hub_link(request, business_id):
+    """Admins: {kind: sheet|template, object_id, id: <parent> | null} —
+    say which product a saved listing belongs to (null removes the link, so
+    the automatic match applies again)."""
+    business = get_authorized_business(request, business_id)
+    if not _is_admin(request):
+        return Response({"error": "Only an admin can link listings to products."}, status=status.HTTP_403_FORBIDDEN)
+    kind = request.data.get("kind")
+    try:
+        oid = int(request.data.get("object_id"))
+    except (TypeError, ValueError):
+        return Response({"error": "object_id is required."}, status=status.HTTP_400_BAD_REQUEST)
+    if not _listing_object(business, kind, oid):
+        return Response({"error": "That listing doesn't exist."}, status=status.HTTP_404_NOT_FOUND)
+    target = request.data.get("id")
+    if not target:
+        ListingHubLink.objects.filter(business=business, kind=kind, object_id=oid).delete()
+        return Response({"linked": None})
+    parent = ParentItemPrice.objects.filter(business=business, item_id__iexact=str(target)).first()
+    if not parent:
+        return Response({"error": "No such product."}, status=status.HTTP_404_NOT_FOUND)
+    ListingHubLink.objects.update_or_create(business=business, kind=kind, object_id=oid,
+                                            defaults={"parent": parent, "linked_by": request.user})
+    return Response({"linked": parent.item_id})
+
+
+@api_view(["GET"])
+def hub_unlinked(request, business_id):
+    """Admins: saved listings no product claims yet, each with the products
+    it most looks like. ?for=<parent> ranks them for that one product."""
+    business = get_authorized_business(request, business_id)
+    if not _is_admin(request):
+        return Response({"error": "Only an admin can link listings."}, status=status.HTTP_403_FORBIDDEN)
+    link_map = src.links(business)
+    sheet_map = src.sheet_parents(business, link_map)
+    tmap = src.template_parents(business, link_map)
+    focus = ParentItemPrice.objects.filter(business=business, item_id__iexact=request.GET.get("for") or "").first()
+    out = []
+    for b in BulkListingBatch.objects.filter(id__in=[k for k, (p, _h) in sheet_map.items() if not p]).order_by("-created_at"):
+        text = src.sheet_text(b)
+        out.append({"kind": "sheet", "object_id": b.id, "platform": b.platform, "name": b.filename,
+                    "category": src.short_category(b.category_label), "created_at": b.created_at,
+                    "sku_ids": (b.sku_ids or [])[:6], "suggestions": src.suggest_parents(business, text), "_text": text})
+    for t in ListingTemplate.objects.filter(id__in=[k for k, (p, _h) in tmap.items() if not p]).order_by("-updated_at"):
+        text = f"{t.name} " + " ".join(str(v) for v in list((t.fields or {}).values())[:20])
+        out.append({"kind": "template", "object_id": t.id, "platform": "meesho", "name": t.name,
+                    "category": "Extension template", "created_at": t.updated_at, "sku_ids": [],
+                    "suggestions": src.suggest_parents(business, text), "_text": text})
+    if focus:
+        from difflib import SequenceMatcher
+        for o in out:
+            o["match_for_focus"] = round(max(
+                SequenceMatcher(None, src._norm(focus.item_id), src._norm(o["_text"])[:200]).ratio(),
+                1.0 if any(s["item_id"] == focus.item_id for s in o["suggestions"]) else 0), 2)
+        out.sort(key=lambda o: -o["match_for_focus"])
+    for o in out:
+        o.pop("_text", None)
+    return Response({"results": out})
 
 
 @api_view(["POST", "DELETE"])
@@ -540,11 +733,11 @@ def _safe(name):
 
 def _load_photos(request, business_id):
     business = get_authorized_business(request, business_id)
-    parent = ParentItemPrice.objects.filter(business=business, item_id__iexact=(request.GET.get("id") or "").strip()).first()
-    if not parent:
+    parent, err = _parent_or_404(request, business, request.GET.get("id"))
+    if err:
         return business, None, []
-    skus = _parent_skus(business, parent)
-    return business, parent, _photos(business, parent, _batches_for(business, parent, skus))
+    g = _gather(business, parent)
+    return business, parent, _photos(business, parent, g["batches"], g["templates"])[0]
 
 
 @api_view(["GET"])

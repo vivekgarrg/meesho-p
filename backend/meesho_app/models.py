@@ -2906,3 +2906,52 @@ class ListingPrice(models.Model):
 
     def __str__(self):
         return f"{self.parent.item_id} · {self.platform} · {self.price}"
+
+
+class ListingHubLink(models.Model):
+    """
+    An admin's statement that a saved listing — a Bulk Listing sheet or a
+    browser-extension template — belongs to a product (parent SKU).
+
+    Most listings find their product on their own: a sheet made after parents
+    became required carries its parent, and a sheet's SKU ids usually sit under
+    one on SKU Pricing. Older sheets, and every extension template, have
+    neither, so without this they never appear on any product in the Listing
+    Hub. A link here always wins over the automatic match.
+    """
+    KIND_SHEET = "sheet"
+    KIND_TEMPLATE = "template"
+    KIND_CHOICES = [(KIND_SHEET, "Bulk Listing sheet"), (KIND_TEMPLATE, "Extension template")]
+
+    business = models.ForeignKey("accounts.Business", on_delete=models.CASCADE, related_name="listing_hub_links")
+    kind = models.CharField(max_length=20, choices=KIND_CHOICES)
+    object_id = models.PositiveIntegerField()
+    parent = models.ForeignKey(ParentItemPrice, on_delete=models.CASCADE, related_name="listing_hub_links")
+    linked_by = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True, blank=True,
+                                  related_name="listing_hub_links_made")
+    linked_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "listing_hub_links"
+        unique_together = [("business", "kind", "object_id")]
+
+    def __str__(self):
+        return f"{self.kind} {self.object_id} → {self.parent.item_id}"
+
+
+class ListingHubPause(models.Model):
+    """A product an admin has paused: it no longer shows in the Listing Hub
+    for listing managers (admins still see it, marked paused, and can resume
+    it). Deleting the row resumes the product."""
+    parent = models.OneToOneField(ParentItemPrice, on_delete=models.CASCADE, related_name="listing_pause")
+    business = models.ForeignKey("accounts.Business", on_delete=models.CASCADE, related_name="listing_pauses")
+    note = models.CharField(max_length=255, blank=True)
+    paused_by = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True, blank=True,
+                                  related_name="listing_pauses_made")
+    paused_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "listing_hub_pauses"
+
+    def __str__(self):
+        return f"paused: {self.parent.item_id}"

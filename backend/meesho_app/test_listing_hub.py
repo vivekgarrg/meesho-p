@@ -21,6 +21,10 @@ IMG = "https://upload.meeshosupplyassets.com/cataloging/1/1.jpg"
 
 class HubTestCase(TestCase):
     def setUp(self):
+        # Never list a real storage bucket from a test.
+        patcher = mock.patch("meesho_app.listing_hub_sources.folder_photos", return_value=([], None))
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.user = User.objects.create_user(username="o", password="pw", role=User.ROLE_SUPER_ADMIN)
         self.business = Business.objects.create(name="B")
         Membership.objects.create(user=self.user, business=self.business)
@@ -157,12 +161,15 @@ class ProductPageTests(HubTestCase):
         r = self.client.get(self.base + "/product/", {"id": "Choti Pragi"}).data
         self.assertEqual([s["sku_id"] for s in r["skus"]], ["LOTA-1", "LOTA-2"])
         self.assertEqual(r["skus"][0]["orders"], 3)
-        self.assertEqual(list(r["listings"]), ["meesho"])                       # the unrelated Flipkart sheet isn't ours
-        labels = {f["label"]: f["value"] for f in r["listings"]["meesho"]["fields"]}
+        self.assertEqual([l["platform"] for l in r["listings"]], ["meesho"])     # the unrelated Flipkart sheet isn't ours
+        sheet = r["listings"][0]
+        self.assertEqual(sheet["matched_by"], "made for it")
+        labels = {f["label"]: f["value"] for f in sheet["fields"]}
         self.assertEqual(labels, {"MRP": "999", "HSN code": "741810"})          # blanks dropped, labels readable
-        self.assertEqual([s["sku_id"] for s in r["listings"]["meesho"]["skus"]], ["LOTA-1"])
+        self.assertEqual([s["sku_id"] for s in sheet["skus"]], ["LOTA-1"])
         self.assertEqual([p["url"] for p in r["photos"]], [IMG, IMG + "?2"])    # main image not repeated
-        self.assertEqual(r["photos"][0]["source"], "main")
+        self.assertEqual(r["photos"][0]["source"], "Main photo")
+        self.assertEqual(r["categories"], ["Puja"])
 
     def test_unknown_product(self):
         self.assertEqual(self.client.get(self.base + "/product/", {"id": "NOPE"}).status_code, 404)

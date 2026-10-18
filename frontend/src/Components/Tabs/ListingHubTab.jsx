@@ -118,7 +118,7 @@ const STEPS = [
   { icon: "💰", title: "Decide the price",
     text: "Open Price. Use the price marked “List at” — the price an admin set, or else the recommended one, worked out from cost, Meesho/Flipkart fees and how often this product comes back. Don't list below the break-even price." },
   { icon: "📋", title: "Copy the details",
-    text: "Open Listing details. Everything typed into this product's earlier Meesho or Flipkart sheet is there — HSN, weight, material, MRP, description. Use the copy buttons instead of typing." },
+    text: "Open Saved listings. Every Meesho / Flipkart sheet and extension template saved for this product is there, grouped by category — HSN, weight, material, MRP, description — each with a copy button. Fix anything marked in red before reusing it." },
   { icon: "🚀", title: "Create the listing",
     text: "Press “Create Meesho listing” or “Create Flipkart listing” — Bulk Listing opens with this product already chosen. “Start from this listing” copies the previous sheet so only the new SKU ids need checking. Generate the sheet and upload it on the marketplace panel." },
   { icon: "✅", title: "After it goes live",
@@ -154,60 +154,189 @@ function Guide({ onHide, compact }) {
 
 // ── search & results ─────────────────────────────────────────────────────────
 
+const NO_SHEET = "No listing sheet yet";
+
 function ProductCard({ p, onOpen }) {
   return (
     <button onClick={() => onOpen(p.item_id)}
-      style={{ ...S.card, padding: 0, overflow: "hidden", textAlign: "left", cursor: "pointer", border: `1px solid ${C.gray100}`,
-        display: "flex", flexDirection: "column" }}>
-      <div style={{ aspectRatio: "1 / 1", background: C.gray50, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
+      style={{ ...S.card, padding: 0, overflow: "hidden", textAlign: "left", cursor: "pointer",
+        border: `1px solid ${p.paused ? C.amberBorder : C.gray100}`, display: "flex", flexDirection: "column", opacity: p.paused ? 0.8 : 1 }}>
+      <div style={{ aspectRatio: "1 / 1", background: C.gray50, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", position: "relative" }}>
         {p.image_url
           ? <img src={p.image_url} alt="" loading="lazy" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
           : <span style={{ fontSize: 30, color: C.gray300 }}>📦</span>}
+        {p.paused && (
+          <span style={{ position: "absolute", top: 8, left: 8, background: C.amber, color: C.white, fontSize: 11, fontWeight: 800, borderRadius: 999, padding: "2px 9px" }}>⏸ Paused</span>
+        )}
       </div>
       <div style={{ padding: "10px 12px", display: "flex", flexDirection: "column", gap: 5 }}>
         <span style={{ fontSize: 13.5, fontWeight: 800, color: C.gray800, wordBreak: "break-word" }}>{p.item_id}</span>
         {p.matched_sku && <span style={{ fontSize: 11, color: C.orange, wordBreak: "break-all" }}>matches SKU {p.matched_sku}</span>}
         <span style={{ fontSize: 11.5, color: C.gray500 }}>
-          {p.sku_count} SKU{p.sku_count === 1 ? "" : "s"} · {p.photo_count} photo{p.photo_count === 1 ? "" : "s"}
+          {p.sku_count} SKU{p.sku_count === 1 ? "" : "s"}{p.photo_count ? ` · 📷 ${p.photo_count} uploaded` : ""}
           {p.saved_prices?.meesho ? ` · ${rupees(p.saved_prices.meesho)}` : ""}
         </span>
         <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
           {!p.priced && <Chip color={C.red} bg={C.redLight}>No cost price</Chip>}
           {PLATFORMS.map((pl) => p.listed_on.includes(pl.key) && <Chip key={pl.key} color={pl.color} bg={`${pl.color}14`}>{pl.label} ✓</Chip>)}
+          {(p.categories || []).map((c) => <Chip key={c} color={C.gray600} bg={C.gray100}>🏷 {c}</Chip>)}
         </div>
       </div>
     </button>
   );
 }
 
-function SearchView({ onOpen }) {
+/**
+ * Admins: saved listings no product claims yet, each with its best-guess
+ * products. `forItem` ranks them for one product and links straight to it.
+ */
+function LinkPanel({ forItem, onClose, onLinked, toast }) {
+  const [rows, setRows] = useState(null);
+  const [busy, setBusy] = useState(null);
+  const [picking, setPicking] = useState({});   // object key -> typed product name
+  const [options, setOptions] = useState({});   // object key -> search results
+
+  const load = useCallback(() => {
+    const q = forItem ? `?${new URLSearchParams({ for: forItem })}` : "";
+    fetch(`${API}/listing-hub/unlinked/${q}`).then((r) => r.json()).then((d) => setRows(d.results || [])).catch(() => setRows([]));
+  }, [forItem]);
+  useEffect(() => { load(); }, [load]);
+
+  const link = async (row, item) => {
+    setBusy(`${row.kind}-${row.object_id}`);
+    try {
+      const res = await fetch(`${API}/listing-hub/link/`, { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ kind: row.kind, object_id: row.object_id, id: item }) });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) { toast(d.error || "Couldn't link it.", false); return; }
+      toast(`Linked to ${d.linked} ✓`);
+      setRows((rs) => rs.filter((r) => !(r.kind === row.kind && r.object_id === row.object_id)));
+      onLinked?.();
+    } finally {
+      setBusy(null);
+    }
+  };
+  const search = async (key, text) => {
+    setPicking((p) => ({ ...p, [key]: text }));
+    if (text.trim().length < 2) { setOptions((o) => ({ ...o, [key]: [] })); return; }
+    const d = await fetch(`${API}/listing-hub/search/?${new URLSearchParams({ q: text })}`).then((r) => r.json()).catch(() => ({}));
+    setOptions((o) => ({ ...o, [key]: (d.results || []).slice(0, 6).map((x) => x.item_id) }));
+  };
+
+  return (
+    <Card style={{ border: `1.5px solid ${C.orangeBorder}`, display: "flex", flexDirection: "column", gap: 12 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "flex-start", flexWrap: "wrap" }}>
+        <div>
+          <p style={{ fontSize: 15, fontWeight: 800, color: C.gray800 }}>{forItem ? `Link a saved listing to “${forItem}”` : "Listings not linked to any product"}</p>
+          <p style={{ fontSize: 12, color: C.gray500, maxWidth: 640, lineHeight: 1.5 }}>
+            These listing sheets and extension templates don't say which product they're for, so they don't show on any product.
+            Link each to its product — the best guesses are shown first.
+          </p>
+        </div>
+        <Btn small onClick={onClose}>Close</Btn>
+      </div>
+      {rows == null ? <CircularProgress size={22} style={{ color: C.orange }} /> : rows.length === 0 ? (
+        <p style={{ fontSize: 13, color: C.green, fontWeight: 700 }}>✓ Every saved listing is linked to a product.</p>
+      ) : rows.map((r) => {
+        const key = `${r.kind}-${r.object_id}`;
+        const pl = PLATFORMS.find((x) => x.key === r.platform) || PLATFORMS[0];
+        return (
+          <div key={key} style={{ border: `1px solid ${C.gray100}`, borderRadius: 12, padding: 12, display: "flex", flexDirection: "column", gap: 8 }}>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              <Chip color={pl.color} bg={`${pl.color}14`}>{r.kind === "template" ? "Extension template" : `${pl.label} sheet`}</Chip>
+              <span style={{ fontSize: 13, fontWeight: 800, color: C.gray800, wordBreak: "break-all" }}>{r.name}</span>
+              <span style={{ fontSize: 12, color: C.gray500 }}>{r.category} · {fmtDate(r.created_at)}</span>
+            </div>
+            {r.sku_ids?.length > 0 && <p style={{ fontSize: 11.5, color: C.gray500, wordBreak: "break-all" }}>SKU ids: {r.sku_ids.join(", ")}</p>}
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+              {forItem && <Btn small kind="primary" disabled={busy === key} onClick={() => link(r, forItem)}>Link to {forItem}</Btn>}
+              {!forItem && r.suggestions.map((s) => (
+                <Btn key={s.item_id} small kind="primary" disabled={busy === key} onClick={() => link(r, s.item_id)}>Link to {s.item_id}</Btn>
+              ))}
+              {!forItem && (
+                <span style={{ position: "relative" }}>
+                  <input value={picking[key] || ""} onChange={(e) => search(key, e.target.value)} placeholder="…or type another product"
+                    style={{ ...S.inp, padding: "6px 10px", fontSize: 12.5, width: 210, border: `1px solid ${C.gray200}` }} />
+                  {(options[key] || []).length > 0 && (
+                    <span style={{ position: "absolute", top: "100%", left: 0, zIndex: 5, background: C.white, border: `1px solid ${C.gray200}`,
+                      borderRadius: 10, boxShadow: "0 8px 20px rgba(0,0,0,.1)", display: "flex", flexDirection: "column", minWidth: 210 }}>
+                      {options[key].map((o) => (
+                        <button key={o} onClick={() => link(r, o)} style={{ textAlign: "left", padding: "8px 10px", border: "none", background: "none", cursor: "pointer", fontSize: 12.5 }}>{o}</button>
+                      ))}
+                    </span>
+                  )}
+                </span>
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </Card>
+  );
+}
+
+function SearchView({ onOpen, toast }) {
   const [q, setQ] = useState("");
+  const [category, setCategory] = useState("");
+  const [paused, setPaused] = useState(false);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [more, setMore] = useState(false);
+  const [linking, setLinking] = useState(false);
+  const [tick, setTick] = useState(0);
+
+  const params = useCallback((extra = {}) => {
+    const p = new URLSearchParams({ q });
+    if (category) p.set("category", category);
+    if (paused) p.set("status", "paused");
+    Object.entries(extra).forEach(([k, v]) => p.set(k, v));
+    return p;
+  }, [q, category, paused]);
 
   useEffect(() => {
     let off = false;
     setLoading(true);
     const t = setTimeout(() => {
-      fetch(`${API}/listing-hub/search/?${new URLSearchParams({ q })}`)
+      fetch(`${API}/listing-hub/search/?${params()}`)
         .then((r) => r.json())
         .then((d) => { if (!off) setData(d); })
         .catch(() => { if (!off) setData({ results: [], total: 0, error: true }); })
         .finally(() => { if (!off) setLoading(false); });
     }, 250);
     return () => { off = true; clearTimeout(t); };
-  }, [q]);
+  }, [params, tick]);
 
   const loadMore = async () => {
     setMore(true);
     try {
-      const d = await fetch(`${API}/listing-hub/search/?${new URLSearchParams({ q, offset: data.results.length })}`).then((r) => r.json());
+      const d = await fetch(`${API}/listing-hub/search/?${params({ offset: data.results.length })}`).then((r) => r.json());
       setData((cur) => ({ ...cur, results: [...cur.results, ...(d.results || [])] }));
     } finally {
       setMore(false);
     }
   };
+
+  // With no search and no category picked, show the products grouped by the
+  // category their listing sheets were saved under.
+  const grouped = !q && !category && !paused;
+  const groups = useMemo(() => {
+    if (!grouped || !data) return [];
+    const by = new Map();
+    for (const c of data.categories || []) by.set(c.label, []);
+    for (const p of data.results || []) {
+      for (const c of (p.categories?.length ? p.categories : [NO_SHEET])) {
+        if (!by.has(c)) by.set(c, []);
+        by.get(c).push(p);
+      }
+    }
+    return [...by.entries()].filter(([, items]) => items.length);
+  }, [grouped, data]);
+
+  const chip = (on) => ({
+    padding: "8px 14px", borderRadius: 999, fontSize: 13, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap", minHeight: 38,
+    border: `1.5px solid ${on ? C.orange : C.gray200}`, background: on ? C.orange : C.white, color: on ? C.white : C.gray600,
+  });
+  const grid = { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(min(100%, 170px), 1fr))", gap: 12 };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
@@ -218,22 +347,59 @@ function SearchView({ onOpen }) {
           style={{ width: "100%", boxSizing: "border-box", padding: "16px 16px 16px 46px", fontSize: 16, borderRadius: 14,
             border: `2px solid ${C.orange}`, outline: "none", background: C.white, color: C.gray800, boxShadow: "0 4px 14px rgba(0,0,0,.05)" }} />
       </div>
+
+      {data?.is_admin && data.unlinked_sheets > 0 && !linking && (
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center", flexWrap: "wrap",
+          background: C.amberLight, border: `1px solid ${C.amberBorder}`, borderRadius: 12, padding: "10px 14px" }}>
+          <span style={{ fontSize: 13, color: "#92400E", fontWeight: 600 }}>
+            {data.unlinked_sheets === 1 ? "1 saved listing sheet isn't" : `${data.unlinked_sheets} saved listing sheets aren't`} linked to any product, so {data.unlinked_sheets === 1 ? "its" : "their"} details don't show anywhere.
+          </span>
+          <Btn small kind="primary" onClick={() => setLinking(true)}>Link them</Btn>
+        </div>
+      )}
+      {linking && <LinkPanel onClose={() => setLinking(false)} onLinked={() => setTick((t) => t + 1)} toast={toast} />}
+
+      <div style={{ display: "flex", gap: 8, overflowX: "auto", paddingBottom: 2, alignItems: "center" }}>
+        <button style={chip(!category && !paused)} onClick={() => { setCategory(""); setPaused(false); }}>All categories</button>
+        {(data?.categories || []).map((c) => (
+          <button key={c.label} style={chip(category === c.label)} onClick={() => { setCategory(category === c.label ? "" : c.label); setPaused(false); }}>
+            {c.label === NO_SHEET ? "📭 " : "🏷 "}{c.label} · {c.count}
+          </button>
+        ))}
+        {data?.is_admin && data.paused_count > 0 && (
+          <button style={{ ...chip(paused), ...(paused ? {} : { borderColor: C.amberBorder, color: "#92400E" }) }}
+            onClick={() => { setPaused(!paused); setCategory(""); }}>⏸ Paused · {data.paused_count}</button>
+        )}
+      </div>
+
       {data?.skus_without_parent?.length > 0 && (
         <p style={{ fontSize: 12.5, color: C.amber, background: C.amberLight, borderRadius: 10, padding: "8px 12px" }}>
           These SKU ids match but aren't under any product yet: <b>{data.skus_without_parent.join(", ")}</b>. Ask an admin to link them on SKU Pricing → SKU Link.
         </p>
       )}
       <p style={{ fontSize: 12, color: C.gray500 }}>
-        {loading ? "Searching…" : q ? `${data?.total ?? 0} product(s) match “${q}”` : `${data?.total ?? 0} products — newest first`}
+        {loading ? "Searching…" : paused ? `${data?.total ?? 0} paused product(s) — hidden from listing managers`
+          : q ? `${data?.total ?? 0} product(s) match “${q}”${category ? ` in ${category}` : ""}`
+            : category ? `${data?.total ?? 0} product(s) in ${category}` : `${data?.total ?? 0} products, grouped by listing category`}
       </p>
       {!loading && data?.results?.length === 0 && (
         <Card style={{ textAlign: "center", color: C.gray500, fontSize: 13 }}>
           Nothing found. Check the spelling, try part of the name or SKU id, or ask an admin to add the product on SKU Pricing.
         </Card>
       )}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(min(100%, 170px), 1fr))", gap: 12 }}>
-        {(data?.results || []).map((p) => <ProductCard key={p.id} p={p} onOpen={onOpen} />)}
-      </div>
+
+      {grouped ? groups.map(([label, items]) => (
+        <section key={label} style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, justifyContent: "space-between", flexWrap: "wrap" }}>
+            <h3 style={{ fontSize: 15, fontWeight: 900, color: C.gray800 }}>{label === NO_SHEET ? "📭" : "🏷"} {label}
+              <span style={{ fontSize: 12, fontWeight: 700, color: C.gray400 }}> · {(data.categories.find((c) => c.label === label) || {}).count ?? items.length}</span></h3>
+            <Btn small kind="ghost" onClick={() => setCategory(label)}>See all in {label} →</Btn>
+          </div>
+          <div style={grid}>{items.slice(0, 12).map((p) => <ProductCard key={`${label}-${p.id}`} p={p} onOpen={onOpen} />)}</div>
+        </section>
+      )) : (
+        <div style={grid}>{(data?.results || []).map((p) => <ProductCard key={p.id} p={p} onOpen={onOpen} />)}</div>
+      )}
       {data && data.results.length < data.total && (
         <div style={{ textAlign: "center" }}><Btn onClick={loadMore} disabled={more}>{more ? "Loading…" : `Show more (${data.total - data.results.length} left)`}</Btn></div>
       )}
@@ -245,12 +411,28 @@ function SearchView({ onOpen }) {
 
 function PhotosSection({ data, toast }) {
   const [zipBusy, setZipBusy] = useState(false);
+  const [check, setCheck] = useState(null);      // { byN: {n: result}, broken } | "running"
   const id = data.parent.item_id;
   const photos = data.photos;
+
+  // Check every link once when the photos open, so a broken one is obvious.
+  const runCheck = useCallback(async () => {
+    setCheck("running");
+    try {
+      const d = await fetch(`${API}/listing-hub/photos/check/?${new URLSearchParams({ id })}`).then((r) => r.json());
+      setCheck({ byN: Object.fromEntries((d.results || []).map((r) => [r.n, r])), broken: d.broken || 0 });
+    } catch {
+      setCheck(null);
+    }
+  }, [id]);
+  useEffect(() => { if (photos.length) runCheck(); }, [photos.length, runCheck]);
+
   if (!photos.length) {
     return (
       <Card style={{ textAlign: "center", color: C.gray500, fontSize: 13, lineHeight: 1.6 }}>
-        No photos yet. Upload them on <b>SKU Pricing → this product → Upload photos</b> (or with the Quadrant Cropper) and they'll appear here.
+        No photos found — none uploaded, none in its storage folder, and none in its saved listings.
+        Upload them on <b>SKU Pricing → this product → Upload photos</b> (or with the Quadrant Cropper) and they'll appear here.
+        {data.photo_note && <div style={{ color: C.amber, marginTop: 6 }}>{data.photo_note}</div>}
       </Card>
     );
   }
@@ -263,29 +445,57 @@ function PhotosSection({ data, toast }) {
       toast(missing ? `Downloaded — ${missing} photo(s) couldn't be fetched` : "All photos downloaded ✓", !missing);
     }
   };
-  const SOURCE = { uploaded: "Uploaded", main: "Main photo" };
+  const sources = photos.reduce((m, p) => m.set(p.source, (m.get(p.source) || 0) + 1), new Map());
+  const broken = check && check !== "running" ? photos.filter((p) => check.byN[p.n]?.ok === false) : [];
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
         <Btn kind="primary" onClick={zip} disabled={zipBusy}>{zipBusy ? "Preparing ZIP…" : `⬇ Download all ${photos.length} photos (ZIP)`}</Btn>
-        <CopyBtn text={photos.map((p) => p.url).join("\n")} toast={toast} label="Copy all photo links" what="Photo links copied" />
+        <CopyBtn text={photos.filter((p) => check?.byN?.[p.n]?.ok !== false).map((p) => p.url).join("\n")} toast={toast}
+          label="Copy working photo links" what="Photo links copied" />
+        <Btn small onClick={runCheck} disabled={check === "running"}>{check === "running" ? "Checking links…" : "↻ Check photo links"}</Btn>
       </div>
+      <p style={{ fontSize: 12, color: C.gray500 }}>
+        From: {[...sources.entries()].map(([s, n]) => `${s} (${n})`).join(" · ")}
+      </p>
+      {data.photo_note && <p style={{ fontSize: 12, color: C.amber }}>{data.photo_note}</p>}
+      {check && check !== "running" && (
+        broken.length ? (
+          <div style={{ background: C.redLight, border: `1px solid ${C.redBorder}`, borderRadius: 12, padding: "10px 14px", color: C.red, fontSize: 13, fontWeight: 600 }}>
+            {broken.length} photo link{broken.length === 1 ? " doesn't" : "s don't"} open — marked in red below. Don't use them in a new listing;
+            re-upload those photos on SKU Pricing if they're needed.
+          </div>
+        ) : (
+          <p style={{ fontSize: 12.5, color: C.green, fontWeight: 700 }}>✓ All {photos.length} photo links open.</p>
+        )
+      )}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(min(100%, 160px), 1fr))", gap: 10 }}>
-        {photos.map((p) => (
-          <div key={p.n} style={{ border: `1px solid ${C.gray100}`, borderRadius: 12, overflow: "hidden", background: C.white }}>
-            <a href={p.url} target="_blank" rel="noreferrer" style={{ display: "block", aspectRatio: "1 / 1", background: C.gray50, position: "relative" }}>
-              <img src={p.url} alt={`Photo ${p.n}`} loading="lazy" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-              <span style={{ position: "absolute", top: 6, left: 6, background: "rgba(0,0,0,.6)", color: "#fff", fontSize: 11, fontWeight: 800, borderRadius: 6, padding: "1px 6px" }}>{p.n}</span>
-            </a>
-            <div style={{ padding: 8, display: "flex", flexDirection: "column", gap: 6 }}>
-              <span style={{ fontSize: 10.5, color: C.gray400, fontWeight: 700 }}>{SOURCE[p.source] || p.source}</span>
-              <div style={{ display: "flex", gap: 6 }}>
-                <Btn small onClick={() => download(`${API}/listing-hub/photo/?${new URLSearchParams({ id, n: p.n })}`, `${id}-${p.n}.jpg`, toast)}>⬇ Save</Btn>
-                <CopyBtn text={p.url} toast={toast} label="Link" what="Photo link copied" />
+        {photos.map((p) => {
+          const res = check && check !== "running" ? check.byN[p.n] : null;
+          const bad = res?.ok === false;
+          return (
+            <div key={p.n} style={{ border: `${bad ? 2 : 1}px solid ${bad ? C.red : C.gray100}`, borderRadius: 12, overflow: "hidden", background: C.white }}>
+              <a href={p.url} target="_blank" rel="noreferrer" style={{ display: "block", aspectRatio: "1 / 1", background: C.gray50, position: "relative" }}>
+                <img src={p.url} alt={`Photo ${p.n}`} loading="lazy" style={{ width: "100%", height: "100%", objectFit: "cover", opacity: bad ? 0.35 : 1 }} />
+                <span style={{ position: "absolute", top: 6, left: 6, background: "rgba(0,0,0,.6)", color: "#fff", fontSize: 11, fontWeight: 800, borderRadius: 6, padding: "1px 6px" }}>{p.n}</span>
+                {res && (
+                  <span style={{ position: "absolute", top: 6, right: 6, borderRadius: 999, fontSize: 11, fontWeight: 800, padding: "1px 7px",
+                    background: res.ok ? C.green : res.ok === false ? C.red : C.gray400, color: C.white }}>
+                    {res.ok ? "✓" : res.ok === false ? "Broken" : "?"}
+                  </span>
+                )}
+              </a>
+              <div style={{ padding: 8, display: "flex", flexDirection: "column", gap: 6 }}>
+                <span style={{ fontSize: 10.5, color: C.gray400, fontWeight: 700 }}>{p.source}</span>
+                {res && !res.ok && res.reason && <span style={{ fontSize: 11, color: bad ? C.red : C.gray500, lineHeight: 1.35 }}>{res.reason}</span>}
+                <div style={{ display: "flex", gap: 6 }}>
+                  <Btn small disabled={bad} onClick={() => download(`${API}/listing-hub/photo/?${new URLSearchParams({ id, n: p.n })}`, `${id}-${p.n}.jpg`, toast)}>⬇ Save</Btn>
+                  <CopyBtn text={p.url} toast={toast} label="Link" what="Photo link copied" />
+                </div>
               </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
@@ -436,16 +646,103 @@ function FieldList({ fields, toast }) {
   );
 }
 
-function DetailsSection({ data, toast, goCreate }) {
-  const available = PLATFORMS.filter((p) => data.listings[p.key]);
-  const [platform, setPlatform] = useState(available[0]?.key || "meesho");
-  const listing = data.listings[platform];
-  const product = data.product;
+const MATCHED = {
+  linked: ["Linked by an admin", C.blue, C.blueLight],
+  "made for it": ["Made for this product", C.green, C.greenLight],
+  "SKU ids": ["Found by its SKU ids", C.gray600, C.gray100],
+  "name / SKU id": ["Matched by name / SKU id", C.gray600, C.gray100],
+};
+const LEVEL = { error: [C.red, C.redLight, "✗"], warning: [C.amber, C.amberLight, "⚠"], info: [C.blue, C.blueLight, "ℹ"] };
+
+function ListingCard({ l, toast, goCreate, isAdmin, onUnlink, open, setOpen }) {
+  const pl = PLATFORMS.find((p) => p.key === l.platform) || PLATFORMS[0];
+  const [mt, mc, mb] = MATCHED[l.matched_by] || [l.matched_by, C.gray600, C.gray100];
   const asText = (fields) => fields.map((f) => `${f.label}: ${f.value}`).join("\n");
+  const errors = l.issues.filter((i) => i.level === "error").length;
+  return (
+    <Card style={{ display: "flex", flexDirection: "column", gap: 12, borderLeft: `4px solid ${errors ? C.red : pl.color}` }}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap", alignItems: "flex-start" }}>
+        <button onClick={() => setOpen(!open)} style={{ textAlign: "left", background: "none", border: "none", padding: 0, cursor: "pointer", minWidth: 0, flex: "1 1 260px" }}>
+          <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+            <Chip color={pl.color} bg={`${pl.color}14`}>{l.kind === "template" ? "Extension template" : `${pl.label} sheet`}</Chip>
+            <Chip>🏷 {l.category_short}</Chip>
+            <Chip color={mc} bg={mb}>{mt}</Chip>
+            {errors > 0 && <Chip color={C.red} bg={C.redLight}>{errors} problem{errors === 1 ? "" : "s"}</Chip>}
+          </div>
+          <p style={{ fontSize: 14, fontWeight: 800, color: C.gray800, marginTop: 6, wordBreak: "break-all" }}>{l.filename}</p>
+          <p style={{ fontSize: 12, color: C.gray500 }}>
+            {fmtDate(l.created_at)}{l.skus.length ? ` · ${l.skus.length} SKU${l.skus.length === 1 ? "" : "s"}` : ""} · {l.fields.length} details
+            <span style={{ color: C.orange, fontWeight: 700 }}> · {open ? "Hide ▲" : "Show details ▼"}</span>
+          </p>
+        </button>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          <CopyBtn text={asText(l.fields)} toast={toast} label="Copy all" what="All details copied" />
+          {l.kind === "sheet" && <Btn small onClick={() => download(`${API}/bulk-listing/batches/${l.id}/download/`, l.filename, toast)}>⬇ Sheet</Btn>}
+          {l.kind === "sheet" && l.platform === "meesho" && <Btn small kind="primary" onClick={() => goCreate("meesho", l.id, l.filename)}>Start from this</Btn>}
+          {l.kind === "template" && l.source_url && <a href={l.source_url} target="_blank" rel="noreferrer" style={{ fontSize: 12.5, fontWeight: 700, color: C.blue, alignSelf: "center" }}>Open form ↗</a>}
+          {isAdmin && l.matched_by === "linked" && <Btn small kind="ghost" onClick={() => onUnlink(l)}>Unlink</Btn>}
+        </div>
+      </div>
+
+      {l.issues.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {l.issues.map((i, k) => {
+            const [c, bg, icon] = LEVEL[i.level] || LEVEL.info;
+            return <div key={k} style={{ background: bg, color: c, borderRadius: 10, padding: "7px 11px", fontSize: 12.5, fontWeight: 600, lineHeight: 1.45 }}>{icon} {i.text}</div>;
+          })}
+        </div>
+      )}
+      {l.issues.length === 0 && <p style={{ fontSize: 12.5, color: C.green, fontWeight: 700 }}>✓ No problems found in this listing.</p>}
+
+      {open && (
+        <>
+          <FieldList fields={l.fields} toast={toast} />
+          {l.skus.length > 0 && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              <p style={{ fontSize: 13, fontWeight: 800, color: C.gray700 }}>Per SKU</p>
+              {l.skus.map((s) => (
+                <div key={s.sku_id} style={{ border: `1px solid ${C.gray100}`, borderRadius: 12, padding: 10, display: "flex", flexDirection: "column", gap: 8 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 12.5, fontWeight: 800, color: C.gray700, wordBreak: "break-all" }}>{s.sku_id}</span>
+                    <span style={{ fontSize: 11.5, color: s.image_count ? C.gray500 : C.red, fontWeight: 700 }}>{s.image_count} photo{s.image_count === 1 ? "" : "s"}</span>
+                  </div>
+                  {s.images.length > 0 && (
+                    <div style={{ display: "flex", gap: 6, overflowX: "auto" }}>
+                      {s.images.map((u, k) => (
+                        <a key={k} href={u} target="_blank" rel="noreferrer" style={{ flex: "0 0 56px", height: 56, borderRadius: 8, overflow: "hidden", background: C.gray50, border: `1px solid ${C.gray100}` }}>
+                          <img src={u} alt="" loading="lazy" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                        </a>
+                      ))}
+                    </div>
+                  )}
+                  {s.fields.length > 0 && <FieldList fields={s.fields} toast={toast} />}
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </Card>
+  );
+}
+
+function ListingsSection({ data, toast, goCreate, reload }) {
+  const [openId, setOpenId] = useState(() => (data.listings[0] ? `${data.listings[0].kind}-${data.listings[0].id}` : null));
+  const [cat, setCat] = useState("");
+  const [linking, setLinking] = useState(false);
+  const product = data.product;
   const productFields = product ? [
     ["name", "Product name", product.name], ["size", "Size", product.size], ["weight", "Weight", product.weight],
     ["hsn", "HSN code", product.hsn_code], ["description", "Description", product.description],
   ].filter(([, , v]) => v).map(([key, label, value]) => ({ key, label, value })) : [];
+  const cats = [...new Set(data.listings.map((l) => l.category_short))];
+  const shown = data.listings.filter((l) => !cat || l.category_short === cat);
+
+  const unlink = async (l) => {
+    const res = await fetch(`${API}/listing-hub/link/`, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind: l.kind, object_id: l.id, id: null }) });
+    if (res.ok) { toast("Unlinked"); reload(); } else toast("Couldn't unlink it.", false);
+  };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
@@ -455,56 +752,41 @@ function DetailsSection({ data, toast, goCreate }) {
             <p style={{ fontSize: 14, fontWeight: 800, color: C.gray800 }}>Product info</p>
             <div style={{ display: "flex", gap: 6 }}>
               {product.drive_link && <a href={product.drive_link} target="_blank" rel="noreferrer" style={{ fontSize: 12.5, fontWeight: 700, color: C.blue }}>Open Drive folder ↗</a>}
-              <CopyBtn text={asText(productFields)} toast={toast} label="Copy all" what="Product info copied" />
+              <CopyBtn text={productFields.map((f) => `${f.label}: ${f.value}`).join("\n")} toast={toast} label="Copy all" what="Product info copied" />
             </div>
           </div>
           <FieldList fields={productFields} toast={toast} />
         </Card>
       )}
-      <Card>
-        <div style={{ display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap" }}>
-          {PLATFORMS.map((p) => (
-            <button key={p.key} onClick={() => setPlatform(p.key)}
-              style={{ padding: "7px 14px", borderRadius: 999, fontSize: 13, fontWeight: 800, cursor: "pointer",
-                border: `1.5px solid ${platform === p.key ? p.color : C.gray200}`, background: platform === p.key ? `${p.color}12` : C.white,
-                color: platform === p.key ? p.color : C.gray500 }}>
-              {p.label} {data.listings[p.key] ? "✓" : ""}
+
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {cats.length > 1 && ["", ...cats].map((c) => (
+            <button key={c || "all"} onClick={() => setCat(c)}
+              style={{ padding: "6px 12px", borderRadius: 999, fontSize: 12.5, fontWeight: 700, cursor: "pointer",
+                border: `1.5px solid ${cat === c ? C.orange : C.gray200}`, background: cat === c ? C.orangeLight : C.white, color: cat === c ? C.orange : C.gray600 }}>
+              {c ? `🏷 ${c}` : `All · ${data.listings.length}`}
             </button>
           ))}
         </div>
-        {!listing ? (
-          <div style={{ fontSize: 13, color: C.gray500, lineHeight: 1.6 }}>
-            <p>This product hasn't been listed on {PLATFORMS.find((p) => p.key === platform).label} through Bulk Listing yet, so there are no saved details for it.</p>
-            <div style={{ marginTop: 10 }}><Btn kind="primary" onClick={() => goCreate(platform)}>Create {PLATFORMS.find((p) => p.key === platform).label} listing</Btn></div>
-          </div>
-        ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-              <p style={{ fontSize: 12, color: C.gray500 }}>
-                From <b>{listing.filename}</b> · {fmtDate(listing.created_at)}{listing.category ? ` · ${listing.category}` : ""}
-              </p>
-              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                <CopyBtn text={asText(listing.fields)} toast={toast} label="Copy all details" what="All details copied" />
-                {platform === "meesho" && <Btn small kind="primary" onClick={() => goCreate("meesho", listing.batch_id, listing.filename)}>Start from this listing</Btn>}
-              </div>
-            </div>
-            <FieldList fields={listing.fields} toast={toast} />
-            {listing.skus.length > 0 && listing.skus.some((s) => s.fields.length) && (
-              <details>
-                <summary style={{ cursor: "pointer", fontSize: 13, fontWeight: 700, color: C.gray700 }}>Per-SKU details ({listing.skus.length})</summary>
-                <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 10 }}>
-                  {listing.skus.map((s) => (
-                    <div key={s.sku_id}>
-                      <p style={{ fontSize: 12.5, fontWeight: 800, color: C.gray700, marginBottom: 6, wordBreak: "break-all" }}>{s.sku_id}</p>
-                      <FieldList fields={s.fields} toast={toast} />
-                    </div>
-                  ))}
-                </div>
-              </details>
-            )}
-          </div>
-        )}
-      </Card>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {data.is_admin && <Btn small onClick={() => setLinking((v) => !v)}>🔗 Link a saved listing</Btn>}
+          <Btn small kind="primary" onClick={() => goCreate("meesho")} disabled={!data.pricing.priced}>＋ New Meesho listing</Btn>
+          <Btn small kind="primary" onClick={() => goCreate("flipkart")} disabled={!data.pricing.priced}>＋ New Flipkart listing</Btn>
+        </div>
+      </div>
+      {linking && <LinkPanel forItem={data.parent.item_id} toast={toast} onClose={() => setLinking(false)} onLinked={reload} />}
+
+      {data.listings.length === 0 ? (
+        <Card style={{ fontSize: 13, color: C.gray500, lineHeight: 1.6 }}>
+          No saved listings for this product yet — no Bulk Listing sheet or extension template is linked to it.
+          {data.is_admin ? " If an older sheet belongs to it, use “Link a saved listing”." : " If one should be here, ask an admin to link it."}
+        </Card>
+      ) : shown.map((l) => {
+        const key = `${l.kind}-${l.id}`;
+        return <ListingCard key={key} l={l} toast={toast} goCreate={goCreate} isAdmin={data.is_admin} onUnlink={unlink}
+          open={openId === key} setOpen={(v) => setOpenId(v ? key : null)} />;
+      })}
     </div>
   );
 }
@@ -514,21 +796,30 @@ function SkuSection({ data, toast }) {
   if (!skus.length) {
     return <Card style={{ color: C.gray500, fontSize: 13 }}>No SKU ids under this product yet. They're added when a listing of it is approved, or by an admin on SKU Pricing → SKU Link.</Card>;
   }
+  const hasTask = skus.some((s) => s.task);
+  const heads = ["SKU id", "Orders", "Last order", ...(hasTask ? ["Listed at", "MRP", "HSN", "Task"] : []), ""];
   return (
     <Card style={{ padding: 0, overflow: "hidden" }}>
       <div style={{ padding: "12px 16px", display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-        <p style={{ fontSize: 13, color: C.gray600 }}>{skus.length} SKU id{skus.length === 1 ? "" : "s"} — most-sold first</p>
+        <p style={{ fontSize: 13, color: C.gray600 }}>{skus.length} SKU id{skus.length === 1 ? "" : "s"} — most-sold first{hasTask ? " · prices from Team Tasks listings" : ""}</p>
         <CopyBtn text={skus.map((s) => s.sku_id).join("\n")} toast={toast} label="Copy all SKU ids" what="SKU ids copied" />
       </div>
       <div style={{ overflowX: "auto" }}>
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-          <thead><tr>{["SKU id", "Orders", "Last order", ""].map((h, i) => <th key={i} style={{ ...S.th, textAlign: i === 0 ? "left" : "right" }}>{h}</th>)}</tr></thead>
+          <thead><tr>{heads.map((h, i) => <th key={i} style={{ ...S.th, textAlign: i === 0 ? "left" : "right", whiteSpace: "nowrap" }}>{h}</th>)}</tr></thead>
           <tbody>
             {skus.map((s, i) => (
               <tr key={s.sku_id} style={{ background: i % 2 ? C.gray50 : C.white }}>
                 <td style={{ ...S.td, fontWeight: 700, wordBreak: "break-all" }}>{s.sku_id}</td>
                 <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace" }}>{s.orders.toLocaleString()}</td>
                 <td style={{ ...S.td, textAlign: "right", whiteSpace: "nowrap" }}>{fmtDate(s.last_order)}</td>
+                {hasTask && <>
+                  <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace" }}>{s.task?.listing_price != null ? rupees(s.task.listing_price) : "—"}</td>
+                  <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace" }}>{s.task?.mrp != null ? rupees(s.task.mrp) : "—"}</td>
+                  <td style={{ ...S.td, textAlign: "right" }}>{s.task?.hsn_code || "—"}</td>
+                  <td style={{ ...S.td, textAlign: "right" }}>{s.task ? <Chip color={s.task.status === "APPROVED" ? C.green : s.task.status === "REJECTED" ? C.red : C.amber}
+                    bg={s.task.status === "APPROVED" ? C.greenLight : s.task.status === "REJECTED" ? C.redLight : C.amberLight}>{(s.task.status || "").toLowerCase()}</Chip> : "—"}</td>
+                </>}
                 <td style={{ ...S.td, textAlign: "right" }}><CopyBtn text={s.sku_id} toast={toast} label="" what="SKU id copied" /></td>
               </tr>
             ))}
@@ -539,32 +830,41 @@ function SkuSection({ data, toast }) {
   );
 }
 
-function HistorySection({ data, toast, goCreate }) {
-  if (!data.batches.length) {
-    return <Card style={{ color: C.gray500, fontSize: 13 }}>No listing sheets made for this product yet.</Card>;
+function PauseControl({ data, toast, reload, onCancel }) {
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const send = async (paused) => {
+    setBusy(true);
+    try {
+      const res = await fetch(`${API}/listing-hub/pause/`, { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: data.parent.item_id, paused, note }) });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) { toast(d.error || "Couldn't change it.", false); return; }
+      toast(paused ? "Paused — listing managers won't see it now" : "Resumed — visible to listing managers again");
+      setNote(""); reload();
+    } finally {
+      setBusy(false);
+    }
+  };
+  if (!data.is_admin) return null;
+  if (data.paused) {
+    return (
+      <div style={{ background: C.amberLight, border: `1.5px solid ${C.amberBorder}`, borderRadius: 14, padding: "12px 16px",
+        display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+        <div style={{ fontSize: 13, color: "#92400E", lineHeight: 1.5 }}>
+          <b>⏸ Paused for listing</b> — listing managers can't see this product in the hub.
+          <div style={{ fontSize: 12 }}>{data.paused.by ? `By ${data.paused.by} · ` : ""}{fmtDate(data.paused.at)}{data.paused.note ? ` · “${data.paused.note}”` : ""}</div>
+        </div>
+        <Btn kind="primary" disabled={busy} onClick={() => send(false)}>▶ Resume listing</Btn>
+      </div>
+    );
   }
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-      {data.batches.map((b) => {
-        const pl = PLATFORMS.find((p) => p.key === b.platform) || PLATFORMS[0];
-        return (
-          <Card key={b.id} style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-            <div style={{ minWidth: 0 }}>
-              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                <Chip color={pl.color} bg={`${pl.color}14`}>{pl.label}</Chip>
-                <span style={{ fontSize: 13, fontWeight: 800, color: C.gray800, wordBreak: "break-all" }}>{b.filename}</span>
-              </div>
-              <p style={{ fontSize: 12, color: C.gray500, marginTop: 4 }}>
-                {fmtDate(b.created_at)} · {b.rows} SKU{b.rows === 1 ? "" : "s"}{b.category ? ` · ${b.category}` : ""}
-              </p>
-            </div>
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-              <Btn small onClick={() => download(`${API}/bulk-listing/batches/${b.id}/download/`, b.filename, toast)}>⬇ Sheet</Btn>
-              {b.platform === "meesho" && <Btn small kind="primary" onClick={() => goCreate("meesho", b.id, b.filename)}>Start from this</Btn>}
-            </div>
-          </Card>
-        );
-      })}
+    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", background: C.gray50, borderRadius: 12, padding: 10 }}>
+      <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Why? e.g. out of stock, price under review (optional)"
+        style={{ ...S.inp, flex: "1 1 240px", padding: "8px 10px", border: `1px solid ${C.gray200}` }} />
+      <Btn kind="primary" disabled={busy} onClick={() => send(true)}>⏸ Pause listing</Btn>
+      <Btn small kind="ghost" onClick={onCancel}>Cancel</Btn>
     </div>
   );
 }
@@ -572,9 +872,8 @@ function HistorySection({ data, toast, goCreate }) {
 const TABS = [
   { key: "photos", label: "🖼️ Photos" },
   { key: "price", label: "💰 Price" },
-  { key: "details", label: "📋 Listing details" },
+  { key: "listings", label: "📋 Saved listings" },
   { key: "skus", label: "🏷️ SKU ids" },
-  { key: "history", label: "🗂️ Past listings" },
 ];
 
 function ProductView({ item, onBack, toast }) {
@@ -588,6 +887,7 @@ function ProductView({ item, onBack, toast }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [tick, setTick] = useState(0);
+  const [pauseOpen, setPauseOpen] = useState(false);
 
   useEffect(() => {
     let off = false;
@@ -601,6 +901,7 @@ function ProductView({ item, onBack, toast }) {
     return () => { off = true; };
   }, [item, target, tick]);
 
+  const reload = () => setTick((x) => x + 1);
   const saveTarget = (v) => { setTarget(v); safeSet(TARGET_KEY, String(v)); };
   const goCreate = (platform, batchId, filename) => {
     const q = new URLSearchParams({ parent: item, platform });
@@ -621,10 +922,16 @@ function ProductView({ item, onBack, toast }) {
   }
   const p = data.parent;
   const listAt = data.pricing.priced ? (data.pricing.platforms.meesho.saved?.price ?? data.pricing.platforms.meesho.recommended) : null;
+  const platformsListed = [...new Set(data.listings.map((l) => l.platform))];
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-      <div><Btn onClick={onBack}>← All products</Btn></div>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+        <Btn onClick={onBack}>← All products</Btn>
+        {data.is_admin && !data.paused && !pauseOpen && <Btn onClick={() => setPauseOpen(true)}>⏸ Pause listing</Btn>}
+      </div>
+      {(data.paused || pauseOpen) && <PauseControl data={data} toast={toast} onCancel={() => setPauseOpen(false)}
+        reload={() => { setPauseOpen(false); reload(); }} />}
 
       <Card style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "center" }}>
         <div style={{ width: isMobile ? 88 : 120, height: isMobile ? 88 : 120, borderRadius: 14, overflow: "hidden", background: C.gray50, flex: "0 0 auto",
@@ -640,9 +947,12 @@ function ProductView({ item, onBack, toast }) {
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
             <Chip>{data.skus.length} SKU ids</Chip>
             <Chip>{data.photos.length} photos</Chip>
+            <Chip>{data.listings.length} saved listing{data.listings.length === 1 ? "" : "s"}</Chip>
+            {data.issue_count > 0 && <Chip color={C.red} bg={C.redLight}>{data.issue_count} listing problem{data.issue_count === 1 ? "" : "s"}</Chip>}
             {listAt != null && <Chip color={C.green} bg={C.greenLight}>Meesho: list at {rupees(listAt)}</Chip>}
             {!data.pricing.priced && <Chip color={C.red} bg={C.redLight}>No cost price — don't list yet</Chip>}
-            {PLATFORMS.map((pl) => data.listings[pl.key] && <Chip key={pl.key} color={pl.color} bg={`${pl.color}14`}>On {pl.label} ✓</Chip>)}
+            {PLATFORMS.map((pl) => platformsListed.includes(pl.key) && <Chip key={pl.key} color={pl.color} bg={`${pl.color}14`}>On {pl.label} ✓</Chip>)}
+            {(data.categories || []).map((c) => <Chip key={c}>🏷 {c}</Chip>)}
           </div>
         </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -657,16 +967,16 @@ function ProductView({ item, onBack, toast }) {
             style={{ padding: "9px 14px", borderRadius: 12, fontSize: 13, fontWeight: 800, cursor: "pointer", whiteSpace: "nowrap",
               border: `1.5px solid ${tab === t.key ? C.orange : C.gray200}`, background: tab === t.key ? C.orange : C.white,
               color: tab === t.key ? C.white : C.gray600 }}>
-            {t.label}
+            {t.label}{t.key === "listings" ? ` · ${data.listings.length}` : ""}
+            {t.key === "listings" && data.issue_count > 0 && <span style={{ marginLeft: 6, color: tab === t.key ? C.white : C.red }}>⚠</span>}
           </button>
         ))}
       </div>
 
       {tab === "photos" && <PhotosSection data={data} toast={toast} />}
-      {tab === "price" && <PriceSection data={data} toast={toast} target={target} setTarget={saveTarget} reload={() => setTick((x) => x + 1)} />}
-      {tab === "details" && <DetailsSection data={data} toast={toast} goCreate={goCreate} />}
+      {tab === "price" && <PriceSection data={data} toast={toast} target={target} setTarget={saveTarget} reload={reload} />}
+      {tab === "listings" && <ListingsSection data={data} toast={toast} goCreate={goCreate} reload={reload} />}
       {tab === "skus" && <SkuSection data={data} toast={toast} />}
-      {tab === "history" && <HistorySection data={data} toast={toast} goCreate={goCreate} />}
     </div>
   );
 }
@@ -702,7 +1012,7 @@ export function ListingHubTab() {
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       {header}
       {guide && <Guide onHide={hideGuide} compact={isMobile} />}
-      {item ? <ProductView key={item} item={item} onBack={back} toast={toast} /> : <SearchView onOpen={open} />}
+      {item ? <ProductView key={item} item={item} onBack={back} toast={toast} /> : <SearchView onOpen={open} toast={toast} />}
       {toastNode}
     </div>
   );
