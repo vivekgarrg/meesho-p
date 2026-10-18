@@ -9,6 +9,7 @@ from rest_framework import status
 from rest_framework.decorators import api_view, parser_classes
 from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
+from rest_framework.exceptions import NotFound, PermissionDenied
 from datetime import datetime, time, timedelta, date as date_cls
 import calendar
 import requests as http_requests
@@ -12625,12 +12626,26 @@ def return_delivery_lookup(request, business_id):
 
 @api_view(["GET", "PATCH"])
 def return_delivery_detail(request, business_id, pk):
-    """Read one return, or record claim / verification progress against it."""
-    business = get_authorized_business(request, business_id)
+    """Read one return, or record claim / verification progress against it.
 
-    try:
-        row = ReturnDelivery.objects.get(pk=pk, business=business)
-    except ReturnDelivery.DoesNotExist:
+    The return may belong to another business than the one selected: one desk
+    receives parcels for several businesses, and the scan lookup already finds
+    a sibling's parcel. So a return is opened — and claim work saved on it —
+    in whichever of the user's businesses owns it, as long as the user is
+    assigned to that business and may use Returns there (checked by
+    get_authorized_business for that business, same as switching to it)."""
+    selected = get_authorized_business(request, business_id)
+
+    business, row = selected, ReturnDelivery.objects.filter(pk=pk, business=selected).first()
+    if row is None:
+        owner_id = ReturnDelivery.objects.filter(pk=pk).values_list("business_id", flat=True).first()
+        if owner_id and any(b.pk == owner_id for b in accessible_businesses(request, include=selected)):
+            try:
+                business = get_authorized_business(request, owner_id)
+                row = ReturnDelivery.objects.get(pk=pk, business=business)
+            except (NotFound, PermissionDenied):
+                row = None
+    if row is None:
         return Response({"error": "Return not found."}, status=status.HTTP_404_NOT_FOUND)
 
     if request.method == "PATCH":
