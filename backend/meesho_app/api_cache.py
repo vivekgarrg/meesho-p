@@ -58,6 +58,10 @@ _NEVER_CACHE_PREFIXES = (
     "bulk-labels/today",      # noon-cutoff business day, not a data version
     "employees/salary-due",   # depends on today's date at finer than a day
 )
+# All-time figures that only change when data does: no date in the key and a long
+# expiry, so they are recomputed only after an upload or edit (a version bump).
+_LONG_LIVED = {"profit/overall/": 30 * 24 * 3600}
+
 # POSTs that read or compute but never write — no reason to flush the cache.
 _STATELESS_POST_MARKERS = ("parse/", "generate/", "presign/", "check/", "preview/", "lookup/")
 
@@ -154,15 +158,20 @@ def _authorized_user(request, business_id):
         return None
 
 
-def _cache_key(request, business_id, user):
-    qs = "&".join(sorted(request.META.get("QUERY_STRING", "").split("&")))
+def _long_ttl(sub):
+    return next((ttl for prefix, ttl in _LONG_LIVED.items() if sub.startswith(prefix)), None)
+
+
+def _cache_key(request, business_id, user, dated=True):
+    # The long-lived all-time answers ignore query params, so they share one entry.
+    qs = "&".join(sorted(request.META.get("QUERY_STRING", "").split("&"))) if dated else ""
     raw = "|".join([
         request.path, qs,
         request.headers.get("X-Settlement-Mode", "all").lower(),
         str(user.pk),
     ])
     digest = hashlib.sha1(raw.encode()).hexdigest()
-    today = time.strftime("%Y%m%d")
+    today = time.strftime("%Y%m%d") if dated else "any"
     return f"api:{business_id}:{global_version()}:{business_version(business_id)}:{today}:{digest}"
 
 
@@ -200,7 +209,7 @@ class ApiCacheMiddleware:
             try:
                 user = _authorized_user(request, int(m.group("id")))
                 if user is not None:
-                    key = _cache_key(request, m.group("id"), user)
+                    key = _cache_key(request, m.group("id"), user, dated=_long_ttl(m.group("sub")) is None)
                     if "no-cache" in request.headers.get("Cache-Control", "").lower():
                         status = "BYPASS"
                     else:
@@ -221,7 +230,7 @@ class ApiCacheMiddleware:
         if key is not None:
             try:
                 if _cacheable(response):
-                    ttl = int(getattr(settings, "API_CACHE_TTL", 900))
+                    ttl = _long_ttl(m.group("sub")) or int(getattr(settings, "API_CACHE_TTL", 900))
                     _cache().set(key, (response.content, response["Content-Type"], time.time()), ttl)
                 response["X-Cache"] = status or "MISS"
             except Exception:  # noqa: BLE001

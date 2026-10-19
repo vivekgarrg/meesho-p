@@ -116,6 +116,12 @@ export function BarcodeScanner({
   hint,
   results = [],
   busy = false,
+  // Delivery-app style session: `progress` ({done, total, label}) is a bar under the
+  // title, and `latest` ({kind, title, lines, code, image_url} | null) is ONE fixed
+  // panel for the most recent scan — it changes in place instead of a feed that
+  // scrolls, so the screen never jumps. Passing `latest` (even null) selects it.
+  progress,
+  latest,
 }) {
   const videoRef    = useRef(null);
   const controlsRef = useRef(null);   // ZXing IScannerControls
@@ -362,6 +368,21 @@ export function BarcodeScanner({
         </div>
       </div>
 
+      {progress && progress.total > 0 && (
+        <div style={{ background: "rgba(0,0,0,0.75)", padding: "0 18px 10px", flexShrink: 0 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", color: "#fff", fontSize: 12, fontWeight: 700, marginBottom: 5 }}>
+            <span>{progress.label || "Done"}</span>
+            <span style={{ fontFamily: "monospace" }}>{progress.done} / {progress.total}</span>
+          </div>
+          <div style={{ height: 7, borderRadius: 99, background: "rgba(255,255,255,0.18)", overflow: "hidden" }}>
+            <div style={{
+              height: "100%", borderRadius: 99, background: C.green, transition: "width 0.25s",
+              width: `${Math.min(100, (progress.done / progress.total) * 100)}%`,
+            }} />
+          </div>
+        </div>
+      )}
+
       {/* ── Viewfinder ── */}
       <div style={{ flex: 1, position: "relative", overflow: "hidden", minHeight: 0 }}>
         <video
@@ -431,7 +452,36 @@ export function BarcodeScanner({
         {/* Live outcome feed — what each scan actually did. Scrollable and
             capped in height so a long session can't push the manual-entry box
             and the close button off a phone screen. */}
-        {results.length > 0 ? (
+        {latest !== undefined ? (
+          <div style={{
+            minHeight: 118, borderRadius: 12, padding: "11px 13px", display: "flex", gap: 12, alignItems: "center",
+            background: latest ? (FEED_META[latest.kind] || FEED_META.ok).bg : "rgba(255,255,255,0.08)",
+            border: `2px solid ${latest ? (FEED_META[latest.kind] || FEED_META.ok).border : "rgba(255,255,255,0.18)"}`,
+          }}>
+            {busy ? (
+              <div style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 14, fontWeight: 700 }}>
+                <CircularProgress size={18} style={{ color: "#fff" }} /> Checking…
+              </div>
+            ) : latest ? (
+              <>
+                {latest.image_url && (
+                  <img src={latest.image_url} alt="" style={{ width: 84, height: 84, objectFit: "cover", borderRadius: 10, flexShrink: 0, background: "#fff" }} />
+                )}
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div style={{ fontSize: 18, fontWeight: 800, lineHeight: 1.2 }}>
+                    {(FEED_META[latest.kind] || FEED_META.ok).mark} {latest.title}
+                  </div>
+                  {(latest.lines || []).map((line, i) => (
+                    <div key={i} style={{ fontSize: 13.5, opacity: 0.92, marginTop: 3, wordBreak: "break-word", fontWeight: i === 0 ? 700 : 400 }}>{line}</div>
+                  ))}
+                  {latest.code && <div style={{ fontSize: 11, opacity: 0.6, marginTop: 4, fontFamily: "monospace", wordBreak: "break-all" }}>{latest.code}</div>}
+                </div>
+              </>
+            ) : (
+              <div style={{ fontSize: 14, opacity: 0.75, fontWeight: 600 }}>Scan the first parcel — the result shows here.</div>
+            )}
+          </div>
+        ) : results.length > 0 ? (
           <div style={{
             display: "flex", flexDirection: "column", gap: 6,
             maxHeight: 168, overflowY: "auto",

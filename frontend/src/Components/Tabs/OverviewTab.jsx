@@ -1137,6 +1137,70 @@ function InsightsPanel({ cur, prev, prevLabel, hasPeriod, profit, dash, daily, d
   );
 }
 
+
+/**
+ * Lifetime revenue and profit — every order to date, whatever period the page is
+ * filtered to. Hidden until clicked (it is the number you don't want on show at a
+ * glance) and only fetched on the first reveal. The server keeps the answer until
+ * new data is uploaded or edited, so showing it again is instant.
+ */
+function LifetimeTotals({ combinedIds }) {
+  const [shown, setShown] = useState(false);
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const key = `${API}|${combinedIds?.join(',') || ''}`;
+
+  // A different business (or combined selection) means different totals.
+  useEffect(() => { setData(null); setFailed(false); setShown(false); }, [key]);
+
+  useEffect(() => {
+    if (!shown || data || loading) return undefined;
+    const ctrl = new AbortController();
+    setLoading(true);
+    setFailed(false);
+    const urls = combinedIds
+      ? combinedIds.map((id) => `/api/business/${id}/profit/overall/`)
+      : [`${API}/profit/overall/`];
+    Promise.all(urls.map((u) => fetch(u, { signal: ctrl.signal }).then((r) => (r.ok ? r.json() : Promise.reject(r)))))
+      .then((list) => {
+        const sum = (k) => list.reduce((a, d) => a + Number(d[k] || 0), 0);
+        setData({ gross: sum('gross_revenue'), settled: sum('total_settled'), profit: sum('net_profit'), orders: sum('order_count') });
+      })
+      .catch((e) => { if (e?.name !== 'AbortError') setFailed(true); })
+      .finally(() => setLoading(false));
+    return () => ctrl.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shown, key]);
+
+  const hidden = <span style={{ letterSpacing: '0.18em', color: C.gray300 }}>₹ ••••••</span>;
+  const cell = (label, value, color, sub) => (
+    <div style={{ minWidth: 150 }}>
+      <p style={{ ...T.label, marginBottom: 5 }}>{label}</p>
+      <p style={{ fontSize: 24, fontWeight: 800, fontFamily: 'monospace', color: shown && data ? color : C.gray300 }}>
+        {shown ? (loading || !data ? '…' : value) : hidden}
+      </p>
+      {sub && shown && data && <p style={{ fontSize: 11, color: C.gray400, marginTop: 3 }}>{sub}</p>}
+    </div>
+  );
+
+  return (
+    <div style={{ ...T.card, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 24, flexWrap: 'wrap', padding: '16px 22px' }}>
+      <div style={{ display: 'flex', gap: 36, flexWrap: 'wrap' }}>
+        {cell('Total revenue · till now', fmt(data?.gross ?? 0), C.gray800, data ? `net settlement ${fmt(data.settled)} · ${data.orders.toLocaleString('en-IN')} orders` : null)}
+        {cell('Total profit · till now', fmt(data?.profit ?? 0), (data?.profit ?? 0) >= 0 ? C.green : C.red)}
+      </div>
+      <div style={{ textAlign: 'right' }}>
+        <button onClick={() => setShown((v) => !v)} style={btn(shown ? 'ghost' : 'ghostOrange', 'md')}>
+          {shown ? '🙈 Hide' : '👁 Show'}
+        </button>
+        {shown && failed && <p style={{ fontSize: 11, color: C.red, marginTop: 6 }}>Could not load — try again.</p>}
+        {shown && !failed && !data && loading && <p style={{ fontSize: 11, color: C.gray400, marginTop: 6 }}>Working it out…</p>}
+      </div>
+    </div>
+  );
+}
+
 export function OverviewTab() {
   const navigate = useNavigate();
   const { range: activeRange, label: filterLabel } = useDateFilter();
@@ -1150,6 +1214,8 @@ export function OverviewTab() {
   const [loading, setLoading] = useState(true);
   const [prevData, setPrevData] = useState(null);
   const [subTab, setSubTab] = useState('overview');
+  // Profit and loss figures stay masked until the eye icon is clicked.
+  const [showPnl, setShowPnl] = useState(false);
   const [daily, setDaily] = useState(null);
   const [dailyLoading, setDailyLoading] = useState(false);
   const onInsights = subTab === 'insights';
@@ -1542,8 +1608,8 @@ export function OverviewTab() {
           <div
             style={{
               ...T.card,
-              background: `linear-gradient(135deg, ${pos ? '#ECFDF5' : '#FFF1F2'} 0%, #fff 65%)`,
-              border: `1.5px solid ${pos ? C.greenBorder : C.redBorder}`,
+              background: `linear-gradient(135deg, ${!showPnl ? '#F8FAFC' : pos ? '#ECFDF5' : '#FFF1F2'} 0%, #fff 65%)`,
+              border: `1.5px solid ${!showPnl ? C.gray200 : pos ? C.greenBorder : C.redBorder}`,
               display: 'flex',
               justifyContent: 'space-between',
               alignItems: 'flex-start',
@@ -1565,6 +1631,18 @@ export function OverviewTab() {
                 }}
               >
                 Net P&L — {filterLabel}
+                <button
+                  type="button"
+                  onClick={() => setShowPnl((v) => !v)}
+                  title={showPnl ? 'Hide profit & loss' : 'Show profit & loss'}
+                  aria-label={showPnl ? 'Hide profit and loss' : 'Show profit and loss'}
+                  style={{
+                    marginLeft: 8, verticalAlign: 'middle', cursor: 'pointer', border: `1px solid ${C.gray200}`,
+                    background: '#fff', borderRadius: 8, padding: '2px 8px', fontSize: 14, lineHeight: 1.4,
+                  }}
+                >
+                  {showPnl ? '🙈' : '👁'}
+                </button>
                 {combinedIds && (
                   <span
                     style={{
@@ -1582,28 +1660,29 @@ export function OverviewTab() {
                   fontSize: 48,
                   fontWeight: 900,
                   fontFamily: 'monospace',
-                  color: pos ? C.green : C.red,
+                  color: !showPnl ? C.gray300 : pos ? C.green : C.red,
                   lineHeight: 1,
                   letterSpacing: '-0.03em',
                 }}
               >
-                {pos ? '+' : ''}
-                {fmt(netProfit)}
+                {showPnl ? <>{pos ? '+' : ''}{fmt(netProfit)}</> : '₹ ••••••'}
               </p>
               <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
-                <span
-                  style={{
-                    background: pos ? C.greenLight : C.redLight,
-                    color: pos ? C.green : C.red,
-                    border: `1px solid ${pos ? C.greenBorder : C.redBorder}`,
-                    fontSize: 11,
-                    fontWeight: 700,
-                    padding: '3px 12px',
-                    borderRadius: 20,
-                  }}
-                >
-                  {pos ? '✅ Profitable' : '❌ In Loss'}
-                </span>
+                {showPnl && (
+                  <span
+                    style={{
+                      background: pos ? C.greenLight : C.redLight,
+                      color: pos ? C.green : C.red,
+                      border: `1px solid ${pos ? C.greenBorder : C.redBorder}`,
+                      fontSize: 11,
+                      fontWeight: 700,
+                      padding: '3px 12px',
+                      borderRadius: 20,
+                    }}
+                  >
+                    {pos ? '✅ Profitable' : '❌ In Loss'}
+                  </span>
+                )}
                 <span
                   style={{
                     background: '#F8FAFC',
@@ -1639,8 +1718,8 @@ export function OverviewTab() {
                 { label: 'Net Settlement', value: fmt(profit.total_settled), color: C.green },
                 {
                   label: 'Order Net P&L',
-                  value: fmt(profit?.net_profit_loss),
-                  color: Number(profit?.net_profit_loss) >= 0 ? C.green : C.red,
+                  value: showPnl ? fmt(profit?.net_profit_loss) : '₹ ••••••',
+                  color: !showPnl ? C.gray300 : Number(profit?.net_profit_loss) >= 0 ? C.green : C.red,
                 },
               ].map(({ label, value, color }) => (
                 <div key={label} style={{ textAlign: 'right' }}>
@@ -1715,6 +1794,8 @@ export function OverviewTab() {
 
           {!onInsights && (
           <>
+          <LifetimeTotals combinedIds={combinedIds} />
+
           <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap' }}>
             {
               // `Object.keys(undefined)` throws — the optional chain after the call

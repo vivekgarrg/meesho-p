@@ -92,3 +92,13 @@ class ApiCacheTestCase(TestCase):
                             {"profile": {"deduct_owner_spent": True}}, format="json")
         self.assertLess(r.status_code, 300)
         self.assertEqual(self.cache_header("/profit/"), "MISS")
+
+
+    def test_overall_totals_ignore_dates_and_are_cached_until_data_changes(self):
+        first = self.client.get(f"{self.base}/profit/overall/", {"date_from": "2020-01-01", "date_to": "2020-01-02"})
+        self.assertEqual(first.status_code, 200, first.data)
+        self.assertEqual(set(first.json()), {"gross_revenue", "total_settled", "net_profit", "order_count"})
+        self.client.get(f"{self.base}/profit/overall/")   # the first read creates cost-settings, which itself invalidates
+        self.assertEqual(self.client.get(f"{self.base}/profit/overall/", {"date_from": "2021-05-05"})["X-Cache"], "HIT")
+        Employee.objects.create(business=self.business, full_name="Ravi")                      # any data change…
+        self.assertEqual(self.client.get(f"{self.base}/profit/overall/")["X-Cache"], "MISS")  # …recomputes it

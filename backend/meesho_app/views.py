@@ -23,7 +23,7 @@ from .helpers.helper import status_wise_summary, strip_html
 from accounts.models import Business, User
 from .permissions import get_authorized_business, accessible_businesses
 from .helpers import label_pdf
-from .return_images import return_image_map
+from .return_images import return_image_map, _norm as return_image_map_key
 from .helpers.label_pdf import extract_all_pages
 from . import master_pricing, pricing_sync
 
@@ -2363,6 +2363,30 @@ def compute_profit_summary(business, date_from="", date_to="", request=None):
         },
         "payout_breakdown": _build_payout_breakdown(qs),
     }
+
+
+@api_view(["GET"])
+def profit_overall(request, business_id):
+    """
+    Lifetime totals for the Overview's hidden "till now" card: revenue, net
+    settlement and final profit across every order, ignoring any date filter.
+
+    Reuses profit_summary itself so the figures can never disagree with the rest
+    of the Overview. It is the heaviest calculation in the app, so the API cache
+    keeps this answer until data changes (see api_cache._LONG_LIVED) rather than
+    for a few minutes.
+    """
+    from django.http import QueryDict
+    get_authorized_business(request, business_id)
+    raw = request._request
+    raw.GET = QueryDict("")             # all time, whatever the caller sent
+    data = profit_summary(raw, business_id).data
+    return Response({
+        "gross_revenue": data.get("gross_revenue", 0),
+        "total_settled": data.get("total_settled", 0),
+        "net_profit":    data.get("net_revenue", 0),
+        "order_count":   data.get("order_count", 0),
+    })
 
 
 @api_view(["GET"])
@@ -13382,6 +13406,95 @@ def scanned_orders_list(request, business_id):
         "results": ScannedOrderSerializer(rows, many=True).data,
         "stats": _scanned_order_stats(business),
         "statuses": [{"value": v, "label": l} for v, l in ScannedOrder.STATUS_CHOICES],
+    })
+
+
+@api_view(["GET"])
+def scan_queue(request, business_id):
+    """
+    The orders assigned to be packed on a day — every label uploaded for it — each
+    marked with where it stands: not scanned yet, packed, dispatched, on hold, or
+    already cancelled / shipped according to Meesho's sheets.
+
+    This is what the packing desk works down: scan a parcel and it leaves "to pack".
+    The summary is the running record of how many were assigned, packed, and how
+    many Meesho says shipped, were cancelled or never went out.
+
+    Query params: date (YYYY-MM-DD, default today's business day), platform.
+    """
+    business = get_authorized_business(request, business_id)
+    day = _parse_day(request.GET.get("date")) or _current_business_date()
+
+    labels = list(
+        _scope_labels(request, LabelOrder.objects.filter(business=business, uploaded_date=day))
+        .order_by("courier_name", "sku", "order_id")[:2000]
+    )
+    ids = [l.order_id for l in labels]
+    awbs = [l.awb_number for l in labels if l.awb_number]
+
+    scan_q = DQ(sub_order_no__in=ids)
+    if awbs:
+        scan_q |= DQ(awb_number__in=awbs)
+    scans = list(ScannedOrder.objects.filter(business=business).filter(scan_q))
+    by_sub = {s.sub_order_no: s for s in scans}
+    by_awb = {s.awb_number: s for s in scans if s.awb_number}
+
+    # What Meesho's Orders sheet says, for parcels nobody has scanned yet — an
+    # order cancelled on Meesho must not be packed.
+    sheet_status = dict(
+        Order.objects.filter(business=business, sub_order_no__in=ids)
+        .values_list("sub_order_no", "reason_for_credit_entry")
+    )
+    image_map = return_image_map(labels)
+
+    items = []
+    for l in labels:
+        sc = by_sub.get(l.order_id) or (by_awb.get(l.awb_number) if l.awb_number else None)
+        ship = sc.ship_status if sc else ScannedOrder.classify_ship_status(sheet_status.get(l.order_id))
+        items.append({
+            "order_id": l.order_id,
+            "awb": l.awb_number,
+            "sku": l.sku,
+            "size": l.size,
+            "qty": l.qty,
+            "courier": l.courier_name,
+            "platform": l.platform,
+            "customer_name": l.customer_name,
+            "customer_city": l.customer_city,
+            "image_url": image_map.get((l.business_id, return_image_map_key(l.sku))),
+            "scan_id": sc.id if sc else None,
+            "state": sc.status if sc else "PENDING",
+            "scan_count": sc.scan_count if sc else 0,
+            "scanned_at": sc.last_scanned_at.isoformat() if sc else None,
+            "ship_status": ship,
+            "ship_status_raw": sc.ship_status_raw if sc else (sheet_status.get(l.order_id) or ""),
+        })
+
+    packed_states = (ScannedOrder.STATUS_PACKED, ScannedOrder.STATUS_DISPATCHED)
+    summary = {
+        "assigned":   len(items),
+        "scanned":    sum(1 for i in items if i["scan_id"]),
+        "packed":     sum(1 for i in items if i["state"] in packed_states),
+        "remaining":  sum(1 for i in items if i["state"] == "PENDING" and i["ship_status"] != ScannedOrder.SHIP_CANCELLED),
+        "on_hold":    sum(1 for i in items if i["state"] in ScannedOrder.ATTENTION_STATUSES),
+        "shipped":    sum(1 for i in items if i["ship_status"] == ScannedOrder.SHIP_SHIPPED),
+        "not_shipped": sum(1 for i in items if i["ship_status"] == ScannedOrder.SHIP_NOT_SHIPPED),
+        "cancelled":  sum(1 for i in items if i["ship_status"] == ScannedOrder.SHIP_CANCELLED),
+        "unknown":    sum(1 for i in items if i["ship_status"] == ScannedOrder.SHIP_UNKNOWN),
+        "pieces":     sum(i["qty"] or 0 for i in items),
+        "pieces_packed": sum(i["qty"] or 0 for i in items if i["state"] in packed_states),
+    }
+    # Pending first (grouped by courier then SKU, as sorted above), finished after.
+    items.sort(key=lambda i: (i["state"] != "PENDING",))
+    dates = list(
+        _scope_labels(request, LabelOrder.objects.filter(business=business))
+        .values_list("uploaded_date", flat=True).distinct().order_by("-uploaded_date")[:14]
+    )
+    return Response({
+        "date": day.isoformat(),
+        "summary": summary,
+        "items": items,
+        "dates": [d.isoformat() for d in dates],
     })
 
 

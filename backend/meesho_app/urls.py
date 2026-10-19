@@ -25,6 +25,7 @@ urlpatterns = [
     path("insights/ai/ask/", insights_ai.insights_ai_ask, name="insights_ai_ask"),
     path("insights/", insights.insights_view, name="insights"),
     path("profit/daily/", views.profit_daily_summary, name="profit_daily_summary"),
+    path("profit/overall/", views.profit_overall, name="profit_overall"),
     path("profit/", views.profit_summary, name="profit_summary"),
     path("profit/sku-orders/", views.sku_order_payments, name="sku_order_payments"),
     path("estimated-profit/", views.estimated_profit_summary, name="estimated_profit_summary"),
@@ -162,6 +163,7 @@ urlpatterns = [
     path("returns/<int:pk>/",           views.return_delivery_detail,   name="return_delivery_detail"),
     # Order scanning — log outgoing parcels at the desk and track their status
     path("order-scan/",              views.scanned_orders_list,        name="scanned_orders_list"),
+    path("order-scan/queue/",        views.scan_queue,                 name="scan_queue"),
     path("order-scan/bulk-status/",  views.scanned_orders_bulk_status, name="scanned_orders_bulk_status"),
     path("order-scan/refresh-ship/", views.scanned_orders_refresh_ship, name="scanned_orders_refresh_ship"),
     path("order-scan/<int:pk>/",     views.scanned_order_detail,       name="scanned_order_detail"),

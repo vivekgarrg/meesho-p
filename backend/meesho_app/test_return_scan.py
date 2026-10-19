@@ -58,3 +58,46 @@ class ReturnScanTests(TestCase):
         self.assertEqual(first["packet_duplicate_of"], [])
         second = self.client.patch(url(self.b.pk), {"packet_id": "pkt-9"}, format="json").data
         self.assertEqual(second["packet_duplicate_of"], ["S1"])
+
+
+class ScanQueueTests(TestCase):
+    """The packing desk's list: every label for the day, marked off as it's scanned."""
+
+    def setUp(self):
+        from .models import LabelOrder, Order
+        user = User.objects.create_user(username="q", password="pw", role=User.ROLE_SUPER_ADMIN)
+        self.business = Business.objects.create(name="B")
+        Membership.objects.create(user=user, business=self.business)
+        self.client = APIClient()
+        self.client.force_authenticate(user)
+        self.base = f"/api/business/{self.business.id}"
+        parent = ParentItemPrice.objects.create(business=self.business, item_id="P", item_price=1, tax_percent=0,
+                                                packaging_cost=0, final_price=1, image_url="https://img.example/p.jpg")
+        FinalPrice.objects.create(business=self.business, sku_id="sku-a", parent=parent, item_price=1,
+                                  tax_percent=0, packaging_cost=0, final_price=1)
+        for oid, sku, awb in (("O1", "sku-a", "A1"), ("O2", "sku-a", "A2"), ("O3", "sku-b", "A3")):
+            LabelOrder.objects.create(business=self.business, order_id=oid, sku=sku, awb_number=awb, qty=2,
+                                      courier_name="Valmo", uploaded_date="2026-10-18")
+        # Meesho already cancelled O3.
+        Order.objects.create(business=self.business, sub_order_no="O3", sku="sku-b", reason_for_credit_entry="CANCELLED")
+
+    def queue(self):
+        return self.client.get(f"{self.base}/order-scan/queue/", {"date": "2026-10-18"}).data
+
+    def test_every_label_for_the_day_is_listed_with_its_state(self):
+        d = self.queue()
+        self.assertEqual(d["summary"]["assigned"], 3)
+        self.assertEqual(d["summary"]["cancelled"], 1)
+        self.assertEqual(d["summary"]["remaining"], 2)          # the cancelled one is not something to pack
+        by = {i["order_id"]: i for i in d["items"]}
+        self.assertEqual(by["O1"]["image_url"], "https://img.example/p.jpg")
+        self.assertEqual(by["O3"]["ship_status"], "CANCELLED")
+
+    def test_scanning_marks_the_order_off_and_counts_it_packed(self):
+        r = self.client.post(f"{self.base}/order-scan/", {"code": "A1", "status": "PACKED"}, format="json")
+        self.assertEqual(r.status_code, 201, r.data)
+        d = self.queue()
+        by = {i["order_id"]: i for i in d["items"]}
+        self.assertEqual(by["O1"]["state"], "PACKED")
+        self.assertEqual((d["summary"]["packed"], d["summary"]["remaining"], d["summary"]["pieces_packed"]), (1, 1, 2))
+        self.assertEqual(d["items"][-1]["state"] in ("PACKED", "PENDING"), True)
