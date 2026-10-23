@@ -107,3 +107,124 @@ class ParentImageRequiredTests(TestCase):
         r = self.client.post(url, {"sku_id": "S1", "parent_id": "P1", "image_url": "https://x.example/a.png"}, format="json")
         self.assertEqual(r.status_code, 201, r.data)
         self.assertEqual(ParentItemPrice.objects.get(item_id="P1").image_url, "https://x.example/a.png")
+
+
+class FlipkartMissingPriceFlagTests(TestCase):
+    """The Flipkart SKU list says which SKUs have no price, so the UI can offer to add one or link a parent."""
+
+    def test_unpriced_sku_is_flagged_and_clears_once_priced(self):
+        from .models import FlipkartOrderPayment
+        user = User.objects.create_user(username="f", password="pw", role=User.ROLE_SUPER_ADMIN)
+        business = Business.objects.create(name="B")
+        Membership.objects.create(user=user, business=business)
+        client = APIClient()
+        client.force_authenticate(user)
+        FlipkartOrderPayment.objects.create(business=business, order_item_id="1", seller_sku="NEW-SKU",
+                                            settlement_value=D("100"), sale_amount=D("100"), order_date="2026-10-01")
+        base = f"/api/business/{business.id}"
+        row = lambda: {r["sku_id"]: r for r in client.get(f"{base}/flipkart-profit/").data["sku_payment_list"]}["NEW-SKU"]
+        self.assertTrue(row()["missing_price"])
+        FinalPrice.objects.create(business=business, sku_id="NEW-SKU", item_price=D("40"), tax_percent=0,
+                                  packaging_cost=D("0"), final_price=D("40"))
+        self.assertFalse(row()["missing_price"])
+
+
+class FlipkartSkuAnalysisShapeTests(TestCase):
+    """The Flipkart SKU rows carry the same delivered/returned split Meesho's analysis shows."""
+
+    def test_rows_split_delivered_profit_from_return_loss(self):
+        from .models import FlipkartOrderPayment
+        user = User.objects.create_user(username="s", password="pw", role=User.ROLE_SUPER_ADMIN)
+        business = Business.objects.create(name="B")
+        Membership.objects.create(user=user, business=business)
+        client = APIClient()
+        client.force_authenticate(user)
+        FinalPrice.objects.create(business=business, sku_id="K", item_price=D("40"), tax_percent=0,
+                                  packaging_cost=D("0"), final_price=D("40"))
+        FlipkartOrderPayment.objects.create(business=business, order_item_id="1", seller_sku="K", quantity=2,
+                                            sale_amount=D("300"), settlement_value=D("200"), order_date="2026-10-01")
+        FlipkartOrderPayment.objects.create(business=business, order_item_id="2", seller_sku="K", quantity=1,
+                                            sale_amount=D("100"), settlement_value=D("-30"), return_type="customer_return",
+                                            order_date="2026-10-02")
+        d = client.get(f"/api/business/{business.id}/flipkart-sku-analysis/").data
+        k = {r["sku_id"]: r for r in d["skus"]}["K"]
+        self.assertEqual((k["delivered_count"], k["return_count"], k["delivered_quantity"]), (1, 1, 2))
+        self.assertEqual(k["delivered_profit"], 120.0)          # 200 settlement − 2 × ₹40
+        self.assertEqual(k["return_loss"], -30.0)               # nothing to cost on a return, just the settlement hit
+        self.assertEqual(k["net_profit"], 90.0)
+        self.assertEqual(k["one_unit_price"], 40.0)
+        self.assertEqual([b["status"] for b in d["status_breakdown"]], ["Delivered", "Returned"])
+
+
+class FlipkartOverallTests(TestCase):
+    def test_lifetime_totals_include_other_charges(self):
+        from .models import FlipkartOrderPayment, FlipkartOtherCharge
+        user = User.objects.create_user(username="fo", password="pw", role=User.ROLE_SUPER_ADMIN)
+        business = Business.objects.create(name="B")
+        Membership.objects.create(user=user, business=business)
+        client = APIClient()
+        client.force_authenticate(user)
+        FinalPrice.objects.create(business=business, sku_id="K", item_price=D("40"), tax_percent=0,
+                                  packaging_cost=D("0"), final_price=D("40"))
+        FlipkartOrderPayment.objects.create(business=business, order_item_id="1", seller_sku="K", quantity=1,
+                                            sale_amount=D("150"), settlement_value=D("100"), order_date="2026-10-01")
+        FlipkartOtherCharge.objects.create(business=business, category=FlipkartOtherCharge.CATEGORY_CHOICES[0][0],
+                                           amount=D("-10"), payment_date="2026-10-02")
+        d = client.get(f"/api/business/{business.id}/flipkart-overall/", {"date_from": "2030-01-01"}).data
+        self.assertEqual((d["gross_revenue"], d["total_settled"], d["net_profit"], d["order_count"]), (150.0, 100.0, 50.0, 1))
+
+
+class FlipkartDeepDiveTests(TestCase):
+    def setUp(self):
+        from .models import FlipkartOrder, FlipkartOrderPayment, FlipkartOtherCharge
+        user = User.objects.create_user(username="dd", password="pw", role=User.ROLE_SUPER_ADMIN)
+        self.business = Business.objects.create(name="B")
+        Membership.objects.create(user=user, business=self.business)
+        self.client = APIClient()
+        self.client.force_authenticate(user)
+        self.base = f"/api/business/{self.business.id}"
+        FinalPrice.objects.create(business=self.business, sku_id="K", item_price=D("40"), tax_percent=0,
+                                  packaging_cost=D("0"), final_price=D("40"))
+        FlipkartOrderPayment.objects.create(
+            business=self.business, order_item_id="1", seller_sku="K", quantity=1, sale_amount=D("200"),
+            marketplace_fee=D("-30"), gst_on_mp_fees=D("-5"), settlement_value=D("165"),
+            fulfilment_type="NON_FBF", order_date="2026-10-01")
+        FlipkartOrder.objects.create(
+            business=self.business, order_item_id="1", order_id="O1", sku="K", order_item_status="DELIVERED",
+            order_date="2026-10-01", dispatch_by_date="2026-10-02", dispatched_date="2026-10-05",
+            dispatch_sla_breached=True, logistics_partner="Ekart")
+        FlipkartOrder.objects.create(
+            business=self.business, order_item_id="2", order_id="O2", sku="K", order_item_status="CANCELLED",
+            order_date="2026-10-01", logistics_partner="Ekart", cancellation_reason="Out of stock")
+        FlipkartOtherCharge.objects.create(business=self.business, category="fines", amount=D("-50"),
+                                           payment_date="2026-10-03", description="SLA penalty", reference_id="R1")
+        FlipkartOtherCharge.objects.create(business=self.business, category="ads", amount=D("-20"),
+                                           payment_date="2026-10-03", description="Ad wallet")
+
+    def test_fees_are_taken_apart(self):
+        d = self.client.get(f"{self.base}/flipkart-deep-dive/").data
+        f = d["fees"]
+        self.assertEqual((f["total_fee"], f["rate_pct"], f["marketplace_fee"], f["gst_on_fee"]), (35.0, 17.5, 30.0, 5.0))
+        self.assertEqual(f["by_sku"][0]["sku"], "K")
+        self.assertEqual(f["by_fulfilment"][0]["label"], "NON_FBF")
+
+    def test_sla_shows_how_late_and_who(self):
+        s = self.client.get(f"{self.base}/flipkart-deep-dive/").data["sla"]
+        self.assertEqual((s["dispatch_breached"], s["avg_dispatch_days_late"], s["worst_dispatch_days_late"]), (1, 3.0, 3))
+        self.assertEqual(s["worst_orders"][0]["dispatch_days_late"], 3)
+        self.assertEqual(s["by_partner"][0]["label"], "Ekart")
+
+    def test_fines_are_listed_line_by_line(self):
+        c = self.client.get(f"{self.base}/flipkart-deep-dive/").data["fines"]
+        self.assertEqual((c["total"], c["fines_total"], c["ads_spend"], c["count"]), (-70.0, 50.0, 20.0, 2))
+        self.assertEqual(c["biggest"][0]["description"], "SLA penalty")
+        self.assertEqual(len(c["lines"]), 2)
+
+    def test_sku_report_pulls_one_skus_full_picture(self):
+        r = self.client.get(f"{self.base}/flipkart-sku-report/", {"sku": "k"}).data
+        self.assertEqual(r["sku"], "k")
+        self.assertEqual(r["row"]["delivered_count"], 1)
+        self.assertEqual(r["orders"]["total"], 2)
+        self.assertEqual((r["orders"]["cancelled"], r["orders"]["dispatch_sla_breached"]), (1, 1))
+        self.assertEqual(r["monthly"][0]["month"], "2026-10")
+        self.assertFalse(r["missing_price"])

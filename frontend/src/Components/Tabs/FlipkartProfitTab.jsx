@@ -421,7 +421,7 @@ const PAYMENT_LIST_COLUMNS = [
 // per order item, so a follow-up installment never gets charged the unit's
 // cost a second time. The raw installments are still listed underneath each
 // order when there's more than one, for full transparency.
-function SkuPaymentDetailRows({ sku, dateQuery, colSpan }) {
+export function SkuPaymentDetailRows({ sku, dateQuery, colSpan }) {
   const [state, setState] = useState({ loading: true, error: null, orders: [] });
 
   useEffect(() => {
@@ -727,6 +727,13 @@ function SkuPaymentListTable({ rows, onRelinked, dateQuery }) {
                     <div style={{ marginTop: 2 }}>
                       <ParentLinkInline sku={r.sku_id} currentParent={r.parent_id} onDone={() => onRelinked?.()} />
                     </div>
+                    {/* No price yet: either add one here, or link it to a parent (above) to inherit that parent's. */}
+                    {r.missing_price && (
+                      <div style={{ marginTop: 4, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                        <span style={{ fontSize: 10.5, fontWeight: 700, color: C.red }}>⚠ no price</span>
+                        <MissingPriceSkuRow sku={r.sku_id} showSku={false} onSaved={() => onRelinked?.()} />
+                      </div>
+                    )}
                   </td>
                   <td style={tdR}>{r.order_count}</td>
                   {PAYMENT_LIST_COLUMNS.map((c) => (
@@ -1068,7 +1075,7 @@ const inputStyle = {
   fontFamily: 'inherit',
 };
 
-function MissingPriceSkuRow({ sku, onSaved }) {
+export function MissingPriceSkuRow({ sku, onSaved, showSku = true }) {
   const [open, setOpen] = useState(false);
   const [itemPrice, setItemPrice] = useState('');
   const [packagingCost, setPackagingCost] = useState('');
@@ -1120,8 +1127,8 @@ function MissingPriceSkuRow({ sku, onSaved }) {
           borderRadius: 6,
         }}
       >
-        <span style={{ fontFamily: 'monospace', fontSize: 11, color: C.red, fontWeight: 600 }}>{sku}</span>
-        <ParentLinkInline sku={sku} currentParent={null} onDone={() => onSaved()} />
+        {showSku && <span style={{ fontFamily: 'monospace', fontSize: 11, color: C.red, fontWeight: 600 }}>{sku}</span>}
+        {showSku && <ParentLinkInline sku={sku} currentParent={null} onDone={() => onSaved()} />}
         <button
           onClick={() => setOpen(true)}
           style={{

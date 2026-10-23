@@ -60,7 +60,7 @@ _NEVER_CACHE_PREFIXES = (
 )
 # All-time figures that only change when data does: no date in the key and a long
 # expiry, so they are recomputed only after an upload or edit (a version bump).
-_LONG_LIVED = {"profit/overall/": 30 * 24 * 3600}
+_LONG_LIVED = {"profit/overall/": 30 * 24 * 3600, "flipkart-overall/": 30 * 24 * 3600}
 
 # POSTs that read or compute but never write — no reason to flush the cache.
 _STATELESS_POST_MARKERS = ("parse/", "generate/", "presign/", "check/", "preview/", "lookup/")

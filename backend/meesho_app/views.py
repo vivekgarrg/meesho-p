@@ -29,7 +29,7 @@ from . import master_pricing, pricing_sync
 
 from .helpers.label_pdf import extract_all_pages
 
-from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, ListingImage, MasterItem, MasterItemComponent, MasterItemPriceHistory, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, LabelDayReset, PurchaseBill, PurchaseItem, BlockedCustomer, InventoryAdjustment, ConsumableItem, ConsumablePurchase, ConsumableUsage, InventoryLog, MeeshoInventory, MeeshoPriceUpdate, ExpenseInvoice, ExpenseInvoiceItem, TransportCharge, PackedStockEvent, EstimatedProfitOrder, ReturnDelivery, GstTransaction, GstInvoiceDetail, ScannedOrder, ListingTemplate, ClaimTicket, WorkerTask, WalletEntry, WalletSettlement, TaskListing, PlatformRate, TaskDocument, BusinessCostSetting, Employee, EmployeePayment, EmployeeAttendance, EmployeeHoliday, BusinessOwner, Product, BulkListingBatch, ReturnVideoBatch, FlipkartOrderPayment
+from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, ListingImage, MasterItem, MasterItemComponent, MasterItemPriceHistory, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, LabelDayReset, PurchaseBill, PurchaseItem, BlockedCustomer, InventoryAdjustment, ConsumableItem, ConsumablePurchase, ConsumableUsage, InventoryLog, MeeshoInventory, MeeshoPriceUpdate, ExpenseInvoice, ExpenseInvoiceItem, TransportCharge, PackedStockEvent, EstimatedProfitOrder, ReturnDelivery, GstTransaction, GstInvoiceDetail, ScannedOrder, ListingTemplate, ClaimTicket, WorkerTask, WalletEntry, WalletSettlement, TaskListing, PlatformRate, TaskDocument, BusinessCostSetting, Employee, EmployeePayment, EmployeeAttendance, EmployeeHoliday, BusinessOwner, Product, BulkListingBatch, ReturnVideoBatch, FlipkartOrderPayment, FlipkartOrder
 from .serializers import (
     OrderPaymentSerializer, AdsCostSerializer,
     ReferralPaymentSerializer, CompensationRecoverySerializer,
@@ -933,6 +933,8 @@ def available_months(request, business_id):
     Returns distinct order months (YYYY-MM) newest first.
     Primary source: Order.order_date (DateField, reliable).
     Falls back to OrderPayment.order_date if Order table is empty.
+    Flipkart's order months (orders report and settlement payments) are
+    included too, so a business that only sells there still gets a period list.
     """
     business = get_authorized_business(request, business_id)
     dates = list(Order.objects.filter(business=business).dates("order_date", "month", order="DESC"))
@@ -951,8 +953,14 @@ def available_months(request, business_id):
             (timezone.localtime(d) if timezone.is_aware(d) else d).strftime("%Y-%m")
             for d in raw
         }
-        return Response(sorted(months, reverse=True))
-    return Response([d.strftime("%Y-%m") for d in dates])
+    else:
+        months = {d.strftime("%Y-%m") for d in dates}
+    for model in (FlipkartOrder, FlipkartOrderPayment):
+        months.update(
+            d.strftime("%Y-%m")
+            for d in model.objects.filter(business=business).dates("order_date", "month")
+        )
+    return Response(sorted(months, reverse=True))
 
 
 @api_view(["GET"])
@@ -3137,6 +3145,11 @@ def flipkart_profit_upload(request, business_id):
             else:
                 updated += 1
 
+        # The report's non-order sheets (ads, fines, SPF...) — same NEFT
+        # batches, so they land in the same transaction as the order rows.
+        from .flipkart_views import import_flipkart_other_charges
+        other_charges = import_flipkart_other_charges(wb, business)
+
     date_from = request.GET.get("date_from", "") or None
     date_to = request.GET.get("date_to", "") or None
     summary = _compute_flipkart_profit_summary(business, date_from, date_to)
@@ -3145,6 +3158,8 @@ def flipkart_profit_upload(request, business_id):
         "invalid_rows": invalid_rows,
         "created":      created,
         "updated":      updated,
+        "other_charges_created": other_charges["created"],
+        "other_charges_updated": other_charges["updated"],
     })
     return Response(summary)
 
@@ -3214,12 +3229,14 @@ _FLIPKART_PAYMENT_COMPONENTS = [
 ]
 
 
-def _compute_flipkart_profit_summary(business, date_from=None, date_to=None):
+def _compute_flipkart_profit_summary(business, date_from=None, date_to=None, sku=None):
     """
     Live P&L over every saved FlipkartOrderPayment row, using the same SKU
     pricing (FinalPrice / ParentItemPrice) and packaging policy
     (BusinessCostSetting) as the Meesho profit engines — the cost of goods is
     the same regardless of which marketplace sold it.
+
+    `sku` narrows everything to that one SKU (used by the SKU full report).
 
     Revenue is `settlement_value` — Flipkart's own "Bank Settlement Value",
     the actual net payout for that order item. A normal (non-returned) row
@@ -3240,6 +3257,8 @@ def _compute_flipkart_profit_summary(business, date_from=None, date_to=None):
         qs = qs.filter(order_date__gte=date_from)
     if date_to:
         qs = qs.filter(order_date__lte=date_to)
+    if sku:     # one SKU's report: the same maths, just over that SKU's rows
+        qs = qs.filter(seller_sku__iexact=sku)
 
     # Raw payment-component reconciliation (sale amount -> fees/taxes/offers ->
     # bank settlement) — independent of SKU pricing, so it's available even
@@ -3264,6 +3283,11 @@ def _compute_flipkart_profit_summary(business, date_from=None, date_to=None):
             "sku_id": sku_id or "(blank SKU)",
             "order_count": row["order_count"],
             "parent_id": parent_link_map.get(sku_id),
+            # No usable unit price today (not priced, or priced at 0): its orders are
+            # left out of profit until a price is added or it is linked to a parent.
+            "missing_price": bool(sku_id) and (
+                _sku_key(sku_id) not in known_skus or not _has_unit_price(get_price(sku_id, None)[0])
+            ),
         }
         for f in _FLIPKART_PAYMENT_COMPONENTS:
             entry[f] = _to_num(row[f] or Decimal("0"))
@@ -3357,12 +3381,22 @@ def _compute_flipkart_profit_summary(business, date_from=None, date_to=None):
             "sku_id": display_sku, "order_count": 0, "delivered_count": 0, "return_count": 0,
             "gross_payout": Decimal("0"), "total_cost": Decimal("0"), "net_profit": Decimal("0"),
             "parent_id": parent_link_map.get(sku_id),
+            # Same split Meesho's SKU analysis shows: what the delivered units made,
+            # what the returns cost, and the per-unit figures that follow.
+            "delivered_profit": Decimal("0"), "return_loss": Decimal("0"),
+            "delivered_quantity": 0, "delivered_cost": Decimal("0"),
         })
         agg["order_count"] += 1
         agg[f"{bucket}_count"] += 1
         agg["gross_payout"] += gross
         agg["total_cost"] += cost
         agg["net_profit"] += net
+        if bucket == "delivered":
+            agg["delivered_profit"] += net
+            agg["delivered_cost"] += cost
+            agg["delivered_quantity"] += int(quantity or 1)
+        else:
+            agg["return_loss"] += net
 
         fu = fulfilment_agg.setdefault(fulfilment_type or "Unknown", {
             "label": fulfilment_type or "Unknown", "count": 0,
@@ -3397,6 +3431,11 @@ def _compute_flipkart_profit_summary(business, date_from=None, date_to=None):
         r["gross_payout"] = _to_num(r["gross_payout"])
         r["total_cost"]   = _to_num(r["total_cost"])
         r["net_profit"]   = _to_num(r["net_profit"])
+        r["delivered_profit"] = _to_num(r["delivered_profit"])
+        r["return_loss"]      = _to_num(r["return_loss"])
+        r["delivered_cost"]   = _to_num(r["delivered_cost"])
+        # Today's unit cost for the SKU (for the "Unit Cost" column).
+        r["one_unit_price"] = _to_num(Decimal(str(get_price(r["sku_id"], None)[0] or 0)))
         r.update(_flipkart_breakeven_adjustment(r["net_profit"], r["delivered_count"]))
     sku_list.sort(key=lambda r: r["net_profit"], reverse=True)
 

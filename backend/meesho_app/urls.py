@@ -1,5 +1,6 @@
 from django.urls import path
 from . import views
+from . import flipkart_views
 from . import api_cache
 from . import bulk_listing_views
 from . import listing_images_views
@@ -33,6 +34,15 @@ urlpatterns = [
     path("flipkart-profit/", views.flipkart_profit_summary, name="flipkart_profit_summary"),
     path("flipkart-profit/upload/", views.flipkart_profit_upload, name="flipkart_profit_upload"),
     path("flipkart-profit/sku-payments/", views.flipkart_profit_sku_payments, name="flipkart_profit_sku_payments"),
+    path("flipkart-orders/", flipkart_views.flipkart_orders_list, name="flipkart_orders_list"),
+    path("flipkart-orders/upload/", flipkart_views.flipkart_orders_upload, name="flipkart_orders_upload"),
+    path("flipkart-payments/grouped/", flipkart_views.flipkart_payments_grouped, name="flipkart_payments_grouped"),
+    path("flipkart-other-charges/", flipkart_views.flipkart_other_charges_list, name="flipkart_other_charges_list"),
+    path("flipkart-overview/", flipkart_views.flipkart_overview, name="flipkart_overview"),
+    path("flipkart-deep-dive/", flipkart_views.flipkart_deep_dive, name="flipkart_deep_dive"),
+    path("flipkart-sku-report/", flipkart_views.flipkart_sku_report, name="flipkart_sku_report"),
+    path("flipkart-overall/", flipkart_views.flipkart_overall, name="flipkart_overall"),
+    path("flipkart-sku-analysis/", flipkart_views.flipkart_sku_analysis, name="flipkart_sku_analysis"),
     path("orders/", views.order_payments_list, name="order_payments_list"),
     path("orders/grouped/",          views.orders_grouped,         name="orders_grouped"),
     path("orders/status-breakdown/", views.order_status_breakdown, name="order_status_breakdown"),

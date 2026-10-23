@@ -1,4 +1,6 @@
 import React, { useState, useEffect } from 'react';
+import { withPlatformSplit } from '../Flipkart/FlipkartShared';
+import { FlipkartOverviewPanel } from '../Flipkart/FlipkartOverviewPanel';
 import { useNavigate } from 'react-router-dom';
 import CircularProgress from '@mui/material/CircularProgress';
 import Alert from '@mui/material/Alert';
@@ -1144,12 +1146,12 @@ function InsightsPanel({ cur, prev, prevLabel, hasPeriod, profit, dash, daily, d
  * glance) and only fetched on the first reveal. The server keeps the answer until
  * new data is uploaded or edited, so showing it again is instant.
  */
-function LifetimeTotals({ combinedIds }) {
+function LifetimeTotals({ combinedIds, path = 'profit/overall/' }) {
   const [shown, setShown] = useState(false);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [failed, setFailed] = useState(false);
-  const key = `${API}|${combinedIds?.join(',') || ''}`;
+  const key = `${API}|${path}|${combinedIds?.join(',') || ''}`;
 
   // A different business (or combined selection) means different totals.
   useEffect(() => { setData(null); setFailed(false); setShown(false); }, [key]);
@@ -1160,8 +1162,8 @@ function LifetimeTotals({ combinedIds }) {
     setLoading(true);
     setFailed(false);
     const urls = combinedIds
-      ? combinedIds.map((id) => `/api/business/${id}/profit/overall/`)
-      : [`${API}/profit/overall/`];
+      ? combinedIds.map((id) => `/api/business/${id}/${path}`)
+      : [`${API}/${path}`];
     Promise.all(urls.map((u) => fetch(u, { signal: ctrl.signal }).then((r) => (r.ok ? r.json() : Promise.reject(r)))))
       .then((list) => {
         const sum = (k) => list.reduce((a, d) => a + Number(d[k] || 0), 0);
@@ -1201,7 +1203,7 @@ function LifetimeTotals({ combinedIds }) {
   );
 }
 
-export function OverviewTab() {
+function MeeshoOverviewTab() {
   const navigate = useNavigate();
   const { range: activeRange, label: filterLabel } = useDateFilter();
   const { businesses } = useBusiness();
@@ -2938,3 +2940,14 @@ export function OverviewTab() {
     </div>
   );
 }
+
+// Meesho by default; the Flipkart view sits beside it under ?platform=flipkart.
+// The Flipkart overview is built from the same cards, formula and tables as the
+// Meesho one, handed over here rather than imported back (the two files would
+// otherwise import each other).
+const FlipkartOverviewView = () => (
+  <FlipkartOverviewPanel
+    parts={{ T, SectionCard, KPICard, StatRow, RateBar, FormulaStep, OutcomeCard, SettlementTable, DeductionRow, LifetimeTotals, Delta, previousRange }}
+  />
+);
+export const OverviewTab = withPlatformSplit(MeeshoOverviewTab, FlipkartOverviewView);

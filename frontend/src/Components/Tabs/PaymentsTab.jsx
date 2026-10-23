@@ -1,4 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { withPlatformSplit } from '../Flipkart/FlipkartShared';
+import { FlipkartPaymentsPanel } from '../Flipkart/FlipkartPaymentsPanel';
 import { useSearchParams } from 'react-router-dom';
 import { API, C, S, btn, Tag } from '../../App';
 import { useDateFilter } from '../../contexts/DateFilterContext';
@@ -169,7 +171,7 @@ function ExpandedRows({ rows }) {
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
-export function PaymentsTab() {
+function MeeshoPaymentsTab() {
   const { range, label: periodLabel } = useDateFilter();
   // Deep-linkable from Overview's outcome cards (e.g. /payments?status=UNKNOWN),
   // so clicking "Unknown" or "Shipped" there lands here pre-filtered.
@@ -577,3 +579,6 @@ export function PaymentsTab() {
     </div>
   );
 }
+
+// Meesho by default; the Flipkart view sits beside it under ?platform=flipkart.
+export const PaymentsTab = withPlatformSplit(MeeshoPaymentsTab, FlipkartPaymentsPanel);

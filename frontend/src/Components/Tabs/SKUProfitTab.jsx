@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { withPlatformSplit } from '../Flipkart/FlipkartShared';
+import { FlipkartSkuAnalysis } from '../Flipkart/FlipkartSkuAnalysis';
 import Box from "@mui/material/Box";
 import Typography from "@mui/material/Typography";
 import Button from "@mui/material/Button";
@@ -152,7 +154,7 @@ function MonthFilter({ months, selMonth, onSelect }) {
 }
 
 // ── Metrics Panel ─────────────────────────────────────────────────────────────
-function MetricsPanel({ data, filterLabel, profitSummary, combinedCount }) {
+function MetricsPanel({ data, filterLabel, profitSummary, combinedCount, flipkart = false }) {
   const ps = profitSummary || {};
   const delSum = ps?.order_summary?.delivered_summary || {};
   const retSum = ps?.order_summary?.return_summary || {};
@@ -190,6 +192,9 @@ function MetricsPanel({ data, filterLabel, profitSummary, combinedCount }) {
     { ...STATUS.claim, count: nClaim, rate: pct(nClaim, nTotal), value: claimLoss, color: claimLoss >= 0 ? "#059669" : "#7C3AED" },
     ...(nOther > 0 ? [{ ...STATUS.other, count: nOther, rate: pct(nOther, nTotal), value: otherNet }] : []),
   ];
+
+  // Flipkart has no RTO or claim outcomes — leave those cards and rates out.
+  const shownCards = flipkart ? statusCards.filter((c) => c.label !== STATUS.rto.label && c.label !== STATUS.claim.label) : statusCards;
 
   return (
     <Box sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
@@ -245,7 +250,7 @@ function MetricsPanel({ data, filterLabel, profitSummary, combinedCount }) {
       <Box>
         <SectionLabel>Breakdown by Order Status</SectionLabel>
         <Box sx={{ display: "flex", gap: 1.5, flexWrap: "wrap" }}>
-          {statusCards.map(({ icon, label, count, rate, value, color, bg, border }) => (
+          {shownCards.map(({ icon, label, count, rate, value, color, bg, border }) => (
             <Box key={label} sx={{
               flex: "1 1 120px", bgcolor: bg,
               border: `1px solid ${border}`, borderRadius: "12px", p: 1.75,
@@ -274,9 +279,9 @@ function MetricsPanel({ data, filterLabel, profitSummary, combinedCount }) {
           {[
             { label: "✅ Delivered", p: pct(nDel, nTotal), count: nDel, color: "#059669" },
             { label: "↩ Return", p: pct(nRet, nTotal), count: nRet, color: "#DC2626" },
-            { label: "🔄 Pure RTO", p: pct(nRTO, nTotal), count: nRTO, color: "#D97706" },
+            ...(flipkart ? [] : [{ label: "🔄 Pure RTO", p: pct(nRTO, nTotal), count: nRTO, color: "#D97706" }]),
             ...(nExchange > 0 ? [{ label: "🔁 Exchange", p: pct(nExchange, nTotal), count: nExchange, color: "#2563EB" }] : []),
-            { label: "⚠ Claims", p: pct(nClaim, nTotal), count: nClaim, color: "#7C3AED" },
+            ...(flipkart ? [] : [{ label: "⚠ Claims", p: pct(nClaim, nTotal), count: nClaim, color: "#7C3AED" }]),
           ].map(r => (
             <Box key={r.label} sx={{ flex: "1 1 160px" }}>
               <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", mb: 0.75 }}>
@@ -1726,7 +1731,7 @@ function MissingSkuPanel({ missingSkus, ordersCount, onResolved }) {
 }
 
 // ── Main tab ──────────────────────────────────────────────────────────────────
-export function SKUAnalysisTab() {
+function MeeshoSKUAnalysisTab() {
   const { range, label, months, mode: globalMode, selectedMonth: globalMonth } = useDateFilter();
   const { businesses } = useBusiness();
   const combined = useCombinedView();
@@ -2118,3 +2123,11 @@ export function SKUAnalysisTab() {
     </Box>
   );
 }
+
+// Meesho by default; the Flipkart view sits beside it under ?platform=flipkart.
+// The Flipkart analysis is built from the very same panels and table, handed over
+// here rather than imported back (that would make the two files import each other).
+const FlipkartSkuView = () => (
+  <FlipkartSkuAnalysis parts={{ SKUDataTable, MetricsPanel, LowMarginPanel, SectionLabel }} />
+);
+export const SKUAnalysisTab = withPlatformSplit(MeeshoSKUAnalysisTab, FlipkartSkuView);

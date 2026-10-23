@@ -1,4 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { withPlatformSplit } from '../Flipkart/FlipkartShared';
+import { FlipkartOrdersPanel } from '../Flipkart/FlipkartOrdersPanel';
 import { useSearchParams } from "react-router-dom";
 
 import Box from "@mui/material/Box";
@@ -130,7 +132,7 @@ function buildColumns(dupeCounts) {
 }
 
 // ── Main Tab ──────────────────────────────────────────────────────────────────
-export function OrdersTab() {
+function MeeshoOrdersTab() {
   const [searchParams, setSearchParams] = useSearchParams();
   const view = searchParams.get("view") || "all";
   const { range: dateRange, label: periodLabel } = useDateFilter();
@@ -514,3 +516,6 @@ export function OrdersTab() {
     </Stack>
   );
 }
+
+// Meesho by default; the Flipkart view sits beside it under ?platform=flipkart.
+export const OrdersTab = withPlatformSplit(MeeshoOrdersTab, FlipkartOrdersPanel);

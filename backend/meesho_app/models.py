@@ -2776,6 +2776,117 @@ class FlipkartOrderPayment(models.Model):
         return bool(rt) and rt != "NA"
 
 
+class FlipkartOrder(models.Model):
+    """
+    One order item from Flipkart's Orders report (the seller-hub export of
+    every item ordered, whatever its status) — the order-side counterpart of
+    FlipkartOrderPayment, which is the money-side. Meesho keeps the same split
+    (Order vs OrderPayment) and so does this: an order here may have no payment
+    yet (not settled), one, or several (sale + return reversal).
+
+    `order_item_id` is stored without the report's "OI:" prefix so it joins
+    straight to FlipkartOrderPayment.order_item_id, and `sku` without the
+    quotes and "SKU:" prefix the export wraps around it so it joins to the SKU
+    pricing table.
+    """
+
+    order_item_id = models.CharField(max_length=100, db_index=True)
+    order_id      = models.CharField(max_length=100, db_index=True)
+
+    order_date          = models.DateField(null=True, blank=True)
+    order_approval_date = models.DateField(null=True, blank=True)
+    order_item_status   = models.CharField(max_length=50, blank=True, default="", db_index=True)
+
+    sku           = models.CharField(max_length=200, blank=True, default="", db_index=True)
+    fsn           = models.CharField(max_length=50, blank=True, default="")
+    product_title = models.CharField(max_length=500, blank=True, default="")
+    quantity      = models.PositiveIntegerField(default=1)
+
+    fulfilment_type    = models.CharField(max_length=50, blank=True, default="")
+    logistics_partner  = models.CharField(max_length=100, blank=True, default="")
+    delivery_tracking_id = models.CharField(max_length=100, blank=True, default="")
+
+    cancellation_date   = models.DateField(null=True, blank=True)
+    cancellation_reason = models.CharField(max_length=255, blank=True, default="")
+    return_approval_date = models.DateField(null=True, blank=True)
+    return_id           = models.CharField(max_length=100, blank=True, default="")
+    return_reason       = models.CharField(max_length=255, blank=True, default="")
+    return_sub_reason   = models.CharField(max_length=255, blank=True, default="")
+
+    dispatch_by_date     = models.DateField(null=True, blank=True)
+    dispatched_date      = models.DateField(null=True, blank=True)
+    dispatch_sla_breached = models.BooleanField(default=False)
+    deliver_by_date      = models.DateField(null=True, blank=True)
+    delivery_date        = models.DateField(null=True, blank=True)
+    delivery_sla_breached = models.BooleanField(default=False)
+
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+    updated_at  = models.DateTimeField(auto_now=True)
+
+    business = models.ForeignKey("accounts.Business", on_delete=models.PROTECT)
+
+    class Meta:
+        db_table = "flipkart_orders"
+        ordering = ["-order_date", "-id"]
+        unique_together = [("business", "order_item_id")]
+
+    def __str__(self):
+        return self.order_item_id
+
+
+class FlipkartOtherCharge(models.Model):
+    """
+    A non-order line of a Flipkart Settlement Report — ad-wallet top-ups,
+    fines, protection-fund (SPF) payouts, MP-fee rebates, service fees and the
+    like. These move real money in the same NEFT batches as the order rows, so
+    they belong in the P&L next to them (Meesho's equivalents are AdsCost /
+    CompensationRecovery).
+
+    `amount` is the sheet's own "Settlement Value": negative is money out,
+    positive money in. Rows whose settlement value is zero (an ads "redeem" row
+    only moves wallet balance, not cash) are not stored.
+    """
+
+    CATEGORY_ADS            = "ads"
+    CATEGORY_FINES          = "fines"
+    CATEGORY_SPF            = "spf"
+    CATEGORY_MP_FEE_REBATE  = "mp_fee_rebate"
+    CATEGORY_STORAGE_RECALL = "storage_recall"
+    CATEGORY_SERVICES       = "services"
+    CATEGORY_TAX            = "tax"
+    CATEGORY_CHOICES = [
+        (CATEGORY_ADS, "Ads"),
+        (CATEGORY_FINES, "Fines"),
+        (CATEGORY_SPF, "Protection fund (SPF)"),
+        (CATEGORY_MP_FEE_REBATE, "MP fee rebate"),
+        (CATEGORY_STORAGE_RECALL, "Storage & recall"),
+        (CATEGORY_SERVICES, "Services"),
+        (CATEGORY_TAX, "TCS recovery / TDS claims"),
+    ]
+
+    category     = models.CharField(max_length=20, choices=CATEGORY_CHOICES, db_index=True)
+    # The report sheet the row came from ("Ads", "Fines", "Google Ads Services"...)
+    source_sheet = models.CharField(max_length=60, blank=True, default="")
+    neft_id      = models.CharField(max_length=100, blank=True, default="")
+    payment_date = models.DateField(null=True, blank=True)
+    reference_id = models.CharField(max_length=200, blank=True, default="")
+    description  = models.CharField(max_length=255, blank=True, default="")
+    amount       = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+    updated_at  = models.DateTimeField(auto_now=True)
+
+    business = models.ForeignKey("accounts.Business", on_delete=models.PROTECT)
+
+    class Meta:
+        db_table = "flipkart_other_charges"
+        ordering = ["-payment_date", "-id"]
+        unique_together = [("business", "source_sheet", "neft_id", "reference_id", "description")]
+
+    def __str__(self):
+        return f"{self.source_sheet} {self.reference_id}"
+
+
 class ListingImage(models.Model):
     """One listing photo stored in object storage (Cloudflare R2), linked to
     the parent SKU it was cropped for.

@@ -17,7 +17,7 @@ import { API, C } from "../../App";
  * One drop zone. The card owns the outer spacing; this component only fills the
  * space it is given, so both cards line up whatever their content does.
  */
-function UploadSection({ title, subtitle, icon, accept, endpoint, isOrders }) {
+function UploadSection({ title, subtitle, icon, accept, endpoint, isOrders, summarize }) {
   const [dragging, setDragging] = useState(false);
   const [loading,  setLoading]  = useState(false);
   const [msg,      setMsg]      = useState(null);
@@ -29,7 +29,7 @@ function UploadSection({ title, subtitle, icon, accept, endpoint, isOrders }) {
     try {
       const res = await fetch(`${API}${endpoint}`, { method: "POST", body: fd });
       const d   = await res.json();
-      if (res.ok) setMsg({ type: "ok", data: isOrders ? d : d.results });
+      if (res.ok) setMsg({ type: "ok", data: summarize ? summarize(d) : isOrders ? d : d.results });
       else        setMsg({ type: "err", text: d.error || "Upload failed" });
     } catch {
       setMsg({ type: "err", text: "Network error — is Django running on port 8000?" });
@@ -144,12 +144,32 @@ function UploadCard({ eyebrow, children }) {
   );
 }
 
+// What the Flipkart upload endpoints send back is a full profit summary (the
+// payments one) — show just the counts that say what the file did.
+const flipkartPaymentsSummary = (d) => ({
+  "Order items in file": d.total_rows,
+  "New": d.created,
+  "Updated": d.updated,
+  "Skipped (no SKU)": d.invalid_rows,
+  "Ads / fines / other lines saved": (d.other_charges_created || 0) + (d.other_charges_updated || 0),
+  "SKUs with no price set": (d.missing_price_skus || []).length,
+});
+const flipkartOrdersSummary = (d) => ({
+  "Order items in file": d.total_rows,
+  "New": d.created,
+  "Updated": d.updated,
+  "Skipped": d.invalid_rows,
+});
+
 export function UploadTab() {
   const TABLE_ROWS = [
     ["Order Payments",         "order_payments",        "sub_order_no",        "Update existing rows (safe to re-upload)"],
     ["Ads Cost",               "ads_cost",              "id (auto-increment)", "Always inserts new rows"],
     ["Referral Payments",      "referral_payments",     "reward_id",           "Update existing rows"],
     ["Compensation & Recovery", "compensation_recovery", "id (auto-increment)", "Always inserts new rows"],
+    ["Flipkart Settlement — Orders", "flipkart_order_payments", "order_item_id + neft_id", "Update existing rows (safe to re-upload)"],
+    ["Flipkart Settlement — Ads, Fines, SPF…", "flipkart_other_charges", "sheet + neft_id + reference", "Update existing rows"],
+    ["Flipkart Orders report", "flipkart_orders", "order_item_id", "Update existing rows (status refreshes)"],
   ];
 
   return (
@@ -194,6 +214,49 @@ export function UploadTab() {
             accept=".csv"
             endpoint="/upload-orders/"
             isOrders={true}
+          />
+        </UploadCard>
+      </Box>
+
+      <Box>
+        <Typography sx={{ fontWeight: 800, fontSize: { xs: 17, sm: 19 }, mb: 0.5, lineHeight: 1.25 }}>
+          Flipkart
+        </Typography>
+        <Typography variant="body2" color="text.secondary">
+          Two files, both .xlsx from the Flipkart seller hub: the Settlement Report (what was paid — order items plus ads,
+          fines and other charges) and the Orders report (every order and its status). Profit uses the same SKU pricing as Meesho.
+        </Typography>
+      </Box>
+
+      <Box
+        sx={{
+          display: "grid",
+          gridTemplateColumns: { xs: "1fr", md: "repeat(2, minmax(0, 1fr))" },
+          alignItems: "stretch",
+          gap: { xs: 2, sm: 2.5 },
+        }}
+      >
+        <UploadCard eyebrow="Flipkart Payments (Settlement Report)">
+          <UploadSection
+            title="Drop the Flipkart Settlement Report here"
+            subtitle="<uuid>_<timestamp>.xlsx — with the Orders, Ads, Fines… sheets"
+            icon="💸"
+            accept=".xlsx,.xls"
+            endpoint="/flipkart-profit/upload/"
+            isOrders={true}
+            summarize={flipkartPaymentsSummary}
+          />
+        </UploadCard>
+
+        <UploadCard eyebrow="Flipkart Orders (Orders report)">
+          <UploadSection
+            title="Drop the Flipkart Orders report here"
+            subtitle="<uuid>_<timestamp>.xlsx — order_item_id, order_item_status, sku…"
+            icon="🛍️"
+            accept=".xlsx,.xls"
+            endpoint="/flipkart-orders/upload/"
+            isOrders={true}
+            summarize={flipkartOrdersSummary}
           />
         </UploadCard>
       </Box>
