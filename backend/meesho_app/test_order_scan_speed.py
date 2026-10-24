@@ -197,3 +197,36 @@ class PackingDayTests(ScanTestCase):
         days = dict(ScannedOrder.objects.values_list("scanned_code", "scan_day"))
         self.assertEqual(str(days["BEFORE-NOON"]), "2026-10-22")
         self.assertEqual(str(days["AFTER-NOON"]), "2026-10-23")
+
+
+class PipedAwbTests(ScanTestCase):
+    """Some labels encode "AWB|routing code" in one barcode; only the AWB counts."""
+
+    def test_piped_code_matches_the_awb_and_is_dispatched(self):
+        self.label("P1_1", "VL0085867529935")
+        r = self.scan("\tVL0085867529935|BO0VNP32", status="DISPATCHED")
+        self.assertEqual(r.status_code, 201, r.data)
+        row = r.data["row"]
+        self.assertEqual((r.data["matched_from"], row["sub_order_no"], row["scanned_code"], row["status"]),
+                         ("LABEL", "P1_1", "VL0085867529935", "DISPATCHED"))
+
+    def test_old_piped_scans_are_repaired_and_merged(self):
+        import importlib
+        from django.apps import apps
+        fix = importlib.import_module("meesho_app.migrations.0065_fix_piped_awb_scans").fix
+        self.label("P2_1", "VL0000000002")
+        self.label("P3_1", "VL0000000003")
+        ScannedOrder.objects.create(business=self.business, scanned_code="VL0000000002|BO1", sub_order_no="VL0000000002|BO1",
+                                    matched_from="NONE", status="PACKED", last_scanned_at=timezone.now())
+        ScannedOrder.objects.create(business=self.business, scanned_code="VL0000000003|BO2", sub_order_no="VL0000000003|BO2",
+                                    matched_from="NONE", status="SCANNED", last_scanned_at=timezone.now())
+        ScannedOrder.objects.create(business=self.business, scanned_code="VL0000000003", sub_order_no="P3_1",
+                                    matched_from="LABEL", status="PACKED", last_scanned_at=timezone.now())
+        ScannedOrder.objects.create(business=self.business, scanned_code="UNKNOWN99|X", sub_order_no="UNKNOWN99|X",
+                                    matched_from="NONE", status="PACKED", last_scanned_at=timezone.now())
+        fix(apps, None)
+        rows = {r.sub_order_no: r for r in ScannedOrder.objects.all()}
+        self.assertEqual(set(rows), {"P2_1", "P3_1", "UNKNOWN99"})
+        self.assertEqual((rows["P2_1"].matched_from, rows["P2_1"].courier_name, rows["P2_1"].status), ("LABEL", "Valmo", "DISPATCHED"))
+        self.assertEqual((rows["P3_1"].scan_count, rows["P3_1"].status), (2, "DISPATCHED"))   # merged
+        self.assertEqual((rows["UNKNOWN99"].scanned_code, rows["UNKNOWN99"].matched_from), ("UNKNOWN99", "NONE"))

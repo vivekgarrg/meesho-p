@@ -12858,6 +12858,13 @@ def _parse_day(raw):
         return None
 
 
+def _order_scan_code(raw):
+    """The code to look an outgoing parcel up by. Some couriers' labels encode
+    the AWB and a routing code in one barcode — "VL0085867529935|BO0VNP32" —
+    and only the part before the "|" is the AWB."""
+    return _clean_scan_code(_clean_scan_code(raw).split("|", 1)[0])
+
+
 def _clean_scan_code(raw):
     """
     Scanners append whitespace/newlines and sometimes wrap the value in quotes.
@@ -13335,7 +13342,7 @@ def scanned_orders_list(request, business_id):
 
     if request.method == "POST":
         payload = request.data if isinstance(request.data, dict) else {}
-        code = _clean_scan_code(payload.get("code") or payload.get("q"))
+        code = _order_scan_code(payload.get("code") or payload.get("q"))
         if not code:
             return Response({"error": "Nothing scanned."}, status=status.HTTP_400_BAD_REQUEST)
         if len(code) > 200:
@@ -13729,7 +13736,7 @@ def scanned_orders_refresh_ship(request, business_id):
     # packed. A code whose order already has its own scan row stays as it is.
     relinked = 0
     for row in ScannedOrder.objects.filter(business=business, matched_from=ScannedOrder.MATCH_NONE):
-        owner, snap = _resolve_scan_in(scope, business, row.scanned_code or row.sub_order_no, row.platform)
+        owner, snap = _resolve_scan_in(scope, business, _order_scan_code(row.scanned_code or row.sub_order_no), row.platform)
         if snap["matched_from"] == ScannedOrder.MATCH_NONE or owner.pk != business.pk:
             continue
         if ScannedOrder.objects.filter(business=business, sub_order_no=snap["sub_order_no"]).exclude(pk=row.pk).exists():
