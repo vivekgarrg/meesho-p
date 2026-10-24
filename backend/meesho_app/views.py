@@ -29,7 +29,7 @@ from . import master_pricing, pricing_sync
 
 from .helpers.label_pdf import extract_all_pages
 
-from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, ListingImage, MasterItem, MasterItemComponent, MasterItemPriceHistory, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, LabelDayReset, PurchaseBill, PurchaseItem, BlockedCustomer, InventoryAdjustment, ConsumableItem, ConsumablePurchase, ConsumableUsage, InventoryLog, MeeshoInventory, MeeshoPriceUpdate, ExpenseInvoice, ExpenseInvoiceItem, TransportCharge, PackedStockEvent, EstimatedProfitOrder, ReturnDelivery, GstTransaction, GstInvoiceDetail, ScannedOrder, ListingTemplate, ClaimTicket, WorkerTask, WalletEntry, WalletSettlement, TaskListing, PlatformRate, TaskDocument, BusinessCostSetting, Employee, EmployeePayment, EmployeeAttendance, EmployeeHoliday, BusinessOwner, Product, BulkListingBatch, ReturnVideoBatch, FlipkartOrderPayment, FlipkartOrder
+from .models import OrderPayment, AdsCost, ReferralPayment, CompensationRecovery, FinalPrice, ListingImage, MasterItem, MasterItemComponent, MasterItemPriceHistory, Order, ParentItemPrice, ParentPriceHistory, LabelOrder, LabelDayReset, PurchaseBill, PurchaseItem, BlockedCustomer, InventoryAdjustment, ConsumableItem, ConsumablePurchase, ConsumableUsage, InventoryLog, MeeshoInventory, MeeshoPriceUpdate, ExpenseInvoice, ExpenseInvoiceItem, TransportCharge, PackedStockEvent, EstimatedProfitOrder, ReturnDelivery, GstTransaction, GstInvoiceDetail, ScannedOrder, ListingTemplate, ClaimTicket, WorkerTask, WalletEntry, WalletSettlement, TaskListing, PlatformRate, TaskDocument, BusinessCostSetting, Employee, EmployeePayment, EmployeeAttendance, EmployeeHoliday, BusinessOwner, Product, BulkListingBatch, ReturnVideoBatch, FlipkartOrderPayment, FlipkartOrder, OrderScanSetting
 from .serializers import (
     OrderPaymentSerializer, AdsCostSerializer,
     ReferralPaymentSerializer, CompensationRecoverySerializer,
@@ -13295,15 +13295,37 @@ def _refresh_ship_status(business, row, status_hint=None, save=True, scope=None)
     return changed
 
 
-def _scanned_order_stats(business):
+def _scan_desk_scope(request, business):
     """
-    Scan workload for the whole business, in one aggregate query — it runs
-    after every scan, so it must stay cheap as the log grows. Never narrowed by
-    the period filter, so nothing on hold can hide behind the selected month.
+    The businesses this person's Order Scan desk combines.
+
+    Everyone's desk merges every business they are assigned to and may use
+    Order Scan in. An admin may narrow that to a chosen set, saved to their
+    account (OrderScanSetting) — never wider than what they can access.
     """
+    from accounts.access import api_access_denied
+    allowed = [b for b in accessible_businesses(request, include=business)
+               if b.pk == business.pk or not api_access_denied(request.user, b, "order-scan/")]
+    setting = OrderScanSetting.objects.filter(user=request.user).first()
+    if setting and setting.business_ids and _is_admin(request.user):
+        wanted = {int(i) for i in setting.business_ids}
+        chosen = [b for b in allowed if b.pk in wanted]
+        if chosen:
+            return chosen
+    return allowed
+
+
+def _scanned_order_stats(scope):
+    """
+    Scan workload across the desk's businesses, in one aggregate query — it
+    runs after every scan, so it must stay cheap as the log grows. Never
+    narrowed by the period filter, so nothing on hold can hide behind the
+    selected month. `scope` is one business or a list of them.
+    """
+    ids = [b.pk for b in scope] if isinstance(scope, (list, tuple)) else [scope.pk]
     S = ScannedOrder
     c = lambda **flt: Count("id", filter=DQ(**flt))
-    agg = S.objects.filter(business=business).aggregate(
+    agg = S.objects.filter(business_id__in=ids).aggregate(
         total=Count("id"),
         scanned=c(status=S.STATUS_SCANNED), packed=c(status=S.STATUS_PACKED),
         dispatched=c(status=S.STATUS_DISPATCHED), on_hold=c(status=S.STATUS_ON_HOLD),
@@ -13339,6 +13361,7 @@ def scanned_orders_list(request, business_id):
       about the duplicate rather than silently logging it twice.
     """
     business = get_authorized_business(request, business_id)
+    desk = _scan_desk_scope(request, business)
 
     if request.method == "POST":
         payload = request.data if isinstance(request.data, dict) else {}
@@ -13415,7 +13438,7 @@ def scanned_orders_list(request, business_id):
                 "business_id": owner.pk,
                 "business_name": owner.name,
                 "row": ScannedOrderSerializer(row).data,
-                "stats": _scanned_order_stats(business),
+                "stats": _scanned_order_stats(desk),
             })
 
         row = ScannedOrder.objects.create(
@@ -13441,20 +13464,11 @@ def scanned_orders_list(request, business_id):
             "business_id": owner.pk,
             "business_name": owner.name,
             "row": ScannedOrderSerializer(row).data,
-            "stats": _scanned_order_stats(business),
+            "stats": _scanned_order_stats(desk),
         }, status=status.HTTP_201_CREATED)
 
-    # ?pool=1 widens the list to every business the user belongs to. Off by
-    # default so the tab still means "this business" unless asked otherwise —
-    # but a scan filed against a sibling (see _resolve_scan_code_pooled) is
-    # invisible without it, which is exactly when you want it on.
-    pooled = request.GET.get("pool", "").strip() in ("1", "true", "yes")
-    if pooled:
-        scope = accessible_businesses(request, include=business)
-        qs = ScannedOrder.objects.filter(business__in=scope)
-    else:
-        qs = ScannedOrder.objects.filter(business=business)
-    qs = qs.select_related("scanned_by", "business")
+    # The record covers every business the desk combines (see _scan_desk_scope).
+    qs = ScannedOrder.objects.filter(business__in=desk).select_related("scanned_by", "business")
 
     # Half-open datetime bounds rather than __date — see _local_day_start.
     date_from = _parse_day(request.GET.get("date_from"))
@@ -13521,8 +13535,9 @@ def scanned_orders_list(request, business_id):
         "page": page,
         "page_size": page_size,
         "results": ScannedOrderSerializer(rows, many=True).data,
-        "stats": _scanned_order_stats(business),
+        "stats": _scanned_order_stats(desk),
         "statuses": [{"value": v, "label": l} for v, l in ScannedOrder.STATUS_CHOICES],
+        "businesses": [{"id": b.pk, "name": b.name} for b in desk],
     })
 
 
@@ -13538,13 +13553,18 @@ def scan_queue(request, business_id):
     many Meesho says shipped, were cancelled or never went out.
 
     Query params: date (YYYY-MM-DD, default today's business day), platform.
+
+    Combines every business on this person's desk (see _scan_desk_scope).
     """
     business = get_authorized_business(request, business_id)
+    desk = _scan_desk_scope(request, business)
+    desk_ids = [b.pk for b in desk]
+    names = {b.pk: b.name for b in desk}
     day = _parse_day(request.GET.get("date")) or _current_business_date()
 
     labels = list(
-        _scope_labels(request, LabelOrder.objects.filter(business=business, uploaded_date=day))
-        .order_by("courier_name", "sku", "order_id")[:2000]
+        _scope_labels(request, LabelOrder.objects.filter(business_id__in=desk_ids, uploaded_date=day))
+        .order_by("courier_name", "sku", "order_id")[:4000]
     )
     ids = [l.order_id for l in labels]
     awbs = [l.awb_number for l in labels if l.awb_number]
@@ -13552,24 +13572,27 @@ def scan_queue(request, business_id):
     scan_q = DQ(sub_order_no__in=ids)
     if awbs:
         scan_q |= DQ(awb_number__in=awbs)
-    scans = list(ScannedOrder.objects.filter(business=business).filter(scan_q))
-    by_sub = {s.sub_order_no: s for s in scans}
-    by_awb = {s.awb_number: s for s in scans if s.awb_number}
+    scans = list(ScannedOrder.objects.filter(business_id__in=desk_ids).filter(scan_q))
+    by_sub = {(s.business_id, s.sub_order_no): s for s in scans}
+    by_awb = {(s.business_id, s.awb_number): s for s in scans if s.awb_number}
 
     # What Meesho's Orders sheet says, for parcels nobody has scanned yet — an
     # order cancelled on Meesho must not be packed.
-    sheet_status = dict(
-        Order.objects.filter(business=business, sub_order_no__in=ids)
-        .values_list("sub_order_no", "reason_for_credit_entry")
-    )
+    sheet_status = {
+        (b, sub): st for b, sub, st in Order.objects.filter(business_id__in=desk_ids, sub_order_no__in=ids)
+        .values_list("business_id", "sub_order_no", "reason_for_credit_entry")
+    }
     image_map = return_image_map(labels)
 
     items = []
     for l in labels:
-        sc = by_sub.get(l.order_id) or (by_awb.get(l.awb_number) if l.awb_number else None)
-        ship = sc.ship_status if sc else ScannedOrder.classify_ship_status(sheet_status.get(l.order_id))
+        sc = by_sub.get((l.business_id, l.order_id)) or (by_awb.get((l.business_id, l.awb_number)) if l.awb_number else None)
+        sheet = sheet_status.get((l.business_id, l.order_id))
+        ship = sc.ship_status if sc else ScannedOrder.classify_ship_status(sheet)
         items.append({
             "order_id": l.order_id,
+            "business_id": l.business_id,
+            "business_name": names.get(l.business_id, ""),
             "awb": l.awb_number,
             "sku": l.sku,
             "size": l.size,
@@ -13584,7 +13607,7 @@ def scan_queue(request, business_id):
             "scan_count": sc.scan_count if sc else 0,
             "scanned_at": sc.last_scanned_at.isoformat() if sc else None,
             "ship_status": ship,
-            "ship_status_raw": sc.ship_status_raw if sc else (sheet_status.get(l.order_id) or ""),
+            "ship_status_raw": sc.ship_status_raw if sc else (sheet or ""),
         })
 
     packed_states = (ScannedOrder.STATUS_PACKED, ScannedOrder.STATUS_DISPATCHED)
@@ -13625,14 +13648,15 @@ def scan_queue(request, business_id):
     # Parcels scanned on this day that aren't on the day's list — usually a code
     # nothing recognised (no label uploaded yet). Kept, and counted, so they
     # can be found later.
-    listed_subs = {i["order_id"] for i in items}
-    listed_awbs = {i["awb"] for i in items if i["awb"]}
-    day_scans = ScannedOrder.objects.filter(business=business, scan_day=day)
+    listed_subs = {(i["business_id"], i["order_id"]) for i in items}
+    listed_awbs = {(i["business_id"], i["awb"]) for i in items if i["awb"]}
+    day_scans = ScannedOrder.objects.filter(business_id__in=desk_ids, scan_day=day)
     platform = _label_view_platform(request)
     if platform:
         day_scans = day_scans.filter(platform=platform)
-    extra = [r for r in day_scans.only("sub_order_no", "awb_number", "matched_from", "courier_name")
-             if r.sub_order_no not in listed_subs and not (r.awb_number and r.awb_number in listed_awbs)]
+    extra = [r for r in day_scans.only("business_id", "sub_order_no", "awb_number", "matched_from", "courier_name")
+             if (r.business_id, r.sub_order_no) not in listed_subs
+             and not (r.awb_number and (r.business_id, r.awb_number) in listed_awbs)]
     summary["off_list"] = len(extra)
     summary["off_list_unrecognised"] = sum(1 for r in extra if r.matched_from == ScannedOrder.MATCH_NONE)
     # The same off-list scans per courier, so the courier tiles still show
@@ -13649,17 +13673,18 @@ def scan_queue(request, business_id):
     items.sort(key=lambda i: (i["state"] != "PENDING",))
     current_day = _current_business_date()
     dates = set(
-        _scope_labels(request, LabelOrder.objects.filter(business=business, uploaded_date__lte=current_day))
+        _scope_labels(request, LabelOrder.objects.filter(business_id__in=desk_ids, uploaded_date__lte=current_day))
         .values_list("uploaded_date", flat=True).distinct().order_by("-uploaded_date")[:14]
     )
     # Today's and yesterday's packing days are always offered, so the desk can
     # switch back to the previous day and scan its orders even with no labels.
     dates |= {current_day, current_day - timedelta(days=1)}
     start, end = _packing_day_window(day)
-    latest_labels = (_scope_labels(request, LabelOrder.objects.filter(business=business, uploaded_date__lte=current_day))
+    latest_labels = (_scope_labels(request, LabelOrder.objects.filter(business_id__in=desk_ids, uploaded_date__lte=current_day))
                      .order_by("-uploaded_date").values_list("uploaded_date", flat=True).first())
     return Response({
         "latest_label_day": latest_labels.isoformat() if latest_labels else None,
+        "businesses": [{"id": b.pk, "name": b.name} for b in desk],
         "date": day.isoformat(),
         "current_day": current_day.isoformat(),
         "is_current_day": day == current_day,
@@ -13672,17 +13697,19 @@ def scan_queue(request, business_id):
 
 @api_view(["GET", "PATCH", "DELETE"])
 def scanned_order_detail(request, business_id, pk):
-    """Read one recorded scan, update its status/notes, or delete a mis-scan."""
+    """Read one recorded scan, update its status/notes, or delete a mis-scan —
+    in any business this person's desk combines."""
     business = get_authorized_business(request, business_id)
+    desk = _scan_desk_scope(request, business)
 
     try:
-        row = ScannedOrder.objects.select_related("scanned_by").get(pk=pk, business=business)
+        row = ScannedOrder.objects.select_related("scanned_by").get(pk=pk, business__in=desk)
     except ScannedOrder.DoesNotExist:
         return Response({"error": "Scan not found."}, status=status.HTTP_404_NOT_FOUND)
 
     if request.method == "DELETE":
         row.delete()
-        return Response({"deleted": True, "stats": _scanned_order_stats(business)})
+        return Response({"deleted": True, "stats": _scanned_order_stats(desk)})
 
     if request.method == "PATCH":
         payload = request.data if isinstance(request.data, dict) else {}
@@ -13711,7 +13738,7 @@ def scanned_order_detail(request, business_id, pk):
 
     row = _attach_meesho_status(business, [row])[0]
     data = ScannedOrderSerializer(row).data
-    data["stats"] = _scanned_order_stats(business)
+    data["stats"] = _scanned_order_stats(desk)
     return Response(data)
 
 
@@ -13729,41 +13756,89 @@ def scanned_orders_refresh_ship(request, business_id):
     this purpose, so re-resolving thousands of them every time would be waste.
     """
     business = get_authorized_business(request, business_id)
+    desk = _scan_desk_scope(request, business)
     scope = accessible_businesses(request, include=business)
 
-    # Codes nothing recognised when scanned: their label / orders sheet may
-    # have been uploaded since. Link them now, so the record says what was
-    # packed. A code whose order already has its own scan row stays as it is.
-    relinked = 0
-    for row in ScannedOrder.objects.filter(business=business, matched_from=ScannedOrder.MATCH_NONE):
-        owner, snap = _resolve_scan_in(scope, business, _order_scan_code(row.scanned_code or row.sub_order_no), row.platform)
-        if snap["matched_from"] == ScannedOrder.MATCH_NONE or owner.pk != business.pk:
-            continue
-        if ScannedOrder.objects.filter(business=business, sub_order_no=snap["sub_order_no"]).exclude(pk=row.pk).exists():
-            continue
-        for k, v in snap.items():
-            setattr(row, k, v)
-        row.save()
-        relinked += 1
+    relinked = checked = changed = 0
+    for biz in desk:
+        # Codes nothing recognised when scanned: their label / orders sheet may
+        # have been uploaded since. Link them now, so the record says what was
+        # packed. A code whose order already has its own scan row stays as it is.
+        for row in ScannedOrder.objects.filter(business=biz, matched_from=ScannedOrder.MATCH_NONE):
+            owner, snap = _resolve_scan_in(scope, biz, _order_scan_code(row.scanned_code or row.sub_order_no), row.platform)
+            if snap["matched_from"] == ScannedOrder.MATCH_NONE or owner.pk != biz.pk:
+                continue
+            if ScannedOrder.objects.filter(business=biz, sub_order_no=snap["sub_order_no"]).exclude(pk=row.pk).exists():
+                continue
+            for k, v in snap.items():
+                setattr(row, k, v)
+            row.save()
+            relinked += 1
 
-    qs = ScannedOrder.objects.filter(business=business).exclude(
-        ship_status=ScannedOrder.SHIP_SHIPPED
-    )
-    if request.data.get("all"):
-        qs = ScannedOrder.objects.filter(business=business)
-
-    rows = list(qs)
-    status_map = _meesho_status_map(business, [r.sub_order_no for r in rows])
-    changed = 0
-    for row in rows:
-        if _refresh_ship_status(business, row, status_map.get(row.sub_order_no), scope=scope):
-            changed += 1
+        qs = ScannedOrder.objects.filter(business=biz).exclude(ship_status=ScannedOrder.SHIP_SHIPPED)
+        if request.data.get("all"):
+            qs = ScannedOrder.objects.filter(business=biz)
+        rows = list(qs)
+        status_map = _meesho_status_map(biz, [r.sub_order_no for r in rows])
+        for row in rows:
+            if _refresh_ship_status(biz, row, status_map.get(row.sub_order_no), scope=scope):
+                changed += 1
+        checked += len(rows)
 
     return Response({
-        "checked": len(rows),
+        "checked": checked,
         "changed": changed,
         "relinked": relinked,
-        "stats": _scanned_order_stats(business),
+        "stats": _scanned_order_stats(desk),
+    })
+
+
+@api_view(["GET", "PUT"])
+def scan_desk_settings(request, business_id):
+    """
+    Which businesses the Order Scan desk combines for this person.
+
+    GET — the businesses they could combine, the ones combined now, and
+          whether they may change it.
+    PUT — admins only: {"business_ids": [...]} — saved to their account, so it
+          holds on every device. An empty list, or every business, means "all".
+    """
+    from accounts.access import api_access_denied
+    business = get_authorized_business(request, business_id)
+    available = [b for b in accessible_businesses(request, include=business)
+                 if b.pk == business.pk or not api_access_denied(request.user, b, "order-scan/")]
+    admin = _is_admin(request.user)
+
+    if request.method == "PUT":
+        if not admin:
+            return Response({"error": "Only an admin can choose which businesses are combined."},
+                            status=status.HTTP_403_FORBIDDEN)
+        raw = request.data.get("business_ids") if isinstance(request.data, dict) else None
+        if not isinstance(raw, list):
+            return Response({"error": "business_ids must be a list."}, status=status.HTTP_400_BAD_REQUEST)
+        allowed_ids = {b.pk for b in available}
+        try:
+            ids = sorted({int(i) for i in raw})
+        except (TypeError, ValueError):
+            return Response({"error": "business_ids must be numbers."}, status=status.HTTP_400_BAD_REQUEST)
+        unknown = [i for i in ids if i not in allowed_ids]
+        if unknown:
+            return Response({"error": "You can only combine businesses you have access to."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if raw and not ids:
+            return Response({"error": "Pick at least one business."}, status=status.HTTP_400_BAD_REQUEST)
+        # Every business ticked is the same as "all", and stays "all" when a
+        # new business is added later.
+        OrderScanSetting.objects.update_or_create(
+            user=request.user, defaults={"business_ids": [] if set(ids) == allowed_ids else ids})
+
+    desk = _scan_desk_scope(request, business)
+    setting = OrderScanSetting.objects.filter(user=request.user).first()
+    return Response({
+        "is_admin": admin,
+        "available": [{"id": b.pk, "name": b.name} for b in available],
+        "selected": [b.pk for b in desk],
+        "all": not (setting and setting.business_ids),
     })
 
 
@@ -13788,8 +13863,14 @@ def scan_alerts(request, business_id):
                         label or orders sheet still to upload
 
     Each comes with a count and the first few orders. ?platform= narrows it.
+    ?scope=desk covers every business the Order Scan desk combines (see
+    _scan_desk_scope); without it, just this business (the Overview card).
     """
     business = get_authorized_business(request, business_id)
+    if request.GET.get("scope") == "desk":
+        ids = [b.pk for b in _scan_desk_scope(request, business)]
+    else:
+        ids = [business.pk]
     platform = _label_view_platform(request)
     today = _current_business_date()
     since = today - timedelta(days=_ALERT_DAYS)
@@ -13805,27 +13886,29 @@ def scan_alerts(request, business_id):
                 "courier": r.courier_name, "platform": r.platform, "status": r.status,
                 "ship_status_raw": r.ship_status_raw, "scanned_at": r.last_scanned_at.isoformat() if r.last_scanned_at else None}
 
-    labels = LabelOrder.objects.filter(business=business, uploaded_date__gte=since, uploaded_date__lt=today)
+    labels = LabelOrder.objects.filter(business_id__in=ids, uploaded_date__gte=since, uploaded_date__lt=today)
     if platform:
         labels = labels.filter(platform=platform)
-    labels = list(labels.only("order_id", "awb_number", "sku", "qty", "courier_name", "platform", "uploaded_date")[:5000])
-    ids = [l.order_id for l in labels]
+    labels = list(labels.only("order_id", "business_id", "awb_number", "sku", "qty", "courier_name", "platform", "uploaded_date")[:5000])
+    order_ids = [l.order_id for l in labels]
     awbs = [l.awb_number for l in labels if l.awb_number]
     scanned_subs, scanned_awbs = set(), set()
     if labels:
-        q = DQ(sub_order_no__in=ids) | (DQ(awb_number__in=awbs) if awbs else DQ(pk__in=[]))
-        for sub, awb in ScannedOrder.objects.filter(business=business).filter(q).values_list("sub_order_no", "awb_number"):
-            scanned_subs.add(sub)
+        q = DQ(sub_order_no__in=order_ids) | (DQ(awb_number__in=awbs) if awbs else DQ(pk__in=[]))
+        for biz, sub, awb in (ScannedOrder.objects.filter(business_id__in=ids).filter(q)
+                              .values_list("business_id", "sub_order_no", "awb_number")):
+            scanned_subs.add((biz, sub))
             if awb:
-                scanned_awbs.add(awb)
-    sheet = dict(Order.objects.filter(business=business, sub_order_no__in=ids)
-                 .values_list("sub_order_no", "reason_for_credit_entry")) if ids else {}
+                scanned_awbs.add((biz, awb))
+    sheet = {(b, sub): st for b, sub, st in Order.objects.filter(business_id__in=ids, sub_order_no__in=order_ids)
+             .values_list("business_id", "sub_order_no", "reason_for_credit_entry")} if order_ids else {}
     settled_ship = (ScannedOrder.SHIP_CANCELLED, ScannedOrder.SHIP_SHIPPED)
     not_packed = [l for l in labels
-                  if l.order_id not in scanned_subs and not (l.awb_number and l.awb_number in scanned_awbs)
-                  and ScannedOrder.classify_ship_status(sheet.get(l.order_id)) not in settled_ship]
+                  if (l.business_id, l.order_id) not in scanned_subs
+                  and not (l.awb_number and (l.business_id, l.awb_number) in scanned_awbs)
+                  and ScannedOrder.classify_ship_status(sheet.get((l.business_id, l.order_id))) not in settled_ship]
 
-    scans = ScannedOrder.objects.filter(business=business, last_scanned_at__gte=week_ago)
+    scans = ScannedOrder.objects.filter(business_id__in=ids, last_scanned_at__gte=week_ago)
     if platform:
         scans = scans.filter(platform=platform)
     not_dispatched = list(scans.filter(
@@ -13872,14 +13955,15 @@ def scanned_orders_bulk_status(request, business_id):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    updated = ScannedOrder.objects.filter(business=business, id__in=ids).exclude(
+    desk = _scan_desk_scope(request, business)
+    updated = ScannedOrder.objects.filter(business__in=desk, id__in=ids).exclude(
         status=new_status
     ).update(status=new_status, status_updated_at=timezone.now())
 
     return Response({
         "updated": updated,
         "status": new_status,
-        "stats": _scanned_order_stats(business),
+        "stats": _scanned_order_stats(desk),
     })
 
 

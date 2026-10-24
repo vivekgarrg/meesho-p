@@ -151,7 +151,8 @@ function useScanDesk(platform) {
       }
       const row = data.row;
       const items = queueRef.current?.items || [];
-      const item = items.find((i) => i.order_id === row.sub_order_no || (row.awb_number && i.awb === row.awb_number));
+      const sameBiz = (i) => !i.business_id || !row.business || i.business_id === row.business;
+      const item = items.find((i) => sameBiz(i) && (i.order_id === row.sub_order_no || (row.awb_number && i.awb === row.awb_number)));
       const ship = row.ship_status;
       const lines = [];
       const what = row.sku ? `${row.sku} × ${row.qty}` : item ? `${item.sku} × ${item.qty}` : null;
@@ -258,7 +259,7 @@ function ProgressBar({ done, total, label }) {
   );
 }
 
-function ItemRow({ item, compact }) {
+function ItemRow({ item, compact, showBusiness }) {
   const st = STATE_META[item.state] || STATE_META.PENDING;
   const ship = SHIP_META[item.ship_status] || SHIP_META.UNKNOWN;
   const cancelled = item.ship_status === "CANCELLED";
@@ -274,7 +275,7 @@ function ItemRow({ item, compact }) {
           <span style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 13, color: C.orange }}>×{item.qty}</span>
         </div>
         <div style={{ fontSize: 11.5, color: C.gray500, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-          {[item.courier, item.customer_city, item.awb].filter(Boolean).join(" · ")}
+          {[showBusiness && item.business_name, item.courier, item.customer_city, item.awb].filter(Boolean).join(" · ")}
         </div>
       </div>
       <div style={{ textAlign: "right", flexShrink: 0, display: "flex", flexDirection: "column", gap: 4, alignItems: "flex-end" }}>
@@ -340,6 +341,88 @@ function DayNotice({ desk, compact }) {
         {compact ? "" : " — scans count toward that day's list."}
       </span>
       <button onClick={backToToday} style={{ ...btn("primary", "sm") }}>Back to today</button>
+    </div>
+  );
+}
+
+// ── Which businesses the desk combines ────────────────────────────────────────
+
+/**
+ * Order Scan merges every business the person is assigned to. An admin can
+ * choose which ones are counted together; that choice is saved to their
+ * account on the server, so it holds on every device.
+ */
+function useDeskBusinesses() {
+  const [info, setInfo] = useState(null);
+  const load = useCallback(() => {
+    fetch(`${API}/order-scan/settings/`).then((r) => (r.ok ? r.json() : null)).then(setInfo).catch(() => {});
+  }, []);
+  useEffect(() => { load(); }, [load]);
+  const save = async (ids) => {
+    const res = await fetch(`${API}/order-scan/settings/`, {
+      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ business_ids: ids }),
+    });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(d.error || "Couldn't save.");
+    setInfo(d);
+    return d;
+  };
+  return { info, save, reload: load };
+}
+
+function DeskBusinesses({ desk, onChanged, compact }) {
+  const { info, save } = desk;
+  const [open, setOpen] = useState(false);
+  const [picked, setPicked] = useState(new Set());
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  useEffect(() => { if (info) setPicked(new Set(info.selected)); }, [info]);
+  if (!info || info.available.length < 2) return null;
+
+  const names = info.available.filter((b) => info.selected.includes(b.id)).map((b) => b.name);
+  const label = names.length === info.available.length && info.all
+    ? `All ${names.length} businesses` : names.join(" + ");
+  const submit = async () => {
+    setBusy(true); setErr(null);
+    try { await save([...picked]); setOpen(false); onChanged?.(); }
+    catch (e) { setErr(e.message); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div style={{ position: "relative" }}>
+      <button onClick={() => info.is_admin && setOpen((v) => !v)} title={info.is_admin ? "Choose which businesses are combined" : "Combined from the businesses you're assigned to"}
+        style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: compact ? "6px 10px" : "8px 12px", borderRadius: 10,
+          border: `1.5px solid ${C.orangeBorder}`, background: C.orangeLight, color: C.orange, fontWeight: 800,
+          fontSize: compact ? 11.5 : 12.5, fontFamily: "inherit", cursor: info.is_admin ? "pointer" : "default",
+          maxWidth: compact ? 170 : 360, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+        🏢 {compact ? `${names.length} businesses` : `Combining: ${label}`}{info.is_admin ? " ▾" : ""}
+      </button>
+      {open && (
+        <div style={{ position: compact ? "fixed" : "absolute", top: compact ? 60 : "calc(100% + 6px)", right: compact ? 12 : 0,
+          left: compact ? 12 : "auto", zIndex: 3200, minWidth: 260, background: C.white, border: `1px solid ${C.gray200}`,
+          borderRadius: 12, boxShadow: "0 12px 30px rgba(0,0,0,.15)", padding: 14, display: "flex", flexDirection: "column", gap: 10 }}>
+          <div style={{ fontSize: 13.5, fontWeight: 800, color: C.gray800 }}>Combine these businesses</div>
+          <div style={{ fontSize: 11.5, color: C.gray500 }}>Saved to your account — the same on every device.</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 260, overflowY: "auto" }}>
+            {info.available.map((b) => (
+              <label key={b.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: C.gray700, cursor: "pointer" }}>
+                <input type="checkbox" checked={picked.has(b.id)}
+                  onChange={() => setPicked((s) => { const n = new Set(s); if (n.has(b.id)) n.delete(b.id); else n.add(b.id); return n; })} />
+                {b.name}
+              </label>
+            ))}
+          </div>
+          {err && <div style={{ fontSize: 12, color: C.red, fontWeight: 600 }}>{err}</div>}
+          <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+            <button onClick={() => setPicked(new Set(info.available.map((b) => b.id)))} style={btn("ghost", "sm")}>All</button>
+            <button onClick={() => setOpen(false)} style={btn("ghost", "sm")}>Cancel</button>
+            <button onClick={submit} disabled={busy || picked.size === 0} style={{ ...btn("primary", "sm"), opacity: busy || !picked.size ? 0.5 : 1 }}>
+              {busy ? "Saving…" : "Save"}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -464,12 +547,14 @@ const ALERT_GROUPS = [
   { key: "unrecognised", title: "Scanned but no order found", help: "Codes scanned this week that match no order yet — upload their labels / orders sheet." },
 ];
 
-export function useScanAlerts(platform) {
+export function useScanAlerts(platform, tick = 0) {
   const [alerts, setAlerts] = useState(null);
   const load = useCallback(() => {
-    const p = platform ? `?${new URLSearchParams({ platform })}` : "";
+    const q = new URLSearchParams({ scope: "desk" });
+    if (platform) q.set("platform", platform);
+    const p = `?${q}`;
     fetch(`${API}/order-scan/alerts/${p}`).then((r) => (r.ok ? r.json() : null)).then(setAlerts).catch(() => {});
-  }, [platform]);
+  }, [platform, tick]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { load(); }, [load]);
   return [alerts, load];
 }
@@ -529,14 +614,14 @@ function AlertBanner({ alerts, onOpen, compact }) {
 
 // ── Phone: full screen, stable ────────────────────────────────────────────────
 
-function MobilePack({ desk, platform, setPlatform }) {
+function MobilePack({ desk, platform, setPlatform, businesses, onScopeChanged, scopeTick, multi }) {
   const navigate = useNavigate();
   const { queue, loading, mode, setMode, latest, busy, date, setDate, record } = desk;
   const [camera, setCamera] = useState(false);
   const [tab, setTab] = useState("pending");
   const [typed, setTyped] = useState("");
   const [courier, setCourier] = useState(null);
-  const [alerts] = useScanAlerts(platform);
+  const [alerts] = useScanAlerts(platform, scopeTick);
   const [showAlerts, setShowAlerts] = useState(false);
 
   const items = queue?.items || [];
@@ -583,6 +668,7 @@ function MobilePack({ desk, platform, setPlatform }) {
             {[...new Set([date, ...(queue?.dates || [])])].filter(Boolean).sort().reverse().map((d) => <option key={d} value={d}>{dayLabel(d, desk.currentDay)}</option>)}
           </select>
         </div>
+        <DeskBusinesses desk={businesses} onChanged={onScopeChanged} compact />
         <PlatformToggle platform={platform} onChange={setPlatform} />
       </div>
 
@@ -625,7 +711,7 @@ function MobilePack({ desk, platform, setPlatform }) {
           <div style={{ textAlign: "center", padding: 36, color: C.gray400, fontSize: 13 }}>
             {!items.length ? "No orders assigned for this day — upload the labels first." : tab === "pending" ? "Everything is packed. 🎉" : "Nothing here."}
           </div>
-        ) : shown.map((i) => <ItemRow key={i.order_id} item={i} compact />)}
+        ) : shown.map((i) => <ItemRow key={`${i.business_id}-${i.order_id}`} item={i} compact showBusiness={multi} />)}
       </div>
 
       {/* Bottom bar */}
@@ -666,7 +752,7 @@ function Tile({ label, value, color, onClick, active }) {
 }
 
 /** The scan record: every scan ever made, with Meesho's status beside our own. */
-function ScanRecord({ platform }) {
+function ScanRecord({ platform, multi }) {
   const [rows, setRows] = useState([]);
   const [total, setTotal] = useState(0);
   const [stats, setStats] = useState(null);
@@ -752,7 +838,7 @@ function ScanRecord({ platform }) {
                   <tr key={r.id} style={{ background: r.ship_status === "CANCELLED" ? C.redLight : idx % 2 ? C.gray50 : C.white }}>
                     <td style={{ ...S.td, whiteSpace: "nowrap", fontSize: 12, color: C.gray500 }}>{fmtTime(r.last_scanned_at)}{r.scan_count > 1 ? ` · ${r.scan_count}×` : ""}</td>
                     <td style={{ ...S.td, fontFamily: "monospace", fontSize: 12 }}>{r.sub_order_no}
-                      <div style={{ color: C.gray400, fontSize: 11 }}>{[r.awb_number, r.courier_name].filter(Boolean).join(" · ")}</div>
+                      <div style={{ color: C.gray400, fontSize: 11 }}>{[multi && r.business_name, r.awb_number, r.courier_name].filter(Boolean).join(" · ")}</div>
                       {r.matched_from === "NONE" && <Tag variant="amber">Not recognised</Tag>}</td>
                     <td style={S.td}><span style={{ fontFamily: "monospace", fontWeight: 700, fontSize: 12.5 }}>{r.sku || "—"}</span> <span style={{ color: C.orange, fontWeight: 800 }}>×{r.qty}</span></td>
                     <td style={S.td}>
@@ -782,13 +868,13 @@ function ScanRecord({ platform }) {
   );
 }
 
-function DesktopPack({ desk, platform, setPlatform }) {
+function DesktopPack({ desk, platform, setPlatform, businesses, onScopeChanged, scopeTick, multi }) {
   const { queue, loading, mode, setMode, latest, busy, date, setDate, record, reload } = desk;
   const [view, setView] = useState("queue");          // queue | record
   const [tab, setTab] = useState("pending");
   const [scan, setScan] = useState("");
   const [courier, setCourier] = useState(null);
-  const [alerts, reloadAlerts] = useScanAlerts(platform);
+  const [alerts, reloadAlerts] = useScanAlerts(platform, scopeTick);
   const [showAlerts, setShowAlerts] = useState(false);
   const input = useRef(null);
   const refocus = useCallback(() => setTimeout(() => input.current?.focus(), 0), []);
@@ -817,6 +903,7 @@ function DesktopPack({ desk, platform, setPlatform }) {
           <p style={{ fontSize: 12, color: C.gray400, marginTop: 3 }}>Every label for the day is an order to pack — scan each parcel to tick it off and keep the record.</p>
         </div>
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <DeskBusinesses desk={businesses} onChanged={onScopeChanged} />
           <PlatformToggle platform={platform} onChange={setPlatform} />
           <select value={date} onChange={(e) => setDate(e.target.value)} style={{ ...S.inp, width: "auto" }}>
             {[...new Set([date, ...(queue?.dates || [])])].filter(Boolean).sort().reverse().map((d) => <option key={d} value={d}>{dayLabel(d, desk.currentDay)}</option>)}
@@ -833,7 +920,7 @@ function DesktopPack({ desk, platform, setPlatform }) {
         </div>
       </div>
 
-      {view === "record" ? <ScanRecord platform={platform} /> : (
+      {view === "record" ? <ScanRecord key={scopeTick} platform={platform} multi={multi} /> : (
         <>
           <DayNotice desk={desk} />
           <AlertBanner alerts={alerts} onOpen={() => { setShowAlerts((v) => !v); reloadAlerts(); }} />
@@ -875,7 +962,7 @@ function DesktopPack({ desk, platform, setPlatform }) {
                 <div style={{ textAlign: "center", padding: 44, color: C.gray400, fontSize: 13 }}>
                   {!items.length ? "No orders assigned for this day — upload the labels first." : tab === "pending" ? "Everything is packed. 🎉" : "Nothing here."}
                 </div>
-              ) : shown.map((i) => <ItemRow key={i.order_id} item={i} />)}
+              ) : shown.map((i) => <ItemRow key={`${i.business_id}-${i.order_id}`} item={i} showBusiness={multi} />)}
             </div>
 
             <div style={{ position: "sticky", top: 12, display: "flex", flexDirection: "column", gap: 14 }}>
@@ -920,7 +1007,11 @@ export function OrderScanTab() {
   const isMobile = useIsMobile();
   const [platform, setPlatform] = useLabelPlatform();
   const desk = useScanDesk(platform);
-  return isMobile
-    ? <MobilePack desk={desk} platform={platform} setPlatform={setPlatform} />
-    : <DesktopPack desk={desk} platform={platform} setPlatform={setPlatform} />;
+  const businesses = useDeskBusinesses();
+  // Bumped when the combined businesses change, so everything re-reads.
+  const [scopeTick, setScopeTick] = useState(0);
+  const onScopeChanged = () => { setScopeTick((t) => t + 1); desk.reload(); };
+  const props = { desk, platform, setPlatform, businesses, onScopeChanged, scopeTick,
+    multi: (businesses.info?.selected?.length || 0) > 1 };
+  return isMobile ? <MobilePack {...props} /> : <DesktopPack {...props} />;
 }

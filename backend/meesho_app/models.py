@@ -3095,3 +3095,23 @@ class ListingHubPause(models.Model):
 
     def __str__(self):
         return f"paused: {self.parent.item_id}"
+
+
+class OrderScanSetting(models.Model):
+    """
+    Which businesses one person's Order Scan desk combines — saved to their
+    account, so it is the same on every device and survives logging out.
+
+    Everyone's desk combines all the businesses they are assigned to by
+    default; an admin can narrow it to the ones they want counted together.
+    An empty list means "all of them".
+    """
+    user = models.OneToOneField("accounts.User", on_delete=models.CASCADE, related_name="order_scan_setting")
+    business_ids = models.JSONField(default=list, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "order_scan_settings"
+
+    def __str__(self):
+        return f"Order scan for {self.user_id}: {self.business_ids or 'all'}"

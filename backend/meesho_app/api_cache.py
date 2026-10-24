@@ -57,8 +57,10 @@ _NEVER_CACHE_PREFIXES = (
     "cache/",                 # the cache's own status/refresh
     "bulk-labels/today",      # noon-cutoff business day, not a data version
     "employees/salary-due",   # depends on today's date at finer than a day
-    "order-scan/alerts",      # "late" is measured in hours since scanning
-    "order-scan/queue",       # noon-cutoff business day; changes with every scan anyway
+    # The whole Order Scan desk: it combines several businesses' data, which a
+    # per-business cache version can't invalidate; "late" is measured in hours;
+    # the day changes at noon; and it changes with every scan anyway.
+    "order-scan/",
 )
 # All-time figures that only change when data does: no date in the key and a long
 # expiry, so they are recomputed only after an upload or edit (a version bump).
