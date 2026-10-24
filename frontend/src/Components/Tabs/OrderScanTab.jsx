@@ -43,6 +43,23 @@ const MODES = [
   { key: "DISPATCHED", label: "Dispatched", help: "marking parcels handed to the courier" },
 ];
 
+/** Today's packing day: it runs noon to noon, so before 12 pm it's still yesterday's. */
+function packingDayISO() {
+  const now = new Date();
+  if (now.getHours() < 12) now.setDate(now.getDate() - 1);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}`;
+}
+const fmtDay = (iso) => (iso ? new Date(`${iso}T00:00:00`).toLocaleDateString("en-IN", { day: "2-digit", month: "short" }) : "");
+function dayLabel(iso, current) {
+  if (!iso) return "";
+  if (iso === current) return `Today · ${fmtDay(iso)} (from 12 pm)`;
+  const prev = new Date(`${current}T00:00:00`); prev.setDate(prev.getDate() - 1);
+  const p = (n) => String(n).padStart(2, "0");
+  const prevIso = `${prev.getFullYear()}-${p(prev.getMonth() + 1)}-${p(prev.getDate())}`;
+  return iso === prevIso ? `Previous day · ${fmtDay(iso)}` : fmtDay(iso);
+}
+
 const fmtTime = (iso) => (iso ? new Date(iso).toLocaleString("en-IN", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }) : "—");
 
 function Photo({ url, size = 48, radius = 8 }) {
@@ -59,7 +76,11 @@ function Photo({ url, size = 48, radius = 8 }) {
 // ── The desk: queue, scanning, record ─────────────────────────────────────────
 
 function useScanDesk(platform) {
-  const [date, setDate] = useState("");
+  const [date, setDateState] = useState("");
+  // True while the screen follows "today": it moves to the new packing day at
+  // noon by itself. Picking another day by hand stops that until "Back to today".
+  const [following, setFollowing] = useState(true);
+  const setDate = (d) => { setDateState(d); setFollowing(!d || d === packingDayISO()); };
   const [queue, setQueue] = useState(null);       // { date, summary, items, dates }
   const [loading, setLoading] = useState(true);
   const [mode, setModeState] = useState(() => {
@@ -71,6 +92,7 @@ function useScanDesk(platform) {
   const queueRef = useRef(null);
   queueRef.current = queue;
   const seq = useRef(0);
+  const reloadTimer = useRef(null);
 
   const setMode = (m) => { setModeState(m); try { localStorage.setItem("scan_mode", m); } catch { /* ignore */ } };
 
@@ -82,12 +104,30 @@ function useScanDesk(platform) {
       if (res.ok) {
         const data = await res.json();
         setQueue(data);
-        if (!forDate) setDate(data.date);
+        if (!forDate) setDateState(data.date);
       }
     } finally { setLoading(false); }
   }, [date, platform]);
 
   useEffect(() => { setLoading(true); setLatest(null); load(date); }, [platform, date]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // After a scan the list is already ticked off locally; the full list is
+  // fetched again only once scanning pauses, not after every parcel.
+  const reloadSoon = useCallback(() => {
+    clearTimeout(reloadTimer.current);
+    reloadTimer.current = setTimeout(() => load(), 1500);
+  }, [load]);
+  useEffect(() => () => clearTimeout(reloadTimer.current), []);
+
+  // At 12 pm the count starts fresh: move to the new packing day if the screen
+  // is following today.
+  useEffect(() => {
+    const t = setInterval(() => {
+      const today = packingDayISO();
+      if (following && date && date !== today) setDateState(today);
+    }, 30000);
+    return () => clearInterval(t);
+  }, [following, date]);
 
   /** Record one scan and describe, in one line each, what it means for the desk. */
   const record = async (codeRaw) => {
@@ -98,7 +138,10 @@ function useScanDesk(platform) {
     try {
       const res = await fetch(`${API}/order-scan/`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code, status: mode }),
+        // Following today: let the server's own noon cut-off decide the day, so a
+        // device clock a minute off around 12 pm can't misfile a scan. A day
+        // picked by hand is sent as-is.
+        body: JSON.stringify({ code, status: mode, platform, day: following ? undefined : date || undefined }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -123,8 +166,9 @@ function useScanDesk(platform) {
         lines.push("Meesho shows this order as cancelled.");
         navigator.vibrate?.([120, 80, 120]);
       } else if (row.matched_from === "NONE") {
-        kind = "warn"; title = "Not recognised";
-        lines.push("No label or order matches this code.");
+        kind = "warn"; title = "Not recognised — saved anyway";
+        if (!what) lines.unshift(code);
+        lines.push("No label or order matches this code yet. It's kept in the scan record and links up once its label / orders sheet is uploaded.");
       } else if (!item) {
         kind = "warn"; title = `${title} · not in this day's list`;
       } else if (data.already_scanned) {
@@ -134,6 +178,7 @@ function useScanDesk(platform) {
         lines.push("The panel still lists it as ready to ship.");
       }
       if (data.cross_business) lines.push(`Filed under ${data.business_name}`);
+      if (row.platform && row.platform !== platform) lines.push(`${row.platform === "flipkart" ? "Flipkart" : "Meesho"} parcel`);
 
       const out = { kind, title, lines, code: row.sub_order_no, image_url: item?.image_url };
       if (my === seq.current) setLatest(out);
@@ -143,7 +188,7 @@ function useScanDesk(platform) {
         ...q,
         items: q.items.map((i) => (i === item ? { ...i, state: row.status, scan_id: row.id, scan_count: row.scan_count, ship_status: ship } : i)),
       });
-      load();
+      reloadSoon();
       return out;
     } catch {
       const out = { kind: "err", title: "Network error", lines: ["The scan was not recorded."], code };
@@ -154,7 +199,9 @@ function useScanDesk(platform) {
     }
   };
 
-  return { date, setDate, queue, loading, mode, setMode, latest, busy, error, setError, record, reload: load };
+  const currentDay = queue?.current_day || packingDayISO();
+  const backToToday = () => setDate(currentDay);
+  return { date, setDate, currentDay, backToToday, queue, loading, mode, setMode, latest, busy, error, setError, record, reload: load };
 }
 
 // ── Pieces ────────────────────────────────────────────────────────────────────
@@ -247,10 +294,237 @@ const FILTERS = [
   { key: "all",       label: "All",       test: () => true },
 ];
 
+/**
+ * Courier tiles from the list itself, so a tile ticks the moment a parcel is
+ * scanned (the list is updated straight away; the server copy only after a pause).
+ */
+function courierStats(items) {
+  const by = new Map();
+  for (const i of items) {
+    const name = (i.courier || "").split(/\s+/).filter(Boolean).join(" ") || "No courier on label";
+    const key = name.toLowerCase();
+    if (!by.has(key)) by.set(key, { courier: name, assigned: 0, scanned: 0, dispatched: 0, left: 0 });
+    const c = by.get(key);
+    if (i.ship_status === "CANCELLED" && !i.scan_id) continue;
+    c.assigned += 1;
+    if (i.scan_id) { c.scanned += 1; if (i.state === "DISPATCHED") c.dispatched += 1; } else c.left += 1;
+  }
+  return [...by.values()].filter((c) => c.assigned).sort((a, b) => b.assigned - a.assigned || a.courier.localeCompare(b.courier));
+}
+
+const courierKey = (c) => (c || "").split(/\s+/).filter(Boolean).join(" ").toLowerCase() || "no courier on label";
+
 function summaryCounts(items) {
   const out = {};
   FILTERS.forEach((f) => { out[f.key] = items.filter(f.test).length; });
   return out;
+}
+
+/** Which packing day is open: today's (counting since 12 pm) or an earlier one picked on purpose. */
+function DayNotice({ desk, compact }) {
+  const { date, currentDay, backToToday } = desk;
+  if (!date) return null;
+  if (date === currentDay) {
+    if (compact) return null;
+    return (
+      <div style={{ fontSize: 12, color: C.gray500 }}>
+        Counting since <b>{fmtDay(currentDay)}, 12:00 pm</b> — the count starts fresh at 12 pm every day.
+      </div>
+    );
+  }
+  return (
+    <div style={{ background: C.amberLight, border: `1.5px solid ${C.amberBorder}`, borderRadius: 12, padding: compact ? "8px 12px" : "10px 14px",
+      display: "flex", gap: 10, alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" }}>
+      <span style={{ fontSize: compact ? 12.5 : 13, fontWeight: 700, color: "#92400E" }}>
+        Scanning for {dayLabel(date, currentDay).toLowerCase().startsWith("previous") ? "the previous day" : "an earlier day"}, {fmtDay(date)}
+        {compact ? "" : " — scans count toward that day's list."}
+      </span>
+      <button onClick={backToToday} style={{ ...btn("primary", "sm") }}>Back to today</button>
+    </div>
+  );
+}
+
+// ── Courier tiles ─────────────────────────────────────────────────────────────
+
+/** One tile per courier: how many it takes today, how many are scanned, how many are left. */
+function CourierTiles({ couriers, offList, active, onPick, compact }) {
+  if (!couriers?.length && !offList) return null;
+  if (compact) {
+    // Phone: one line of chips, so the packing list keeps the screen.
+    return (
+      <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 2 }}>
+        {couriers.map((c) => {
+          const on = active === c.courier;
+          const done = c.left === 0;
+          return (
+            <button key={c.courier} onClick={() => onPick(on ? null : c.courier)}
+              style={{ flex: "0 0 auto", display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 10px", borderRadius: 999,
+                fontFamily: "inherit", fontSize: 12.5, fontWeight: 800, cursor: "pointer", whiteSpace: "nowrap",
+                border: `1.5px solid ${on ? C.orange : done ? C.greenBorder : C.gray200}`, background: on ? C.orangeLight : C.white,
+                color: C.gray800 }}>
+              🚚 {c.courier} <span style={{ fontFamily: "monospace" }}>{c.scanned}/{c.assigned}</span>
+              <span style={{ color: done ? C.green : C.red, fontWeight: 700 }}>{done ? "✓" : `${c.left} left`}</span>
+            </button>
+          );
+        })}
+        {offList > 0 && (
+          <span style={{ flex: "0 0 auto", padding: "6px 10px", borderRadius: 999, fontSize: 12, fontWeight: 700, whiteSpace: "nowrap",
+            border: `1.5px dashed ${C.amberBorder}`, background: C.amberLight, color: "#92400E" }}>+{offList} not on list</span>
+        )}
+      </div>
+    );
+  }
+  return (
+    <div style={{ display: compact ? "flex" : "grid", gap: 10, overflowX: compact ? "auto" : undefined,
+      gridTemplateColumns: compact ? undefined : "repeat(auto-fill, minmax(170px, 1fr))", paddingBottom: compact ? 2 : 0 }}>
+      {(couriers || []).map((c) => {
+        const pct = c.assigned ? Math.round((c.scanned / c.assigned) * 100) : 0;
+        const on = active === c.courier;
+        const done = c.left === 0 && c.assigned > 0;
+        return (
+          <button key={c.courier} onClick={() => onPick(on ? null : c.courier)}
+            style={{ flex: compact ? "0 0 150px" : undefined, textAlign: "left", cursor: "pointer", fontFamily: "inherit",
+              background: on ? C.orangeLight : C.white, border: `1.5px solid ${on ? C.orange : done ? C.greenBorder : C.gray200}`,
+              borderRadius: 12, padding: "10px 12px", display: "flex", flexDirection: "column", gap: 6 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 6, alignItems: "center" }}>
+              <span style={{ fontSize: 12.5, fontWeight: 800, color: C.gray800, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>🚚 {c.courier}</span>
+              {done && <span style={{ fontSize: 11, color: C.green, fontWeight: 800 }}>✓ done</span>}
+            </div>
+            <div style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 20, color: C.gray900, lineHeight: 1 }}>
+              {c.scanned}<span style={{ color: C.gray400, fontSize: 14 }}> / {c.assigned}</span>
+            </div>
+            <div style={{ height: 6, borderRadius: 99, background: C.gray100, overflow: "hidden" }}>
+              <div style={{ height: "100%", width: `${pct}%`, background: done ? C.green : C.orange, transition: "width .25s" }} />
+            </div>
+            <span style={{ fontSize: 11.5, fontWeight: 700, color: c.left ? C.red : C.green }}>
+              {c.left ? `${c.left} left to scan` : "All scanned"}{c.dispatched ? ` · ${c.dispatched} dispatched` : ""}
+            </span>
+          </button>
+        );
+      })}
+      {offList > 0 && (
+        <div style={{ flex: compact ? "0 0 150px" : undefined, borderRadius: 12, padding: "10px 12px", border: `1.5px dashed ${C.amberBorder}`,
+          background: C.amberLight, display: "flex", flexDirection: "column", gap: 4 }}>
+          <span style={{ fontSize: 12.5, fontWeight: 800, color: "#92400E" }}>Scanned, not on this list</span>
+          <span style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 20, color: "#92400E" }}>{offList}</span>
+          <span style={{ fontSize: 11, color: "#92400E" }}>Kept in the scan record</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The courier KPIs, always shown. With labels for the day: each courier's
+ * scanned / left. Scans that aren't on the day's labels are counted per courier
+ * too. With nothing for the day, it says why and offers the latest day that
+ * has labels.
+ */
+function CourierSection({ desk, items, sum, active, onPick, compact }) {
+  const tiles = courierStats(items);
+  const off = (sum?.off_list_by_courier || []).filter((c) => c.scanned);
+  const latest = desk.queue?.latest_label_day;
+  if (!tiles.length && !off.length) {
+    if (desk.loading && !desk.queue) return null;
+    const msg = `No labels uploaded for ${fmtDay(desk.date)} yet — courier-wise counts appear once that day's labels are uploaded on Labels.`;
+    return (
+      <div style={{ border: `1.5px dashed ${C.gray200}`, borderRadius: 12, padding: compact ? "8px 12px" : "12px 16px",
+        background: C.gray50, display: "flex", gap: 10, alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" }}>
+        <span style={{ fontSize: compact ? 12 : 13, color: C.gray600, fontWeight: 600 }}>🚚 {msg}</span>
+        {latest && latest !== desk.date && (
+          <button onClick={() => desk.setDate(latest)} style={btn("ghostOrange", "sm")}>Open {fmtDay(latest)} (latest labels)</button>
+        )}
+      </div>
+    );
+  }
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      {tiles.length > 0 && <CourierTiles couriers={tiles} offList={0} active={active} onPick={onPick} compact={compact} />}
+      {off.length > 0 && (
+        <div style={{ display: "flex", gap: 6, flexWrap: compact ? "nowrap" : "wrap", overflowX: compact ? "auto" : undefined, alignItems: "center" }}>
+          <span style={{ fontSize: 11.5, fontWeight: 800, color: "#92400E", whiteSpace: "nowrap" }}>Scanned, not on this day's labels:</span>
+          {off.map((c) => (
+            <span key={c.courier} style={{ flex: "0 0 auto", padding: "4px 10px", borderRadius: 999, fontSize: 12, fontWeight: 700,
+              whiteSpace: "nowrap", border: `1.5px dashed ${C.amberBorder}`, background: C.amberLight, color: "#92400E" }}>
+              🚚 {c.courier} · {c.scanned}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── "Not sent" alerts ─────────────────────────────────────────────────────────
+
+const ALERT_GROUPS = [
+  { key: "not_packed", title: "Labels never scanned", help: "Labels from earlier days nobody has scanned at the desk — and not cancelled or shipped." },
+  { key: "not_dispatched", title: "Packed, not marked dispatched", help: "Scanned over a day ago but never marked as handed to the courier." },
+  { key: "not_shipped", title: "Sent, but marketplace says not shipped", help: "Packed or dispatched over a day ago, yet the latest sheet still shows it as not shipped — its status wasn't updated." },
+  { key: "unrecognised", title: "Scanned but no order found", help: "Codes scanned this week that match no order yet — upload their labels / orders sheet." },
+];
+
+export function useScanAlerts(platform) {
+  const [alerts, setAlerts] = useState(null);
+  const load = useCallback(() => {
+    const p = platform ? `?${new URLSearchParams({ platform })}` : "";
+    fetch(`${API}/order-scan/alerts/${p}`).then((r) => (r.ok ? r.json() : null)).then(setAlerts).catch(() => {});
+  }, [platform]);
+  useEffect(() => { load(); }, [load]);
+  return [alerts, load];
+}
+
+function AlertsPanel({ alerts, onClose }) {
+  return (
+    <div style={{ ...S.card, border: `1.5px solid ${C.redBorder}`, display: "flex", flexDirection: "column", gap: 12 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "flex-start" }}>
+        <div>
+          <div style={{ fontSize: 15, fontWeight: 800, color: C.gray900 }}>Orders not sent (last 7 days)</div>
+          <div style={{ fontSize: 12, color: C.gray500 }}>Check each one — pack it, mark it dispatched, or update its status on the marketplace panel.</div>
+        </div>
+        <button onClick={onClose} style={btn("ghost", "sm")}>Close</button>
+      </div>
+      {ALERT_GROUPS.filter((g) => alerts[g.key]?.count).map((g) => (
+        <div key={g.key} style={{ border: `1px solid ${C.gray100}`, borderRadius: 12, overflow: "hidden" }}>
+          <div style={{ padding: "10px 14px", background: C.gray50 }}>
+            <span style={{ fontSize: 13.5, fontWeight: 800, color: C.gray800 }}>{g.title} · {alerts[g.key].count}</span>
+            <div style={{ fontSize: 12, color: C.gray500 }}>{g.help}</div>
+          </div>
+          {alerts[g.key].items.map((i) => (
+            <div key={`${g.key}-${i.order_id}`} style={{ display: "flex", gap: 10, padding: "8px 14px", borderTop: `1px solid ${C.gray100}`, fontSize: 12.5, flexWrap: "wrap" }}>
+              <span style={{ fontFamily: "monospace", fontWeight: 700, color: C.gray800 }}>{i.order_id}</span>
+              <span style={{ color: C.gray500 }}>{[i.sku && `${i.sku} × ${i.qty}`, i.courier, i.awb, i.platform === "flipkart" ? "Flipkart" : null].filter(Boolean).join(" · ")}</span>
+              <span style={{ marginLeft: "auto", color: C.gray400 }}>{i.date || fmtTime(i.scanned_at)}{i.ship_status_raw ? ` · sheet: ${i.ship_status_raw}` : ""}</span>
+            </div>
+          ))}
+          {alerts[g.key].count > alerts[g.key].items.length && (
+            <div style={{ padding: "6px 14px", fontSize: 11.5, color: C.gray400 }}>…and {alerts[g.key].count - alerts[g.key].items.length} more</div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function AlertBanner({ alerts, onOpen, compact }) {
+  if (!alerts?.total) return null;
+  if (compact) {
+    return (
+      <button onClick={onOpen} style={{ cursor: "pointer", fontFamily: "inherit", background: C.redLight, border: `1.5px solid ${C.redBorder}`,
+        borderRadius: 10, padding: "7px 12px", color: C.red, fontSize: 12.5, fontWeight: 800, display: "flex", justifyContent: "space-between" }}>
+        <span>⚠️ {alerts.total} order{alerts.total === 1 ? "" : "s"} not sent</span><span>Review →</span>
+      </button>
+    );
+  }
+  const parts = ALERT_GROUPS.filter((g) => alerts[g.key]?.count).map((g) => `${alerts[g.key].count} ${g.title.toLowerCase()}`);
+  return (
+    <button onClick={onOpen} style={{ textAlign: "left", cursor: "pointer", fontFamily: "inherit", background: C.redLight,
+      border: `1.5px solid ${C.redBorder}`, borderRadius: 12, padding: "10px 14px", color: C.red, display: "flex", gap: 10, alignItems: "center" }}>
+      <span style={{ fontSize: 20 }}>⚠️</span>
+      <span style={{ flex: 1, fontSize: 13, fontWeight: 700 }}>{alerts.total} order{alerts.total === 1 ? "" : "s"} not sent: {parts.join(" · ")}</span>
+      <span style={{ fontSize: 12.5, fontWeight: 800 }}>Review →</span>
+    </button>
+  );
 }
 
 // ── Phone: full screen, stable ────────────────────────────────────────────────
@@ -261,11 +535,15 @@ function MobilePack({ desk, platform, setPlatform }) {
   const [camera, setCamera] = useState(false);
   const [tab, setTab] = useState("pending");
   const [typed, setTyped] = useState("");
+  const [courier, setCourier] = useState(null);
+  const [alerts] = useScanAlerts(platform);
+  const [showAlerts, setShowAlerts] = useState(false);
 
   const items = queue?.items || [];
   const sum = queue?.summary;
-  const counts = useMemo(() => summaryCounts(items), [items]);
-  const shown = items.filter(FILTERS.find((f) => f.key === tab).test);
+  const inCourier = courier ? items.filter((i) => courierKey(i.courier) === courierKey(courier)) : items;
+  const counts = useMemo(() => summaryCounts(inCourier), [inCourier]);
+  const shown = inCourier.filter(FILTERS.find((f) => f.key === tab).test);
   const progress = { done: sum?.packed ?? 0, total: (sum?.assigned ?? 0) - (sum?.cancelled ?? 0), label: `${MODES.find((m) => m.key === mode).label}` };
 
   // Lock the page behind the fixed screen so it can't scroll under it.
@@ -302,7 +580,7 @@ function MobilePack({ desk, platform, setPlatform }) {
           <div style={{ fontSize: 17, fontWeight: 800, color: C.gray900 }}>Pack orders</div>
           <select value={date} onChange={(e) => setDate(e.target.value)}
             style={{ border: "none", background: "none", fontSize: 12, color: C.gray500, fontWeight: 600, padding: 0, fontFamily: "inherit" }}>
-            {(queue?.dates?.length ? queue.dates : [date]).filter(Boolean).map((d) => <option key={d} value={d}>{d}</option>)}
+            {[...new Set([date, ...(queue?.dates || [])])].filter(Boolean).sort().reverse().map((d) => <option key={d} value={d}>{dayLabel(d, desk.currentDay)}</option>)}
           </select>
         </div>
         <PlatformToggle platform={platform} onChange={setPlatform} />
@@ -314,11 +592,20 @@ function MobilePack({ desk, platform, setPlatform }) {
           <div style={{ display: "flex", justifyContent: "center", padding: 24 }}><CircularProgress style={{ color: C.orange }} /></div>
         ) : (
           <>
+            <DayNotice desk={desk} compact />
             <ProgressBar done={progress.done} total={progress.total} label={`${progress.label} · ${sum?.pieces_packed ?? 0} of ${sum?.pieces ?? 0} pieces`} />
+            <CourierSection desk={desk} items={items} sum={sum} active={courier} onPick={setCourier} compact />
+            <AlertBanner alerts={alerts} onOpen={() => setShowAlerts(true)} compact />
             <LatestPanel latest={latest} busy={busy} minHeight={118} />
           </>
         )}
       </div>
+
+      {showAlerts && alerts && (
+        <div style={{ position: "fixed", inset: 0, zIndex: 3100, background: "rgba(0,0,0,.35)", padding: 12, overflowY: "auto" }}>
+          <AlertsPanel alerts={alerts} onClose={() => setShowAlerts(false)} />
+        </div>
+      )}
 
       {/* Queue */}
       <div style={{ display: "flex", gap: 6, padding: "0 14px 8px", flexShrink: 0 }}>
@@ -388,6 +675,7 @@ function ScanRecord({ platform }) {
   const [q, setQ] = useState("");
   const [ship, setShip] = useState("");
   const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState(null);
   const PAGE = 40;
 
   const load = useCallback(async () => {
@@ -395,19 +683,24 @@ function ScanRecord({ platform }) {
     try {
       const p = new URLSearchParams({ page, page_size: PAGE });
       if (q.trim()) p.set("q", q.trim());
-      if (ship) p.set("ship", ship);
+      if (ship === "UNMATCHED") p.set("matched", "no");
+      else if (ship) p.set("ship", ship);
+      if (platform) p.set("platform", platform);
       const res = await fetch(`${API}/order-scan/?${p}`);
       const data = await res.json();
       setRows(data.results || []); setTotal(data.total ?? 0); setStats(data.stats || null);
     } finally { setLoading(false); }
-  }, [page, q, ship]);
+  }, [page, q, ship, platform]);
   useEffect(() => { const t = setTimeout(load, q ? 250 : 0); return () => clearTimeout(t); }, [load, q]);
   useEffect(() => { setPage(1); }, [q, ship]);
 
   const recheck = async () => {
     setBusy(true);
-    try { await fetch(`${API}/order-scan/refresh-ship/`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }); await load(); }
-    finally { setBusy(false); }
+    try {
+      const d = await fetch(`${API}/order-scan/refresh-ship/`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }).then((r) => r.json());
+      setNote(`Checked ${d.checked} · ${d.changed} status change(s)${d.relinked ? ` · ${d.relinked} unrecognised scan(s) now matched an order` : ""}`);
+      await load();
+    } finally { setBusy(false); }
   };
   const setStatus = async (id, status) => {
     await fetch(`${API}/order-scan/${id}/`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status }) });
@@ -419,14 +712,15 @@ function ScanRecord({ platform }) {
     load();
   };
 
-  const SHIPS = [["", "All"], ["PROBLEM", "Cancelled / not shipped"], ["SHIPPED", "Shipped"], ["NOT_SHIPPED", "Not shipped yet"], ["CANCELLED", "Cancelled"], ["UNKNOWN", "No status"]];
+  const SHIPS = [["", "All"], ["PROBLEM", "Cancelled / not shipped"], ["SHIPPED", "Shipped"], ["NOT_SHIPPED", "Not shipped yet"], ["CANCELLED", "Cancelled"], ["UNKNOWN", "No status"], ["UNMATCHED", "Not recognised"]];
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       {stats && (
         <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
           <Tile label="Scanned in total" value={stats.total} color={C.orange} />
           <Tile label="Packed" value={stats.packed + stats.dispatched} color={C.green} />
-          <Tile label="Shipped (Meesho)" value={stats.ship_shipped} color={C.green} />
+          <Tile label="Shipped (marketplace)" value={stats.ship_shipped} color={C.green} />
+          <Tile label="Not recognised" value={stats.unrecognised} color={C.amber} onClick={() => setShip("UNMATCHED")} active={ship === "UNMATCHED"} />
           <Tile label="Not shipped yet" value={stats.ship_not_shipped} color={C.amber} />
           <Tile label="Cancelled" value={stats.ship_cancelled} color={C.red} />
           <Tile label="On hold / problem" value={stats.needs_attention} color={C.red} />
@@ -440,15 +734,16 @@ function ScanRecord({ platform }) {
               border: `1.5px solid ${ship === k ? C.orange : C.gray200}`, background: ship === k ? C.orange : C.white, color: ship === k ? "#fff" : C.gray600 }}>{l}</button>
         ))}
         <button onClick={recheck} disabled={busy} style={{ ...btn("ghost", "sm"), marginLeft: "auto", opacity: busy ? 0.5 : 1 }}>
-          <RefreshIcon style={{ fontSize: 15, verticalAlign: "-3px" }} />&nbsp;Re-check with Meesho sheets
+          <RefreshIcon style={{ fontSize: 15, verticalAlign: "-3px" }} />&nbsp;Re-check with uploaded sheets
         </button>
       </div>
+      {note && <div style={{ fontSize: 12.5, color: C.green, fontWeight: 700 }}>✓ {note}</div>}
       <div style={{ ...S.card, padding: 0, overflow: "hidden" }}>
         {loading && !rows.length ? (
           <div style={{ display: "flex", justifyContent: "center", padding: 40 }}><CircularProgress style={{ color: C.orange }} /></div>
         ) : (
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-            <thead><tr>{["Scanned", "Order", "Item", "Our status", "Meesho says", ""].map((h) => <th key={h} style={S.th}>{h}</th>)}</tr></thead>
+            <thead><tr>{["Scanned", "Order", "Item", "Our status", "Marketplace says", ""].map((h) => <th key={h} style={S.th}>{h}</th>)}</tr></thead>
             <tbody>
               {rows.length === 0 && <tr><td colSpan={6} style={{ ...S.td, textAlign: "center", padding: 36, color: C.gray400 }}>Nothing scanned yet.</td></tr>}
               {rows.map((r, idx) => {
@@ -456,7 +751,9 @@ function ScanRecord({ platform }) {
                 return (
                   <tr key={r.id} style={{ background: r.ship_status === "CANCELLED" ? C.redLight : idx % 2 ? C.gray50 : C.white }}>
                     <td style={{ ...S.td, whiteSpace: "nowrap", fontSize: 12, color: C.gray500 }}>{fmtTime(r.last_scanned_at)}{r.scan_count > 1 ? ` · ${r.scan_count}×` : ""}</td>
-                    <td style={{ ...S.td, fontFamily: "monospace", fontSize: 12 }}>{r.sub_order_no}<div style={{ color: C.gray400, fontSize: 11 }}>{r.awb_number}</div></td>
+                    <td style={{ ...S.td, fontFamily: "monospace", fontSize: 12 }}>{r.sub_order_no}
+                      <div style={{ color: C.gray400, fontSize: 11 }}>{[r.awb_number, r.courier_name].filter(Boolean).join(" · ")}</div>
+                      {r.matched_from === "NONE" && <Tag variant="amber">Not recognised</Tag>}</td>
                     <td style={S.td}><span style={{ fontFamily: "monospace", fontWeight: 700, fontSize: 12.5 }}>{r.sku || "—"}</span> <span style={{ color: C.orange, fontWeight: 800 }}>×{r.qty}</span></td>
                     <td style={S.td}>
                       <select value={r.status} onChange={(e) => setStatus(r.id, e.target.value)} style={{ ...S.inp, padding: "4px 8px", fontSize: 12, width: "auto" }}>
@@ -490,14 +787,18 @@ function DesktopPack({ desk, platform, setPlatform }) {
   const [view, setView] = useState("queue");          // queue | record
   const [tab, setTab] = useState("pending");
   const [scan, setScan] = useState("");
+  const [courier, setCourier] = useState(null);
+  const [alerts, reloadAlerts] = useScanAlerts(platform);
+  const [showAlerts, setShowAlerts] = useState(false);
   const input = useRef(null);
   const refocus = useCallback(() => setTimeout(() => input.current?.focus(), 0), []);
   useEffect(() => { if (view === "queue") refocus(); }, [view, refocus]);
 
   const items = queue?.items || [];
   const sum = queue?.summary;
-  const counts = useMemo(() => summaryCounts(items), [items]);
-  const shown = items.filter(FILTERS.find((f) => f.key === tab).test);
+  const inCourier = courier ? items.filter((i) => courierKey(i.courier) === courierKey(courier)) : items;
+  const counts = useMemo(() => summaryCounts(inCourier), [inCourier]);
+  const shown = inCourier.filter(FILTERS.find((f) => f.key === tab).test);
 
   const submit = async () => {
     const code = scan.trim();
@@ -518,7 +819,7 @@ function DesktopPack({ desk, platform, setPlatform }) {
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
           <PlatformToggle platform={platform} onChange={setPlatform} />
           <select value={date} onChange={(e) => setDate(e.target.value)} style={{ ...S.inp, width: "auto" }}>
-            {(queue?.dates?.length ? queue.dates : [date]).filter(Boolean).map((d) => <option key={d} value={d}>Labels of {d}</option>)}
+            {[...new Set([date, ...(queue?.dates || [])])].filter(Boolean).sort().reverse().map((d) => <option key={d} value={d}>{dayLabel(d, desk.currentDay)}</option>)}
           </select>
           <div style={{ display: "flex", background: C.gray100, borderRadius: 10, padding: 3 }}>
             {["queue", "record"].map((v) => (
@@ -534,11 +835,21 @@ function DesktopPack({ desk, platform, setPlatform }) {
 
       {view === "record" ? <ScanRecord platform={platform} /> : (
         <>
+          <DayNotice desk={desk} />
+          <AlertBanner alerts={alerts} onOpen={() => { setShowAlerts((v) => !v); reloadAlerts(); }} />
+          {showAlerts && alerts && <AlertsPanel alerts={alerts} onClose={() => setShowAlerts(false)} />}
+          <div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 8 }}>
+              <span style={{ fontSize: 13, fontWeight: 800, color: C.gray700 }}>By courier — scanned / to send</span>
+              {courier && <button onClick={() => setCourier(null)} style={btn("ghost", "sm")}>Show all couriers</button>}
+            </div>
+            <CourierSection desk={desk} items={items} sum={sum} active={courier} onPick={(c) => { setCourier(c); setTab(c ? "pending" : tab); refocus(); }} />
+          </div>
           <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
             <Tile label="Assigned" value={sum?.assigned} color={C.gray600} onClick={() => setTab("all")} active={tab === "all"} />
             <Tile label="Packed" value={sum?.packed} color={C.green} onClick={() => setTab("done")} active={tab === "done"} />
             <Tile label="To pack" value={sum?.remaining} color={C.orange} onClick={() => setTab("pending")} active={tab === "pending"} />
-            <Tile label="Shipped (Meesho)" value={sum?.shipped} color={C.green} />
+            <Tile label={`Shipped (${platform === "flipkart" ? "Flipkart" : "Meesho"})`} value={sum?.shipped} color={C.green} />
             <Tile label="Not shipped yet" value={sum?.not_shipped} color={C.amber} />
             <Tile label="Cancelled" value={sum?.cancelled} color={C.red} onClick={() => setTab("issues")} active={tab === "issues"} />
           </div>
@@ -553,6 +864,7 @@ function DesktopPack({ desk, platform, setPlatform }) {
                     {f.label} · {counts[f.key] ?? 0}
                   </button>
                 ))}
+                {courier && <Tag variant="orange">🚚 {courier}</Tag>}
                 <button onClick={() => { reload(); refocus(); }} style={{ ...btn("ghost", "sm"), marginLeft: "auto" }}>
                   <RefreshIcon style={{ fontSize: 15, verticalAlign: "-3px" }} />&nbsp;Refresh
                 </button>

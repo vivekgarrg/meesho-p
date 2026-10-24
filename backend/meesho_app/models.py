@@ -685,6 +685,11 @@ class LabelOrder(models.Model):
     class Meta:
         db_table = "label_orders"
         ordering = ["-uploaded_date", "courier_name"]
+        indexes = [
+            # The packing desk looks every parcel up by the AWB printed on it;
+            # without this each scan read the whole labels table.
+            models.Index(fields=["business", "awb_number"], name="label_biz_awb_idx"),
+        ]
 
     def __str__(self):
         return f"{self.order_id} | {self.courier_name} | {self.sku}"
@@ -1561,22 +1566,32 @@ class ScannedOrder(models.Model):
     SHIPPED_MARKERS = (
         "SHIPPED", "DELIVERED", "RTO", "RTO_COMPLETE", "RTO_LOCKED",
         "RETURN", "EXCHANGE", "DOOR_STEP_EXCHANGED",
+        # Flipkart's own wording
+        "PICKUP_COMPLETE", "IN_TRANSIT",
     )
-    NOT_SHIPPED_MARKERS = ("READY_TO_SHIP", "PENDING")
+    NOT_SHIPPED_MARKERS = (
+        "READY_TO_SHIP", "PENDING",
+        # Flipkart: accepted / packed / waiting for pickup — still with us
+        "READY_TO_DISPATCH", "APPROVED", "PACKED", "UPCOMING",
+    )
     CANCELLED_MARKERS = ("CANCELLED",)
 
     # ── Which table the scanned code was recognised from ──────────────────
     MATCH_LABEL   = "LABEL"      # shipping label PDF — the richest source
     MATCH_PAYMENT = "PAYMENT"    # payments sheet
     MATCH_ORDER   = "ORDER"      # orders sheet
+    MATCH_FLIPKART = "FLIPKART"  # Flipkart orders sheet
     MATCH_NONE    = "NONE"       # nothing in the system knows this code (yet)
 
     MATCH_CHOICES = [
         (MATCH_LABEL,   "Shipping label"),
         (MATCH_PAYMENT, "Payments sheet"),
         (MATCH_ORDER,   "Orders sheet"),
+        (MATCH_FLIPKART, "Flipkart orders sheet"),
         (MATCH_NONE,    "Not recognised"),
     ]
+
+    PLATFORM_CHOICES = [("meesho", "Meesho"), ("flipkart", "Flipkart")]
 
     # ── Identity ──────────────────────────────────────────────────────────
     scanned_code = models.CharField(max_length=200, db_index=True,
@@ -1585,6 +1600,14 @@ class ScannedOrder(models.Model):
                                     help_text="Resolved sub-order, or the raw code when unrecognised")
     awb_number   = models.CharField(max_length=100, blank=True, db_index=True)
     matched_from = models.CharField(max_length=20, choices=MATCH_CHOICES, default=MATCH_NONE)
+    # Which marketplace the parcel is for — from whatever recognised the code,
+    # or, for a code nothing recognised, the marketplace the desk was scanning.
+    platform     = models.CharField(max_length=10, choices=PLATFORM_CHOICES, default="meesho", db_index=True)
+    # The packing day this scan counts toward. A packing day runs noon to noon
+    # (the same cut-off as the label upload day), so counts start fresh at
+    # 12 pm. Set from the day the desk is working on, so an order of the
+    # previous day can still be scanned against that day's list on purpose.
+    scan_day     = models.DateField(null=True, blank=True, db_index=True)
 
     # ── Snapshot of the order as it was at scan time ──────────────────────
     sku          = models.CharField(max_length=300, blank=True, db_index=True)
@@ -2829,6 +2852,12 @@ class FlipkartOrder(models.Model):
         db_table = "flipkart_orders"
         ordering = ["-order_date", "-id"]
         unique_together = [("business", "order_item_id")]
+        indexes = [
+            # Order scanning resolves a Flipkart parcel by its tracking id (the
+            # AWB on the parcel) or its order id.
+            models.Index(fields=["business", "delivery_tracking_id"], name="fk_order_biz_tracking_idx"),
+            models.Index(fields=["business", "order_id"], name="fk_order_biz_order_idx"),
+        ]
 
     def __str__(self):
         return self.order_item_id

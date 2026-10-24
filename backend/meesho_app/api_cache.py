@@ -57,6 +57,8 @@ _NEVER_CACHE_PREFIXES = (
     "cache/",                 # the cache's own status/refresh
     "bulk-labels/today",      # noon-cutoff business day, not a data version
     "employees/salary-due",   # depends on today's date at finer than a day
+    "order-scan/alerts",      # "late" is measured in hours since scanning
+    "order-scan/queue",       # noon-cutoff business day; changes with every scan anyway
 )
 # All-time figures that only change when data does: no date in the key and a long
 # expiry, so they are recomputed only after an upload or edit (a version bump).

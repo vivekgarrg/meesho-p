@@ -118,6 +118,8 @@ API_OWNERSHIP = {
     "legacy-listings/":      ["/tasks"],
     "return-claim-batches/": ["/tasks"],
     "order-scan/":           ["/order-scan"],
+    # The Overview dashboard shows the "orders not sent" alert too.
+    "order-scan/alerts/":    ["/order-scan", "/"],
     # Overview carries a "salary due" reminder, so it needs this one sub-path —
     # more specific than "employees/" below, so it wins on longest-prefix-first.
     "employees/salary-due/": ["/employees", "/"],

@@ -176,6 +176,7 @@ urlpatterns = [
     path("order-scan/queue/",        views.scan_queue,                 name="scan_queue"),
     path("order-scan/bulk-status/",  views.scanned_orders_bulk_status, name="scanned_orders_bulk_status"),
     path("order-scan/refresh-ship/", views.scanned_orders_refresh_ship, name="scanned_orders_refresh_ship"),
+    path("order-scan/alerts/",       views.scan_alerts,                name="scan_alerts"),
     path("order-scan/<int:pk>/",     views.scanned_order_detail,       name="scanned_order_detail"),
     # Worker tasks + wallet
     path("worker-tasks/",              views.worker_tasks_list,   name="worker_tasks_list"),

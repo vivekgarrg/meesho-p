@@ -7458,6 +7458,13 @@ def label_batch_history(request, business_id):
     })
 
 
+def _packing_day_window(day):
+    """(start, end) aware datetimes of a packing day: noon of `day` to noon of
+    the next day — so counts start fresh at 12 pm."""
+    start = timezone.make_aware(datetime.combine(day, time(12, 0)))
+    return start, start + timedelta(days=1)
+
+
 def _current_business_date():
     """
     Noon-to-noon "business day", not midnight-to-midnight: before 12pm,
@@ -12859,118 +12866,162 @@ def _clean_scan_code(raw):
     return (raw or "").strip().strip("\r\n\t ").strip('"').strip("'")
 
 
-def _resolve_scan_code_pooled(request, business, code):
-    """
-    Resolve a scanned code against every business the user can reach.
-
-    (owning_business, snapshot). The selected business is tried first so the
-    common case costs exactly one lookup and never changes owner unnecessarily;
-    only an unrecognised code falls through to the siblings.
-
-    Why the *owning* business is returned rather than always the selected one:
-    one desk packs for several businesses, and filing a Rudam 2 parcel under
-    Rudam because that happened to be the dropdown value would put the row where
-    nobody looks for it. The scan lands with its order, and the UI says so.
-    """
-    snapshot = _resolve_scan_code(business, code)
-    if snapshot["matched_from"] != ScannedOrder.MATCH_NONE:
-        return business, snapshot
-
-    for sibling in accessible_businesses(request, include=business):
-        if sibling.pk == business.pk:
-            continue
-        other = _resolve_scan_code(sibling, code)
-        if other["matched_from"] != ScannedOrder.MATCH_NONE:
-            return sibling, other
-
-    # Nothing anywhere — log it against the business the operator had selected.
-    return business, snapshot
+# How far back a partially-read code is searched for. Exact AWB / order id
+# matches have no limit; a partial match is a guess, and guessing across every
+# label ever uploaded was the slow path on every unrecognised scan.
+_PARTIAL_SCAN_DAYS = 60
 
 
-def _resolve_scan_code(business, code):
-    """
-    Work out which order a scanned code belongs to, and snapshot what we know
-    about it.
-
-    Sources in order of richness: the shipping label (has courier, customer and
-    AWB), then the payments sheet, then the orders sheet. An unmatched code is
-    not an error — it is recorded as-is so the scan is never lost, and it will
-    read as "not recognised" in the table.
-    """
-    snapshot = {
+def _empty_scan_snapshot(code, platform=None):
+    return {
         "sub_order_no": code,
         "awb_number": "",
         "matched_from": ScannedOrder.MATCH_NONE,
+        "platform": platform if platform in ("meesho", "flipkart") else "meesho",
         "sku": "", "product_name": "", "size": "", "qty": 1,
         "courier_name": "", "payment_type": "",
         "customer_name": "", "customer_city": "", "customer_state": "",
         "customer_pincode": "", "order_date": None,
     }
 
-    labels = LabelOrder.objects.filter(business=business)
-    # AWB first: it is what is actually printed as a barcode on the parcel.
-    label = (
-        labels.filter(awb_number__iexact=code).first()
-        or labels.filter(order_id__iexact=code).first()
-    )
-    if label is None and len(code) >= _MIN_PARTIAL_SCAN_LEN:
-        # A partially-read code, or one the courier prefixes — still resolvable.
-        label = labels.filter(
-            DQ(awb_number__icontains=code) | DQ(order_id__icontains=code)
-        ).first()
 
-    if label:
-        snapshot.update({
-            "sub_order_no": label.order_id,
-            "awb_number": label.awb_number or "",
-            "matched_from": ScannedOrder.MATCH_LABEL,
-            "sku": label.sku or "",
-            "size": label.size or "",
-            "qty": label.qty or 1,
-            "courier_name": label.courier_name or "",
-            "payment_type": label.payment_type or "",
-            "customer_name": label.customer_name or "",
-            "customer_city": label.customer_city or "",
-            "customer_state": label.customer_state or "",
-            "customer_pincode": label.customer_pincode or "",
-            "order_date": label.order_date,
-        })
-        return snapshot
+def _label_snapshot(code, label):
+    snap = _empty_scan_snapshot(code, label.platform)
+    snap.update({
+        "sub_order_no": label.order_id,
+        "awb_number": label.awb_number or "",
+        "matched_from": ScannedOrder.MATCH_LABEL,
+        "sku": label.sku or "",
+        "size": label.size or "",
+        "qty": label.qty or 1,
+        "courier_name": label.courier_name or "",
+        "payment_type": label.payment_type or "",
+        "customer_name": label.customer_name or "",
+        "customer_city": label.customer_city or "",
+        "customer_state": label.customer_state or "",
+        "customer_pincode": label.customer_pincode or "",
+        "order_date": label.order_date,
+    })
+    return snap
 
-    payment = (
-        OrderPayment.objects.filter(business=business, sub_order_no__iexact=code)
-        .order_by("-order_date")
-        .first()
-    )
-    if payment:
-        snapshot.update({
-            "sub_order_no": payment.sub_order_no,
-            "matched_from": ScannedOrder.MATCH_PAYMENT,
-            "sku": payment.supplier_sku or "",
-            "product_name": payment.product_name or "",
-            "qty": payment.quantity or 1,
-            "order_date": timezone.localtime(payment.order_date).date() if payment.order_date else None,
-        })
-        return snapshot
 
-    order = (
-        Order.objects.filter(business=business, sub_order_no__iexact=code)
-        .order_by("-order_date")
-        .first()
-    )
-    if order:
-        snapshot.update({
-            "sub_order_no": order.sub_order_no,
-            "matched_from": ScannedOrder.MATCH_ORDER,
-            "sku": order.sku or "",
-            "product_name": order.product_name or "",
-            "size": order.size or "",
-            "qty": order.quantity or 1,
-            "customer_state": order.customer_state or "",
-            "order_date": order.order_date,
-        })
+def _flipkart_snapshot(code, fo):
+    snap = _empty_scan_snapshot(code, "flipkart")
+    snap.update({
+        "sub_order_no": fo.order_item_id,
+        "awb_number": fo.delivery_tracking_id or "",
+        "matched_from": ScannedOrder.MATCH_FLIPKART,
+        "sku": fo.sku or "",
+        "product_name": (fo.product_title or "")[:500],
+        "qty": fo.quantity or 1,
+        "courier_name": fo.logistics_partner or "",
+        "order_date": fo.order_date,
+    })
+    return snap
 
-    return snapshot
+
+def _resolve_scan_in(scope, business, code, platform=None):
+    """
+    (owning business, snapshot) for a scanned code, searched across `scope`.
+
+    Built for speed at the desk: every source is asked once for an *exact* hit
+    across all the user's businesses — on indexed columns (label AWB, label
+    order id, Flipkart tracking / order ids, payment / order sub-orders) — and
+    only when nothing anywhere matches exactly is a partial match tried, over
+    recent labels only. The selected business wins a tie. A code nothing knows
+    is returned as-is (matched_from NONE) so the scan is still recorded.
+    """
+    ids = [b.pk for b in scope] or [business.pk]
+    by_id = {b.pk: b for b in scope}
+    by_id.setdefault(business.pk, business)
+
+    def pick(rows):
+        rows = list(rows)
+        if not rows:
+            return None
+        return next((r for r in rows if r.business_id == business.pk), rows[0])
+
+    def done(row, snap):
+        return by_id.get(row.business_id, business), snap
+
+    labels = LabelOrder.objects.filter(business_id__in=ids)
+    for field in ("awb_number__iexact", "order_id__iexact"):
+        hit = pick(labels.filter(**{field: code})[:10])
+        if hit:
+            return done(hit, _label_snapshot(code, hit))
+
+    def flipkart_exact():
+        fos = FlipkartOrder.objects.filter(business_id__in=ids)
+        for field in ("delivery_tracking_id__iexact", "order_item_id__iexact", "order_id__iexact"):
+            hit = pick(fos.filter(**{field: code})[:10])
+            if hit:
+                return hit
+        return None
+
+    def meesho_exact():
+        pay = pick(OrderPayment.objects.filter(business_id__in=ids, sub_order_no__iexact=code)
+                   .order_by("-order_date")[:10])
+        if pay:
+            snap = _empty_scan_snapshot(code, "meesho")
+            snap.update({
+                "sub_order_no": pay.sub_order_no, "matched_from": ScannedOrder.MATCH_PAYMENT,
+                "sku": pay.supplier_sku or "", "product_name": pay.product_name or "", "qty": pay.quantity or 1,
+                "order_date": timezone.localtime(pay.order_date).date() if pay.order_date else None,
+            })
+            return pay, snap
+        order = pick(Order.objects.filter(business_id__in=ids, sub_order_no__iexact=code).order_by("-order_date")[:10])
+        if order:
+            snap = _empty_scan_snapshot(code, "meesho")
+            snap.update({
+                "sub_order_no": order.sub_order_no, "matched_from": ScannedOrder.MATCH_ORDER,
+                "sku": order.sku or "", "product_name": order.product_name or "", "size": order.size or "",
+                "qty": order.quantity or 1, "customer_state": order.customer_state or "", "order_date": order.order_date,
+            })
+            return order, snap
+        return None
+
+    # The marketplace the desk is scanning for is asked first; the other still
+    # answers, so a Flipkart parcel scanned on the Meesho screen is not lost.
+    if platform == "flipkart":
+        fo = flipkart_exact()
+        if fo:
+            return done(fo, _flipkart_snapshot(code, fo))
+        found = meesho_exact()
+        if found:
+            return done(*found)
+    else:
+        found = meesho_exact()
+        if found:
+            return done(*found)
+        fo = flipkart_exact()
+        if fo:
+            return done(fo, _flipkart_snapshot(code, fo))
+
+    # Partial: a code the courier prefixed, or one read short. Recent only.
+    if len(code) >= _MIN_PARTIAL_SCAN_LEN:
+        since = timezone.localdate() - timedelta(days=_PARTIAL_SCAN_DAYS)
+        hit = pick(labels.filter(uploaded_date__gte=since)
+                   .filter(DQ(awb_number__icontains=code) | DQ(order_id__icontains=code))[:10])
+        if hit:
+            return done(hit, _label_snapshot(code, hit))
+        fo = pick(FlipkartOrder.objects.filter(business_id__in=ids, order_date__gte=since,
+                                               delivery_tracking_id__icontains=code)[:10])
+        if fo:
+            return done(fo, _flipkart_snapshot(code, fo))
+
+    return business, _empty_scan_snapshot(code, platform)
+
+
+def _resolve_scan_code_pooled(request, business, code, platform=None):
+    """Resolve a scanned code against every business the user can reach — see
+    _resolve_scan_in. The scan is filed against the business that owns the
+    order, not whichever one the dropdown shows."""
+    return _resolve_scan_in(accessible_businesses(request, include=business), business, code, platform)
+
+
+def _resolve_scan_code(business, code, platform=None):
+    """Resolve a scanned code within one business."""
+    return _resolve_scan_in([business], business, code, platform)[1]
 
 
 def _meesho_status_map(business, sub_order_nos):
@@ -13076,6 +13127,17 @@ def _status_raws(businesses, sub_orders):
             .values_list("live_order_status", flat=True)
         ):
             found.append((raw, b, "payments"))
+        # Flipkart's orders sheet: its item status, and a dispatch date is proof
+        # it left even when the status column lags.
+        for raw, dispatched in (
+            FlipkartOrder.objects.filter(business=b)
+            .filter(DQ(order_item_id__in=subs) | DQ(order_id__in=subs))
+            .values_list("order_item_status", "dispatched_date")
+        ):
+            if raw:
+                found.append((raw, b, "flipkart orders"))
+            if dispatched:
+                found.append(("SHIPPED", b, "flipkart dispatch date"))
     return found
 
 
@@ -13101,6 +13163,10 @@ def _suborders_for_codes(businesses, codes):
         subs.update(
             ReturnDelivery.objects.filter(business=b, awb_number__in=wanted)
             .values_list("suborder_no", flat=True)
+        )
+        subs.update(
+            FlipkartOrder.objects.filter(business=b, delivery_tracking_id__in=wanted)
+            .values_list("order_item_id", flat=True)
         )
     return subs
 
@@ -13224,44 +13290,29 @@ def _refresh_ship_status(business, row, status_hint=None, save=True, scope=None)
 
 def _scanned_order_stats(business):
     """
-    Scan workload for the whole business — counted in the database so it stays
-    cheap as the log grows, and never narrowed by the period filter so nothing
-    on hold can hide behind the selected month.
+    Scan workload for the whole business, in one aggregate query — it runs
+    after every scan, so it must stay cheap as the log grows. Never narrowed by
+    the period filter, so nothing on hold can hide behind the selected month.
     """
-    base = ScannedOrder.objects.filter(business=business)
-    today = timezone.localdate()
-
-    by_status = {
-        row["status"]: row["n"]
-        for row in base.values("status").annotate(n=Count("id"))
-    }
-
-    return {
-        "total":       base.count(),
-        "scanned":     by_status.get(ScannedOrder.STATUS_SCANNED, 0),
-        "packed":      by_status.get(ScannedOrder.STATUS_PACKED, 0),
-        "dispatched":  by_status.get(ScannedOrder.STATUS_DISPATCHED, 0),
-        "on_hold":     by_status.get(ScannedOrder.STATUS_ON_HOLD, 0),
-        "issue":       by_status.get(ScannedOrder.STATUS_ISSUE, 0),
-        "cancelled":   by_status.get(ScannedOrder.STATUS_CANCELLED, 0),
-        "open":        base.filter(status__in=ScannedOrder.OPEN_STATUSES).count(),
-        "needs_attention": base.filter(status__in=ScannedOrder.ATTENTION_STATUSES).count(),
-        "unrecognised":    base.filter(matched_from=ScannedOrder.MATCH_NONE).count(),
-        "scanned_today":   base.filter(
-            last_scanned_at__gte=_local_day_start(today),
-            last_scanned_at__lt=_local_day_start(today + timedelta(days=1)),
-        ).count(),
-        "rescanned":       base.filter(scan_count__gt=1).count(),
-
-        # Shipping cross-check: scanned by us, but what does Meesho say?
-        "ship_shipped":     base.filter(ship_status=ScannedOrder.SHIP_SHIPPED).count(),
-        "ship_not_shipped": base.filter(ship_status=ScannedOrder.SHIP_NOT_SHIPPED).count(),
-        "ship_cancelled":   base.filter(ship_status=ScannedOrder.SHIP_CANCELLED).count(),
-        "ship_unknown":     base.filter(ship_status=ScannedOrder.SHIP_UNKNOWN).count(),
-        "ship_problem":     base.filter(ship_status__in=[
-            ScannedOrder.SHIP_NOT_SHIPPED, ScannedOrder.SHIP_CANCELLED,
-        ]).count(),
-    }
+    S = ScannedOrder
+    c = lambda **flt: Count("id", filter=DQ(**flt))
+    agg = S.objects.filter(business=business).aggregate(
+        total=Count("id"),
+        scanned=c(status=S.STATUS_SCANNED), packed=c(status=S.STATUS_PACKED),
+        dispatched=c(status=S.STATUS_DISPATCHED), on_hold=c(status=S.STATUS_ON_HOLD),
+        issue=c(status=S.STATUS_ISSUE), cancelled=c(status=S.STATUS_CANCELLED),
+        open=c(status__in=S.OPEN_STATUSES), needs_attention=c(status__in=S.ATTENTION_STATUSES),
+        unrecognised=c(matched_from=S.MATCH_NONE),
+        # Today's packing day (noon to noon), not the calendar day.
+        scanned_today=c(scan_day=_current_business_date()),
+        rescanned=c(scan_count__gt=1),
+        # Shipping cross-check: scanned by us, but what does the marketplace say?
+        ship_shipped=c(ship_status=S.SHIP_SHIPPED), ship_not_shipped=c(ship_status=S.SHIP_NOT_SHIPPED),
+        ship_cancelled=c(ship_status=S.SHIP_CANCELLED), ship_unknown=c(ship_status=S.SHIP_UNKNOWN),
+        ship_problem=c(ship_status__in=[S.SHIP_NOT_SHIPPED, S.SHIP_CANCELLED]),
+        meesho=c(platform="meesho"), flipkart=c(platform="flipkart"),
+    )
+    return {k: v or 0 for k, v in agg.items()}
 
 
 @api_view(["GET", "POST"])
@@ -13300,7 +13351,21 @@ def scanned_orders_list(request, business_id):
 
         # Pooled: a code belonging to a sibling business resolves and is filed
         # against that business, not the one in the dropdown.
-        owner, snapshot = _resolve_scan_code_pooled(request, business, code)
+        # The packing day this scan counts toward: the day the desk has open —
+        # today's (noon to noon) unless someone picked an earlier day to scan
+        # its orders on purpose. Never a day that hasn't started.
+        current_day = _current_business_date()
+        scan_day = current_day
+        if payload.get("day"):
+            scan_day = _parse_day(str(payload["day"]))
+            if scan_day is None:
+                return Response({"error": "day must be YYYY-MM-DD."}, status=status.HTTP_400_BAD_REQUEST)
+            if scan_day > current_day:
+                return Response({"error": "That packing day hasn't started yet — scans count from 12 pm."},
+                                status=status.HTTP_400_BAD_REQUEST)
+
+        scan_platform = str(payload.get("platform") or "").strip().lower() or None
+        owner, snapshot = _resolve_scan_code_pooled(request, business, code, scan_platform)
         cross_business = owner.pk != business.pk
         now = timezone.now()
 
@@ -13316,7 +13381,8 @@ def scanned_orders_list(request, business_id):
             existing.last_scanned_at = now
             existing.scanned_code = code
             existing.scanned_by = request.user
-            fields = ["scan_count", "last_scanned_at", "scanned_code", "scanned_by", "updated_at"]
+            existing.scan_day = scan_day
+            fields = ["scan_count", "last_scanned_at", "scanned_code", "scanned_by", "scan_day", "updated_at"]
 
             if payload.get("status") and new_status != existing.status:
                 existing.status = new_status
@@ -13353,6 +13419,7 @@ def scanned_orders_list(request, business_id):
             notes=str(payload.get("notes") or "").strip(),
             last_scanned_at=now,
             scanned_by=request.user,
+            scan_day=scan_day,
             **snapshot,
         )
         row = _attach_meesho_status(business, [row])[0]
@@ -13414,6 +13481,10 @@ def scanned_orders_list(request, business_id):
         qs = qs.filter(matched_from=ScannedOrder.MATCH_NONE)
     elif matched == "yes":
         qs = qs.exclude(matched_from=ScannedOrder.MATCH_NONE)
+
+    scan_platform = request.GET.get("platform", "").strip().lower()
+    if scan_platform in ("meesho", "flipkart"):
+        qs = qs.filter(platform=scan_platform)
 
     # ?ship=shipped | not_shipped | cancelled | unknown | problem
     ship = request.GET.get("ship", "").strip().upper()
@@ -13523,17 +13594,72 @@ def scan_queue(request, business_id):
         "pieces":     sum(i["qty"] or 0 for i in items),
         "pieces_packed": sum(i["qty"] or 0 for i in items if i["state"] in packed_states),
     }
+    # Per courier: how many it has to take today, how many are scanned, how many
+    # are left — what the desk checks before the pickup van arrives.
+    couriers = {}
+    for i in items:
+        name = " ".join((i["courier"] or "").split()) or "No courier on label"
+        c = couriers.setdefault(name.casefold(), {"courier": name, "assigned": 0, "scanned": 0, "packed": 0,
+                                                  "dispatched": 0, "left": 0, "cancelled": 0})
+        if i["ship_status"] == ScannedOrder.SHIP_CANCELLED and not i["scan_id"]:
+            c["cancelled"] += 1
+            continue
+        c["assigned"] += 1
+        if i["scan_id"]:
+            c["scanned"] += 1
+            if i["state"] in packed_states:
+                c["packed"] += 1
+            if i["state"] == ScannedOrder.STATUS_DISPATCHED:
+                c["dispatched"] += 1
+        else:
+            c["left"] += 1
+    summary["by_courier"] = sorted(couriers.values(), key=lambda c: (-c["assigned"], c["courier"]))
+
+    # Parcels scanned on this day that aren't on the day's list — usually a code
+    # nothing recognised (no label uploaded yet). Kept, and counted, so they
+    # can be found later.
+    listed_subs = {i["order_id"] for i in items}
+    listed_awbs = {i["awb"] for i in items if i["awb"]}
+    day_scans = ScannedOrder.objects.filter(business=business, scan_day=day)
+    platform = _label_view_platform(request)
+    if platform:
+        day_scans = day_scans.filter(platform=platform)
+    extra = [r for r in day_scans.only("sub_order_no", "awb_number", "matched_from", "courier_name")
+             if r.sub_order_no not in listed_subs and not (r.awb_number and r.awb_number in listed_awbs)]
+    summary["off_list"] = len(extra)
+    summary["off_list_unrecognised"] = sum(1 for r in extra if r.matched_from == ScannedOrder.MATCH_NONE)
+    # The same off-list scans per courier, so the courier tiles still show
+    # what was scanned on a day with no (or only some) labels uploaded.
+    off_by_courier = {}
+    for r in extra:
+        name = " ".join((r.courier_name or "").split()) or (
+            "Not recognised" if r.matched_from == ScannedOrder.MATCH_NONE else "No courier on record")
+        off_by_courier[name] = off_by_courier.get(name, 0) + 1
+    summary["off_list_by_courier"] = sorted(({"courier": k, "scanned": v} for k, v in off_by_courier.items()),
+                                            key=lambda c: (-c["scanned"], c["courier"]))
+
     # Pending first (grouped by courier then SKU, as sorted above), finished after.
     items.sort(key=lambda i: (i["state"] != "PENDING",))
-    dates = list(
-        _scope_labels(request, LabelOrder.objects.filter(business=business))
+    current_day = _current_business_date()
+    dates = set(
+        _scope_labels(request, LabelOrder.objects.filter(business=business, uploaded_date__lte=current_day))
         .values_list("uploaded_date", flat=True).distinct().order_by("-uploaded_date")[:14]
     )
+    # Today's and yesterday's packing days are always offered, so the desk can
+    # switch back to the previous day and scan its orders even with no labels.
+    dates |= {current_day, current_day - timedelta(days=1)}
+    start, end = _packing_day_window(day)
+    latest_labels = (_scope_labels(request, LabelOrder.objects.filter(business=business, uploaded_date__lte=current_day))
+                     .order_by("-uploaded_date").values_list("uploaded_date", flat=True).first())
     return Response({
+        "latest_label_day": latest_labels.isoformat() if latest_labels else None,
         "date": day.isoformat(),
+        "current_day": current_day.isoformat(),
+        "is_current_day": day == current_day,
+        "window": {"start": start.isoformat(), "end": end.isoformat()},
         "summary": summary,
         "items": items,
-        "dates": [d.isoformat() for d in dates],
+        "dates": [d.isoformat() for d in sorted(dates, reverse=True)],
     })
 
 
@@ -13596,6 +13722,22 @@ def scanned_orders_refresh_ship(request, business_id):
     this purpose, so re-resolving thousands of them every time would be waste.
     """
     business = get_authorized_business(request, business_id)
+    scope = accessible_businesses(request, include=business)
+
+    # Codes nothing recognised when scanned: their label / orders sheet may
+    # have been uploaded since. Link them now, so the record says what was
+    # packed. A code whose order already has its own scan row stays as it is.
+    relinked = 0
+    for row in ScannedOrder.objects.filter(business=business, matched_from=ScannedOrder.MATCH_NONE):
+        owner, snap = _resolve_scan_in(scope, business, row.scanned_code or row.sub_order_no, row.platform)
+        if snap["matched_from"] == ScannedOrder.MATCH_NONE or owner.pk != business.pk:
+            continue
+        if ScannedOrder.objects.filter(business=business, sub_order_no=snap["sub_order_no"]).exclude(pk=row.pk).exists():
+            continue
+        for k, v in snap.items():
+            setattr(row, k, v)
+        row.save()
+        relinked += 1
 
     qs = ScannedOrder.objects.filter(business=business).exclude(
         ship_status=ScannedOrder.SHIP_SHIPPED
@@ -13605,10 +13747,6 @@ def scanned_orders_refresh_ship(request, business_id):
 
     rows = list(qs)
     status_map = _meesho_status_map(business, [r.sub_order_no for r in rows])
-    # Resolved with the full pool available, so a row whose Orders sheet was
-    # uploaded under a different business stops reading as "no status".
-    scope = accessible_businesses(request, include=business)
-
     changed = 0
     for row in rows:
         if _refresh_ship_status(business, row, status_map.get(row.sub_order_no), scope=scope):
@@ -13617,8 +13755,93 @@ def scanned_orders_refresh_ship(request, business_id):
     return Response({
         "checked": len(rows),
         "changed": changed,
+        "relinked": relinked,
         "stats": _scanned_order_stats(business),
     })
+
+
+_ALERT_DAYS = 7          # how far back unsent orders are chased
+_ALERT_GRACE_HOURS = 24  # a parcel packed today isn't "late" yet
+
+
+@api_view(["GET"])
+def scan_alerts(request, business_id):
+    """
+    Orders that should have gone out but, as far as we can tell, haven't —
+    for the alert on the Overview dashboard and the Order Scan screen.
+
+      not_packed      — labels from earlier days never scanned at the desk
+                        (and not cancelled / already shipped per the sheets)
+      not_dispatched  — scanned / packed over a day ago but never marked
+                        dispatched
+      not_shipped     — we marked it packed or dispatched over a day ago, yet
+                        the marketplace's sheet still says it hasn't shipped:
+                        the status was never updated there
+      unrecognised    — scanned in the last week but matching no order — a
+                        label or orders sheet still to upload
+
+    Each comes with a count and the first few orders. ?platform= narrows it.
+    """
+    business = get_authorized_business(request, business_id)
+    platform = _label_view_platform(request)
+    today = _current_business_date()
+    since = today - timedelta(days=_ALERT_DAYS)
+    late = timezone.now() - timedelta(hours=_ALERT_GRACE_HOURS)
+    week_ago = timezone.now() - timedelta(days=_ALERT_DAYS)
+
+    def label_row(l):
+        return {"order_id": l.order_id, "awb": l.awb_number, "sku": l.sku, "qty": l.qty,
+                "courier": l.courier_name, "platform": l.platform, "date": l.uploaded_date.isoformat()}
+
+    def scan_row(r):
+        return {"id": r.id, "order_id": r.sub_order_no, "awb": r.awb_number, "sku": r.sku, "qty": r.qty,
+                "courier": r.courier_name, "platform": r.platform, "status": r.status,
+                "ship_status_raw": r.ship_status_raw, "scanned_at": r.last_scanned_at.isoformat() if r.last_scanned_at else None}
+
+    labels = LabelOrder.objects.filter(business=business, uploaded_date__gte=since, uploaded_date__lt=today)
+    if platform:
+        labels = labels.filter(platform=platform)
+    labels = list(labels.only("order_id", "awb_number", "sku", "qty", "courier_name", "platform", "uploaded_date")[:5000])
+    ids = [l.order_id for l in labels]
+    awbs = [l.awb_number for l in labels if l.awb_number]
+    scanned_subs, scanned_awbs = set(), set()
+    if labels:
+        q = DQ(sub_order_no__in=ids) | (DQ(awb_number__in=awbs) if awbs else DQ(pk__in=[]))
+        for sub, awb in ScannedOrder.objects.filter(business=business).filter(q).values_list("sub_order_no", "awb_number"):
+            scanned_subs.add(sub)
+            if awb:
+                scanned_awbs.add(awb)
+    sheet = dict(Order.objects.filter(business=business, sub_order_no__in=ids)
+                 .values_list("sub_order_no", "reason_for_credit_entry")) if ids else {}
+    settled_ship = (ScannedOrder.SHIP_CANCELLED, ScannedOrder.SHIP_SHIPPED)
+    not_packed = [l for l in labels
+                  if l.order_id not in scanned_subs and not (l.awb_number and l.awb_number in scanned_awbs)
+                  and ScannedOrder.classify_ship_status(sheet.get(l.order_id)) not in settled_ship]
+
+    scans = ScannedOrder.objects.filter(business=business, last_scanned_at__gte=week_ago)
+    if platform:
+        scans = scans.filter(platform=platform)
+    not_dispatched = list(scans.filter(
+        last_scanned_at__lt=late, status__in=[ScannedOrder.STATUS_SCANNED, ScannedOrder.STATUS_PACKED],
+    ).exclude(ship_status__in=settled_ship).exclude(matched_from=ScannedOrder.MATCH_NONE).order_by("last_scanned_at"))
+    not_shipped = list(scans.filter(
+        last_scanned_at__lt=late, ship_status=ScannedOrder.SHIP_NOT_SHIPPED,
+        status__in=[ScannedOrder.STATUS_PACKED, ScannedOrder.STATUS_DISPATCHED],
+    ).order_by("last_scanned_at"))
+    unrecognised = list(scans.filter(matched_from=ScannedOrder.MATCH_NONE).order_by("-last_scanned_at"))
+
+    by_day = {}
+    for l in not_packed:
+        by_day[l.uploaded_date.isoformat()] = by_day.get(l.uploaded_date.isoformat(), 0) + 1
+    out = {
+        "not_packed": {"count": len(not_packed), "by_day": by_day, "items": [label_row(l) for l in not_packed[:20]]},
+        "not_dispatched": {"count": len(not_dispatched), "items": [scan_row(r) for r in not_dispatched[:20]]},
+        "not_shipped": {"count": len(not_shipped), "items": [scan_row(r) for r in not_shipped[:20]]},
+        "unrecognised": {"count": len(unrecognised), "items": [scan_row(r) for r in unrecognised[:20]]},
+        "since": since.isoformat(),
+    }
+    out["total"] = sum(v["count"] for k, v in out.items() if isinstance(v, dict))
+    return Response(out)
 
 
 @api_view(["POST"])

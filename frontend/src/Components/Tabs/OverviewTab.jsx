@@ -1230,6 +1230,9 @@ function MeeshoOverviewTab() {
   // of which period you happen to be looking at. Silently absent for users
   // whose nav rules don't grant them the Employees section.
   const [salaryDue, setSalaryDue] = useState(null);
+  // Orders that should have gone out but haven't (packing desk). Silently
+  // absent for users without Order Scan or Overview access to it.
+  const [scanAlerts, setScanAlerts] = useState(null);
 
   useEffect(() => {
     const ctrl = new AbortController();
@@ -1240,6 +1243,10 @@ function MeeshoOverviewTab() {
     fetch(`${API}/employees/salary-due/`, { signal: ctrl.signal })
       .then((r) => (r.ok ? r.json() : null))
       .then(setSalaryDue)
+      .catch(() => {});
+    fetch(`${API}/order-scan/alerts/`, { signal: ctrl.signal })
+      .then((r) => (r.ok ? r.json() : null))
+      .then(setScanAlerts)
       .catch(() => {});
     return () => ctrl.abort();
   }, []);
@@ -2691,6 +2698,38 @@ function MeeshoOverviewTab() {
                 </p>
               </div>
               <span style={{ fontSize: 13, fontWeight: 700, color: C.red }}>View details →</span>
+            </div>
+          )}
+
+          {/* ── 10a. Orders not sent (packing desk) ─────────────────────────── */}
+          {scanAlerts && scanAlerts.total > 0 && (
+            <div
+              onClick={() => navigate('/order-scan')}
+              style={{
+                ...T.card, display: 'flex', alignItems: 'center', gap: 20, cursor: 'pointer',
+                background: '#FFF1F2', border: '1.5px solid #FECDD3', padding: '16px 22px', flexWrap: 'wrap',
+              }}
+            >
+              <span style={{ fontSize: 28 }}>📦</span>
+              <div style={{ flex: 1, minWidth: 200 }}>
+                <p style={{ fontSize: 13, fontWeight: 800, color: C.red, marginBottom: 4 }}>
+                  {scanAlerts.total.toLocaleString()} order{scanAlerts.total === 1 ? '' : 's'} not sent — status not updated
+                </p>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  {[
+                    ['not_packed', 'never scanned'],
+                    ['not_dispatched', 'packed, not dispatched'],
+                    ['not_shipped', 'sent, marketplace says not shipped'],
+                    ['unrecognised', 'scanned, no order found'],
+                  ].filter(([k]) => scanAlerts[k]?.count).map(([k, label]) => (
+                    <span key={k} style={{ fontSize: 11.5, fontWeight: 700, color: C.gray700, background: '#fff',
+                      border: '1px solid #FECDD3', borderRadius: 20, padding: '2px 10px' }}>
+                      {scanAlerts[k].count} {label}
+                    </span>
+                  ))}
+                </div>
+              </div>
+              <span style={{ fontSize: 13, fontWeight: 700, color: C.red }}>Review in Order scan →</span>
             </div>
           )}
 
