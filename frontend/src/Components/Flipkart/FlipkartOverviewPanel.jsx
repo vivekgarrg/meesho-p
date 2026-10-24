@@ -191,6 +191,23 @@ export function FlipkartOverviewPanel({ parts }) {
   const losers = summary.top_loss_skus || [];
   const tornado = [...losers].reverse().concat(winners).map((r) => ({ sku: r.sku_id, net: r.net_profit }));
   const daily = orders.daily.map((d) => ({ day: d.order_date.slice(5), count: d.count }));
+  // Settlements per payment day against orders placed per day — the same
+  // "Daily Settlement Activity" chart as the Meesho Overview.
+  const payments = data.payments || { daily: [], by_status: [] };
+  const timelineData = (() => {
+    const map = {};
+    (payments.daily || []).forEach(({ payment_date, count: n }) => {
+      const d = String(payment_date);
+      map[d] = { ...(map[d] || { date: d, settlements: 0, orders: 0 }), settlements: n };
+    });
+    (orders.daily || []).forEach(({ order_date, count: n }) => {
+      const d = String(order_date);
+      map[d] = { ...(map[d] || { date: d, settlements: 0, orders: 0 }), orders: n };
+    });
+    return Object.values(map).sort((a, b) => (a.date > b.date ? 1 : -1));
+  })();
+  const orderStatusBars = (orders.by_status || []).map((r) => ({ status: String(r.status || 'UNKNOWN').replace(/_/g, ' '), count: r.count }));
+  const paymentStatusBars = (payments.by_status || []).map((r) => ({ status: r.status, count: r.count }));
 
   const compareRows = cur && [
     { label: 'Order items', cur: cur.items, prev: prevM?.items, f: fmtNum, mode: 'pct' },
@@ -415,6 +432,41 @@ export function FlipkartOverviewPanel({ parts }) {
                 )}
               </div>
             </>
+          )}
+
+          {/* Daily settlement activity — same as the Meesho Overview */}
+          {timelineData.length > 0 && (
+            <SectionCard title="Daily Settlement Activity">
+              <p style={{ fontSize: 11, color: C.gray400, marginBottom: 10 }}>
+                Settlements per day vs orders placed. Gap = pending settlement.
+              </p>
+              <AppLineChart
+                dataset={timelineData}
+                indexKey="date"
+                series={[
+                  { dataKey: 'settlements', label: 'Settlements', color: C.green },
+                  { dataKey: 'orders', label: 'Orders Placed', color: FLIPKART_COLOR },
+                ]}
+                maxTicks={15}
+                height={230}
+              />
+            </SectionCard>
+          )}
+
+          {/* Orders + Payments by status — same as the Meesho Overview */}
+          {(orderStatusBars.length > 0 || paymentStatusBars.length > 0) && (
+            <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap' }}>
+              {orderStatusBars.length > 0 && (
+                <SectionCard title="Orders by Lifecycle Status" style={{ flex: '1 1 300px', minWidth: 0 }}>
+                  <AppBarChart dataset={orderStatusBars} indexKey="status" series={[{ dataKey: 'count', label: 'Orders', color: FLIPKART_COLOR }]} height={200} />
+                </SectionCard>
+              )}
+              {paymentStatusBars.length > 0 && (
+                <SectionCard title="Payments by Settlement Status" style={{ flex: '1 1 300px', minWidth: 0 }}>
+                  <AppBarChart dataset={paymentStatusBars} indexKey="status" series={[{ dataKey: 'count', label: 'Payments', color: FLIPKART_COLOR }]} height={200} />
+                </SectionCard>
+              )}
+            </div>
           )}
         </>
       )}

@@ -523,6 +523,50 @@ def _settled_item_ids(business):
     return set(FlipkartOrderPayment.objects.filter(business=business).values_list("order_item_id", flat=True))
 
 
+def _payment_status(return_type):
+    """A Flipkart settlement row's outcome, in the same words the Meesho
+    payments chart uses."""
+    rt = (return_type or "").strip().lower()
+    if not rt or rt == "na":
+        return "Delivered"
+    if "courier" in rt or "rto" in rt:
+        return "RTO"
+    if "customer" in rt or "return" in rt:
+        return "Return"
+    return rt.replace("_", " ").title()
+
+
+def _payment_analytics(business, date_from, date_to):
+    """The payments half of the Overview charts — the same shape the Meesho
+    dashboard sends: settlements per payment day, and payments by settlement
+    status. Covers the orders placed in the period, like the profit figures."""
+    qs = FlipkartOrderPayment.objects.filter(business=business)
+    if date_from:
+        qs = qs.filter(order_date__gte=date_from)
+    if date_to:
+        qs = qs.filter(order_date__lte=date_to)
+    daily = (qs.exclude(payment_date=None).values("payment_date")
+             .annotate(count=Count("order_item_id", distinct=True), total=Sum("settlement_value"))
+             .order_by("payment_date"))
+    per_item = {}
+    for item_id, return_type, value in qs.values_list("order_item_id", "return_type", "settlement_value"):
+        e = per_item.setdefault(item_id, {"status": "Delivered", "total": Decimal("0")})
+        st = _payment_status(return_type)
+        if st != "Delivered":
+            e["status"] = st      # any return row decides the item's outcome
+        e["total"] += value or Decimal("0")
+    by = defaultdict(lambda: {"count": 0, "total_settlement": Decimal("0")})
+    for e in per_item.values():
+        by[e["status"]]["count"] += 1
+        by[e["status"]]["total_settlement"] += e["total"]
+    return {
+        "daily": [{"payment_date": str(r["payment_date"]), "count": r["count"], "total": float(r["total"] or 0)} for r in daily],
+        "by_status": sorted(({"status": k, "count": v["count"], "total_settlement": float(v["total_settlement"])}
+                             for k, v in by.items()), key=lambda r: -r["count"]),
+        "settled_items": len(per_item),
+    }
+
+
 def _order_analytics(business, date_from, date_to):
     """What the Orders report says: outcomes, SLA misses and how much has actually been paid."""
     qs = FlipkartOrder.objects.filter(business=business)
@@ -662,6 +706,7 @@ def flipkart_overview(request, business_id):
         "other_charges": other,
         "net_profit": round(order_profit + other["total"], 2),
         "orders": _order_analytics(business, date_from, date_to),
+        "payments": _payment_analytics(business, date_from, date_to),
     })
 
 
