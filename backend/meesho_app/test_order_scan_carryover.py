@@ -68,13 +68,15 @@ class CarryOverTests(CarryTestCase):
         LabelOrder.objects.create(order_id="T0_1", awb_number="TAWB0", uploaded_date=self.today, business=self.biz)
         q = self.queue()
         self.assertEqual(q["date"], self.today.isoformat())
-        self.assertEqual(q["summary"]["assigned"], 1)
+        self.assertEqual(q["summary"]["assigned"], 3)          # today's 1 + yesterday's 2 not sent yet
+        self.assertEqual(q["summary"]["carried"], 2)
 
     def test_a_day_picked_by_hand_is_shown_as_is(self):
         q = self.queue(date=self.today.isoformat())
         self.assertEqual(q["date"], self.today.isoformat())
         self.assertFalse(q["carried_over"])
-        self.assertEqual(q["summary"]["assigned"], 0)
+        self.assertEqual(q["summary"]["assigned"], 2)          # only yesterday's unsent orders
+        self.assertEqual({i["order_id"] for i in q["items"]}, {"Y1_1", "Y2_1"})
 
     def test_a_long_quiet_spell_starts_on_today(self):
         LabelOrder.objects.all().update(uploaded_date=self.today - timedelta(days=20))
@@ -130,3 +132,73 @@ class UploadCheckTests(CarryTestCase):
         self.assertEqual(r.status_code, 200, r.data)
         s = r.data["scan_check"]
         self.assertEqual((s["dispatched"], s["dispatched_shipped"], s["dispatched_not_shipped"]), (2, 1, 1))
+
+
+class CarryForwardTests(CarryTestCase):
+    """Orders that haven't gone out come forward onto the next day's list."""
+
+    def setUp(self):
+        super().setUp()
+        for i in range(6):
+            LabelOrder.objects.create(order_id=f"Y{i}_1", awb_number=f"YAWB{i}", courier_name="Valmo",
+                                      uploaded_date=self.yesterday, business=self.biz)
+        LabelOrder.objects.create(order_id="OLD_1", awb_number="OLDAWB", courier_name="Valmo",
+                                  uploaded_date=self.today - timedelta(days=12), business=self.biz)
+        LabelOrder.objects.create(order_id="T0_1", awb_number="TAWB0", courier_name="Valmo",
+                                  uploaded_date=self.today, business=self.biz)
+        self.scan("Y0_1", awb_number="YAWB0")                                   # dispatched: gone
+        self.scan("Y1_1", status=ScannedOrder.STATUS_PACKED, awb_number="YAWB1")  # packed, still here
+        self.scan("Y2_1", status=ScannedOrder.STATUS_PACKED, awb_number="YAWB2",
+                  ship_status=ScannedOrder.SHIP_SHIPPED)                        # marketplace: shipped
+        Order.objects.create(business=self.biz, sub_order_no="Y3_1", reason_for_credit_entry="CANCELLED")
+        Order.objects.create(business=self.biz, sub_order_no="Y4_1", reason_for_credit_entry="READY_TO_SHIP")
+        Order.objects.create(business=self.biz, sub_order_no="Y4_1", reason_for_credit_entry="SHIPPED")
+        # Y5_1: never scanned, no sheet — not sent.
+
+    def queue(self):
+        return self.client.get(f"{self.base}/order-scan/queue/", {"date": self.today.isoformat()}).data
+
+    def test_only_orders_that_have_not_gone_out_come_forward(self):
+        q = self.queue()
+        carried = {i["order_id"]: i for i in q["items"] if i["carried_from"]}
+        self.assertEqual(set(carried), {"Y1_1", "Y5_1"})
+        self.assertEqual(carried["Y5_1"]["carried_from"], self.yesterday.isoformat())
+        self.assertEqual(carried["Y1_1"]["state"], ScannedOrder.STATUS_PACKED)
+        self.assertEqual(q["summary"]["assigned"], 3)
+        self.assertEqual(q["summary"]["carried"], 2)
+        self.assertEqual(q["summary"]["remaining"], 2)          # T0_1 and Y5_1 still to pack
+
+    def test_scanning_a_carried_order_counts_today(self):
+        self.client.post(f"{self.base}/order-scan/", {"code": "YAWB5", "status": "DISPATCHED"}, format="json")
+        q = self.queue()
+        item = next(i for i in q["items"] if i["order_id"] == "Y5_1")
+        self.assertEqual((item["state"], item["carried_from"]), ("DISPATCHED", self.yesterday.isoformat()))
+        self.assertEqual(ScannedOrder.objects.get(sub_order_no="Y5_1").scan_day, self.today)
+        self.assertEqual(q["summary"]["off_list"], 0)
+
+    def test_dispatched_today_stays_on_todays_list_but_not_tomorrows(self):
+        self.client.post(f"{self.base}/order-scan/", {"code": "YAWB1", "status": "DISPATCHED"}, format="json")
+        item = next(i for i in self.queue()["items"] if i["order_id"] == "Y1_1")
+        self.assertEqual(item["state"], "DISPATCHED")
+        # The next day it has gone out, so it doesn't come forward again.
+        ScannedOrder.objects.filter(sub_order_no="Y1_1").update(scan_day=self.yesterday)
+        self.assertNotIn("Y1_1", {i["order_id"] for i in self.queue()["items"]})
+
+
+class CourierSummaryTests(CarryTestCase):
+    def test_packed_per_courier_for_the_day(self):
+        self.scan("A_1", status=ScannedOrder.STATUS_PACKED, day=self.today, courier_name="Valmo", qty=2)
+        self.scan("B_1", day=self.today, courier_name="valmo ")                       # dispatched
+        self.scan("C_1", status=ScannedOrder.STATUS_PACKED, day=self.today, courier_name="Delhivery")
+        self.scan("D_1", status=ScannedOrder.STATUS_ON_HOLD, day=self.today, courier_name="Delhivery")  # not packed
+        self.scan("E_1", status=ScannedOrder.STATUS_PACKED, day=self.yesterday, courier_name="Valmo")   # other day
+        d = self.client.get(f"{self.base}/order-scan/courier-summary/", {"date": self.today.isoformat()}).data
+        rows = {c["courier"]: (c["packed"], c["dispatched"], c["pieces"]) for c in d["couriers"]}
+        self.assertEqual(rows, {"Valmo": (2, 1, 3), "Delhivery": (1, 0, 1)})
+        self.assertEqual(d["total"], {"packed": 3, "dispatched": 1, "pieces": 4})
+        self.assertEqual(d["couriers"][0]["by_business"], [{"business": "Rudam", "packed": 2}])
+
+    def test_defaults_to_todays_packing_day(self):
+        self.scan("A_1", status=ScannedOrder.STATUS_PACKED, day=self.today, courier_name="Valmo")
+        d = self.client.get(f"{self.base}/order-scan/courier-summary/").data
+        self.assertEqual((d["date"], d["total"]["packed"]), (self.today.isoformat(), 1))

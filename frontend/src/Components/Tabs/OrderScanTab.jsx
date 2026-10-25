@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { API, C, S, btn, Tag, useIsMobile } from "../../App";
 import { BarcodeScanner } from "../shared/BarcodeScanner";
 import { PlatformToggle, useLabelPlatform } from "../PlatformToggle";
+import { CourierSummary } from "./CourierSummary";
 import QrCodeScannerIcon from "@mui/icons-material/QrCodeScanner";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
@@ -292,6 +293,9 @@ function ItemRow({ item, compact, showBusiness, admin, selecting, selected, onTo
         <div style={{ fontSize: 11.5, color: C.gray500, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {[showBusiness && item.business_name, item.courier, item.customer_city, item.awb].filter(Boolean).join(" · ")}
         </div>
+        {item.carried_from && (
+          <div style={{ marginTop: 3 }}><Tag variant="amber">↻ Not sent · from {fmtDay(item.carried_from)}</Tag></div>
+        )}
       </div>
       <div style={{ textAlign: "right", flexShrink: 0, display: "flex", flexDirection: "column", gap: 4, alignItems: "flex-end" }}>
         {admin && !selecting && !compact ? (
@@ -369,6 +373,7 @@ const FILTERS = [
   { key: "pending",   label: "To pack",   test: (i) => i.state === "PENDING" && i.ship_status !== "CANCELLED" },
   { key: "done",      label: "Packed",    test: (i) => ["PACKED", "DISPATCHED", "SCANNED"].includes(i.state) },
   { key: "issues",    label: "Issues",    test: (i) => ["ON_HOLD", "ISSUE"].includes(i.state) || i.ship_status === "CANCELLED" },
+  { key: "carried",   label: "From earlier", test: (i) => !!i.carried_from },
   { key: "all",       label: "All",       test: () => true },
 ];
 
@@ -706,6 +711,7 @@ function MobilePack({ desk, platform, setPlatform, businesses, onScopeChanged, s
   const navigate = useNavigate();
   const { queue, loading, mode, setMode, latest, busy, date, setDate, record } = desk;
   const [camera, setCamera] = useState(false);
+  const [showSummary, setShowSummary] = useState(false);
   const [tab, setTab] = useState("pending");
   const [typed, setTyped] = useState("");
   const [courier, setCourier] = useState(null);
@@ -759,7 +765,15 @@ function MobilePack({ desk, platform, setPlatform, businesses, onScopeChanged, s
         </div>
         <DeskBusinesses desk={businesses} onChanged={onScopeChanged} compact />
         <PlatformToggle platform={platform} onChange={setPlatform} />
+        <button onClick={() => setShowSummary(true)} style={{ ...btn("ghost", "sm"), minHeight: 38 }}>🖨 Courier summary</button>
       </div>
+      {showSummary && (
+        <div style={{ position: "fixed", inset: 0, zIndex: 3200, background: C.white, overflowY: "auto",
+          padding: "calc(12px + env(safe-area-inset-top)) 14px calc(16px + env(safe-area-inset-bottom))" }}>
+          <button onClick={() => setShowSummary(false)} style={{ ...btn("ghost", "sm"), marginBottom: 12 }}>← Back to scanning</button>
+          <CourierSummary platform={platform} day={date} compact />
+        </div>
+      )}
 
       {/* Progress + last result: fixed, never reflows */}
       <div style={{ padding: "12px 14px 10px", display: "flex", flexDirection: "column", gap: 12, flexShrink: 0 }}>
@@ -961,7 +975,7 @@ function ScanRecord({ platform, multi }) {
 
 function DesktopPack({ desk, platform, setPlatform, businesses, onScopeChanged, scopeTick, multi }) {
   const { queue, loading, mode, setMode, latest, busy, date, setDate, record, reload } = desk;
-  const [view, setView] = useState("queue");          // queue | record
+  const [view, setView] = useState("queue");          // queue | record | summary
   const [tab, setTab] = useState("pending");
   const [scan, setScan] = useState("");
   const [courier, setCourier] = useState(null);
@@ -1001,18 +1015,19 @@ function DesktopPack({ desk, platform, setPlatform, businesses, onScopeChanged, 
             {[...new Set([date, ...(queue?.dates || [])])].filter(Boolean).sort().reverse().map((d) => <option key={d} value={d}>{dayLabel(d, desk.currentDay)}</option>)}
           </select>
           <div style={{ display: "flex", background: C.gray100, borderRadius: 10, padding: 3 }}>
-            {["queue", "record"].map((v) => (
+            {["queue", "record", "summary"].map((v) => (
               <button key={v} onClick={() => setView(v)}
                 style={{ border: "none", borderRadius: 8, padding: "7px 16px", fontSize: 13, fontWeight: 700, fontFamily: "inherit", cursor: "pointer",
                   background: view === v ? C.white : "transparent", color: view === v ? C.orange : C.gray500 }}>
-                {v === "queue" ? "Today's list" : "Scan record"}
+                {v === "queue" ? "Today's list" : v === "record" ? "Scan record" : "🖨 Courier summary"}
               </button>
             ))}
           </div>
         </div>
       </div>
 
-      {view === "record" ? <ScanRecord key={scopeTick} platform={platform} multi={multi} /> : (
+      {view === "summary" ? <CourierSummary key={scopeTick} platform={platform} day={date} /> :
+       view === "record" ? <ScanRecord key={scopeTick} platform={platform} multi={multi} /> : (
         <>
           <DayNotice desk={desk} />
           <AlertBanner alerts={alerts} onOpen={() => { setShowAlerts((v) => !v); reloadAlerts(); }} />

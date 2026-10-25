@@ -13721,6 +13721,11 @@ def scanned_orders_list(request, business_id):
     })
 
 
+# How many days back an order that hasn't gone out keeps coming forward onto
+# the day's packing list.
+SCAN_CARRY_DAYS = 7
+
+
 @api_view(["GET"])
 def scan_queue(request, business_id):
     """
@@ -13749,6 +13754,19 @@ def scan_queue(request, business_id):
         _scope_labels(request, LabelOrder.objects.filter(business_id__in=desk_ids, uploaded_date=day))
         .order_by("courier_name", "sku", "order_id")[:4000]
     )
+    # Orders from the last few days that still haven't gone out come forward
+    # onto this day's list: not dispatched by us, and not shipped or cancelled
+    # per the marketplace. Which of them qualify is settled below, once their
+    # scans and sheet statuses are known.
+    on_day = {(l.business_id, l.order_id) for l in labels}
+    earlier, seen = [], set(on_day)
+    for l in (_scope_labels(request, LabelOrder.objects.filter(
+            business_id__in=desk_ids, uploaded_date__lt=day, uploaded_date__gte=day - timedelta(days=SCAN_CARRY_DAYS)))
+            .order_by("-uploaded_date", "courier_name", "sku", "order_id")[:4000]):
+        if (l.business_id, l.order_id) not in seen:
+            seen.add((l.business_id, l.order_id))
+            earlier.append(l)
+    labels += earlier
     ids = [l.order_id for l in labels]
     awbs = [l.awb_number for l in labels if l.awb_number]
 
@@ -13761,10 +13779,14 @@ def scan_queue(request, business_id):
 
     # What Meesho's Orders sheet says, for parcels nobody has scanned yet — an
     # order cancelled on Meesho must not be packed.
-    sheet_status = {
-        (b, sub): st for b, sub, st in Order.objects.filter(business_id__in=desk_ids, sub_order_no__in=ids)
-        .values_list("business_id", "sub_order_no", "reason_for_credit_entry")
-    }
+    # An order has several sheet rows over its life (SHIPPED, then RTO…), so the
+    # most advanced status wins rather than whichever row comes last.
+    sheet_status = {}
+    for b, sub, st in Order.objects.filter(business_id__in=desk_ids, sub_order_no__in=ids) \
+            .values_list("business_id", "sub_order_no", "reason_for_credit_entry"):
+        cur = sheet_status.get((b, sub))
+        if not cur or _SHIP_PRIORITY[ScannedOrder.classify_ship_status(st)] > _SHIP_PRIORITY[ScannedOrder.classify_ship_status(cur)]:
+            sheet_status[(b, sub)] = st
     image_map = return_image_map(labels)
 
     items = []
@@ -13772,7 +13794,19 @@ def scan_queue(request, business_id):
         sc = by_sub.get((l.business_id, l.order_id)) or (by_awb.get((l.business_id, l.awb_number)) if l.awb_number else None)
         sheet = sheet_status.get((l.business_id, l.order_id))
         ship = sc.ship_status if sc else ScannedOrder.classify_ship_status(sheet)
+        carried_from = None
+        if (l.business_id, l.order_id) not in on_day:
+            sheet_ship = ScannedOrder.classify_ship_status(sheet)
+            # Handled on this very day: it stays on the list, ticked off.
+            gone = not (sc and sc.scan_day == day) and (
+                    ship in (ScannedOrder.SHIP_SHIPPED, ScannedOrder.SHIP_CANCELLED)
+                    or sheet_ship in (ScannedOrder.SHIP_SHIPPED, ScannedOrder.SHIP_CANCELLED)
+                    or (sc and sc.status in (ScannedOrder.STATUS_DISPATCHED, ScannedOrder.STATUS_CANCELLED)))
+            if gone:
+                continue
+            carried_from = l.uploaded_date.isoformat()
         items.append({
+            "carried_from": carried_from,
             "order_id": l.order_id,
             "business_id": l.business_id,
             "business_name": names.get(l.business_id, ""),
@@ -13796,6 +13830,8 @@ def scan_queue(request, business_id):
     packed_states = (ScannedOrder.STATUS_PACKED, ScannedOrder.STATUS_DISPATCHED)
     summary = {
         "assigned":   len(items),
+        # Of those, brought forward from earlier days because they haven't gone out.
+        "carried":    sum(1 for i in items if i["carried_from"]),
         "scanned":    sum(1 for i in items if i["scan_id"]),
         "packed":     sum(1 for i in items if i["state"] in packed_states),
         "remaining":  sum(1 for i in items if i["state"] == "PENDING" and i["ship_status"] != ScannedOrder.SHIP_CANCELLED),
@@ -14152,6 +14188,61 @@ def scanned_orders_bulk_status(request, business_id):
         "updated": updated,
         "status": new_status,
         "stats": _scanned_order_stats(desk),
+    })
+
+
+@api_view(["GET"])
+def scan_courier_summary(request, business_id):
+    """
+    How many parcels were packed on a packing day, per courier — the count the
+    desk hands over with each courier's pickup, printable as a 4×6 label.
+
+    Query: date (YYYY-MM-DD, default today's packing day), platform.
+    Counts every scan filed to that day across the desk's businesses: packed
+    (packed or dispatched), of those dispatched, and pieces.
+    """
+    business = get_authorized_business(request, business_id)
+    desk = _scan_desk_scope(request, business)
+    names = {b.pk: b.name for b in desk}
+    day = _parse_day(request.GET.get("date")) or _current_business_date()
+    S = ScannedOrder
+    qs = S.objects.filter(business__in=desk, scan_day=day,
+                          status__in=(S.STATUS_PACKED, S.STATUS_DISPATCHED, S.STATUS_SCANNED))
+    platform = _label_view_platform(request)
+    if platform:
+        qs = qs.filter(platform=platform)
+
+    couriers = {}
+    for business_id_, courier, st, qty, at in qs.values_list("business_id", "courier_name", "status", "qty", "last_scanned_at"):
+        name = " ".join((courier or "").split()) or "No courier"
+        c = couriers.setdefault(name.casefold(), {"courier": name, "packed": 0, "dispatched": 0, "pieces": 0,
+                                                  "by_business": {}, "first": at, "last": at})
+        if c["courier"].islower() and not name.islower():
+            c["courier"] = name          # show "Valmo", not a scan's "valmo"
+        c["packed"] += 1
+        c["pieces"] += qty or 1
+        if st == S.STATUS_DISPATCHED:
+            c["dispatched"] += 1
+        biz = names.get(business_id_, "")
+        c["by_business"][biz] = c["by_business"].get(biz, 0) + 1
+        if at and (not c["first"] or at < c["first"]):
+            c["first"] = at
+        if at and (not c["last"] or at > c["last"]):
+            c["last"] = at
+    rows = sorted(couriers.values(), key=lambda c: (-c["packed"], c["courier"]))
+    for c in rows:
+        c["by_business"] = [{"business": k, "packed": v} for k, v in sorted(c["by_business"].items(), key=lambda kv: -kv[1])]
+        c["first"] = c["first"].isoformat() if c["first"] else None
+        c["last"] = c["last"].isoformat() if c["last"] else None
+    return Response({
+        "date": day.isoformat(),
+        "current_day": _current_business_date().isoformat(),
+        "platform": platform or "",
+        "businesses": [{"id": b.pk, "name": b.name} for b in desk],
+        "couriers": rows,
+        "total": {"packed": sum(c["packed"] for c in rows), "dispatched": sum(c["dispatched"] for c in rows),
+                  "pieces": sum(c["pieces"] for c in rows)},
+        "printed_by": request.user.get_full_name() or request.user.get_username(),
     })
 
 
