@@ -215,7 +215,122 @@ const flipkartOrdersSummary = (d) => ({
   "Skipped": d.invalid_rows,
 });
 
+// ── Clean up a wrong upload ───────────────────────────────────────────────────
+
+const fmtWhen = (iso) => new Date(iso).toLocaleString("en-IN", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
+const fmtDate = (iso) => new Date(`${iso}T00:00:00`).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+
+/**
+ * Every payment / order upload, by when it was made, with what it added — and
+ * a way for an admin to remove the rows one upload added.
+ */
+function CleanupPanel() {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [dataset, setDataset] = useState("");
+  const [days, setDays] = useState(90);
+  const [confirming, setConfirming] = useState(null);   // upload awaiting "yes, remove"
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+
+  const load = React.useCallback(async () => {
+    setLoading(true);
+    try {
+      const p = new URLSearchParams({ days });
+      if (dataset) p.set("dataset", dataset);
+      const res = await fetch(`${API}/upload-cleanup/?${p}`);
+      if (res.ok) setData(await res.json());
+    } finally { setLoading(false); }
+  }, [dataset, days]);
+  React.useEffect(() => { load(); }, [load]);
+
+  const remove = async (u) => {
+    setBusy(true); setMsg(null);
+    try {
+      const res = await fetch(`${API}/upload-cleanup/delete/`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ dataset: u.dataset, start: u.start, end: u.end }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (res.ok) {
+        setMsg({ type: "ok", text: `Removed ${d.rows.toLocaleString("en-IN")} rows from the ${d.dataset_label} uploaded ${fmtWhen(u.start)}.` });
+        setConfirming(null);
+        await load();
+      } else setMsg({ type: "err", text: d.error || "Could not remove that upload." });
+    } catch { setMsg({ type: "err", text: "Network error — nothing was removed." }); }
+    setBusy(false);
+  };
+
+  const key = (u) => `${u.dataset}-${u.start}`;
+  return (
+    <Card elevation={0} sx={{ border: `1.5px solid ${C.orange}`, borderRadius: 3 }}>
+      <CardContent sx={{ p: { xs: 2, sm: 2.5 }, "&:last-child": { pb: { xs: 2, sm: 2.5 } }, display: "flex", flexDirection: "column", gap: 1.5 }}>
+        <Box>
+          <Typography sx={{ fontWeight: 800, fontSize: 17 }}>🧹 Clean up an upload</Typography>
+          <Typography variant="body2" color="text.secondary">
+            Uploaded the wrong file? Find it by when it was uploaded and remove the rows it added. Rows it only updated
+            (orders already in the system) keep their values — upload the correct file again to put those right.
+          </Typography>
+        </Box>
+        <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap", alignItems: "center" }}>
+          {[{ key: "", label: "All uploads" }, ...(data?.datasets || [])].map((d) => (
+            <Chip key={d.key} label={d.label} onClick={() => { setDataset(d.key); setConfirming(null); }}
+              color={dataset === d.key ? "primary" : "default"} variant={dataset === d.key ? "filled" : "outlined"} sx={{ fontWeight: 700 }} />
+          ))}
+          <Box component="select" value={days} onChange={(e) => setDays(Number(e.target.value))}
+            sx={{ ml: "auto", p: "6px 10px", borderRadius: 2, border: `1px solid ${C.border}`, fontFamily: "inherit", fontSize: 13, bgcolor: "#fff" }}>
+            {[[7, "Last 7 days"], [30, "Last 30 days"], [90, "Last 90 days"], [365, "Last year"], [730, "Last 2 years"]].map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+          </Box>
+        </Box>
+        {msg && <Alert severity={msg.type === "ok" ? "success" : "error"}>{msg.text}</Alert>}
+        {data && !data.can_delete && <Alert severity="info">Only an admin can remove uploaded data — ask an admin to clean up.</Alert>}
+        {loading && !data ? (
+          <Typography variant="body2" color="text.secondary">Loading uploads…</Typography>
+        ) : !data?.uploads.length ? (
+          <Typography variant="body2" color="text.secondary">No uploads in this period.</Typography>
+        ) : (
+          <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
+            {data.uploads.map((u) => {
+              const asking = confirming === key(u);
+              return (
+                <Box key={key(u)} sx={{ border: `1px solid ${asking ? "#FCA5A5" : C.border}`, bgcolor: asking ? "#FEF2F2" : "#fff",
+                  borderRadius: 2, p: 1.5, display: "flex", gap: 1.5, flexWrap: "wrap", alignItems: "center" }}>
+                  <Box sx={{ flex: "1 1 260px", minWidth: 0 }}>
+                    <Typography sx={{ fontWeight: 800, fontSize: 14 }}>
+                      {u.dataset_label} <Box component="span" sx={{ color: "text.secondary", fontWeight: 600 }}>· uploaded {fmtWhen(u.start)}</Box>
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary" sx={{ overflowWrap: "anywhere" }}>
+                      {u.counts.map((c) => `${c.rows.toLocaleString("en-IN")} ${c.label.toLowerCase()}`).join(" · ")}
+                      {u.dates ? ` · ${u.date_field} ${fmtDate(u.dates.from)}${u.dates.to !== u.dates.from ? ` – ${fmtDate(u.dates.to)}` : ""}` : ""}
+                    </Typography>
+                  </Box>
+                  {data.can_delete && (asking ? (
+                    <Box sx={{ display: "flex", gap: 1, alignItems: "center", flexWrap: "wrap" }}>
+                      <Typography variant="body2" sx={{ fontWeight: 700, color: "#B91C1C" }}>
+                        Remove {u.rows.toLocaleString("en-IN")} rows? This can't be undone.
+                      </Typography>
+                      <Button size="small" variant="contained" color="error" disabled={busy} disableElevation onClick={() => remove(u)} sx={{ textTransform: "none", fontWeight: 700 }}>
+                        {busy ? "Removing…" : "Yes, remove"}
+                      </Button>
+                      <Button size="small" disabled={busy} onClick={() => setConfirming(null)} sx={{ textTransform: "none" }}>Cancel</Button>
+                    </Box>
+                  ) : (
+                    <Button size="small" variant="outlined" color="error" onClick={() => { setConfirming(key(u)); setMsg(null); }} sx={{ textTransform: "none", fontWeight: 700 }}>
+                      Remove this upload
+                    </Button>
+                  ))}
+                </Box>
+              );
+            })}
+          </Box>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 export function UploadTab() {
+  const [cleanup, setCleanup] = useState(false);
   const TABLE_ROWS = [
     ["Order Payments",         "order_payments",        "sub_order_no",        "Update existing rows (safe to re-upload)"],
     ["Ads Cost",               "ads_cost",              "id (auto-increment)", "Always inserts new rows"],
@@ -229,14 +344,22 @@ export function UploadTab() {
   return (
     <Box sx={{ maxWidth: 1040, mx: "auto", display: "flex", flexDirection: "column", gap: { xs: 2.5, sm: 3 }, minWidth: 0 }}>
 
-      <Box>
-        <Typography sx={{ fontWeight: 800, fontSize: { xs: 20, sm: 24 }, mb: 0.5, lineHeight: 1.25 }}>
-          Upload Data
-        </Typography>
-        <Typography variant="body2" color="text.secondary">
-          Upload the Meesho payment report — the .xlsx, or the .zip straight from the panel — and the Orders CSV.
-        </Typography>
+      <Box sx={{ display: "flex", gap: 2, alignItems: "flex-start", justifyContent: "space-between", flexWrap: "wrap" }}>
+        <Box sx={{ flex: "1 1 280px", minWidth: 0 }}>
+          <Typography sx={{ fontWeight: 800, fontSize: { xs: 20, sm: 24 }, mb: 0.5, lineHeight: 1.25 }}>
+            Upload Data
+          </Typography>
+          <Typography variant="body2" color="text.secondary">
+            Upload the Meesho payment report — the .xlsx, or the .zip straight from the panel — and the Orders CSV.
+          </Typography>
+        </Box>
+        <Button variant="outlined" onClick={() => setCleanup((v) => !v)}
+          sx={{ textTransform: "none", fontWeight: 700 }}>
+          {cleanup ? "Close clean up" : "🧹 Clean up"}
+        </Button>
       </Box>
+
+      {cleanup && <CleanupPanel />}
 
       {/* CSS grid rather than MUI <Grid item xs>: that API was removed in MUI v6,
           so the old markup gave the two cards no width at all and they sized to

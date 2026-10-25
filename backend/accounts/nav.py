@@ -86,6 +86,7 @@ ALWAYS_VISIBLE_PATHS = ["/admin"]
 API_OWNERSHIP = {
     "upload/":               ["/upload"],
     "upload-orders/":        ["/upload"],
+    "upload-cleanup/":       ["/upload"],
 
     "labels/":               ["/labels"],
     "bulk-labels/":          ["/bulk-labels"],

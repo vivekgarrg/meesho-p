@@ -2,6 +2,7 @@ from django.urls import path
 from . import views
 from . import flipkart_views
 from . import api_cache
+from . import upload_cleanup
 from . import bulk_listing_views
 from . import listing_images_views
 from . import insights
@@ -86,6 +87,8 @@ urlpatterns = [
     path("pricing/upload/", views.upload_pricing_workbook, name="upload_pricing_workbook"),
     path("final-prices/<str:sku_id>/", views.final_price_detail, name="final_price_detail"),
     path("upload-orders/", views.upload_orders_csv, name="upload_orders"),
+    path("upload-cleanup/", upload_cleanup.upload_cleanup_list, name="upload_cleanup_list"),
+    path("upload-cleanup/delete/", upload_cleanup.upload_cleanup_delete, name="upload_cleanup_delete"),
     path("full-orders/", views.full_orders_list, name="full_orders_list"),
     path("full-orders/analytics/", views.full_orders_analytics, name="full_orders_analytics"),
     path("dashboard/", views.dashboard_analytics, name="dashboard_analytics"),
