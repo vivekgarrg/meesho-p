@@ -104,3 +104,41 @@ class SettingTests(DeskTestCase):
         a = self.client_for(self.admin)
         self.assertEqual(a.put(self.base() + "/settings/", {"business_ids": [99999]}, format="json").status_code, 400)
         self.assertEqual(a.put(self.base() + "/settings/", {"business_ids": "x"}, format="json").status_code, 400)
+
+
+class AdminStatusTests(DeskTestCase):
+    def set_status(self, client, status, *items):
+        return client.post(self.base() + "/queue/status/", {
+            "status": status, "day": self.today.isoformat(),
+            "items": [{"business_id": b.id, "order_id": o} for b, o in items],
+        }, format="json")
+
+    def test_admin_marks_unscanned_orders_dispatched(self):
+        r = self.set_status(self.client_for(self.admin), "DISPATCHED", (self.a, "RuVa0_1"), (self.b, "CoDe0_1"))
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual((r.data["created"], r.data["not_found"]), (2, 0))
+        row = ScannedOrder.objects.get(business=self.b, sub_order_no="CoDe0_1")
+        self.assertEqual((row.status, row.scan_day, row.awb_number), ("DISPATCHED", self.today, "CoDeAWB0"))
+        self.assertIn("by hand", row.notes)
+        q = self.queue(self.client_for(self.admin))
+        self.assertEqual(q["summary"]["packed"], 2)
+        self.assertTrue(q["is_admin"])
+
+    def test_admin_changes_a_scanned_status_and_can_undo_it(self):
+        admin = self.client_for(self.admin)
+        admin.post(self.base() + "/", {"code": "RuVaAWB1", "status": "PACKED"}, format="json")
+        r = self.set_status(admin, "ON_HOLD", (self.a, "RuVa1_1"))
+        self.assertEqual(r.data["updated"], 1)
+        self.assertEqual(ScannedOrder.objects.get(sub_order_no="RuVa1_1").status, "ON_HOLD")
+        r = self.set_status(admin, "PENDING", (self.a, "RuVa1_1"))
+        self.assertEqual(r.data["reset"], 1)
+        self.assertFalse(ScannedOrder.objects.filter(sub_order_no="RuVa1_1").exists())
+
+    def test_workers_cannot_and_other_businesses_are_out_of_reach(self):
+        r = self.set_status(self.client_for(self.worker), "DISPATCHED", (self.a, "RuVa0_1"))
+        self.assertEqual(r.status_code, 403)
+        self.assertFalse(self.queue(self.client_for(self.worker))["is_admin"])
+        OrderScanSetting.objects.create(user=self.admin, business_ids=[self.a.id])
+        r = self.set_status(self.client_for(self.admin), "DISPATCHED", (self.b, "CoVa0_1"), (self.a, "nope"))
+        self.assertEqual((r.data["created"], r.data["not_found"]), (0, 2))
+        self.assertFalse(ScannedOrder.objects.exists())

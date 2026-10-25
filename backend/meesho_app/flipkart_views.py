@@ -39,7 +39,7 @@ from .permissions import get_authorized_business
 from .views import (
     _FLIPKART_PAYMENT_COMPONENTS, _compute_flipkart_profit_summary, _cost_setting,
     _estimated_profit_pricing_lookup, _flipkart_parent_link_map, _has_unit_price,
-    _packaging_charge, _sku_key, _to_num, safe_date, safe_decimal, safe_str,
+    _packaging_charge, _scan_ship_check, _sku_key, _to_num, safe_date, safe_decimal, safe_str,
 )
 
 ZERO = Decimal("0")
@@ -157,12 +157,14 @@ def flipkart_orders_upload(request, business_id):
         return row[i] if i is not None and i < len(row) else None
 
     total_rows = invalid_rows = created = updated = 0
+    item_ids = []
     with transaction.atomic():
         for row in rows:
             order_item_id = clean_item_id(get(row, "order_item_id"))
             if not order_item_id:
                 continue
             total_rows += 1
+            item_ids.append(order_item_id)
             order_id = safe_str(get(row, "order_id")) or ""
             if not order_id:
                 invalid_rows += 1
@@ -208,6 +210,8 @@ def flipkart_orders_upload(request, business_id):
         "invalid_rows": invalid_rows,
         "created": created,
         "updated": updated,
+        # What this report says about the parcels we scanned and dispatched.
+        "scan_check": _scan_ship_check(business, item_ids),
     })
 
 

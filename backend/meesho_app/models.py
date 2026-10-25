@@ -1281,6 +1281,25 @@ class ReturnDelivery(models.Model):
     detailed_return_reason = models.TextField(blank=True)
     otp_verified_at        = models.DateTimeField(null=True, blank=True)
 
+    # ── Where the return is: still on its way, or delivered back to us ────
+    # The "Returns → In transit" export lists returns before they arrive, so
+    # a parcel that reaches the desk ahead of the delivered export can still
+    # be looked up and checked. A delivered row never goes back to in transit.
+    STAGE_IN_TRANSIT = "IN_TRANSIT"
+    STAGE_DELIVERED  = "DELIVERED"
+    STAGE_CHOICES = [
+        (STAGE_IN_TRANSIT, "In transit"),
+        (STAGE_DELIVERED,  "Delivered"),
+    ]
+    stage                  = models.CharField(max_length=20, choices=STAGE_CHOICES,
+                                              default=STAGE_DELIVERED, db_index=True)
+    transit_status         = models.CharField(max_length=60, blank=True,
+                                              help_text="Status on the in-transit sheet, e.g. Picked Up, Returned")
+    expected_delivery_date = models.DateField(null=True, blank=True)
+    delivery_attempt       = models.CharField(max_length=30, blank=True)
+    transit_updated_at     = models.DateTimeField(null=True, blank=True,
+                                                  help_text="When an in-transit sheet last reported on it")
+
     # ── Claim tracking (entered in the app, never from the sheet) ──────────
     claim_status    = models.CharField(max_length=20, choices=CLAIM_STATUS_CHOICES,
                                        default=CLAIM_UNREVIEWED, db_index=True)

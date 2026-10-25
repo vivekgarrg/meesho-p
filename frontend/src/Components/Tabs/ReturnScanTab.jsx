@@ -52,6 +52,7 @@ const isTouch = () => typeof window !== "undefined" && window.matchMedia?.("(poi
 
 /** One short line about the claim window — enough to know if it's urgent. */
 function windowText(row) {
+  if (isTransit(row)) return `In transit${row.expected_delivery_date ? ` · expected ${fmtDay(row.expected_delivery_date)}` : ""}`;
   const cs = row.claim_status;
   if (["RAISED", "APPROVED", "REJECTED", "NOT_REQUIRED"].includes(cs)) return "";
   const left = row.days_left;
@@ -62,6 +63,7 @@ function windowText(row) {
 }
 
 const isRTO = (row) => (row.type_of_return || "").toLowerCase().includes("rto");
+const isTransit = (row) => row.stage === "IN_TRANSIT";
 const fmtDay = (v) => (v ? new Date(v).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" }) : null);
 
 // ── Hindi alongside English ───────────────────────────────────────────────────
@@ -235,9 +237,19 @@ function ReturnSummary({ row, compact }) {
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
         <Tag variant={isRTO(row) ? "red" : "orange"}>{isRTO(row) ? "RTO" : "Customer return"}</Tag>
         <Tag variant={CLAIM_TAG[row.claim_status]}>{CLAIM_LABELS[row.claim_status]}</Tag>
+        {isTransit(row) && <Tag variant="blue">🚚 In transit{row.transit_status ? ` · ${row.transit_status}` : ""}</Tag>}
         {row.business_name && <Tag variant="blue">◈ {row.business_name}</Tag>}
         {win && <span style={{ fontSize: 13, fontWeight: 800, color: URGENCY_COLOR[row.claim_urgency] || C.gray500 }}>⏱ {win}</span>}
       </div>
+
+      {isTransit(row) && (
+        <Banner tone="blue">
+          <div>From the <strong>In transit</strong> sheet — Meesho hasn't marked this return delivered yet
+            {row.expected_delivery_date ? <> (expected {fmtDay(row.expected_delivery_date)})</> : null}.
+            Check the parcel and decide on the claim now; the 7-day claim window starts once the Delivered sheet shows it.</div>
+          <Hi size={12}>यह रिटर्न इन-ट्रांज़िट शीट से है — मीशो पर अभी डिलीवर नहीं दिखा। पार्सल अभी जाँचें; क्लेम के 7 दिन डिलीवर होने के बाद गिने जाएँगे।</Hi>
+        </Banner>
+      )}
 
       {(skuMismatch || qtyMismatch) && (
         <Banner icon={<ErrorOutlineIcon style={{ fontSize: 18, flexShrink: 0 }} />}>
@@ -470,6 +482,7 @@ function Timeline({ row }) {
     { label: "Dispatched", date: row.dispatch_date },
     { label: "Return created", date: row.return_created_date },
     { label: "Came back", date: row.delivered_date },
+    { label: "Expected back", date: !row.delivered_date ? row.expected_delivery_date : null },
     { label: "Claim raised", date: row.claim_raised_at, pending: !row.claim_raised_at && ["REQUIRED"].includes(row.claim_status) },
     { label: "Claim deadline", date: !row.claim_raised_at && deadline ? deadline : null, warn: true },
   ].filter((s) => s.date || s.pending);
@@ -518,6 +531,9 @@ function FullDetails({ row }) {
           <Field label="Sub type" value={row.sub_type} />
           <Field label="Packet ID" value={row.packet_id} mono />
           <Field label="Return price type" value={row.return_price_type} />
+          {(isTransit(row) || row.transit_status) && <Field label="Transit status" value={row.transit_status} />}
+          {(isTransit(row) || row.transit_status) && <Field label="Expected back" value={fmtDay(row.expected_delivery_date)} />}
+          {row.delivery_attempt && <Field label="Delivery attempt" value={row.delivery_attempt} />}
         </DetailCard>
         <DetailCard title="🧾 Order">
           <Field label="Sub-order" value={row.suborder_no} mono />
@@ -822,6 +838,7 @@ const FILTERS = [
   { key: "required",  label: "Claim required",   claim: "REQUIRED",   urgency: "" },
   { key: "attention", label: "Closing soon",     claim: "",           urgency: "attention" },
   { key: "raised",    label: "Raised",           claim: "RAISED",     urgency: "" },
+  { key: "transit",   label: "In transit",       claim: "",           urgency: "", stage: "in_transit" },
 ];
 
 function SubTabs({ tab, setTab, total }) {
@@ -858,7 +875,8 @@ function ReturnsList({ onPick, activeId, touch }) {
   const f = FILTERS.find((x) => x.key === filter);
   // "Closing soon" and "Needs decision" are all-time: an expiring claim must never
   // be hidden by whichever period the global date bar happens to show.
-  const ignorePeriod = !!f.urgency;
+  // In transit has no delivered date for the period to apply to.
+  const ignorePeriod = !!f.urgency || !!f.stage;
 
   useEffect(() => {
     const t = setTimeout(() => setListQuery(query.trim()), 250);
@@ -873,6 +891,7 @@ function ReturnsList({ onPick, activeId, touch }) {
       if (listQuery) p.set("q", listQuery);
       if (f.claim) p.set("claim_status", f.claim);
       if (f.urgency) p.set("urgency", f.urgency);
+      if (f.stage) p.set("stage", f.stage);
       if (!ignorePeriod) {
         if (range.date_from) p.set("date_from", range.date_from);
         if (range.date_to) p.set("date_to", range.date_to);
@@ -881,12 +900,12 @@ function ReturnsList({ onPick, activeId, touch }) {
       const data = await res.json();
       setRows(data.results || []); setTotal(data.total ?? 0); setStats(data.stats || null);
     } finally { setLoading(false); }
-  }, [page, listQuery, f.claim, f.urgency, ignorePeriod, range.date_from, range.date_to]);
+  }, [page, listQuery, f.claim, f.urgency, f.stage, ignorePeriod, range.date_from, range.date_to]);
   useEffect(() => { fetchList(); }, [fetchList]);
 
   const counts = {
     all: stats?.total, review: stats?.unreviewed, required: stats?.claim_required,
-    attention: stats?.needs_attention, raised: stats?.claim_raised,
+    attention: stats?.needs_attention, raised: stats?.claim_raised, transit: stats?.in_transit,
   };
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
@@ -1011,6 +1030,8 @@ function DesktopReturns({ desk }) {
   const [total, setTotal] = useState(null);
   const search = useRef(null);
   const fileRef = useRef(null);
+  // Which Meesho returns export is being uploaded.
+  const [sheetKind, setSheetKind] = useState("delivered");
   const { gun, full } = useContext(DeskCtx);
 
   // With a scanner gun the cursor lives in the scan box. Off by default on touch
@@ -1018,9 +1039,11 @@ function DesktopReturns({ desk }) {
   // on for an iPad with a Bluetooth gun.
   const refocus = useCallback(() => { if (gun) setTimeout(() => search.current?.focus({ preventScroll: true }), 0); }, [gun]);
   useEffect(() => { if (tab === "scan") refocus(); }, [tab, refocus]);
+  // Counted again after each upload.
+  const [uploads, setUploads] = useState(0);
   useEffect(() => {
     fetch(`${API}/returns/?page_size=1`).then((r) => r.json()).then((d) => setTotal(d.stats?.total ?? d.total ?? null)).catch(() => {});
-  }, []);
+  }, [uploads]);
 
   const onEnter = async (code) => {
     const c = (code ?? query).trim();
@@ -1044,14 +1067,18 @@ function DesktopReturns({ desk }) {
 
   const handleFile = async (file) => {
     if (!file) return;
-    const form = new FormData(); form.append("file", file);
+    const form = new FormData(); form.append("file", file); form.append("kind", sheetKind);
     setUploading(true); setUploadMsg(null);
     try {
       const res = await fetch(`${API}/returns/upload/`, { method: "POST", body: form });
       const data = await res.json();
+      const transit = data.kind === "in_transit";
       setUploadMsg(data.success
-        ? { ok: true, text: `Uploaded — ${data.created} new, ${data.updated} updated, ${data.skipped} skipped.` }
+        ? { ok: true, text: `${transit ? "In transit sheet uploaded" : "Uploaded"} — ${data.created} new, ${data.updated} updated, ${data.skipped} skipped.`
+            + (transit && data.already_delivered ? ` ${data.already_delivered} were already delivered and stay that way.` : "")
+            + (transit ? " These returns can now be scanned and checked before they're marked delivered." : "") }
         : { ok: false, text: data.error || "Upload failed." });
+      if (data.success) setUploads((n) => n + 1);
     } catch { setUploadMsg({ ok: false, text: "Network error during upload." }); }
     finally { setUploading(false); }
   };
@@ -1087,6 +1114,19 @@ function DesktopReturns({ desk }) {
 
       {showUpload && (
         <div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
+            {[["delivered", "✅ Delivered returns", "Returns → Completed/Delivered"], ["in_transit", "🚚 In transit returns", "Returns → In transit"]].map(([k, l, sub]) => {
+              const on = sheetKind === k;
+              return (
+                <button key={k} onClick={() => { setSheetKind(k); setUploadMsg(null); }}
+                  style={{ flex: "1 1 220px", textAlign: "left", padding: "10px 14px", borderRadius: 12, cursor: "pointer", fontFamily: "inherit", minHeight: 48,
+                    border: `1.5px solid ${on ? C.orange : C.gray200}`, background: on ? C.orangeLight : C.white }}>
+                  <div style={{ fontSize: 14, fontWeight: 800, color: on ? C.orange : C.gray800 }}>{l}</div>
+                  <div style={{ fontSize: 11.5, color: C.gray500, marginTop: 2 }}>{sub}</div>
+                </button>
+              );
+            })}
+          </div>
           <div onClick={() => fileRef.current?.click()}
             onDragOver={(e) => e.preventDefault()}
             onDrop={(e) => { e.preventDefault(); handleFile(e.dataTransfer.files[0]); }}
@@ -1094,7 +1134,9 @@ function DesktopReturns({ desk }) {
             <input ref={fileRef} type="file" accept=".csv,.xlsx,.xls" style={{ display: "none" }} onChange={(e) => handleFile(e.target.files[0])} />
             {uploading ? <CircularProgress size={20} style={{ color: C.orange }} /> : (
               <span style={{ fontSize: 13.5, color: C.gray600, fontWeight: 600 }}>
-                Tap to choose (or drop) the Meesho “Returns → Completed/Delivered” export — re-uploading is safe, claim work is never overwritten.
+                {sheetKind === "in_transit"
+                  ? "Tap to choose (or drop) the Meesho “Returns → In transit” export (intransit_….csv) — returns on their way show up here, so a parcel can be scanned and checked before it's marked delivered."
+                  : "Tap to choose (or drop) the Meesho “Returns → Completed/Delivered” export — re-uploading is safe, claim work is never overwritten."}
               </span>
             )}
           </div>

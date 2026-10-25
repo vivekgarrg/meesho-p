@@ -5782,12 +5782,15 @@ def upload_orders_csv(request, business_id):
             else:
                 updated += 1
 
+    subs = df["Sub Order No"].astype(str).str.strip().tolist() if "Sub Order No" in df.columns else []
     return Response(
         {
             "success": True,
             "created": created,
             "updated": updated,
             "total_rows": len(df),
+            # What this sheet says about the parcels we scanned and dispatched.
+            "scan_check": _scan_ship_check(business, subs),
         },
         status=status.HTTP_201_CREATED,
     )
@@ -11680,6 +11683,10 @@ _RETURN_COL_MAP = {
     "return reason":          "return_reason",
     "detailed return reason": "detailed_return_reason",
     "otp verified at":        "otp_verified_at",
+    # Only on the "In transit" export.
+    "expected delivery date": "expected_delivery_date",
+    "status":                 "transit_status",
+    "attempt":                "delivery_attempt",
 }
 
 # Cells Meesho writes to mean "nothing here".
@@ -11754,6 +11761,13 @@ def _return_text(val, blank_as_empty=True):
     return s.strip()
 
 
+def _is_return_header(text):
+    """The header row of either returns export: Delivered, or In transit (which
+    has an expected delivery date instead of a delivered one)."""
+    low = text.lower()
+    return "suborder number" in low and ("delivered date" in low or "expected delivery date" in low)
+
+
 def _find_return_header_row(lines):
     """
     The export starts with 6 lines of supplier metadata before the real header,
@@ -11761,8 +11775,7 @@ def _find_return_header_row(lines):
     content instead of hardcoding a skiprows count.
     """
     for idx, line in enumerate(lines[:60]):
-        low = line.lower()
-        if "suborder number" in low and "delivered date" in low:
+        if _is_return_header(line):
             return idx
     return None
 
@@ -11777,11 +11790,12 @@ def _read_return_sheet(file):
         header_idx = None
         for idx, row in raw.iterrows():
             joined = " ".join(str(c).lower() for c in row.tolist() if c is not None)
-            if "suborder number" in joined and "delivered date" in joined:
+            if _is_return_header(joined):
                 header_idx = idx
                 break
         if header_idx is None:
-            raise ValueError("Could not find the header row (expected 'Suborder Number' and 'Delivered Date').")
+            raise ValueError("Could not find the header row (expected 'Suborder Number' and "
+                             "'Delivered Date' or 'Expected Delivery Date').")
         df = raw.iloc[header_idx + 1:].copy()
         df.columns = [str(c) for c in raw.iloc[header_idx].tolist()]
     else:
@@ -11799,7 +11813,8 @@ def _read_return_sheet(file):
         lines = text.splitlines()
         header_idx = _find_return_header_row(lines)
         if header_idx is None:
-            raise ValueError("Could not find the header row (expected 'Suborder Number' and 'Delivered Date').")
+            raise ValueError("Could not find the header row (expected 'Suborder Number' and "
+                             "'Delivered Date' or 'Expected Delivery Date').")
         df = pd.read_csv(io.StringIO("\n".join(lines[header_idx:])), dtype=str)
 
     df.columns = [str(c).strip().lower() for c in df.columns]
@@ -11811,11 +11826,17 @@ def _read_return_sheet(file):
 @parser_classes([MultiPartParser])
 def return_deliveries_upload(request, business_id):
     """
-    Upload the Meesho "Returns → Completed/Delivered" export (CSV or Excel).
+    Upload a Meesho returns export (CSV or Excel): "Returns → Completed/Delivered"
+    or "Returns → In transit". Which one it is comes from its columns (the
+    in-transit one has an expected delivery date and a status, no delivered
+    date); `kind` = delivered | in_transit, when sent, must agree.
 
     Keyed on (suborder_no, awb_number), so re-uploading an overlapping export
-    updates rows in place. Claim fields are deliberately left out of the update
-    payload — an upload can never overwrite claim work already recorded.
+    updates rows in place, and a return first seen in transit becomes the same
+    row once the delivered export lists it. Claim fields are deliberately left
+    out of the update payload — an upload can never overwrite claim work
+    already recorded. An in-transit sheet never touches a delivered return's
+    delivered date, proof of delivery or stage.
     """
     business = get_authorized_business(request, business_id)
     file = request.FILES.get("file")
@@ -11833,9 +11854,22 @@ def return_deliveries_upload(request, business_id):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
+    in_transit = "delivered_date" not in df.columns
+    sheet_kind = "in_transit" if in_transit else "delivered"
+    asked = str(request.data.get("kind") or "").strip().lower()
+    if asked in ("delivered", "in_transit") and asked != sheet_kind:
+        return Response(
+            {"error": ("This is the In transit returns export — upload it under “In transit”."
+                       if in_transit else
+                       "This is the Delivered returns export — upload it under “Delivered”.")},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
     created = updated = skipped = 0
     no_delivered_date = 0
+    already_delivered = 0
     seen_keys = set()
+    now = timezone.now()
 
     with transaction.atomic():
         for _, row in df.iterrows():
@@ -11853,7 +11887,7 @@ def return_deliveries_upload(request, business_id):
             seen_keys.add(key)
 
             delivered = safe_date(row.get("delivered_date"))
-            if delivered is None:
+            if delivered is None and not in_transit:
                 no_delivered_date += 1
 
             qty = safe_int(row.get("qty"))
@@ -11868,17 +11902,34 @@ def return_deliveries_upload(request, business_id):
                 "qty":                    1 if qty is None else max(0, qty),
                 "dispatch_date":          safe_date(row.get("dispatch_date")),
                 "return_created_date":    safe_date(row.get("return_created_date")),
-                "delivered_date":         delivered,
                 "type_of_return":         _return_text(row.get("type_of_return")),
                 "sub_type":               _return_text(row.get("sub_type")),
                 "courier_partner":        _return_text(row.get("courier_partner")),
                 "tracking_link":          _return_text(row.get("tracking_link")),
-                "proof_of_delivery":      _return_text(row.get("proof_of_delivery")),
                 "return_price_type":      _return_text(row.get("return_price_type")),
                 "return_reason":          _return_text(row.get("return_reason")),
                 "detailed_return_reason": _return_text(row.get("detailed_return_reason")),
-                "otp_verified_at":        safe_datetime(row.get("otp_verified_at")),
             }
+            if in_transit:
+                existing = ReturnDelivery.objects.filter(business=business, suborder_no=suborder,
+                                                         awb_number=awb).only("stage").first()
+                defaults.update({
+                    "transit_status":         _return_text(row.get("transit_status"))[:60],
+                    "expected_delivery_date": safe_date(row.get("expected_delivery_date")),
+                    "delivery_attempt":       _return_text(row.get("delivery_attempt"))[:30],
+                    "transit_updated_at":     now,
+                })
+                if existing and existing.stage == ReturnDelivery.STAGE_DELIVERED:
+                    already_delivered += 1     # already back with us: keep it delivered
+                else:
+                    defaults["stage"] = ReturnDelivery.STAGE_IN_TRANSIT
+            else:
+                defaults.update({
+                    "delivered_date":    delivered,
+                    "proof_of_delivery": _return_text(row.get("proof_of_delivery")),
+                    "otp_verified_at":   safe_datetime(row.get("otp_verified_at")),
+                    "stage":             ReturnDelivery.STAGE_DELIVERED,
+                })
 
             _, was_created = ReturnDelivery.objects.update_or_create(
                 business=business, suborder_no=suborder, awb_number=awb,
@@ -11896,6 +11947,10 @@ def return_deliveries_upload(request, business_id):
             "updated": updated,
             "skipped": skipped,
             "without_delivered_date": no_delivered_date,
+            "kind": sheet_kind,
+            # In-transit sheet only: returns it lists that the delivered export
+            # already had — left as delivered.
+            "already_delivered": already_delivered,
         },
         status=status.HTTP_201_CREATED,
     )
@@ -11913,9 +11968,13 @@ def _return_claim_stats(business):
     window = ReturnDelivery.CLAIM_WINDOW_DAYS
     warn   = ReturnDelivery.WARN_FROM_DAY
 
+    # A return still in transit has nothing to decide yet, so it isn't counted
+    # as "not reviewed" — it gets its own count.
+    in_transit = base.filter(stage=ReturnDelivery.STAGE_IN_TRANSIT)
     by_status = {
         row["claim_status"]: row["n"]
-        for row in base.values("claim_status").annotate(n=Count("id"))
+        for row in base.exclude(stage=ReturnDelivery.STAGE_IN_TRANSIT, claim_status=ReturnDelivery.CLAIM_UNREVIEWED)
+        .values("claim_status").annotate(n=Count("id"))
     }
 
     # Day-of-window boundaries, as delivered_date ranges:
@@ -11952,6 +12011,7 @@ def _return_claim_stats(business):
             (ReturnDelivery.CLAIM_UNREVIEWED,), delivered_date__lte=warn_end_on
         ),
         "open_total": base.filter(claim_status__in=open_all).count(),
+        "in_transit": in_transit.count(),
     }
 
     # Everything that needs someone to act today.
@@ -12016,6 +12076,7 @@ def return_deliveries_list(request, business_id):
       claim_status — one of the CLAIM_* values, or "open" for anything still owed
       urgency      — "attention" (expiring or last day), "expired", "unreviewed"
       type         — "customer" | "rto"
+      stage        — "in_transit" | "delivered"
       page, page_size
     """
     business = get_authorized_business(request, business_id)
@@ -12046,6 +12107,10 @@ def return_deliveries_list(request, business_id):
     elif claim_status:
         qs = qs.filter(claim_status=claim_status)
 
+    stage = request.GET.get("stage", "").strip().upper()
+    if stage in (ReturnDelivery.STAGE_IN_TRANSIT, ReturnDelivery.STAGE_DELIVERED):
+        qs = qs.filter(stage=stage)
+
     return_type = request.GET.get("type", "").strip().lower()
     if return_type == "customer":
         qs = qs.filter(type_of_return__icontains="customer")
@@ -12071,7 +12136,8 @@ def return_deliveries_list(request, business_id):
             delivered_date__lt=today - timedelta(days=window),
         )
     elif urgency == "unreviewed":
-        qs = qs.filter(claim_status=ReturnDelivery.CLAIM_UNREVIEWED)
+        # Still on its way: nothing to decide until it's back with us.
+        qs = qs.filter(claim_status=ReturnDelivery.CLAIM_UNREVIEWED).exclude(stage=ReturnDelivery.STAGE_IN_TRANSIT)
 
     total = qs.count()
 
@@ -12668,9 +12734,8 @@ def return_delivery_lookup(request, business_id):
         return Response({
             "found": False,
             "scanned": code,
-            "message": "No received return matches this code. Upload the latest "
-                       "returns export, or check that the parcel has been marked "
-                       "delivered on Meesho.",
+            "message": "No return matches this code. Upload the latest Delivered "
+                       "and In transit returns exports, then scan it again.",
         }, status=status.HTTP_404_NOT_FOUND)
 
     matches = []
@@ -13295,6 +13360,109 @@ def _refresh_ship_status(business, row, status_hint=None, save=True, scope=None)
     return changed
 
 
+def _scan_ship_check(business, codes):
+    """
+    After a marketplace orders sheet is uploaded: re-check the shipping status
+    of every parcel we scanned that the sheet reports on, and say how many of
+    the ones we dispatched the marketplace now shows as shipped.
+
+    Done in bulk (a few queries per 500 orders, not several per row) because a
+    weekly sheet carries thousands of orders. Only a status the sheets actually
+    report is written; a row they say nothing about keeps what it had.
+    """
+    S = ScannedOrder
+    codes = sorted({c for c in codes if c})
+    rows = []
+    for i in range(0, len(codes), 500):
+        rows += list(S.objects.filter(business=business, sub_order_no__in=codes[i:i + 500]))
+
+    best = {}   # sub-order -> (bucket, raw, source)
+
+    def offer(sub, raw, source):
+        bucket = S.classify_ship_status(raw)
+        if bucket == S.SHIP_UNKNOWN:
+            return
+        cur = best.get(sub)
+        if cur is None or _SHIP_PRIORITY[bucket] > _SHIP_PRIORITY[cur[0]]:
+            best[sub] = (bucket, raw or "", source)
+
+    subs = [r.sub_order_no for r in rows]
+    for i in range(0, len(subs), 500):
+        chunk = subs[i:i + 500]
+        for sub, raw in Order.objects.filter(business=business, sub_order_no__in=chunk) \
+                .values_list("sub_order_no", "reason_for_credit_entry"):
+            offer(sub, raw, "orders")
+        for sub, raw in OrderPayment.objects.filter(business=business, sub_order_no__in=chunk) \
+                .exclude(live_order_status__isnull=True).exclude(live_order_status="") \
+                .values_list("sub_order_no", "live_order_status"):
+            offer(sub, raw, "payments")
+        for item, raw, dispatched in FlipkartOrder.objects.filter(business=business, order_item_id__in=chunk) \
+                .values_list("order_item_id", "order_item_status", "dispatched_date"):
+            offer(item, raw, "flipkart orders")
+            if dispatched:
+                offer(item, "SHIPPED", "flipkart dispatch date")
+
+    now = timezone.now()
+    changed, newly_shipped = [], 0
+    for row in rows:
+        found = best.get(row.sub_order_no)
+        if not found or row.ship_status == S.SHIP_SHIPPED:
+            continue
+        bucket, raw, source = found
+        if bucket == row.ship_status and raw[:100] == (row.ship_status_raw or ""):
+            continue
+        if bucket == S.SHIP_SHIPPED:
+            newly_shipped += 1
+        row.ship_status, row.ship_status_raw, row.ship_source, row.ship_checked_at = bucket, raw[:100], source[:100], now
+        changed.append(row)
+    if changed:
+        S.objects.bulk_update(changed, ["ship_status", "ship_status_raw", "ship_source", "ship_checked_at"], batch_size=500)
+
+    dispatched = [r for r in rows if r.status == S.STATUS_DISPATCHED]
+    count = lambda rs, ship: sum(1 for r in rs if r.ship_status == ship)
+    waiting = [r for r in dispatched if r.ship_status in (S.SHIP_NOT_SHIPPED, S.SHIP_UNKNOWN)]
+    return {
+        "scanned_in_file": len(rows),
+        "dispatched": len(dispatched),
+        "dispatched_shipped": count(dispatched, S.SHIP_SHIPPED),
+        "dispatched_not_shipped": count(dispatched, S.SHIP_NOT_SHIPPED),
+        "dispatched_cancelled": count(dispatched, S.SHIP_CANCELLED),
+        "dispatched_no_status": count(dispatched, S.SHIP_UNKNOWN),
+        "packed_not_dispatched": sum(1 for r in rows if r.status in (S.STATUS_SCANNED, S.STATUS_PACKED)),
+        "newly_shipped": newly_shipped,
+        "status_changes": len(changed),
+        # The dispatched parcels the marketplace still doesn't show as shipped —
+        # the ones to chase with the courier.
+        "waiting": [{"order": r.sub_order_no, "awb": r.awb_number or "", "courier": r.courier_name or "",
+                     "status": r.ship_status_raw or "No status yet"}
+                    for r in sorted(waiting, key=lambda r: r.last_scanned_at or now)[:50]],
+    }
+
+
+def _following_day(request, desk_ids):
+    """
+    The packing day the desk opens on when nobody picked one.
+
+    The day turns at 12 pm, but the screen doesn't go blank then: it keeps
+    showing the last day that had work until the new day gets its first scan
+    or its labels. Returns (day, carried_over).
+    """
+    today = _current_business_date()
+    labels = _scope_labels(request, LabelOrder.objects.filter(business_id__in=desk_ids))
+    scans = ScannedOrder.objects.filter(business_id__in=desk_ids)
+    platform = _label_view_platform(request)
+    if platform:
+        scans = scans.filter(platform=platform)
+    if labels.filter(uploaded_date=today).exists() or scans.filter(scan_day=today).exists():
+        return today, False
+    since = today - timedelta(days=7)
+    last = [d for d in (
+        labels.filter(uploaded_date__lt=today, uploaded_date__gte=since).aggregate(d=Max("uploaded_date"))["d"],
+        scans.filter(scan_day__lt=today, scan_day__gte=since).aggregate(d=Max("scan_day"))["d"],
+    ) if d]
+    return (max(last), True) if last else (today, False)
+
+
 def _scan_desk_scope(request, business):
     """
     The businesses this person's Order Scan desk combines.
@@ -13398,6 +13566,18 @@ def scanned_orders_list(request, business_id):
         owner, snapshot = _resolve_scan_code_pooled(request, business, code, scan_platform)
         cross_business = owner.pk != business.pk
         now = timezone.now()
+
+        # Past 12 pm, until the new day has work, the desk still shows the
+        # previous day's list: a leftover parcel from that list counts toward
+        # it, not as the first scan of the new day.
+        if not payload.get("day") and snapshot["matched_from"] != ScannedOrder.MATCH_NONE:
+            shown, carried = _following_day(request, [b.pk for b in _scan_desk_scope(request, business)])
+            if carried:
+                on_list = DQ(order_id=snapshot["sub_order_no"])
+                if snapshot.get("awb_number"):
+                    on_list |= DQ(awb_number=snapshot["awb_number"])
+                if LabelOrder.objects.filter(business=owner, uploaded_date=shown).filter(on_list).exists():
+                    scan_day = shown
 
         existing = ScannedOrder.objects.filter(
             business=owner, sub_order_no=snapshot["sub_order_no"]
@@ -13560,7 +13740,10 @@ def scan_queue(request, business_id):
     desk = _scan_desk_scope(request, business)
     desk_ids = [b.pk for b in desk]
     names = {b.pk: b.name for b in desk}
-    day = _parse_day(request.GET.get("date")) or _current_business_date()
+    day = _parse_day(request.GET.get("date"))
+    carried_over = False
+    if not day:
+        day, carried_over = _following_day(request, desk_ids)
 
     labels = list(
         _scope_labels(request, LabelOrder.objects.filter(business_id__in=desk_ids, uploaded_date=day))
@@ -13688,6 +13871,11 @@ def scan_queue(request, business_id):
         "date": day.isoformat(),
         "current_day": current_day.isoformat(),
         "is_current_day": day == current_day,
+        # Past 12 pm with nothing scanned or labelled for the new day yet: the
+        # previous day's list stays up until the first scan replaces it.
+        "carried_over": carried_over,
+        # An admin may set any order's status by hand (scan_queue_admin_status).
+        "is_admin": _is_admin(request.user),
         "window": {"start": start.isoformat(), "end": end.isoformat()},
         "summary": summary,
         "items": items,
@@ -13964,6 +14152,99 @@ def scanned_orders_bulk_status(request, business_id):
         "updated": updated,
         "status": new_status,
         "stats": _scanned_order_stats(desk),
+    })
+
+
+@api_view(["POST"])
+def scan_queue_admin_status(request, business_id):
+    """
+    Admin only: set the status of orders on the day's list by hand — mark a
+    parcel dispatched (or packed, on hold…) without scanning it, change any
+    status, or put it back to "to pack".
+
+    Body: {"status": PACKED | DISPATCHED | … | PENDING,
+           "day": "YYYY-MM-DD" (the packing day the list is for),
+           "items": [{"business_id": 1, "order_id": "123_1"}, …]}
+
+    An order nobody scanned gets a scan row built from its label, noted as
+    marked by hand. PENDING removes the order's scan row, so it is back on the
+    to-pack list.
+    """
+    business = get_authorized_business(request, business_id)
+    if not _is_admin(request.user):
+        return Response({"error": "Only an admin can change order statuses by hand."},
+                        status=status.HTTP_403_FORBIDDEN)
+    payload = request.data if isinstance(request.data, dict) else {}
+
+    new_status = str(payload.get("status") or "").strip().upper()
+    if new_status != "PENDING" and new_status not in _SCAN_STATUSES:
+        return Response({"error": f"Invalid status. Expected PENDING or one of: {', '.join(sorted(_SCAN_STATUSES))}"},
+                        status=status.HTTP_400_BAD_REQUEST)
+    items = payload.get("items") or []
+    if not isinstance(items, list) or not items or len(items) > 2000:
+        return Response({"error": "Give a list of orders (business_id + order_id)."},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    current_day = _current_business_date()
+    day = _parse_day(str(payload.get("day") or "")) or current_day
+    if day > current_day:
+        return Response({"error": "That packing day hasn't started yet."}, status=status.HTTP_400_BAD_REQUEST)
+
+    desk = {b.pk: b for b in _scan_desk_scope(request, business)}
+    scope = accessible_businesses(request, include=business)
+    now = timezone.now()
+    note = f"Marked {new_status.replace('_', ' ').lower()} by hand by {request.user.get_username()}"
+    updated = created = reset = missing = 0
+
+    for it in items:
+        try:
+            biz = desk.get(int(it.get("business_id")))
+        except (TypeError, ValueError, AttributeError):
+            biz = None
+        order_id = str((it or {}).get("order_id") or "").strip() if isinstance(it, dict) else ""
+        if not biz or not order_id:
+            missing += 1
+            continue
+        label = LabelOrder.objects.filter(business=biz, order_id=order_id).first()
+        match = DQ(sub_order_no=order_id)
+        if label and label.awb_number:
+            match |= DQ(awb_number=label.awb_number)
+        row = ScannedOrder.objects.filter(business=biz).filter(match).first()
+
+        if new_status == "PENDING":
+            if row:
+                row.delete()
+                reset += 1
+            continue
+        if row:
+            if row.status != new_status:
+                row.status, row.status_updated_at = new_status, now
+                row.notes = f"{row.notes}\n{note}".strip()[:2000]
+                row.save(update_fields=["status", "status_updated_at", "notes", "updated_at"])
+                updated += 1
+            continue
+        if not label:
+            missing += 1
+            continue
+        owner, snap = _resolve_scan_in([biz], biz, label.awb_number or order_id, label.platform or None)
+        if snap["matched_from"] == ScannedOrder.MATCH_NONE:
+            missing += 1
+            continue
+        row = ScannedOrder.objects.create(
+            business=biz, scanned_code=label.awb_number or order_id, status=new_status,
+            status_updated_at=now, notes=note, last_scanned_at=now, scanned_by=request.user,
+            scan_day=day, **snap,
+        )
+        _refresh_ship_status(biz, row, scope=scope)
+        created += 1
+
+    return Response({
+        "status": new_status,
+        "updated": updated,
+        "created": created,
+        "reset": reset,
+        "not_found": missing,
+        "stats": _scanned_order_stats(list(desk.values())),
     })
 
 

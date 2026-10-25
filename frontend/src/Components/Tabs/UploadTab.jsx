@@ -29,7 +29,7 @@ function UploadSection({ title, subtitle, icon, accept, endpoint, isOrders, summ
     try {
       const res = await fetch(`${API}${endpoint}`, { method: "POST", body: fd });
       const d   = await res.json();
-      if (res.ok) setMsg({ type: "ok", data: summarize ? summarize(d) : isOrders ? d : d.results });
+      if (res.ok) setMsg({ type: "ok", data: summarize ? summarize(d) : isOrders ? d : d.results, scan: d.scan_check });
       else        setMsg({ type: "err", text: d.error || "Upload failed" });
     } catch {
       setMsg({ type: "err", text: "Network error — is Django running on port 8000?" });
@@ -119,8 +119,57 @@ function UploadSection({ title, subtitle, icon, accept, endpoint, isOrders, summ
           ))}
         </Alert>
       )}
+      {msg?.type === "ok" && msg.scan && <ScanCheck s={msg.scan} />}
       {msg?.type === "err" && <Alert severity="error">{msg.text}</Alert>}
     </Box>
+  );
+}
+
+/**
+ * What an orders sheet says about the parcels we scanned: of the ones marked
+ * dispatched at the packing desk, how many the marketplace now shows shipped,
+ * and which are still waiting.
+ */
+function ScanCheck({ s }) {
+  const [open, setOpen] = useState(false);
+  if (!s.scanned_in_file) {
+    return <Alert severity="info">None of the orders in this file were scanned at the Order Scan desk.</Alert>;
+  }
+  const waiting = s.dispatched_not_shipped + s.dispatched_no_status;
+  const pct = s.dispatched ? Math.round((s.dispatched_shipped / s.dispatched) * 100) : 0;
+  const rows = [
+    ["Dispatched at the desk", s.dispatched],
+    ["Shipped per this sheet", `${s.dispatched_shipped}${s.dispatched ? ` (${pct}%)` : ""}`],
+    ["Still not shipped", s.dispatched_not_shipped],
+    ["No status in the sheet", s.dispatched_no_status],
+    ["Cancelled", s.dispatched_cancelled],
+    ["Packed, not dispatched yet", s.packed_not_dispatched],
+    ["Newly marked shipped by this upload", s.newly_shipped],
+  ];
+  return (
+    <Alert severity={waiting || s.dispatched_cancelled ? "warning" : "success"} sx={{ textAlign: "left", "& .MuiAlert-message": { minWidth: 0, width: "100%" } }}>
+      <Typography variant="subtitle2" sx={{ mb: 1 }}>
+        Order Scan check — {s.dispatched_shipped} of {s.dispatched} dispatched parcels shipped
+      </Typography>
+      {rows.map(([k, v]) => (
+        <Box key={k} sx={{ display: "flex", justifyContent: "space-between", gap: 1, py: 0.4, borderBottom: "1px solid rgba(0,0,0,0.08)" }}>
+          <Typography variant="body2">{k}</Typography>
+          <Typography variant="body2" sx={{ fontWeight: 700 }}>{v}</Typography>
+        </Box>
+      ))}
+      {s.waiting?.length > 0 && (
+        <Box sx={{ mt: 1 }}>
+          <Button size="small" onClick={() => setOpen((v) => !v)} sx={{ textTransform: "none", px: 0 }}>
+            {open ? "Hide" : "Show"} dispatched but not shipped{waiting > s.waiting.length ? ` (first ${s.waiting.length})` : ""}
+          </Button>
+          {open && s.waiting.map((w) => (
+            <Typography key={w.order} variant="body2" sx={{ fontFamily: "monospace", fontSize: 12, overflowWrap: "anywhere" }}>
+              {w.order}{w.awb ? ` · ${w.awb}` : ""}{w.courier ? ` · ${w.courier}` : ""} · {w.status}
+            </Typography>
+          ))}
+        </Box>
+      )}
+    </Alert>
   );
 }
 
@@ -153,6 +202,11 @@ const flipkartPaymentsSummary = (d) => ({
   "Skipped (no SKU)": d.invalid_rows,
   "Ads / fines / other lines saved": (d.other_charges_created || 0) + (d.other_charges_updated || 0),
   "SKUs with no price set": (d.missing_price_skus || []).length,
+});
+const meeshoOrdersSummary = (d) => ({
+  "Rows in file": d.total_rows,
+  "New": d.created,
+  "Updated": d.updated,
 });
 const flipkartOrdersSummary = (d) => ({
   "Order items in file": d.total_rows,
@@ -214,6 +268,7 @@ export function UploadTab() {
             accept=".csv"
             endpoint="/upload-orders/"
             isOrders={true}
+            summarize={meeshoOrdersSummary}
           />
         </UploadCard>
       </Box>

@@ -76,12 +76,14 @@ function Photo({ url, size = 48, radius = 8 }) {
 // ── The desk: queue, scanning, record ─────────────────────────────────────────
 
 function useScanDesk(platform) {
-  const [date, setDateState] = useState("");
-  // True while the screen follows "today": it moves to the new packing day at
-  // noon by itself. Picking another day by hand stops that until "Back to today".
-  const [following, setFollowing] = useState(true);
-  const setDate = (d) => { setDateState(d); setFollowing(!d || d === packingDayISO()); };
+  // The day picked by hand; "" while the screen follows today. Following, the
+  // server decides what to show: today's list — or, after 12 pm until today's
+  // first scan or labels, the previous day's, so the screen never goes blank.
+  const [picked, setPicked] = useState("");
+  const following = !picked;
   const [queue, setQueue] = useState(null);       // { date, summary, items, dates }
+  const date = picked || queue?.date || "";
+  const setDate = (d) => { if (!(following && d === queue?.date)) setPicked(d); };
   const [loading, setLoading] = useState(true);
   const [mode, setModeState] = useState(() => {
     try { return localStorage.getItem("scan_mode") === "DISPATCHED" ? "DISPATCHED" : "PACKED"; } catch { return "PACKED"; }
@@ -96,20 +98,16 @@ function useScanDesk(platform) {
 
   const setMode = (m) => { setModeState(m); try { localStorage.setItem("scan_mode", m); } catch { /* ignore */ } };
 
-  const load = useCallback(async (forDate = date) => {
+  const load = useCallback(async () => {
     const p = new URLSearchParams({ platform });
-    if (forDate) p.set("date", forDate);
+    if (picked) p.set("date", picked);
     try {
       const res = await fetch(`${API}/order-scan/queue/?${p}`);
-      if (res.ok) {
-        const data = await res.json();
-        setQueue(data);
-        if (!forDate) setDateState(data.date);
-      }
+      if (res.ok) setQueue(await res.json());
     } finally { setLoading(false); }
-  }, [date, platform]);
+  }, [picked, platform]);
 
-  useEffect(() => { setLoading(true); setLatest(null); load(date); }, [platform, date]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { setLoading(true); setLatest(null); load(); }, [load]);
 
   // After a scan the list is already ticked off locally; the full list is
   // fetched again only once scanning pauses, not after every parcel.
@@ -119,15 +117,16 @@ function useScanDesk(platform) {
   }, [load]);
   useEffect(() => () => clearTimeout(reloadTimer.current), []);
 
-  // At 12 pm the count starts fresh: move to the new packing day if the screen
-  // is following today.
+  // At 12 pm a new packing day starts: ask the server again, which keeps the
+  // previous day's list up until the new day has its first scan or labels.
+  const seenDay = useRef(packingDayISO());
   useEffect(() => {
     const t = setInterval(() => {
       const today = packingDayISO();
-      if (following && date && date !== today) setDateState(today);
+      if (today !== seenDay.current) { seenDay.current = today; if (following) load(); }
     }, 30000);
     return () => clearInterval(t);
-  }, [following, date]);
+  }, [following, load]);
 
   /** Record one scan and describe, in one line each, what it means for the desk. */
   const record = async (codeRaw) => {
@@ -141,7 +140,7 @@ function useScanDesk(platform) {
         // Following today: let the server's own noon cut-off decide the day, so a
         // device clock a minute off around 12 pm can't misfile a scan. A day
         // picked by hand is sent as-is.
-        body: JSON.stringify({ code, status: mode, platform, day: following ? undefined : date || undefined }),
+        body: JSON.stringify({ code, status: mode, platform, day: picked || undefined }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -200,9 +199,22 @@ function useScanDesk(platform) {
     }
   };
 
+  /** Admin: set the status of orders on the list by hand (PENDING puts them back to pack). */
+  const setStatusByHand = async (items, status) => {
+    const res = await fetch(`${API}/order-scan/queue/status/`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status, day: queueRef.current?.date, items: items.map((i) => ({ business_id: i.business_id, order_id: i.order_id })) }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) return { error: data.error || "Could not change the status." };
+    await load();
+    return data;
+  };
+
   const currentDay = queue?.current_day || packingDayISO();
-  const backToToday = () => setDate(currentDay);
-  return { date, setDate, currentDay, backToToday, queue, loading, mode, setMode, latest, busy, error, setError, record, reload: load };
+  const backToToday = () => setPicked("");
+  const startToday = () => setPicked(currentDay);
+  return { date, setDate, following, currentDay, backToToday, startToday, queue, loading, mode, setMode, latest, busy, error, setError, record, reload: load, setStatusByHand };
 }
 
 // ── Pieces ────────────────────────────────────────────────────────────────────
@@ -259,15 +271,18 @@ function ProgressBar({ done, total, label }) {
   );
 }
 
-function ItemRow({ item, compact, showBusiness }) {
+function ItemRow({ item, compact, showBusiness, admin, selecting, selected, onToggle, onSetStatus }) {
   const st = STATE_META[item.state] || STATE_META.PENDING;
   const ship = SHIP_META[item.ship_status] || SHIP_META.UNKNOWN;
   const cancelled = item.ship_status === "CANCELLED";
   return (
-    <div style={{
+    <div onClick={selecting ? onToggle : undefined} style={{
       display: "flex", gap: 12, alignItems: "center", padding: compact ? "10px 12px" : "11px 16px",
-      borderBottom: `1px solid ${C.gray100}`, background: cancelled ? C.redLight : C.white,
+      borderBottom: `1px solid ${C.gray100}`, background: selected ? C.orangeLight : cancelled ? C.redLight : C.white,
+      cursor: selecting ? "pointer" : "default",
     }}>
+      {selecting && <input type="checkbox" checked={!!selected} onChange={onToggle} onClick={(e) => e.stopPropagation()}
+        style={{ width: 20, height: 20, accentColor: C.orange, flexShrink: 0 }} />}
       <Photo url={item.image_url} size={compact ? 46 : 52} />
       <div style={{ minWidth: 0, flex: 1 }}>
         <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
@@ -279,11 +294,73 @@ function ItemRow({ item, compact, showBusiness }) {
         </div>
       </div>
       <div style={{ textAlign: "right", flexShrink: 0, display: "flex", flexDirection: "column", gap: 4, alignItems: "flex-end" }}>
-        <Tag variant={st.tag}>{st.label}</Tag>
+        {admin && !selecting && !compact ? (
+          <select value={item.state} onChange={(e) => onSetStatus(e.target.value)} title="Change status (admin)"
+            style={{ ...S.inp, padding: "4px 8px", fontSize: 12, width: "auto", fontWeight: 700 }}>
+            {Object.entries(STATE_META).map(([k, m]) => <option key={k} value={k}>{m.label}</option>)}
+          </select>
+        ) : <Tag variant={st.tag}>{st.label}</Tag>}
         {(item.state !== "PENDING" || cancelled) && item.ship_status !== "UNKNOWN" && (
           <span style={{ fontSize: 10.5, fontWeight: 700, color: ship.color }}>{ship.label}</span>
         )}
       </div>
+    </div>
+  );
+}
+
+/**
+ * Admin: pick orders on the list and set their status by hand — mark them
+ * dispatched without scanning, put them on hold, or back to "to pack".
+ */
+function useAdminSelect(desk, shown) {
+  const [selecting, setSelecting] = useState(false);
+  const [picked, setPicked] = useState(() => new Set());
+  const [note, setNote] = useState(null);
+  const keyOf = (i) => `${i.business_id}-${i.order_id}`;
+  const toggle = (i) => setPicked((s) => { const n = new Set(s); n.has(keyOf(i)) ? n.delete(keyOf(i)) : n.add(keyOf(i)); return n; });
+  const stop = () => { setSelecting(false); setPicked(new Set()); };
+  const apply = async (items, status) => {
+    if (!items.length) return;
+    const d = await desk.setStatusByHand(items, status);
+    if (d.error) { setNote(`⚠ ${d.error}`); return; }
+    {
+      const n = d.updated + d.created + d.reset;
+      setNote(`${n} order${n === 1 ? "" : "s"} set to ${STATE_META[status]?.label || status}${d.not_found ? ` · ${d.not_found} not found` : ""}`);
+      stop();
+      setTimeout(() => setNote(null), 5000);
+    }
+  };
+  return {
+    admin: !!desk.queue?.is_admin, selecting, start: () => setSelecting(true), stop, note,
+    isPicked: (i) => picked.has(keyOf(i)), toggle,
+    count: picked.size,
+    allShown: () => setPicked(new Set(shown.map(keyOf))),
+    applyPicked: (status) => apply((desk.queue?.items || []).filter((i) => picked.has(keyOf(i))), status),
+    applyOne: (i, status) => apply([i], status),
+  };
+}
+
+function AdminBar({ sel, shownCount, compact }) {
+  const [status, setStatus] = useState("DISPATCHED");
+  if (!sel.admin) return null;
+  if (!sel.selecting) {
+    return (
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <button onClick={sel.start} style={btn("ghostOrange", "sm")}>✎ Change status{compact ? "" : " (admin)"}</button>
+        {sel.note && <span style={{ fontSize: 12, fontWeight: 700, color: sel.note.startsWith("⚠") ? C.red : C.green }}>{sel.note.startsWith("⚠") ? "" : "✓ "}{sel.note}</span>}
+      </div>
+    );
+  }
+  return (
+    <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", padding: "8px 10px", borderRadius: 10,
+      background: C.orangeLight, border: `1.5px solid ${C.orange}` }}>
+      <span style={{ fontSize: 12.5, fontWeight: 800, color: C.gray800 }}>{sel.count} selected</span>
+      <button onClick={sel.allShown} style={btn("ghost", "sm")}>Select all {shownCount}</button>
+      <select value={status} onChange={(e) => setStatus(e.target.value)} style={{ ...S.inp, padding: "5px 8px", fontSize: 12.5, width: "auto", fontWeight: 700 }}>
+        {Object.entries(STATE_META).map(([k, m]) => <option key={k} value={k}>{k === "PENDING" ? "To pack (undo scan)" : m.label}</option>)}
+      </select>
+      <button onClick={() => sel.applyPicked(status)} disabled={!sel.count} style={{ ...btn("primary", "sm"), opacity: sel.count ? 1 : 0.5 }}>Apply</button>
+      <button onClick={sel.stop} style={btn("ghost", "sm")}>Cancel</button>
     </div>
   );
 }
@@ -323,8 +400,19 @@ function summaryCounts(items) {
 
 /** Which packing day is open: today's (counting since 12 pm) or an earlier one picked on purpose. */
 function DayNotice({ desk, compact }) {
-  const { date, currentDay, backToToday } = desk;
+  const { date, currentDay, backToToday, startToday, following, queue } = desk;
   if (!date) return null;
+  if (following && queue?.carried_over) {
+    return (
+      <div style={{ background: "#EFF6FF", border: "1.5px solid #BFDBFE", borderRadius: 12, padding: compact ? "8px 12px" : "10px 14px",
+        display: "flex", gap: 10, alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" }}>
+        <span style={{ fontSize: compact ? 12.5 : 13, fontWeight: 700, color: "#1E3A8A" }}>
+          Showing {fmtDay(date)}'s orders{compact ? "" : ` — today's list (from 12 pm) takes over once a new order is scanned or today's labels are uploaded.`}
+        </span>
+        <button onClick={startToday} style={{ ...btn("ghost", "sm") }}>Start today's list</button>
+      </div>
+    );
+  }
   if (date === currentDay) {
     if (compact) return null;
     return (
@@ -629,6 +717,7 @@ function MobilePack({ desk, platform, setPlatform, businesses, onScopeChanged, s
   const inCourier = courier ? items.filter((i) => courierKey(i.courier) === courierKey(courier)) : items;
   const counts = useMemo(() => summaryCounts(inCourier), [inCourier]);
   const shown = inCourier.filter(FILTERS.find((f) => f.key === tab).test);
+  const sel = useAdminSelect(desk, shown);
   const progress = { done: sum?.packed ?? 0, total: (sum?.assigned ?? 0) - (sum?.cancelled ?? 0), label: `${MODES.find((m) => m.key === mode).label}` };
 
   // Lock the page behind the fixed screen so it can't scroll under it.
@@ -657,14 +746,14 @@ function MobilePack({ desk, platform, setPlatform, businesses, onScopeChanged, s
       )}
 
       {/* Header */}
-      <div style={{ padding: "10px 14px", display: "flex", alignItems: "center", gap: 10, borderBottom: `1px solid ${C.gray100}`, flexShrink: 0 }}>
+      <div style={{ padding: "10px 14px", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", borderBottom: `1px solid ${C.gray100}`, flexShrink: 0 }}>
         <button onClick={() => navigate(-1)} aria-label="Back" style={{ background: "none", border: "none", padding: 4, cursor: "pointer", lineHeight: 0, color: C.gray700 }}>
           <ArrowBackIcon />
         </button>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 17, fontWeight: 800, color: C.gray900 }}>Pack orders</div>
+        <div style={{ flex: "1 1 150px", minWidth: 150 }}>
+          <div style={{ fontSize: 17, fontWeight: 800, color: C.gray900, whiteSpace: "nowrap" }}>Pack orders</div>
           <select value={date} onChange={(e) => setDate(e.target.value)}
-            style={{ border: "none", background: "none", fontSize: 12, color: C.gray500, fontWeight: 600, padding: 0, fontFamily: "inherit" }}>
+            style={{ border: "none", background: "none", fontSize: 12, color: C.gray500, fontWeight: 600, padding: 0, fontFamily: "inherit", maxWidth: "100%" }}>
             {[...new Set([date, ...(queue?.dates || [])])].filter(Boolean).sort().reverse().map((d) => <option key={d} value={d}>{dayLabel(d, desk.currentDay)}</option>)}
           </select>
         </div>
@@ -706,12 +795,14 @@ function MobilePack({ desk, platform, setPlatform, businesses, onScopeChanged, s
           </button>
         ))}
       </div>
+      {sel.admin && <div style={{ padding: "0 14px 8px", flexShrink: 0 }}><AdminBar sel={sel} shownCount={shown.length} compact /></div>}
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto", borderTop: `1px solid ${C.gray100}` }}>
         {shown.length === 0 ? (
           <div style={{ textAlign: "center", padding: 36, color: C.gray400, fontSize: 13 }}>
             {!items.length ? "No orders assigned for this day — upload the labels first." : tab === "pending" ? "Everything is packed. 🎉" : "Nothing here."}
           </div>
-        ) : shown.map((i) => <ItemRow key={`${i.business_id}-${i.order_id}`} item={i} compact showBusiness={multi} />)}
+        ) : shown.map((i) => <ItemRow key={`${i.business_id}-${i.order_id}`} item={i} compact showBusiness={multi}
+              admin={sel.admin} selecting={sel.selecting} selected={sel.isPicked(i)} onToggle={() => sel.toggle(i)} onSetStatus={(st) => sel.applyOne(i, st)} />)}
       </div>
 
       {/* Bottom bar */}
@@ -885,6 +976,7 @@ function DesktopPack({ desk, platform, setPlatform, businesses, onScopeChanged, 
   const inCourier = courier ? items.filter((i) => courierKey(i.courier) === courierKey(courier)) : items;
   const counts = useMemo(() => summaryCounts(inCourier), [inCourier]);
   const shown = inCourier.filter(FILTERS.find((f) => f.key === tab).test);
+  const sel = useAdminSelect(desk, shown);
 
   const submit = async () => {
     const code = scan.trim();
@@ -956,13 +1048,15 @@ function DesktopPack({ desk, platform, setPlatform, businesses, onScopeChanged, 
                   <RefreshIcon style={{ fontSize: 15, verticalAlign: "-3px" }} />&nbsp;Refresh
                 </button>
               </div>
+              {sel.admin && <div style={{ padding: "10px 16px", borderBottom: `1px solid ${C.gray100}` }}><AdminBar sel={sel} shownCount={shown.length} /></div>}
               {loading && !queue ? (
                 <div style={{ display: "flex", justifyContent: "center", padding: 44 }}><CircularProgress style={{ color: C.orange }} /></div>
               ) : shown.length === 0 ? (
                 <div style={{ textAlign: "center", padding: 44, color: C.gray400, fontSize: 13 }}>
                   {!items.length ? "No orders assigned for this day — upload the labels first." : tab === "pending" ? "Everything is packed. 🎉" : "Nothing here."}
                 </div>
-              ) : shown.map((i) => <ItemRow key={`${i.business_id}-${i.order_id}`} item={i} showBusiness={multi} />)}
+              ) : shown.map((i) => <ItemRow key={`${i.business_id}-${i.order_id}`} item={i} showBusiness={multi}
+                    admin={sel.admin} selecting={sel.selecting} selected={sel.isPicked(i)} onToggle={() => sel.toggle(i)} onSetStatus={(st) => sel.applyOne(i, st)} />)}
             </div>
 
             <div style={{ position: "sticky", top: 12, display: "flex", flexDirection: "column", gap: 14 }}>
