@@ -4,6 +4,7 @@ import openpyxl
 from decimal import Decimal, InvalidOperation
 from django.db import transaction, IntegrityError
 from django.db.models import Sum, Count, Min, Max, ExpressionWrapper, F, DecimalField as DjDecimalField, Q as DQ, Prefetch, ProtectedError
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.decorators import api_view, parser_classes
@@ -679,7 +680,8 @@ def _return_assurance_total(adj_rows):
 # ── Per-order profit formula ───────────────────────────────────────────────────
 
 def compute_order_net(payment_rows, sku_final_price, sku_packaging_price, quantity, unique_statuses,
-                      sku_item_price=None, sku_tax_percent=None, cost_setting=None, buffer_per_unit=None):
+                      sku_item_price=None, sku_tax_percent=None, cost_setting=None, buffer_per_unit=None,
+                      buffer_total=None):
     # list(["Cancelled", "Delivered", "Return", "RTO", "Shipped", "Exchange", "Unknown"])
 
     ZERO = Decimal("0")
@@ -694,7 +696,10 @@ def compute_order_net(payment_rows, sku_final_price, sku_packaging_price, quanti
     tax_cost       = purchase_cost * Decimal(str(sku_tax_percent or 0)) / Decimal("100")
     # Loss-recovery buffer: a set-aside on every unit that actually sells, so it
     # follows the same outcomes as the item cost (not returns / RTO).
-    buffer_cost    = Decimal(str(buffer_per_unit or 0)) * qty
+    # `buffer_total` is the whole order's buffer, already worked out by
+    # _BufferResolver.charge (SKU buffer × qty, or the business's per-order default).
+    buffer_cost    = (Decimal(str(buffer_total)) if buffer_total is not None
+                      else Decimal(str(buffer_per_unit or 0)) * qty)
 
     # Which outcomes consume a box is the owner's call, not a property of the
     # data — see BusinessCostSetting and _packaging_charge.
@@ -1746,9 +1751,14 @@ class _BufferResolver:
     Follows the same rule as _PriceResolver.effective_price: a SKU under a parent
     that carries an item price uses the PARENT's buffer; any other SKU uses its own.
     Not dated — unlike prices, the buffer always reads its current value.
+
+    A SKU with no buffer of its own is charged the business's default instead —
+    a flat ₹ per order (BusinessCostSetting.default_buffer_per_order). Every
+    profit path asks charge() for the order's buffer, so they all agree.
     """
 
     def __init__(self, business):
+        self.default_per_order = Decimal(str(_cost_setting(business).default_buffer_per_order or 0))
         fps = list(FinalPrice.objects.filter(business=business).only("sku_id", "parent_id", "buffer_amount"))
         self.sku_buffer = _SkuMap((fp.sku_id, fp.buffer_amount or Decimal("0")) for fp in fps)
         self.sku_parent = _SkuMap((fp.sku_id, fp.parent_id) for fp in fps if fp.parent_id)
@@ -1763,6 +1773,14 @@ class _BufferResolver:
         if pid and pid in self.parent_buffer:
             return self.parent_buffer[pid]
         return self.sku_buffer.get(sku_id, Decimal("0"))
+
+    def charge(self, sku_id, qty):
+        """The buffer one order of `qty` units carries: the SKU's own per-unit
+        buffer × qty when it has one, else the business's per-order default."""
+        own = Decimal(str(self.for_sku(sku_id) or 0))
+        if own > 0:
+            return own * Decimal(str(qty or 1))
+        return self.default_per_order
 
 
 def _has_unit_price(item_price):
@@ -1925,7 +1943,7 @@ def sku_order_payments(request, business_id):
         if not _has_unit_price(eff_item_price):
             continue
         result = compute_order_net(payments, eff_price, eff_pkg, qty, unique_statuses,
-                                   eff_item_price, eff_tax_pct, cost_setting=cost_setting, buffer_per_unit=pricing.buffers.for_sku(sku))
+                                   eff_item_price, eff_tax_pct, cost_setting=cost_setting, buffer_total=pricing.buffers.charge(sku, qty))
         order_date = order.get("order_date") or (primary.order_date.date() if primary.order_date else None)
         orders.append({
             "sub_order_no":        sub_no,
@@ -2046,7 +2064,7 @@ def compute_profit_summary(business, date_from="", date_to="", request=None):
             resolved_revenue += _resolve_settlement(_cls)
 
         result = compute_order_net(payments, eff_price, eff_pkg, qty, unique_statuses,
-                                   eff_item_price, eff_tax_pct, cost_setting=cost_setting, buffer_per_unit=pricing.buffers.for_sku(sku))
+                                   eff_item_price, eff_tax_pct, cost_setting=cost_setting, buffer_total=pricing.buffers.charge(sku, qty))
         accumulate_sku_profit(canonical_sku.get(sku, sku), order_wise_profit, result, price_map, packaging_map, unique_statuses)
         orders_with_price += 1
 
@@ -2562,7 +2580,7 @@ def profit_daily_summary(request, business_id):
             continue
 
         result = compute_order_net(group, eff_price, eff_pkg, qty, unique_statuses,
-                                   eff_item_price, eff_tax_pct, cost_setting=cost_setting, buffer_per_unit=buffers.for_sku(sku))
+                                   eff_item_price, eff_tax_pct, cost_setting=cost_setting, buffer_total=buffers.charge(sku, qty))
         key = STATUS_TO_KEY.get(result["status"], "unknown")
 
         # compute_order_net's own status sets are narrower than what the rest
@@ -2710,7 +2728,9 @@ def _estimated_profit_pricing_lookup(business):
 
     # The loss-recovery buffer rides along on the closure so every caller can
     # charge it without a second lookup function.
-    get_price.buffer_for = _BufferResolver(business).for_sku
+    buffers = _BufferResolver(business)
+    get_price.buffer_for = buffers.for_sku
+    get_price.buffer_charge = buffers.charge
     return get_price, known_skus, canonical_sku
 
 
@@ -2836,7 +2856,7 @@ def _compute_estimated_profit_summary(business, date_from=None, date_to=None):
         # multiplied by qty again — same fix as compute_order_net().
         tax_cost = purchase_cost * tax_pct / Decimal("100")
         # Loss-recovery buffer, charged on every unit that actually sold.
-        buffer_cost = Decimal(str(get_price.buffer_for(sku_id) or 0)) * qty_d
+        buffer_cost = get_price.buffer_charge(sku_id, qty_d)
 
         if claim_approved:
             bucket = "claim"
@@ -3361,7 +3381,7 @@ def _compute_flipkart_profit_summary(business, date_from=None, date_to=None, sku
             purchase_cost = item_price * qty_d
             tax_cost = purchase_cost * tax_pct / Decimal("100")
             packaging = _packaging_charge(BusinessCostSetting.DELIVERED, packaging_cost, cost_setting)
-            buffer_cost = Decimal(str(get_price.buffer_for(sku_id) or 0)) * qty_d
+            buffer_cost = get_price.buffer_charge(sku_id, qty_d)
             cost = purchase_cost + tax_cost + packaging + buffer_cost
             gross, net = settlement, settlement - cost
 
@@ -3581,7 +3601,7 @@ def flipkart_profit_sku_payments(request, business_id):
             purchase_cost = item_price * qty_d
             tax_cost = purchase_cost * tax_pct / Decimal("100")
             packaging = _packaging_charge(BusinessCostSetting.DELIVERED, packaging_cost, cost_setting)
-            buffer_cost = Decimal(str(get_price.buffer_for(sku_id) or 0)) * qty_d
+            buffer_cost = get_price.buffer_charge(sku_id, qty_d)
             cost = purchase_cost + tax_cost + packaging + buffer_cost
             net = settlement - cost
 
@@ -3744,7 +3764,7 @@ def ads_sku_analysis(request, business_id):
         if not _has_unit_price(eff_item_price):
             continue
         result = compute_order_net(payments, eff_price, eff_pkg, qty, unique_statuses,
-                                   eff_item_price, eff_tax_pct, cost_setting=cost_setting, buffer_per_unit=buffers.for_sku(sku))
+                                   eff_item_price, eff_tax_pct, cost_setting=cost_setting, buffer_total=buffers.charge(sku, qty))
 
         is_ad = sub_no in ad_sub_orders
         bucket = ad_profit if is_ad else org_profit
@@ -13439,6 +13459,17 @@ def _scan_ship_check(business, codes):
     }
 
 
+def _labels_on_day(qs, day):
+    """Labels whose packing day is `day`: uploaded that day and not moved, or
+    moved to it by an admin (LabelOrder.pack_day)."""
+    return qs.filter(DQ(pack_day=day) | DQ(pack_day__isnull=True, uploaded_date=day))
+
+
+def _with_pack_day(qs):
+    """Annotate each label with its packing day (`eff_day`), for ranges and lists."""
+    return qs.annotate(eff_day=Coalesce("pack_day", "uploaded_date"))
+
+
 def _following_day(request, desk_ids):
     """
     The packing day the desk opens on when nobody picked one.
@@ -13453,11 +13484,11 @@ def _following_day(request, desk_ids):
     platform = _label_view_platform(request)
     if platform:
         scans = scans.filter(platform=platform)
-    if labels.filter(uploaded_date=today).exists() or scans.filter(scan_day=today).exists():
+    if _labels_on_day(labels, today).exists() or scans.filter(scan_day=today).exists():
         return today, False
     since = today - timedelta(days=7)
     last = [d for d in (
-        labels.filter(uploaded_date__lt=today, uploaded_date__gte=since).aggregate(d=Max("uploaded_date"))["d"],
+        _with_pack_day(labels).filter(eff_day__lt=today, eff_day__gte=since).aggregate(d=Max("eff_day"))["d"],
         scans.filter(scan_day__lt=today, scan_day__gte=since).aggregate(d=Max("scan_day"))["d"],
     ) if d]
     return (max(last), True) if last else (today, False)
@@ -13576,7 +13607,7 @@ def scanned_orders_list(request, business_id):
                 on_list = DQ(order_id=snapshot["sub_order_no"])
                 if snapshot.get("awb_number"):
                     on_list |= DQ(awb_number=snapshot["awb_number"])
-                if LabelOrder.objects.filter(business=owner, uploaded_date=shown).filter(on_list).exists():
+                if _labels_on_day(LabelOrder.objects.filter(business=owner), shown).filter(on_list).exists():
                     scan_day = shown
 
         existing = ScannedOrder.objects.filter(
@@ -13721,9 +13752,55 @@ def scanned_orders_list(request, business_id):
     })
 
 
-# How many days back an order that hasn't gone out keeps coming forward onto
-# the day's packing list.
-SCAN_CARRY_DAYS = 7
+# How many days back an unsent order can be found and moved onto the latest
+# day's packing list.
+SCAN_SHIFT_DAYS = 7
+
+
+def _earlier_unsent(request, desk_ids, day, names):
+    """
+    Orders from the SCAN_SHIFT_DAYS before `day` that still haven't gone out:
+    not dispatched or cancelled by us, and not shipped or cancelled per the
+    marketplace. These are what an admin may move onto `day` (scan_queue_shift).
+    """
+    labels = list(
+        _with_pack_day(_scope_labels(request, LabelOrder.objects.filter(business_id__in=desk_ids)))
+        .filter(eff_day__lt=day, eff_day__gte=day - timedelta(days=SCAN_SHIFT_DAYS))
+        .order_by("-eff_day", "courier_name", "sku", "order_id")[:3000]
+    )
+    if not labels:
+        return {"count": 0, "by_day": [], "items": []}
+    ids = [l.order_id for l in labels]
+    awbs = [l.awb_number for l in labels if l.awb_number]
+    q = DQ(sub_order_no__in=ids) | (DQ(awb_number__in=awbs) if awbs else DQ(pk__in=[]))
+    scans = list(ScannedOrder.objects.filter(business_id__in=desk_ids).filter(q)
+                 .only("business_id", "sub_order_no", "awb_number", "status", "ship_status"))
+    by_sub = {(s.business_id, s.sub_order_no): s for s in scans}
+    by_awb = {(s.business_id, s.awb_number): s for s in scans if s.awb_number}
+    sheet = {}
+    for b, sub, st in Order.objects.filter(business_id__in=desk_ids, sub_order_no__in=ids) \
+            .values_list("business_id", "sub_order_no", "reason_for_credit_entry"):
+        bucket = ScannedOrder.classify_ship_status(st)
+        if _SHIP_PRIORITY[bucket] > _SHIP_PRIORITY[sheet.get((b, sub), ScannedOrder.SHIP_UNKNOWN)]:
+            sheet[(b, sub)] = bucket
+    settled = (ScannedOrder.SHIP_SHIPPED, ScannedOrder.SHIP_CANCELLED)
+    out = []
+    for l in labels:
+        sc = by_sub.get((l.business_id, l.order_id)) or (by_awb.get((l.business_id, l.awb_number)) if l.awb_number else None)
+        if sc and (sc.status in (ScannedOrder.STATUS_DISPATCHED, ScannedOrder.STATUS_CANCELLED) or sc.ship_status in settled):
+            continue
+        if sheet.get((l.business_id, l.order_id)) in settled:
+            continue
+        out.append({
+            "order_id": l.order_id, "business_id": l.business_id, "business_name": names.get(l.business_id, ""),
+            "awb": l.awb_number, "sku": l.sku, "qty": l.qty, "courier": l.courier_name,
+            "day": l.eff_day.isoformat(), "state": sc.status if sc else "PENDING",
+        })
+    by_day = {}
+    for i in out:
+        by_day[i["day"]] = by_day.get(i["day"], 0) + 1
+    return {"count": len(out), "by_day": [{"day": d, "count": n} for d, n in sorted(by_day.items(), reverse=True)],
+            "items": out[:500]}
 
 
 @api_view(["GET"])
@@ -13751,22 +13828,9 @@ def scan_queue(request, business_id):
         day, carried_over = _following_day(request, desk_ids)
 
     labels = list(
-        _scope_labels(request, LabelOrder.objects.filter(business_id__in=desk_ids, uploaded_date=day))
+        _labels_on_day(_scope_labels(request, LabelOrder.objects.filter(business_id__in=desk_ids)), day)
         .order_by("courier_name", "sku", "order_id")[:4000]
     )
-    # Orders from the last few days that still haven't gone out come forward
-    # onto this day's list: not dispatched by us, and not shipped or cancelled
-    # per the marketplace. Which of them qualify is settled below, once their
-    # scans and sheet statuses are known.
-    on_day = {(l.business_id, l.order_id) for l in labels}
-    earlier, seen = [], set(on_day)
-    for l in (_scope_labels(request, LabelOrder.objects.filter(
-            business_id__in=desk_ids, uploaded_date__lt=day, uploaded_date__gte=day - timedelta(days=SCAN_CARRY_DAYS)))
-            .order_by("-uploaded_date", "courier_name", "sku", "order_id")[:4000]):
-        if (l.business_id, l.order_id) not in seen:
-            seen.add((l.business_id, l.order_id))
-            earlier.append(l)
-    labels += earlier
     ids = [l.order_id for l in labels]
     awbs = [l.awb_number for l in labels if l.awb_number]
 
@@ -13794,19 +13858,9 @@ def scan_queue(request, business_id):
         sc = by_sub.get((l.business_id, l.order_id)) or (by_awb.get((l.business_id, l.awb_number)) if l.awb_number else None)
         sheet = sheet_status.get((l.business_id, l.order_id))
         ship = sc.ship_status if sc else ScannedOrder.classify_ship_status(sheet)
-        carried_from = None
-        if (l.business_id, l.order_id) not in on_day:
-            sheet_ship = ScannedOrder.classify_ship_status(sheet)
-            # Handled on this very day: it stays on the list, ticked off.
-            gone = not (sc and sc.scan_day == day) and (
-                    ship in (ScannedOrder.SHIP_SHIPPED, ScannedOrder.SHIP_CANCELLED)
-                    or sheet_ship in (ScannedOrder.SHIP_SHIPPED, ScannedOrder.SHIP_CANCELLED)
-                    or (sc and sc.status in (ScannedOrder.STATUS_DISPATCHED, ScannedOrder.STATUS_CANCELLED)))
-            if gone:
-                continue
-            carried_from = l.uploaded_date.isoformat()
         items.append({
-            "carried_from": carried_from,
+            # Moved here by an admin from the day it was uploaded for.
+            "shifted_from": l.uploaded_date.isoformat() if l.pack_day and l.pack_day != l.uploaded_date else None,
             "order_id": l.order_id,
             "business_id": l.business_id,
             "business_name": names.get(l.business_id, ""),
@@ -13830,8 +13884,8 @@ def scan_queue(request, business_id):
     packed_states = (ScannedOrder.STATUS_PACKED, ScannedOrder.STATUS_DISPATCHED)
     summary = {
         "assigned":   len(items),
-        # Of those, brought forward from earlier days because they haven't gone out.
-        "carried":    sum(1 for i in items if i["carried_from"]),
+        # Of those, moved here from earlier days by an admin.
+        "moved_in":   sum(1 for i in items if i["shifted_from"]),
         "scanned":    sum(1 for i in items if i["scan_id"]),
         "packed":     sum(1 for i in items if i["state"] in packed_states),
         "remaining":  sum(1 for i in items if i["state"] == "PENDING" and i["ship_status"] != ScannedOrder.SHIP_CANCELLED),
@@ -13892,15 +13946,21 @@ def scan_queue(request, business_id):
     items.sort(key=lambda i: (i["state"] != "PENDING",))
     current_day = _current_business_date()
     dates = set(
-        _scope_labels(request, LabelOrder.objects.filter(business_id__in=desk_ids, uploaded_date__lte=current_day))
-        .values_list("uploaded_date", flat=True).distinct().order_by("-uploaded_date")[:14]
+        _with_pack_day(_scope_labels(request, LabelOrder.objects.filter(business_id__in=desk_ids)))
+        .filter(eff_day__lte=current_day)
+        .values_list("eff_day", flat=True).distinct().order_by("-eff_day")[:14]
     )
     # Today's and yesterday's packing days are always offered, so the desk can
     # switch back to the previous day and scan its orders even with no labels.
     dates |= {current_day, current_day - timedelta(days=1)}
     start, end = _packing_day_window(day)
-    latest_labels = (_scope_labels(request, LabelOrder.objects.filter(business_id__in=desk_ids, uploaded_date__lte=current_day))
-                     .order_by("-uploaded_date").values_list("uploaded_date", flat=True).first())
+    latest_labels = (_with_pack_day(_scope_labels(request, LabelOrder.objects.filter(business_id__in=desk_ids)))
+                     .filter(eff_day__lte=current_day).order_by("-eff_day").values_list("eff_day", flat=True).first())
+    # Orders from earlier days that never went out: an admin can move them onto
+    # the latest day's list. Offered only on the latest day, and only to an admin.
+    is_admin = _is_admin(request.user)
+    latest_day = day == current_day or carried_over or (latest_labels and day >= latest_labels)
+    earlier_unsent = _earlier_unsent(request, desk_ids, day, names) if is_admin and latest_day else None
     return Response({
         "latest_label_day": latest_labels.isoformat() if latest_labels else None,
         "businesses": [{"id": b.pk, "name": b.name} for b in desk],
@@ -13910,8 +13970,10 @@ def scan_queue(request, business_id):
         # Past 12 pm with nothing scanned or labelled for the new day yet: the
         # previous day's list stays up until the first scan replaces it.
         "carried_over": carried_over,
-        # An admin may set any order's status by hand (scan_queue_admin_status).
-        "is_admin": _is_admin(request.user),
+        # An admin may set any order's status by hand (scan_queue_admin_status)
+        # and move earlier days' unsent orders onto this day (scan_queue_shift).
+        "is_admin": is_admin,
+        "earlier_unsent": earlier_unsent,
         "window": {"start": start.isoformat(), "end": end.isoformat()},
         "summary": summary,
         "items": items,
@@ -14103,17 +14165,18 @@ def scan_alerts(request, business_id):
 
     def label_row(l):
         return {"order_id": l.order_id, "awb": l.awb_number, "sku": l.sku, "qty": l.qty,
-                "courier": l.courier_name, "platform": l.platform, "date": l.uploaded_date.isoformat()}
+                "courier": l.courier_name, "platform": l.platform, "date": l.eff_day.isoformat()}
 
     def scan_row(r):
         return {"id": r.id, "order_id": r.sub_order_no, "awb": r.awb_number, "sku": r.sku, "qty": r.qty,
                 "courier": r.courier_name, "platform": r.platform, "status": r.status,
                 "ship_status_raw": r.ship_status_raw, "scanned_at": r.last_scanned_at.isoformat() if r.last_scanned_at else None}
 
-    labels = LabelOrder.objects.filter(business_id__in=ids, uploaded_date__gte=since, uploaded_date__lt=today)
+    labels = _with_pack_day(LabelOrder.objects.filter(business_id__in=ids)).filter(eff_day__gte=since, eff_day__lt=today)
     if platform:
         labels = labels.filter(platform=platform)
-    labels = list(labels.only("order_id", "business_id", "awb_number", "sku", "qty", "courier_name", "platform", "uploaded_date")[:5000])
+    labels = list(labels.only("order_id", "business_id", "awb_number", "sku", "qty", "courier_name", "platform",
+                              "uploaded_date", "pack_day")[:5000])
     order_ids = [l.order_id for l in labels]
     awbs = [l.awb_number for l in labels if l.awb_number]
     scanned_subs, scanned_awbs = set(), set()
@@ -14146,7 +14209,7 @@ def scan_alerts(request, business_id):
 
     by_day = {}
     for l in not_packed:
-        by_day[l.uploaded_date.isoformat()] = by_day.get(l.uploaded_date.isoformat(), 0) + 1
+        by_day[l.eff_day.isoformat()] = by_day.get(l.eff_day.isoformat(), 0) + 1
     out = {
         "not_packed": {"count": len(not_packed), "by_day": by_day, "items": [label_row(l) for l in not_packed[:20]]},
         "not_dispatched": {"count": len(not_dispatched), "items": [scan_row(r) for r in not_dispatched[:20]]},
@@ -14189,6 +14252,67 @@ def scanned_orders_bulk_status(request, business_id):
         "status": new_status,
         "stats": _scanned_order_stats(desk),
     })
+
+
+@api_view(["POST"])
+def scan_queue_shift(request, business_id):
+    """
+    Admin only: move orders that didn't go out on their own day onto a later
+    packing day's list — or back to their own day.
+
+    Body: {"to_day": "YYYY-MM-DD", "items": [{"business_id": 1, "order_id": "123_1"}, …]}
+          {"undo": true, "items": [...]}  — back to the day they were uploaded for
+
+    Only the packing day moves (LabelOrder.pack_day); the label's upload date
+    and everything scanned stay as they are.
+    """
+    business = get_authorized_business(request, business_id)
+    if not _is_admin(request.user):
+        return Response({"error": "Only an admin can move orders between days."}, status=status.HTTP_403_FORBIDDEN)
+    data = request.data if isinstance(request.data, dict) else {}
+    items = data.get("items") or []
+    if not isinstance(items, list) or not items or len(items) > 3000:
+        return Response({"error": "Give a list of orders (business_id + order_id)."}, status=status.HTTP_400_BAD_REQUEST)
+    undo = bool(data.get("undo"))
+    current_day = _current_business_date()
+    to_day = None
+    if not undo:
+        to_day = _parse_day(str(data.get("to_day") or ""))
+        if not to_day:
+            return Response({"error": "to_day must be YYYY-MM-DD."}, status=status.HTTP_400_BAD_REQUEST)
+        if to_day > current_day:
+            return Response({"error": "That packing day hasn't started yet."}, status=status.HTTP_400_BAD_REQUEST)
+
+    desk_ids = {b.pk for b in _scan_desk_scope(request, business)}
+    wanted = {}
+    for it in items:
+        try:
+            biz = int(it.get("business_id"))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if biz in desk_ids and str(it.get("order_id") or "").strip():
+            wanted.setdefault(biz, set()).add(str(it["order_id"]).strip())
+
+    moved = skipped = 0
+    with transaction.atomic():
+        for biz, orders in wanted.items():
+            for label in LabelOrder.objects.filter(business_id=biz, order_id__in=orders):
+                if undo:
+                    if label.pack_day is not None:
+                        label.pack_day = None
+                        label.save(update_fields=["pack_day", "updated_at"])
+                        moved += 1
+                    continue
+                own_day = label.pack_day or label.uploaded_date
+                if own_day >= to_day:
+                    skipped += 1          # already on that day, or a later one
+                    continue
+                label.pack_day = None if to_day == label.uploaded_date else to_day
+                label.save(update_fields=["pack_day", "updated_at"])
+                moved += 1
+    asked = sum(len(v) for v in wanted.values())
+    return Response({"moved": moved, "skipped": skipped, "not_found": max(0, asked - moved - skipped),
+                     "to_day": to_day.isoformat() if to_day else None, "undo": undo})
 
 
 @api_view(["GET"])
@@ -17281,6 +17405,7 @@ def cost_settings(request, business_id):
             "packaging_statuses":        list(setting.packaging_statuses or []),
             "exchange_uses_two_packets": setting.exchange_uses_two_packets,
             "sale_price_includes_gst":   setting.sale_price_includes_gst,
+            "default_buffer_per_order":  float(setting.default_buffer_per_order or 0),
             "available_statuses": [
                 {"value": v, "label": l}
                 for v, l in BusinessCostSetting.PACKAGING_STATUS_CHOICES
@@ -17317,6 +17442,16 @@ def cost_settings(request, business_id):
     for flag in ("exchange_uses_two_packets", "sale_price_includes_gst"):
         if flag in data:
             setattr(setting, flag, bool(data[flag]))
+
+    if "default_buffer_per_order" in data:
+        try:
+            amount = Decimal(str(data["default_buffer_per_order"] or 0)).quantize(Decimal("0.01"))
+        except (InvalidOperation, ValueError):
+            amount = None
+        if amount is None or amount < 0 or amount > 1000:
+            return Response({"error": "The buffer must be between ₹0 and ₹1000 per order."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        setting.default_buffer_per_order = amount
 
     setting.updated_by = request.user
     setting.save()

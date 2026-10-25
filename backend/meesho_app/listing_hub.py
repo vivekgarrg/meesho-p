@@ -98,10 +98,17 @@ def _batches_for(business, parent, sheet_map):
     return batches
 
 
-def _card(p, sku_counts, photo_counts, platforms, cats, saved, paused, matched_sku=None):
+def _unit_cost(parent, default_buffer):
+    """What one unit costs to sell: its final price plus its loss-recovery
+    buffer — the business's per-order default when it has none of its own."""
+    own = _d(parent.buffer_amount)
+    return _d(parent.final_price) + (own if own > 0 else _d(default_buffer))
+
+
+def _card(p, sku_counts, photo_counts, platforms, cats, saved, paused, matched_sku=None, default_buffer=0):
     return {
         "id": p.id, "item_id": p.item_id, "image_url": p.image_url,
-        "unit_cost": _money(_d(p.final_price) + _d(p.buffer_amount)) if p.item_price else None,
+        "unit_cost": _money(_unit_cost(p, default_buffer)) if p.item_price else None,
         "priced": bool(p.item_price and p.item_price > 0),
         "sku_count": sku_counts.get(p.id, 0), "photo_count": photo_counts.get(p.id, 0),
         "listed_on": platforms.get(p.id, []),
@@ -174,9 +181,12 @@ def hub_search(request, business_id):
         saved[lp.parent_id][lp.platform] = _money(lp.price)
     photos = _photo_counts(business)
     unlinked = sum(1 for pids, _how in sheet_map.values() if not pids) if admin else 0
+    from .views import _cost_setting
+    default_buffer = _cost_setting(business).default_buffer_per_order
     return Response({
         "total": total, "offset": offset,
-        "results": [_card(p, sku_counts, photos, platforms, cats, saved, paused, matched.get(p.id)) for p in page],
+        "results": [_card(p, sku_counts, photos, platforms, cats, saved, paused, matched.get(p.id),
+                          default_buffer=default_buffer) for p in page],
         "skus_without_parent": sorted(set(orphan_skus))[:20],
         "categories": sorted(({"label": k, "count": v} for k, v in counts.items()),
                              key=lambda c: (c["label"] == NO_SHEET, -c["count"], c["label"])),
@@ -330,7 +340,7 @@ def _pricing(business, parent, skus, target=None):
     from .views import _cost_setting
 
     cost_setting = _cost_setting(business)
-    unit_cost = _d(parent.final_price) + _d(parent.buffer_amount)
+    unit_cost = _unit_cost(parent, cost_setting.default_buffer_per_order)
     if target is None:
         target = max(MIN_DEFAULT_TARGET, (unit_cost * DEFAULT_TARGET_SHARE).quantize(Decimal("1")))
     priced = bool(parent.item_price and parent.item_price > 0)

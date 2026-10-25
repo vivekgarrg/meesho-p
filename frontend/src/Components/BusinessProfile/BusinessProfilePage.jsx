@@ -63,6 +63,41 @@ const COST_FLAGS = [
   },
 ];
 
+/**
+ * The ₹ set aside on every order that sells, so the losses that keep turning
+ * up are already paid for out of profit. Saved when the box loses focus.
+ */
+function BufferSetting({ value, canEdit, saving, onSave }) {
+  const [draft, setDraft] = useState(value ?? 6);
+  useEffect(() => { setDraft(value ?? 6); }, [value]);
+  const commit = () => {
+    const n = Number(draft);
+    if (Number.isFinite(n) && n >= 0 && n !== Number(value)) onSave(n);
+    else setDraft(value ?? 6);
+  };
+  return (
+    <div style={{ padding: "12px 14px", borderRadius: 10, border: `1px solid ${C.border}`, background: C.gray50,
+      marginTop: 10, opacity: canEdit ? 1 : 0.75, display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
+      <div style={{ flex: "1 1 260px", minWidth: 0 }}>
+        <div style={{ fontSize: 14, fontWeight: 700, color: C.gray800 }}>Loss buffer per order</div>
+        <div style={{ fontSize: 12, color: C.gray500, marginTop: 3 }}>
+          Set aside on every delivered, exchanged or claimed order so losses (damages, rejected claims, odd deductions)
+          are covered. Not charged on returns or RTO. A SKU with its own buffer in SKU Pricing uses that instead.
+          Set 0 to turn it off.
+        </div>
+      </div>
+      <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 15, fontWeight: 800, color: C.gray800 }}>
+        ₹
+        <input type="number" min="0" step="0.5" value={draft} disabled={!canEdit || saving}
+          onChange={(e) => setDraft(e.target.value)} onBlur={commit}
+          onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
+          style={{ ...S.inp, width: 90, fontWeight: 800, fontSize: 15 }} />
+        <span style={{ fontSize: 12, color: C.gray500, fontWeight: 600 }}>/ order</span>
+      </label>
+    </div>
+  );
+}
+
 function initialsOf(name) {
   return (name || "?")
     .split(/\s+/)
@@ -343,6 +378,8 @@ export default function BusinessProfilePage() {
                     <FlagRow key={f.key} title={f.title} help={f.help}
                              checked={!!cost[f.key]} onChange={(v) => saveCost({ [f.key]: v })} />
                   ))}
+                  <BufferSetting value={cost.default_buffer_per_order} canEdit={canEdit} saving={profileSaving}
+                    onSave={(v) => saveCost({ default_buffer_per_order: v })} />
                 </>
               )}
             </>

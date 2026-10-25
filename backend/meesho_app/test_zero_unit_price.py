@@ -20,6 +20,20 @@ from .models import (
 from .views import _has_unit_price
 
 
+# These tests work their profit figures out by hand around other rules, so they
+# run without the business-wide ₹6 per-order buffer (see test_default_buffer.py).
+def setUpModule():
+    from .models import BusinessCostSetting
+    field = BusinessCostSetting._meta.get_field("default_buffer_per_order")
+    field._saved_default, field.default = field.default, 0
+
+
+def tearDownModule():
+    from .models import BusinessCostSetting
+    field = BusinessCostSetting._meta.get_field("default_buffer_per_order")
+    field.default = field._saved_default
+
+
 class HelperTests(TestCase):
     def test_only_a_positive_price_counts(self):
         self.assertTrue(_has_unit_price(D("0.01")))

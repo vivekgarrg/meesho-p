@@ -378,7 +378,7 @@ class FlipkartPricing:
             purchase = Decimal(str(item_price or 0)) * qty
             tax = purchase * Decimal(str(tax_pct or 0)) / Decimal("100")
             packaging = _packaging_charge(BusinessCostSetting.DELIVERED, Decimal(str(packaging_cost or 0)), self.cost_setting)
-            buffer_cost = Decimal(str(self.get_price.buffer_for(sku) or 0)) * qty
+            buffer_cost = self.get_price.buffer_charge(sku, qty)
             cost = purchase + tax + packaging + buffer_cost
             net = settlement - cost
 

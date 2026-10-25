@@ -212,10 +212,22 @@ function useScanDesk(platform) {
     return data;
   };
 
+  /** Admin: move earlier days' unsent orders onto `toDay` — or, with undo, back to their own day. */
+  const shiftOrders = async (items, { toDay, undo } = {}) => {
+    const res = await fetch(`${API}/order-scan/shift/`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ to_day: toDay, undo: !!undo, items: items.map((i) => ({ business_id: i.business_id, order_id: i.order_id })) }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) return { error: data.error || "Could not move those orders." };
+    await load();
+    return data;
+  };
+
   const currentDay = queue?.current_day || packingDayISO();
   const backToToday = () => setPicked("");
   const startToday = () => setPicked(currentDay);
-  return { date, setDate, following, currentDay, backToToday, startToday, queue, loading, mode, setMode, latest, busy, error, setError, record, reload: load, setStatusByHand };
+  return { date, setDate, following, currentDay, backToToday, startToday, queue, loading, mode, setMode, latest, busy, error, setError, record, reload: load, setStatusByHand, shiftOrders };
 }
 
 // ── Pieces ────────────────────────────────────────────────────────────────────
@@ -272,7 +284,7 @@ function ProgressBar({ done, total, label }) {
   );
 }
 
-function ItemRow({ item, compact, showBusiness, admin, selecting, selected, onToggle, onSetStatus }) {
+function ItemRow({ item, compact, showBusiness, admin, selecting, selected, onToggle, onSetStatus, onMoveBack }) {
   const st = STATE_META[item.state] || STATE_META.PENDING;
   const ship = SHIP_META[item.ship_status] || SHIP_META.UNKNOWN;
   const cancelled = item.ship_status === "CANCELLED";
@@ -293,8 +305,16 @@ function ItemRow({ item, compact, showBusiness, admin, selecting, selected, onTo
         <div style={{ fontSize: 11.5, color: C.gray500, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {[showBusiness && item.business_name, item.courier, item.customer_city, item.awb].filter(Boolean).join(" · ")}
         </div>
-        {item.carried_from && (
-          <div style={{ marginTop: 3 }}><Tag variant="amber">↻ Not sent · from {fmtDay(item.carried_from)}</Tag></div>
+        {item.shifted_from && (
+          <div style={{ marginTop: 3, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+            <Tag variant="amber">↻ Moved from {fmtDay(item.shifted_from)}</Tag>
+            {admin && !selecting && onMoveBack && (
+              <button onClick={(e) => { e.stopPropagation(); onMoveBack(); }}
+                style={{ border: "none", background: "none", padding: 0, fontSize: 11, fontWeight: 700, color: C.gray500, cursor: "pointer", textDecoration: "underline" }}>
+                Move back
+              </button>
+            )}
+          </div>
         )}
       </div>
       <div style={{ textAlign: "right", flexShrink: 0, display: "flex", flexDirection: "column", gap: 4, alignItems: "flex-end" }}>
@@ -373,7 +393,6 @@ const FILTERS = [
   { key: "pending",   label: "To pack",   test: (i) => i.state === "PENDING" && i.ship_status !== "CANCELLED" },
   { key: "done",      label: "Packed",    test: (i) => ["PACKED", "DISPATCHED", "SCANNED"].includes(i.state) },
   { key: "issues",    label: "Issues",    test: (i) => ["ON_HOLD", "ISSUE"].includes(i.state) || i.ship_status === "CANCELLED" },
-  { key: "carried",   label: "From earlier", test: (i) => !!i.carried_from },
   { key: "all",       label: "All",       test: () => true },
 ];
 
@@ -684,6 +703,93 @@ function AlertsPanel({ alerts, onClose }) {
   );
 }
 
+/**
+ * Admin only: orders from earlier days that never went out. Nothing moves by
+ * itself — the admin picks which ones go onto the day on screen.
+ */
+function UnsentBanner({ desk, onOpen, compact }) {
+  const u = desk.queue?.earlier_unsent;
+  if (!u?.count) return null;
+  return (
+    <button onClick={onOpen} style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", textAlign: "left", cursor: "pointer",
+      fontFamily: "inherit", background: "#FFFBEB", border: `1.5px solid ${C.amberBorder}`, borderRadius: 12, padding: compact ? "8px 12px" : "10px 14px" }}>
+      <span style={{ fontSize: compact ? 16 : 18 }}>↻</span>
+      <span style={{ flex: 1, minWidth: 0, fontSize: compact ? 12.5 : 13.5, fontWeight: 800, color: "#92400E" }}>
+        {u.count} order{u.count === 1 ? "" : "s"} from earlier days not sent
+        {!compact && <span style={{ fontWeight: 600 }}> · {u.by_day.map((d) => `${fmtDay(d.day)}: ${d.count}`).join(" · ")}</span>}
+      </span>
+      <span style={{ fontSize: 12.5, fontWeight: 800, color: C.orange, whiteSpace: "nowrap" }}>Move to {fmtDay(desk.date)} →</span>
+    </button>
+  );
+}
+
+function ShiftPanel({ desk, onClose }) {
+  const u = desk.queue?.earlier_unsent || { items: [], count: 0, by_day: [] };
+  const key = (i) => `${i.business_id}-${i.order_id}`;
+  const [picked, setPicked] = useState(() => new Set(u.items.map(key)));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const toggle = (i) => setPicked((s) => { const n = new Set(s); n.has(key(i)) ? n.delete(key(i)) : n.add(key(i)); return n; });
+  const days = u.by_day.map((d) => d.day);
+  const move = async () => {
+    setBusy(true); setError(null);
+    const d = await desk.shiftOrders(u.items.filter((i) => picked.has(key(i))), { toDay: desk.date });
+    setBusy(false);
+    if (d.error) setError(d.error); else onClose(d.moved);
+  };
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 3300, background: "rgba(0,0,0,.35)", padding: 12, overflowY: "auto" }}
+      onClick={() => onClose()}>
+      <div onClick={(e) => e.stopPropagation()}
+        style={{ ...S.card, maxWidth: 720, margin: "24px auto", padding: 0, overflow: "hidden", display: "flex", flexDirection: "column", maxHeight: "calc(100dvh - 48px)" }}>
+        <div style={{ padding: "14px 16px", borderBottom: `1px solid ${C.gray100}` }}>
+          <div style={{ fontSize: 16, fontWeight: 900, color: C.gray900 }}>Move unsent orders to {fmtDay(desk.date)}</div>
+          <div style={{ fontSize: 12.5, color: C.gray500, marginTop: 3 }}>
+            These never went out on their own day — not dispatched here, and not shipped or cancelled on the marketplace.
+            The ones you move join {fmtDay(desk.date)}'s list and courier counts; the rest stay where they are.
+          </div>
+          <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap", alignItems: "center" }}>
+            <button onClick={() => setPicked(new Set(u.items.map(key)))} style={btn("ghost", "sm")}>Select all</button>
+            <button onClick={() => setPicked(new Set())} style={btn("ghost", "sm")}>Clear</button>
+            <span style={{ fontSize: 12.5, fontWeight: 700, color: C.gray600 }}>{picked.size} of {u.items.length} selected</span>
+          </div>
+        </div>
+        <div style={{ overflowY: "auto", flex: 1 }}>
+          {days.map((day) => (
+            <div key={day}>
+              <div style={{ padding: "8px 16px", background: C.gray50, fontSize: 12, fontWeight: 800, color: C.gray600, display: "flex", justifyContent: "space-between" }}>
+                <span>{fmtDay(day)}</span>
+                <button onClick={() => setPicked((s) => { const n = new Set(s); u.items.filter((i) => i.day === day).forEach((i) => n.add(key(i))); return n; })}
+                  style={{ border: "none", background: "none", color: C.orange, fontWeight: 800, cursor: "pointer", fontSize: 12 }}>Select day</button>
+              </div>
+              {u.items.filter((i) => i.day === day).map((i) => (
+                <label key={key(i)} style={{ display: "flex", gap: 10, alignItems: "center", padding: "9px 16px", borderBottom: `1px solid ${C.gray100}`, cursor: "pointer",
+                  background: picked.has(key(i)) ? C.orangeLight : C.white }}>
+                  <input type="checkbox" checked={picked.has(key(i))} onChange={() => toggle(i)} style={{ width: 18, height: 18, accentColor: C.orange }} />
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 13 }}>{i.sku || "—"} <span style={{ color: C.orange }}>×{i.qty}</span></div>
+                    <div style={{ fontSize: 11.5, color: C.gray500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {[i.business_name, i.courier, i.awb, i.order_id].filter(Boolean).join(" · ")}
+                    </div>
+                  </div>
+                  <Tag variant={(STATE_META[i.state] || STATE_META.PENDING).tag}>{(STATE_META[i.state] || STATE_META.PENDING).label}</Tag>
+                </label>
+              ))}
+            </div>
+          ))}
+        </div>
+        <div style={{ padding: "12px 16px", borderTop: `1px solid ${C.gray100}`, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          {error && <span style={{ fontSize: 12.5, color: C.red, fontWeight: 700 }}>{error}</span>}
+          <button onClick={() => onClose()} style={{ ...btn("ghost", "md"), marginLeft: "auto" }}>Cancel</button>
+          <button onClick={move} disabled={!picked.size || busy} style={{ ...btn("primary", "md"), opacity: !picked.size || busy ? 0.5 : 1 }}>
+            {busy ? "Moving…" : `Move ${picked.size} to ${fmtDay(desk.date)}`}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function AlertBanner({ alerts, onOpen, compact }) {
   if (!alerts?.total) return null;
   if (compact) {
@@ -715,8 +821,9 @@ function MobilePack({ desk, platform, setPlatform, businesses, onScopeChanged, s
   const [tab, setTab] = useState("pending");
   const [typed, setTyped] = useState("");
   const [courier, setCourier] = useState(null);
-  const [alerts] = useScanAlerts(platform, scopeTick);
+  const [alerts, reloadAlerts] = useScanAlerts(platform, scopeTick);
   const [showAlerts, setShowAlerts] = useState(false);
+  const [showShift, setShowShift] = useState(false);
 
   const items = queue?.items || [];
   const sum = queue?.summary;
@@ -775,8 +882,11 @@ function MobilePack({ desk, platform, setPlatform, businesses, onScopeChanged, s
         </div>
       )}
 
-      {/* Progress + last result: fixed, never reflows */}
-      <div style={{ padding: "12px 14px 10px", display: "flex", flexDirection: "column", gap: 12, flexShrink: 0 }}>
+      {/* Everything between the header and the scan bar scrolls as one, so the
+          list always has room however many notices are showing. */}
+      <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
+      {/* Progress + last result */}
+      <div style={{ padding: "12px 14px 10px", display: "flex", flexDirection: "column", gap: 12 }}>
         {loading && !queue ? (
           <div style={{ display: "flex", justifyContent: "center", padding: 24 }}><CircularProgress style={{ color: C.orange }} /></div>
         ) : (
@@ -785,6 +895,8 @@ function MobilePack({ desk, platform, setPlatform, businesses, onScopeChanged, s
             <ProgressBar done={progress.done} total={progress.total} label={`${progress.label} · ${sum?.pieces_packed ?? 0} of ${sum?.pieces ?? 0} pieces`} />
             <CourierSection desk={desk} items={items} sum={sum} active={courier} onPick={setCourier} compact />
             <AlertBanner alerts={alerts} onOpen={() => setShowAlerts(true)} compact />
+            <UnsentBanner desk={desk} onOpen={() => setShowShift(true)} compact />
+            {showShift && <ShiftPanel desk={desk} onClose={(moved) => { setShowShift(false); if (moved) reloadAlerts(); }} />}
             <LatestPanel latest={latest} busy={busy} minHeight={118} />
           </>
         )}
@@ -796,8 +908,8 @@ function MobilePack({ desk, platform, setPlatform, businesses, onScopeChanged, s
         </div>
       )}
 
-      {/* Queue */}
-      <div style={{ display: "flex", gap: 6, padding: "0 14px 8px", flexShrink: 0 }}>
+      {/* Queue — the filters stay in view while the list scrolls */}
+      <div style={{ display: "flex", gap: 6, padding: "8px 14px", position: "sticky", top: 0, zIndex: 2, background: C.white }}>
         {FILTERS.map((f) => (
           <button key={f.key} onClick={() => setTab(f.key)}
             style={{
@@ -809,14 +921,16 @@ function MobilePack({ desk, platform, setPlatform, businesses, onScopeChanged, s
           </button>
         ))}
       </div>
-      {sel.admin && <div style={{ padding: "0 14px 8px", flexShrink: 0 }}><AdminBar sel={sel} shownCount={shown.length} compact /></div>}
-      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", borderTop: `1px solid ${C.gray100}` }}>
+      {sel.admin && <div style={{ padding: "0 14px 8px" }}><AdminBar sel={sel} shownCount={shown.length} compact /></div>}
+      <div style={{ borderTop: `1px solid ${C.gray100}` }}>
         {shown.length === 0 ? (
           <div style={{ textAlign: "center", padding: 36, color: C.gray400, fontSize: 13 }}>
             {!items.length ? "No orders assigned for this day — upload the labels first." : tab === "pending" ? "Everything is packed. 🎉" : "Nothing here."}
           </div>
         ) : shown.map((i) => <ItemRow key={`${i.business_id}-${i.order_id}`} item={i} compact showBusiness={multi}
-              admin={sel.admin} selecting={sel.selecting} selected={sel.isPicked(i)} onToggle={() => sel.toggle(i)} onSetStatus={(st) => sel.applyOne(i, st)} />)}
+              admin={sel.admin} selecting={sel.selecting} selected={sel.isPicked(i)} onToggle={() => sel.toggle(i)} onSetStatus={(st) => sel.applyOne(i, st)}
+              onMoveBack={async () => { await desk.shiftOrders([i], { undo: true }); reloadAlerts(); }} />)}
+      </div>
       </div>
 
       {/* Bottom bar */}
@@ -981,6 +1095,7 @@ function DesktopPack({ desk, platform, setPlatform, businesses, onScopeChanged, 
   const [courier, setCourier] = useState(null);
   const [alerts, reloadAlerts] = useScanAlerts(platform, scopeTick);
   const [showAlerts, setShowAlerts] = useState(false);
+  const [showShift, setShowShift] = useState(false);
   const input = useRef(null);
   const refocus = useCallback(() => setTimeout(() => input.current?.focus(), 0), []);
   useEffect(() => { if (view === "queue") refocus(); }, [view, refocus]);
@@ -1031,6 +1146,8 @@ function DesktopPack({ desk, platform, setPlatform, businesses, onScopeChanged, 
         <>
           <DayNotice desk={desk} />
           <AlertBanner alerts={alerts} onOpen={() => { setShowAlerts((v) => !v); reloadAlerts(); }} />
+          <UnsentBanner desk={desk} onOpen={() => setShowShift(true)} />
+          {showShift && <ShiftPanel desk={desk} onClose={(moved) => { setShowShift(false); if (moved) reloadAlerts(); }} />}
           {showAlerts && alerts && <AlertsPanel alerts={alerts} onClose={() => setShowAlerts(false)} />}
           <div>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 8 }}>
@@ -1071,7 +1188,8 @@ function DesktopPack({ desk, platform, setPlatform, businesses, onScopeChanged, 
                   {!items.length ? "No orders assigned for this day — upload the labels first." : tab === "pending" ? "Everything is packed. 🎉" : "Nothing here."}
                 </div>
               ) : shown.map((i) => <ItemRow key={`${i.business_id}-${i.order_id}`} item={i} showBusiness={multi}
-                    admin={sel.admin} selecting={sel.selecting} selected={sel.isPicked(i)} onToggle={() => sel.toggle(i)} onSetStatus={(st) => sel.applyOne(i, st)} />)}
+                    admin={sel.admin} selecting={sel.selecting} selected={sel.isPicked(i)} onToggle={() => sel.toggle(i)} onSetStatus={(st) => sel.applyOne(i, st)}
+              onMoveBack={async () => { await desk.shiftOrders([i], { undo: true }); reloadAlerts(); }} />)}
             </div>
 
             <div style={{ position: "sticky", top: 12, display: "flex", flexDirection: "column", gap: 14 }}>

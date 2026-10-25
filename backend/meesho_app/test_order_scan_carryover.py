@@ -68,15 +68,13 @@ class CarryOverTests(CarryTestCase):
         LabelOrder.objects.create(order_id="T0_1", awb_number="TAWB0", uploaded_date=self.today, business=self.biz)
         q = self.queue()
         self.assertEqual(q["date"], self.today.isoformat())
-        self.assertEqual(q["summary"]["assigned"], 3)          # today's 1 + yesterday's 2 not sent yet
-        self.assertEqual(q["summary"]["carried"], 2)
+        self.assertEqual(q["summary"]["assigned"], 1)          # only today's own — nothing comes forward by itself
 
     def test_a_day_picked_by_hand_is_shown_as_is(self):
         q = self.queue(date=self.today.isoformat())
         self.assertEqual(q["date"], self.today.isoformat())
         self.assertFalse(q["carried_over"])
-        self.assertEqual(q["summary"]["assigned"], 2)          # only yesterday's unsent orders
-        self.assertEqual({i["order_id"] for i in q["items"]}, {"Y1_1", "Y2_1"})
+        self.assertEqual(q["summary"]["assigned"], 0)
 
     def test_a_long_quiet_spell_starts_on_today(self):
         LabelOrder.objects.all().update(uploaded_date=self.today - timedelta(days=20))
@@ -134,8 +132,8 @@ class UploadCheckTests(CarryTestCase):
         self.assertEqual((s["dispatched"], s["dispatched_shipped"], s["dispatched_not_shipped"]), (2, 1, 1))
 
 
-class CarryForwardTests(CarryTestCase):
-    """Orders that haven't gone out come forward onto the next day's list."""
+class ShiftTests(CarryTestCase):
+    """Only the day's own orders are listed; an admin moves earlier unsent ones onto it."""
 
     def setUp(self):
         super().setUp()
@@ -155,34 +153,71 @@ class CarryForwardTests(CarryTestCase):
         Order.objects.create(business=self.biz, sub_order_no="Y4_1", reason_for_credit_entry="SHIPPED")
         # Y5_1: never scanned, no sheet — not sent.
 
-    def queue(self):
-        return self.client.get(f"{self.base}/order-scan/queue/", {"date": self.today.isoformat()}).data
+    def queue(self, day=None, client=None):
+        return (client or self.client).get(f"{self.base}/order-scan/queue/", {"date": (day or self.today).isoformat()}).data
 
-    def test_only_orders_that_have_not_gone_out_come_forward(self):
+    def shift(self, items, **body):
+        return self.client.post(f"{self.base}/order-scan/shift/", {
+            "items": [{"business_id": self.biz.id, "order_id": o} for o in items], **body}, format="json")
+
+    def test_the_latest_day_shows_only_its_own_orders(self):
         q = self.queue()
-        carried = {i["order_id"]: i for i in q["items"] if i["carried_from"]}
-        self.assertEqual(set(carried), {"Y1_1", "Y5_1"})
-        self.assertEqual(carried["Y5_1"]["carried_from"], self.yesterday.isoformat())
-        self.assertEqual(carried["Y1_1"]["state"], ScannedOrder.STATUS_PACKED)
-        self.assertEqual(q["summary"]["assigned"], 3)
-        self.assertEqual(q["summary"]["carried"], 2)
-        self.assertEqual(q["summary"]["remaining"], 2)          # T0_1 and Y5_1 still to pack
+        self.assertEqual([i["order_id"] for i in q["items"]], ["T0_1"])
+        self.assertEqual(q["summary"]["by_courier"][0]["assigned"], 1)
 
-    def test_scanning_a_carried_order_counts_today(self):
+    def test_the_admin_is_offered_the_earlier_unsent_orders(self):
+        unsent = self.queue()["earlier_unsent"]
+        self.assertEqual({i["order_id"] for i in unsent["items"]}, {"Y1_1", "Y5_1"})
+        self.assertEqual(unsent["by_day"], [{"day": self.yesterday.isoformat(), "count": 2}])
+
+    def test_moving_them_puts_them_on_the_latest_day_only(self):
+        r = self.shift(["Y1_1", "Y5_1"], to_day=self.today.isoformat())
+        self.assertEqual(r.data["moved"], 2)
+        q = self.queue()
+        self.assertEqual({i["order_id"]: i["shifted_from"] for i in q["items"]},
+                         {"T0_1": None, "Y1_1": self.yesterday.isoformat(), "Y5_1": self.yesterday.isoformat()})
+        self.assertEqual(q["summary"]["moved_in"], 2)
+        self.assertEqual(q["earlier_unsent"]["count"], 0)
+        self.assertNotIn("Y5_1", {i["order_id"] for i in self.queue(self.yesterday)["items"]})
+        # The label's own upload date is untouched.
+        self.assertEqual(LabelOrder.objects.get(order_id="Y5_1").uploaded_date, self.yesterday)
+
+    def test_a_scan_of_a_moved_order_counts_today(self):
+        self.shift(["Y5_1"], to_day=self.today.isoformat())
         self.client.post(f"{self.base}/order-scan/", {"code": "YAWB5", "status": "DISPATCHED"}, format="json")
         q = self.queue()
         item = next(i for i in q["items"] if i["order_id"] == "Y5_1")
-        self.assertEqual((item["state"], item["carried_from"]), ("DISPATCHED", self.yesterday.isoformat()))
-        self.assertEqual(ScannedOrder.objects.get(sub_order_no="Y5_1").scan_day, self.today)
+        self.assertEqual(item["state"], "DISPATCHED")
         self.assertEqual(q["summary"]["off_list"], 0)
 
-    def test_dispatched_today_stays_on_todays_list_but_not_tomorrows(self):
-        self.client.post(f"{self.base}/order-scan/", {"code": "YAWB1", "status": "DISPATCHED"}, format="json")
-        item = next(i for i in self.queue()["items"] if i["order_id"] == "Y1_1")
-        self.assertEqual(item["state"], "DISPATCHED")
-        # The next day it has gone out, so it doesn't come forward again.
-        ScannedOrder.objects.filter(sub_order_no="Y1_1").update(scan_day=self.yesterday)
-        self.assertNotIn("Y1_1", {i["order_id"] for i in self.queue()["items"]})
+    def test_undo_moves_them_back(self):
+        self.shift(["Y5_1"], to_day=self.today.isoformat())
+        r = self.shift(["Y5_1"], undo=True)
+        self.assertEqual(r.data["moved"], 1)
+        self.assertNotIn("Y5_1", {i["order_id"] for i in self.queue()["items"]})
+        self.assertIn("Y5_1", {i["order_id"] for i in self.queue(self.yesterday)["items"]})
+
+    def test_moved_orders_are_no_longer_late_in_the_alerts(self):
+        before = self.client.get(f"{self.base}/order-scan/alerts/").data["not_packed"]["count"]
+        self.shift(["Y5_1"], to_day=self.today.isoformat())
+        after = self.client.get(f"{self.base}/order-scan/alerts/").data["not_packed"]["count"]
+        self.assertEqual(before - after, 1)
+
+    def test_only_an_admin_may_move_or_see_them(self):
+        worker = User.objects.create_user(username="w", password="pw", role=User.ROLE_BUSINESS_USER)
+        Membership.objects.create(user=worker, business=self.biz)
+        c = APIClient()
+        c.force_authenticate(worker)
+        self.assertIsNone(self.queue(client=c)["earlier_unsent"])
+        r = c.post(f"{self.base}/order-scan/shift/", {"items": [{"business_id": self.biz.id, "order_id": "Y5_1"}],
+                                                      "to_day": self.today.isoformat()}, format="json")
+        self.assertEqual(r.status_code, 403)
+
+    def test_never_to_a_day_not_started_or_backwards(self):
+        r = self.shift(["Y5_1"], to_day=(self.today + timedelta(days=1)).isoformat())
+        self.assertEqual(r.status_code, 400)
+        r = self.shift(["T0_1"], to_day=self.yesterday.isoformat())
+        self.assertEqual((r.data["moved"], r.data["skipped"]), (0, 1))
 
 
 class CourierSummaryTests(CarryTestCase):

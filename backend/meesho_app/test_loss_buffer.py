@@ -11,6 +11,20 @@ from accounts.models import Business, Membership, User
 from .models import FinalPrice, Order, OrderPayment, ParentItemPrice
 
 
+# These tests work their profit figures out by hand around other rules, so they
+# run without the business-wide ₹6 per-order buffer (see test_default_buffer.py).
+def setUpModule():
+    from .models import BusinessCostSetting
+    field = BusinessCostSetting._meta.get_field("default_buffer_per_order")
+    field._saved_default, field.default = field.default, 0
+
+
+def tearDownModule():
+    from .models import BusinessCostSetting
+    field = BusinessCostSetting._meta.get_field("default_buffer_per_order")
+    field.default = field._saved_default
+
+
 class LossBufferTests(TestCase):
     def setUp(self):
         user = User.objects.create_user(username="o", password="pw", role=User.ROLE_SUPER_ADMIN)

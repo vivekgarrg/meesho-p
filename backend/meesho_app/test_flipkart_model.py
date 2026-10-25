@@ -25,6 +25,20 @@ SETTLEMENT_HEADERS = [
 ]
 
 
+# These tests work their profit figures out by hand around other rules, so they
+# run without the business-wide ₹6 per-order buffer (see test_default_buffer.py).
+def setUpModule():
+    from .models import BusinessCostSetting
+    field = BusinessCostSetting._meta.get_field("default_buffer_per_order")
+    field._saved_default, field.default = field.default, 0
+
+
+def tearDownModule():
+    from .models import BusinessCostSetting
+    field = BusinessCostSetting._meta.get_field("default_buffer_per_order")
+    field.default = field._saved_default
+
+
 def settlement_row(neft, item, sale, settlement, sku="SKU-A", order="OD1", return_type="NA", refund=0.0):
     return {
         "NEFT ID": neft, "Neft Type": "Prepaid", "Payment Date": "2026-09-28",

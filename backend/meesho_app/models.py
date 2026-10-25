@@ -666,6 +666,10 @@ class LabelOrder(models.Model):
     # Dates
     order_date    = models.DateField(null=True, blank=True)        # from invoice section
     uploaded_date = models.DateField(db_index=True)                # date PDF was processed
+    # The packing day an admin moved this order to on Order Scan, because it
+    # didn't go out on its own day. Null = its packing day is uploaded_date.
+    # uploaded_date itself never changes, so the Labels history stays true.
+    pack_day      = models.DateField(null=True, blank=True, db_index=True)
 
     # Which marketplace printed the label. The Meesho and Flipkart tabs each show
     # only their own, so couriers, history and customers never mix.
@@ -2732,6 +2736,15 @@ class BusinessCostSetting(models.Model):
     # Getting this backwards overstates the GST bill by the rate itself, so it
     # is a switch rather than an assumption.
     sale_price_includes_gst = models.BooleanField(default=True)
+
+    # A set-aside of ₹ per order on every order that sells (delivered, exchange,
+    # claim), so the losses that keep turning up — damages, missed claims, odd
+    # deductions — are already paid for out of profit. Used for any SKU whose
+    # own loss-recovery buffer (SKU Pricing) is not set; a SKU with its own
+    # buffer is charged that instead, per unit.
+    DEFAULT_BUFFER_PER_ORDER = Decimal("6")
+    default_buffer_per_order = models.DecimalField(max_digits=8, decimal_places=2,
+                                                   default=DEFAULT_BUFFER_PER_ORDER)
 
     updated_at = models.DateTimeField(auto_now=True)
     updated_by = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True,

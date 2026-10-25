@@ -181,6 +181,7 @@ urlpatterns = [
     path("order-scan/refresh-ship/", views.scanned_orders_refresh_ship, name="scanned_orders_refresh_ship"),
     path("order-scan/alerts/",       views.scan_alerts,                name="scan_alerts"),
     path("order-scan/queue/status/", views.scan_queue_admin_status,   name="scan_queue_admin_status"),
+    path("order-scan/shift/",       views.scan_queue_shift,           name="scan_queue_shift"),
     path("order-scan/courier-summary/", views.scan_courier_summary, name="scan_courier_summary"),
     path("order-scan/settings/",     views.scan_desk_settings,         name="scan_desk_settings"),
     path("order-scan/<int:pk>/",     views.scanned_order_detail,       name="scanned_order_detail"),
