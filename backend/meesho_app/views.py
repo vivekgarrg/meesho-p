@@ -1809,6 +1809,7 @@ class _PriceResolver:
         from collections import defaultdict
 
         self.buffers = _BufferResolver(business)
+        self.master_book = master_pricing.MasterPriceBook(business)
 
         # Load pricing once (include item_price + tax_percent for tax cost calculation)
         _fp_all = list(FinalPrice.objects.filter(business=business).only("sku_id", "final_price", "packaging_cost", "parent_id", "item_price", "tax_percent"))
@@ -1849,6 +1850,22 @@ class _PriceResolver:
     def effective_price(self, sku_id, order_date):
         """
         (final_price, packaging_cost, item_price, tax_percent) for a SKU.
+
+        Priority: master price (parent built from the master list, as of the
+        order's date), then the parent's price, then the SKU's own. This wrapper
+        adds the master tier over _parent_or_sku_price, which holds the rest.
+        """
+        fp, pkg, ip, tax = self._parent_or_sku_price(sku_id, order_date)
+        pid = self.sku_parent_map.get(sku_id)
+        if pid:
+            m = self.master_book.price_at(pid, order_date)
+            if m:
+                return master_pricing.compute_final_price(m, tax, pkg), pkg, m, tax
+        return fp, pkg, ip, tax
+
+    def _parent_or_sku_price(self, sku_id, order_date):
+        """
+        Parent-then-SKU tiers.
 
         Priority is the parent's price, then the SKU's own — in that order and
         regardless of whether an order date is known. Previously the parent was
@@ -2501,7 +2518,19 @@ def profit_daily_summary(request, business_id):
             h["tax_percent"] or 0,
         ))
 
+    _master_book = master_pricing.MasterPriceBook(business)
+
     def get_eff_price(sku_id, order_date):
+        # Master price (parent built from the master list) outranks parent and SKU price.
+        fp, pkg, ip, tax = _parent_or_sku_eff_price(sku_id, order_date)
+        pid = sku_parent_map.get(sku_id)
+        if pid:
+            m = _master_book.price_at(pid, order_date)
+            if m:
+                return master_pricing.compute_final_price(m, tax, pkg), pkg, m, tax
+        return fp, pkg, ip, tax
+
+    def _parent_or_sku_eff_price(sku_id, order_date):
         pid = sku_parent_map.get(sku_id)
         if pid:
             if order_date:
@@ -2701,7 +2730,19 @@ def _estimated_profit_pricing_lookup(business):
             h["packaging_cost"] or Decimal("0"), h["tax_percent"] or 0,
         ))
 
+    master_book = master_pricing.MasterPriceBook(business)
+
     def get_price(sku_id, order_date):
+        # Master price (parent built from the master list) outranks parent and SKU price.
+        ip, pkg, tax = _parent_or_sku_price(sku_id, order_date)
+        pid = sku_parent_map.get(sku_id)
+        if pid:
+            m = master_book.price_at(pid, order_date)
+            if m:
+                return m, pkg, tax
+        return ip, pkg, tax
+
+    def _parent_or_sku_price(sku_id, order_date):
         if order_date is not None and hasattr(order_date, "date"):
             order_date = order_date.date()
         # Parent price first, SKU price only as a fallback — and a parent with no
@@ -3685,7 +3726,19 @@ def ads_sku_analysis(request, business_id):
             h["tax_percent"]    or 0,
         ))
 
+    _master_book = master_pricing.MasterPriceBook(business)
+
     def get_eff_price(sku_id, order_date):
+        # Master price (parent built from the master list) outranks parent and SKU price.
+        fp, pkg, ip, tax = _parent_or_sku_eff_price(sku_id, order_date)
+        pid = sku_parent_map.get(sku_id)
+        if pid:
+            m = _master_book.price_at(pid, order_date)
+            if m:
+                return master_pricing.compute_final_price(m, tax, pkg), pkg, m, tax
+        return fp, pkg, ip, tax
+
+    def _parent_or_sku_eff_price(sku_id, order_date):
         """
         (final_price, packaging_cost, item_price, tax_percent) for a SKU.
 

@@ -109,3 +109,64 @@ def resolve_master_item(name, business):
     if not item:
         return None, f"No master item named \"{name}\" in this business."
     return item, None
+
+
+class MasterPriceBook:
+    """Master-list price of each parent SKU as of a given date — the FIRST
+    tier of the profit engine's price preference:
+
+      1. master price   (parent built from MasterItems: sum of quantity x the
+                         master item's unit price in effect on that date)
+      2. parent price   (its dated history, else current)
+      3. the SKU's own price
+
+    Loaded once per business. `price_at` is None for a parent with no
+    components, or whose master items carry no price yet — the caller then
+    falls through to tier 2/3 exactly as before. The date picks each master
+    item's dated entry (an order older than every entry gets the earliest, an
+    undated order gets the current price), so a supplier raise dated today
+    reprices today's orders without recosting last month's.
+    """
+
+    def __init__(self, business):
+        from collections import defaultdict
+
+        from .models import MasterItem, MasterItemComponent, MasterItemPriceHistory
+
+        self.components = defaultdict(list)  # parent_id -> [(master_item_id, qty)]
+        for c in MasterItemComponent.objects.filter(parent__business=business).values_list(
+            "parent_id", "master_item_id", "quantity"
+        ):
+            self.components[c[0]].append((c[1], c[2]))
+        self.current = dict(MasterItem.objects.filter(business=business).values_list("id", "unit_price"))
+        self.history = defaultdict(list)  # master_item_id -> [(effective_from, unit_price)]
+        for mid, day, price in MasterItemPriceHistory.objects.filter(
+            master_item__business=business
+        ).order_by("effective_from").values_list("master_item_id", "effective_from", "unit_price"):
+            self.history[mid].append((day, price))
+
+    def _unit_price(self, master_id, on_date):
+        entries = self.history.get(master_id)
+        if entries and on_date is not None:
+            chosen = entries[0]
+            for entry in entries:
+                if entry[0] <= on_date:
+                    chosen = entry
+                else:
+                    break
+            return chosen[1] or Decimal("0")
+        return self.current.get(master_id) or Decimal("0")
+
+    def price_at(self, parent_id, on_date=None):
+        comps = self.components.get(parent_id)
+        if not comps:
+            return None
+        if on_date is not None and hasattr(on_date, "date"):
+            on_date = on_date.date()
+        # A master item with no dated entries can't say what it cost on a past
+        # date — using its current price would recost old orders. Leave those
+        # to the parent's own dated history (tier 2).
+        if on_date is not None and any(not self.history.get(mid) for mid, _q in comps):
+            return None
+        total = sum((qty * self._unit_price(mid, on_date) for mid, qty in comps), Decimal("0"))
+        return total if total > 0 else None

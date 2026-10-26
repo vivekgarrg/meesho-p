@@ -202,3 +202,15 @@ class StaleFinalPriceTests(DatingTestCase):
         self.assertEqual(r.status_code, 200, r.data)
         self.parent.refresh_from_db()
         self.assertEqual(self.parent.final_price, D("54.50"))
+
+
+class MasterPriceTierTests(DatingTestCase):
+    def test_master_history_outranks_parent_and_is_dated(self):
+        from datetime import timedelta
+        from .models import MasterItemPriceHistory
+        katori = MasterItem.objects.create(business=self.business, name="Katori2", unit_price=D("20"))
+        MasterItemComponent.objects.create(parent=self.parent, master_item=katori, quantity=2)
+        MasterItemPriceHistory.objects.create(master_item=katori, effective_from=LAST_MONTH - timedelta(days=5), unit_price=D("20"))
+        MasterItemPriceHistory.objects.create(master_item=katori, effective_from=TODAY, unit_price=D("30"))
+        self.assertEqual(self.cost_on(LAST_MONTH), D("44.00"))   # 2x20 + 5% + 2
+        self.assertEqual(self.cost_on(TODAY), D("65.00"))        # 2x30 + 5% + 2
