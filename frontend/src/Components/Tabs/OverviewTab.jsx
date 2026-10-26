@@ -1867,7 +1867,7 @@ function MeeshoOverviewTab() {
                 label={`Purchase Cost`}
                 value={profit.total_purchase_cost}
                 color={C.red}
-                note={Number(profit.total_buffer_cost || 0) > 0 ? `total items purchased with gst, packaging and ${fmt(profit.total_buffer_cost)} loss buffer included` : "total items purchased with gst and packaging cost included"}
+                note="total items purchased with gst and packaging cost included"
               />
 
               {Number(profit.total_other || 0) !== 0 && (
@@ -1990,8 +1990,7 @@ function MeeshoOverviewTab() {
                       {fmt(profit.total_tax_cost ?? 0)}
                     </p>
                   </div>
-                  {Number(profit.total_buffer_cost || 0) > 0 && (
-                    <div>
+                  <div>
                       <p style={{ fontSize: 10, color: C.gray400, marginBottom: 2 }}>🛟 Loss buffer</p>
                       <p style={{ fontSize: 13, fontFamily: 'monospace', fontWeight: 700, color: C.amber }}>
                         {fmt(profit.total_buffer_cost)}

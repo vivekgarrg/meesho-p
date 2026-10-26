@@ -31,10 +31,10 @@ class HubTestCase(TestCase):
         self.client = APIClient()
         self.client.force_authenticate(self.user)
         self.base = f"/api/business/{self.business.id}/listing-hub"
-        # Unit cost 100 + 0% + 10 packaging + 5 buffer = 115.
+        # Unit cost 100 + 0% + 10 packaging = 110.
         self.lota = ParentItemPrice.objects.create(business=self.business, item_id="Choti Pragi", item_price=D("100"),
                                                    tax_percent=0, packaging_cost=D("10"), final_price=D("110"),
-                                                   buffer_amount=D("5"), image_url=IMG)
+                                                   image_url=IMG)
         for s in ("LOTA-1", "LOTA-2"):
             FinalPrice.objects.create(business=self.business, sku_id=s, parent=self.lota)
         self.n = 0
@@ -80,7 +80,7 @@ class SearchTests(HubTestCase):
         card = self.client.get(self.base + "/search/").data["results"][0]
         self.assertEqual(card["listed_on"], ["flipkart"])
         self.assertEqual(card["sku_count"], 2)
-        self.assertEqual(card["unit_cost"], 115.0)
+        self.assertEqual(card["unit_cost"], 110.0)
 
 
 class RecommendedPriceTests(HubTestCase):
@@ -94,8 +94,8 @@ class RecommendedPriceTests(HubTestCase):
         self.assertAlmostEqual(w["payout_per_rupee"], 1.0, places=3)
         self.assertAlmostEqual(w["payout_offset"], -10.0, places=1)
         # Default cost settings charge the box on delivered orders only, so:
-        # 0.6·(P − 10 − 115) + 0.2·(−160) + 0.2·0 = 30  →  P = 228.33
-        self.assertAlmostEqual(m["exact"], 228.33, places=1)
+        # 0.6·(P − 10 − 110) + 0.2·(−160) + 0.2·0 = 30  →  P = 223.33
+        self.assertAlmostEqual(m["exact"], 223.33, places=1)
         self.assertEqual(m["recommended"], 229)              # next price ending in 9
         self.assertGreaterEqual(m["profit_at_recommended"], 30)
         self.assertIsNotNone(m["current_selling_price"])     # median of recent delivered orders
@@ -103,7 +103,7 @@ class RecommendedPriceTests(HubTestCase):
     def test_default_target_is_a_share_of_cost(self):
         self.history()
         r = self.client.get(self.base + "/product/", {"id": "Choti Pragi"}).data["pricing"]
-        self.assertEqual(r["default_target"], 23.0)          # 20% of ₹115
+        self.assertEqual(r["default_target"], 22.0)          # 20% of ₹110
 
     def test_few_own_orders_falls_back_to_business_rates(self):
         other = ParentItemPrice.objects.create(business=self.business, item_id="NEW", item_price=D("50"),
@@ -133,7 +133,7 @@ class SavedPriceTests(HubTestCase):
         self.assertEqual(r.status_code, 200, r.data)
         m = self.client.get(self.base + "/product/", {"id": "Choti Pragi"}).data["pricing"]["platforms"]["meesho"]
         self.assertEqual(m["saved"]["price"], 259.0)
-        self.assertAlmostEqual(m["saved"]["expected_profit"], 0.6 * (259 - 125) - 32, places=1)
+        self.assertAlmostEqual(m["saved"]["expected_profit"], 0.6 * (259 - 120) - 32, places=1)
         self.client.delete(self.base + "/price/", {"id": "Choti Pragi", "platform": "meesho"}, format="json")
         self.assertFalse(ListingPrice.objects.exists())
 

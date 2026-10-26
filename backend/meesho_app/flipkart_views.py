@@ -12,9 +12,8 @@ payments (what was actually paid out); Flipkart gets the same two halves here:
                            SPF, rebates...), which also move bank money.
 
 Profit uses the same mechanics as Meesho — the shared SKU pricing table
-(FinalPrice / ParentItemPrice), the business's packaging policy and the
-loss-recovery buffer — via views._estimated_profit_pricing_lookup. A delivered
-item's cost is item price x qty + tax + packaging + buffer; a returned item
+(FinalPrice / ParentItemPrice), the business's packaging policy — via views._estimated_profit_pricing_lookup. A delivered
+item's cost is item price x qty + tax + packaging; a returned item
 carries no cost and only counts when its settlement is a real loss. Ads, fines
 and the other settlement charges are then taken off, the way Meesho takes off
 ads and recoveries.
@@ -357,7 +356,7 @@ class FlipkartPricing:
           * returned, settlement >= 0       -> left out ("non_loss_return")
           * returned, settlement <  0       -> counts at the settlement, no cost
           * otherwise                       -> settlement - (item cost x qty +
-                                               tax + packaging + buffer)
+                                               tax + packaging)
         """
         primary = max(rows, key=lambda r: abs(r.sale_amount or ZERO))
         sku = primary.seller_sku or next((r.seller_sku for r in rows if r.seller_sku), "") or ""
@@ -378,8 +377,7 @@ class FlipkartPricing:
             purchase = Decimal(str(item_price or 0)) * qty
             tax = purchase * Decimal(str(tax_pct or 0)) / Decimal("100")
             packaging = _packaging_charge(BusinessCostSetting.DELIVERED, Decimal(str(packaging_cost or 0)), self.cost_setting)
-            buffer_cost = self.get_price.buffer_charge(sku, qty)
-            cost = purchase + tax + packaging + buffer_cost
+            cost = purchase + tax + packaging
             net = settlement - cost
 
         return {

@@ -573,7 +573,7 @@ function PricePlatform({ platform, entry, item, toast, onSaved, unitCost }) {
       </button>
       {why && (
         <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12, color: C.gray600, lineHeight: 1.7 }}>
-          <li>Cost per unit (item + GST + packaging + loss buffer): <b>{rupees(unitCost)}</b></li>
+          <li>Cost per unit (item + GST + packaging): <b>{rupees(unitCost)}</b></li>
           <li>{meta.label} pays you about <b>₹{w.payout_per_rupee} for every ₹1</b> of price{w.payout_offset ? <>, then <b>₹{Math.abs(w.payout_offset)}</b> {w.payout_offset < 0 ? "less" : "more"}</> : null} (from {w.fee_rows.toLocaleString()} delivered orders)</li>
           <li>Out of {w.orders_seen.toLocaleString()} orders of {w.rates_from}: <b>{w.delivered_pct}%</b> delivered, <b>{w.return_pct}%</b> returned, <b>{w.rto_pct}%</b> RTO</li>
           <li>Each return costs about <b>{rupees(Math.abs(w.loss_per_return))}</b>{w.loss_per_rto ? <>, each RTO <b>{rupees(Math.abs(w.loss_per_rto))}</b></> : null}</li>

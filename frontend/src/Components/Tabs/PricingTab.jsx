@@ -345,9 +345,8 @@ function ParentCard({ parent, notify, onLink, dragging, unlinked = [], onOptOut,
     item_price: parent.item_price != null ? String(parent.item_price) : "",
     tax_percent: parent.tax_percent != null ? String(parent.tax_percent) : "0",
     packaging_cost: parent.packaging_cost != null ? String(parent.packaging_cost) : "0",
-    buffer_amount: parent.buffer_amount != null ? String(parent.buffer_amount) : "0",
     image_url: parent.image_url || "",
-  }), [parent.item_price, parent.tax_percent, parent.packaging_cost, parent.buffer_amount, parent.image_url]);
+  }), [parent.item_price, parent.tax_percent, parent.packaging_cost, parent.image_url]);
   const [editForm, setEditForm] = useState(formFromParent);
   const [imageBroken, setImageBroken] = useState(false);
   const [renameValue, setRenameValue] = useState(parent.item_id);
@@ -836,12 +835,6 @@ function ParentCard({ parent, notify, onLink, dragging, unlinked = [], onOptOut,
           <span style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 16, color: C.gray900, whiteSpace: "nowrap" }}>
             {fmt(parent.final_price)}
           </span>
-          {Number(parent.buffer_amount) > 0 && (
-            <span title="Loss-recovery buffer set aside on every unit sold. Cost per unit including it is shown here; profit deducts it."
-              style={{ fontSize: 11, fontWeight: 700, color: C.amber, background: C.amberLight, border: `1px solid ${C.amberBorder}`, padding: "2px 8px", borderRadius: 20, whiteSpace: "nowrap" }}>
-              + {fmt(parent.buffer_amount)} buffer = {fmt(Number(parent.final_price || 0) + Number(parent.buffer_amount))}
-            </span>
-          )}
 
           {trajectory && (
             <span style={{ fontSize: 11, color: C.gray400, fontFamily: "monospace", whiteSpace: "nowrap" }}>
@@ -1343,15 +1336,14 @@ function ParentCard({ parent, notify, onLink, dragging, unlinked = [], onOptOut,
                 <ActionPanel accent={C.amber} icon="✏️" title="Direct Price Override" right={
                   <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
                     <span style={{ fontSize: 12, color: C.gray500 }}>Preview: <strong style={{ fontFamily: "monospace", color: C.orange }}>{fmt(calcFinal(editForm.item_price, editForm.tax_percent, editForm.packaging_cost))}</strong>
-                      {Number(editForm.buffer_amount) > 0 && <> · with buffer <strong style={{ fontFamily: "monospace", color: C.amber }}>{fmt(calcFinal(editForm.item_price, editForm.tax_percent, editForm.packaging_cost) + Number(editForm.buffer_amount))}</strong></>}
                     </span>
                     <button onClick={saveEdit} disabled={savingEdit} style={btn("success", "sm")}>
                       {savingEdit ? "Saving…" : "Save"}
                     </button>
                   </div>
                 }>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 8 }}>
-                    {[["Item Price (₹)", "item_price"], ["Tax %", "tax_percent"], ["Packaging (₹)", "packaging_cost"], ["Loss buffer (₹/unit)", "buffer_amount"]].map(([label, key]) => {
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+                    {[["Item Price (₹)", "item_price"], ["Tax %", "tax_percent"], ["Packaging (₹)", "packaging_cost"]].map(([label, key]) => {
                       const autoPriced = key === "item_price" && hasComponents;
                       return (
                         <div key={key}>
@@ -1370,11 +1362,6 @@ function ParentCard({ parent, notify, onLink, dragging, unlinked = [], onOptOut,
                     📅 Applies to orders placed from <b>today ({new Date().toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })})</b>.
                     Orders placed before today keep the price they were sold at — both are kept in this
                     parent's price history. To date a change differently, use <b>Add Price Entry</b>.
-                  </p>
-                  <p style={{ fontSize: 11, color: C.gray500, marginTop: 4, lineHeight: 1.6 }}>
-                    🛟 <b>Loss buffer</b> is an extra amount set aside on every unit that sells, to recover returns and
-                    other losses. Profit deducts it with the item cost. Unlike the price it is not dated — it applies to
-                    all orders using the current value.
                   </p>
                   {hasComponents && (
                     <p style={{ fontSize: 10.5, color: C.gray500, marginTop: 6 }}>
@@ -1597,7 +1584,7 @@ function AddParentForm({ onSaved, onCancel, notify }) {
   // Tax and packaging start EMPTY, not "0": pre-filled zeros counted as
   // "filled in" without anyone having decided them. A parent's price is what
   // every SKU under it is costed at, so all three must be chosen.
-  const [form, setForm] = useState({ item_id: "", item_price: "", tax_percent: "", packaging_cost: "", buffer_amount: "" });
+  const [form, setForm] = useState({ item_id: "", item_price: "", tax_percent: "", packaging_cost: "" });
   // Every parent needs a picture: a pasted link, or a file uploaded right after it is created.
   const [img, setImg] = useState(emptyImage);
   const [saving, setSaving] = useState(false);
@@ -1615,7 +1602,6 @@ function AddParentForm({ onSaved, onCancel, notify }) {
     if (form.tax_percent === "") p.tax_percent = "Choose the tax rate";
     const pk = Number(form.packaging_cost);
     if (form.packaging_cost.trim() === "" || !Number.isFinite(pk) || pk < 0) p.packaging_cost = "Enter packaging (0 if none)";
-    if (form.buffer_amount.trim() !== "" && (!Number.isFinite(Number(form.buffer_amount)) || Number(form.buffer_amount) < 0)) p.buffer_amount = "0 or more";
     const ie = imageProblem(img);
     if (ie) p.image_url = ie;
     return p;
@@ -1633,7 +1619,7 @@ function AddParentForm({ onSaved, onCancel, notify }) {
         // final_price is not sent: the server computes it from these three.
         body: JSON.stringify({
           item_id: form.item_id.trim(), item_price: form.item_price, tax_percent: form.tax_percent,
-          packaging_cost: form.packaging_cost, buffer_amount: form.buffer_amount.trim() || "0",
+          packaging_cost: form.packaging_cost,
           ...imageFields(img),
         }),
       });
@@ -1673,7 +1659,6 @@ function AddParentForm({ onSaved, onCancel, notify }) {
         <p style={{ fontSize: 14, fontWeight: 700, color: C.gray800 }}>➕ New Parent SKU</p>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <span style={{ fontSize: 13, color: C.gray500 }}>Final price: <strong style={{ fontFamily: "monospace", color: C.orange, fontSize: 16 }}>{ready ? fmt(preview) : "—"}</strong>
-            {ready && Number(form.buffer_amount) > 0 && <> · with buffer <strong style={{ fontFamily: "monospace", color: C.amber }}>{fmt(preview + Number(form.buffer_amount))}</strong></>}
           </span>
           <button onClick={onCancel} style={btn("ghost")}>Cancel</button>
           <button onClick={save} disabled={saving} style={{ ...btn("primary"), ...(!ready ? { opacity: 0.55 } : {}) }}>
@@ -1705,12 +1690,6 @@ function AddParentForm({ onSaved, onCancel, notify }) {
           <input type="text" inputMode="decimal" value={form.packaging_cost} onChange={set("packaging_cost")}
             placeholder="0 if none" style={fieldStyle("packaging_cost")} />
           {fieldErr("packaging_cost")}
-        </div>
-        <div>
-          <label style={S.label} title="Extra ₹ set aside on every unit sold, to recover returns and other losses">Loss buffer (₹/unit)</label>
-          <input type="text" inputMode="decimal" value={form.buffer_amount} onChange={set("buffer_amount")}
-            placeholder="0 if none" style={fieldStyle("buffer_amount")} />
-          {fieldErr("buffer_amount")}
         </div>
       </div>
       <div style={{ marginTop: 12 }}>
