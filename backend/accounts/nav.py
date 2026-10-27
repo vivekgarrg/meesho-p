@@ -27,6 +27,7 @@ NAV_CATALOG = [
 
     {"path": "/orders",            "label": "Orders",            "group": "Operations"},
     {"path": "/order-scan",        "label": "Order Scan",        "group": "Operations"},
+    {"path": "/scan-lookup",       "label": "Listing Lookup",    "group": "Operations"},
     {"path": "/payments",          "label": "Payments",          "group": "Operations"},
     {"path": "/unscheduled",       "label": "Unscheduled Pay",   "group": "Operations"},
     {"path": "/unsettled",         "label": "Unsettled",         "group": "Operations"},
@@ -119,6 +120,8 @@ API_OWNERSHIP = {
     "legacy-listings/":      ["/tasks"],
     "return-claim-batches/": ["/tasks"],
     "order-scan/":           ["/order-scan"],
+    # The lookup tab scans a code and reads the listing behind it.
+    "order-scan/lookup/":    ["/scan-lookup", "/order-scan"],
     # The Overview dashboard shows the "orders not sent" alert too.
     "order-scan/alerts/":    ["/order-scan", "/"],
     # Overview carries a "salary due" reminder, so it needs this one sub-path —

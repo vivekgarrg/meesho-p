@@ -167,9 +167,10 @@ function useScanDesk(platform) {
         lines.push("Meesho shows this order as cancelled.");
         navigator.vibrate?.([120, 80, 120]);
       } else if (row.matched_from === "NONE") {
-        kind = "warn"; title = "Not recognised — saved anyway";
+        kind = "err"; title = "NOT RECOGNISED — check with admin";
         if (!what) lines.unshift(code);
-        lines.push("No label or order matches this code yet. It's kept in the scan record and links up once its label / orders sheet is uploaded.");
+        lines.push("No label or order matches this code. Set this parcel aside — an admin checks it and files it under the right courier.");
+        navigator.vibrate?.([120, 80, 120]);
       } else if (!item) {
         kind = "warn"; title = `${title} · not in this day's list`;
       } else if (data.already_scanned) {
@@ -200,6 +201,17 @@ function useScanDesk(platform) {
     }
   };
 
+  /** Admin: file a scan nothing recognised under a courier, so it counts there. */
+  const assignCourier = async (scanId, courier) => {
+    const res = await fetch(`${API}/order-scan/${scanId}/`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ courier_name: courier }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) return { error: data.error || "Could not assign that courier." };
+    await load();
+    return data;
+  };
+
   /** Admin: set the status of orders on the list by hand (PENDING puts them back to pack). */
   const setStatusByHand = async (items, status) => {
     const res = await fetch(`${API}/order-scan/queue/status/`, {
@@ -227,7 +239,7 @@ function useScanDesk(platform) {
   const currentDay = queue?.current_day || packingDayISO();
   const backToToday = () => setPicked("");
   const startToday = () => setPicked(currentDay);
-  return { date, setDate, following, currentDay, backToToday, startToday, queue, loading, mode, setMode, latest, busy, error, setError, record, reload: load, setStatusByHand, shiftOrders };
+  return { date, setDate, following, currentDay, backToToday, startToday, queue, loading, mode, setMode, latest, busy, error, setError, record, reload: load, setStatusByHand, shiftOrders, assignCourier };
 }
 
 // ── Pieces ────────────────────────────────────────────────────────────────────
@@ -272,6 +284,7 @@ function ItemRow({ item, compact, showBusiness, admin, selecting, selected, onTo
   // The badge says where the order is now, not just the last thing scanned.
   const st = bucket === "shipped" ? { label: "Shipped", tag: "green" }
     : bucket === "cancelled" ? { label: "Cancelled", tag: "red" }
+    : item.state === "DISPATCHED" ? { label: "Dispatched · not shipped yet", tag: "amber" }
     : (STATE_META[item.state] || STATE_META.PENDING);
   const ship = SHIP_META[item.ship_status] || SHIP_META.UNKNOWN;
   const cancelled = bucket === "cancelled";
@@ -313,7 +326,7 @@ function ItemRow({ item, compact, showBusiness, admin, selecting, selected, onTo
             {Object.entries(STATE_META).map(([k, m]) => <option key={k} value={k}>{m.label}</option>)}
           </select>
         ) : <Tag variant={st.tag}>{st.label}</Tag>}
-        {(item.state !== "PENDING" || cancelled) && item.ship_status !== "UNKNOWN" && bucket !== "shipped" && !cancelled && (
+        {(item.state !== "PENDING" || cancelled) && item.ship_status !== "UNKNOWN" && bucket !== "shipped" && !cancelled && item.state !== "DISPATCHED" && (
           <span style={{ fontSize: 10.5, fontWeight: 700, color: ship.color }}>{ship.label}</span>
         )}
       </div>
@@ -382,12 +395,14 @@ function AdminBar({ sel, shownCount, compact }) {
  * Where an order sits on the desk — exactly one place, so the tab counts add up
  * and an order never shows in two lists:
  *   cancelled → shipped → on hold / problem → to pack (never scanned) → packed.
- * "Shipped" is anything that has left — handed to the courier here, or shipped
- * per the marketplace's sheet — so it drops out of Packed the moment it goes.
+ * "Shipped" means the MARKETPLACE shows it shipped. Marking a parcel Dispatched
+ * here is only our hand-over to the courier: it stays under Packed (with a
+ * Dispatched badge) until Meesho / Flipkart's sheet confirms it shipped, and
+ * until then an unshipped order carries over to the next day.
  */
 function bucketOf(i) {
   if (i.ship_status === "CANCELLED" || i.state === "CANCELLED") return "cancelled";
-  if (i.ship_status === "SHIPPED" || i.state === "DISPATCHED") return "shipped";
+  if (i.ship_status === "SHIPPED") return "shipped";
   if (i.state === "ON_HOLD" || i.state === "ISSUE") return "issues";
   if (i.state === "PENDING") return "pending";
   return "packed";
@@ -780,7 +795,7 @@ function UnsentBanner({ desk, onOpen, compact }) {
       fontFamily: "inherit", background: "#FFFBEB", border: `1.5px solid ${C.amberBorder}`, borderRadius: 12, padding: compact ? "8px 12px" : "10px 14px" }}>
       <span style={{ fontSize: compact ? 16 : 18 }}>↻</span>
       <span style={{ flex: 1, minWidth: 0, fontSize: compact ? 12.5 : 13.5, fontWeight: 800, color: "#92400E" }}>
-        {u.count} order{u.count === 1 ? "" : "s"} from earlier days not picked up
+        {u.count} earlier order{u.count === 1 ? "" : "s"} never scanned
         {!compact && <span style={{ fontWeight: 600 }}> · {u.by_day.map((d) => `${fmtDay(d.day)}: ${d.count}`).join(" · ")}</span>}
       </span>
       <span style={{ fontSize: 12.5, fontWeight: 800, color: C.orange, whiteSpace: "nowrap" }}>Move to today →</span>
@@ -810,8 +825,8 @@ function ShiftPanel({ desk, onClose }) {
         <div style={{ padding: "14px 16px", borderBottom: `1px solid ${C.gray100}` }}>
           <div style={{ fontSize: 16, fontWeight: 900, color: C.gray900 }}>Move unsent orders to {fmtDay(desk.date)}</div>
           <div style={{ fontSize: 12.5, color: C.gray500, marginTop: 3 }}>
-            Packed but never picked up on their own day. Cancelled orders you already scanned are included — they are still
-            in the bag. The ones you move join {fmtDay(desk.date)}'s list and courier counts; the rest stay where they are.
+            Orders you scanned that haven't shipped come onto the day's list on their own. These were never scanned at all.
+            The ones you move join {fmtDay(desk.date)}'s list and courier counts; the rest stay where they are.
           </div>
           <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap", alignItems: "center" }}>
             <button onClick={() => setPicked(new Set(u.items.map(key)))} style={btn("ghost", "sm")}>Select all</button>
@@ -852,6 +867,88 @@ function ShiftPanel({ desk, onClose }) {
             {busy ? "Moving…" : `Move ${picked.size} to ${fmtDay(desk.date)}`}
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+/** Parcels nothing recognised — shown to everyone as an error; an admin files them under a courier. */
+function UnrecognisedBanner({ desk, onOpen, compact }) {
+  const n = desk.queue?.unrecognised?.length || 0;
+  if (!n) return null;
+  return (
+    <button onClick={onOpen} className="os-btn" style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", textAlign: "left", cursor: "pointer",
+      fontFamily: "inherit", background: C.redLight, border: `2px solid ${C.red}`, borderRadius: 12, padding: compact ? "10px 12px" : "12px 14px" }}>
+      <span style={{ fontSize: compact ? 18 : 20 }} aria-hidden>✕</span>
+      <span style={{ flex: 1, minWidth: 0, fontSize: compact ? 13 : 14, fontWeight: 800, color: C.red }}>
+        {n} parcel{n === 1 ? "" : "s"} not recognised
+        <span style={{ fontWeight: 600 }}>{desk.queue?.is_admin ? " — assign a courier" : " — an admin will check"}</span>
+      </span>
+      <span style={{ fontSize: 12.5, fontWeight: 800, color: C.red, whiteSpace: "nowrap" }}>{desk.queue?.is_admin ? "Check →" : "View →"}</span>
+    </button>
+  );
+}
+
+const COURIER_CHOICES = ["Valmo", "Delhivery", "XpressBees", "Shadowfax", "Ekart"];
+
+function UnrecognisedPanel({ desk, onClose }) {
+  const list = desk.queue?.unrecognised || [];
+  const admin = !!desk.queue?.is_admin;
+  const couriers = useMemo(() => {
+    const seen = new Map(COURIER_CHOICES.map((c) => [c.toLowerCase(), c]));
+    (desk.queue?.items || []).forEach((i) => { const n = cleanCourier(i.courier); if (i.courier && !seen.has(n.toLowerCase())) seen.set(n.toLowerCase(), n); });
+    return [...seen.values()];
+  }, [desk.queue]);
+  const [pick, setPick] = useState({});
+  const [busyId, setBusyId] = useState(null);
+  const [error, setError] = useState(null);
+  const assign = async (u) => {
+    const courier = pick[u.id];
+    if (!courier) return;
+    setBusyId(u.id); setError(null);
+    const d = await desk.assignCourier(u.id, courier);
+    setBusyId(null);
+    if (d.error) setError(d.error);
+  };
+  return (
+    <div role="dialog" aria-modal="true" aria-label="Parcels not recognised" onClick={onClose}
+      style={{ position: "fixed", inset: 0, zIndex: 3300, background: "rgba(0,0,0,.4)", padding: 12, overflowY: "auto" }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ ...S.card, maxWidth: 640, margin: "24px auto", padding: 0, overflow: "hidden" }}>
+        <div style={{ padding: "14px 16px", borderBottom: `1px solid ${C.gray100}`, display: "flex", justifyContent: "space-between", gap: 10, alignItems: "flex-start" }}>
+          <div>
+            <div style={{ fontSize: 16, fontWeight: 900, color: C.red }}>✕ Parcels not recognised · {list.length}</div>
+            <div style={{ fontSize: 12.5, color: C.gray600, marginTop: 3, lineHeight: 1.5 }}>
+              No label or order matches these codes. {admin
+                ? "Check the parcel, then pick its courier — it is then counted under that courier."
+                : "Keep them aside — an admin checks each one and files it under the right courier."}
+            </div>
+          </div>
+          <button onClick={onClose} className="os-btn" style={btn("ghost", "sm")}>Close</button>
+        </div>
+        {error && <div style={{ padding: "8px 16px", color: C.red, fontWeight: 700, fontSize: 13 }}>{error}</div>}
+        {list.length === 0 ? (
+          <div style={{ padding: 32, textAlign: "center", color: C.green, fontWeight: 800 }}>✓ All filed.</div>
+        ) : list.map((u) => (
+          <div key={u.id} style={{ padding: "12px 16px", borderTop: `1px solid ${C.gray100}`, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+            <div style={{ flex: "1 1 200px", minWidth: 0 }}>
+              <div style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 14, wordBreak: "break-all" }}>{u.code}</div>
+              <div style={{ fontSize: 12, color: C.gray500 }}>{fmtTime(u.scanned_at)}{u.scan_count > 1 ? ` · scanned ${u.scan_count}×` : ""}</div>
+            </div>
+            {admin && (
+              <>
+                <select value={pick[u.id] || ""} onChange={(e) => setPick((p) => ({ ...p, [u.id]: e.target.value }))} aria-label={`Courier for ${u.code}`} className="os-in"
+                  style={{ ...S.inp, width: "auto", minHeight: 44, fontWeight: 700 }}>
+                  <option value="">Choose courier…</option>
+                  {couriers.map((c) => <option key={c} value={c}>{c}</option>)}
+                </select>
+                <button onClick={() => assign(u)} disabled={!pick[u.id] || busyId === u.id} className="os-btn"
+                  style={{ ...btn("primary", "md"), minHeight: 44, opacity: !pick[u.id] || busyId === u.id ? 0.5 : 1 }}>
+                  {busyId === u.id ? "Saving…" : "Assign"}
+                </button>
+              </>
+            )}
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -976,6 +1073,7 @@ function MobilePack({ desk, platform, setPlatform, businesses, onScopeChanged, s
   const [alerts, reloadAlerts] = useScanAlerts(platform, scopeTick);
   const [showAlerts, setShowAlerts] = useState(false);
   const [showShift, setShowShift] = useState(false);
+  const [showUnrec, setShowUnrec] = useState(false);
 
   const items = queue?.items || [];
   const sum = queue?.summary;
@@ -988,8 +1086,8 @@ function MobilePack({ desk, platform, setPlatform, businesses, onScopeChanged, s
   const listTab = PHONE_LIST_TABS.includes(tab);
   const tabs = FILTERS.filter((f) => f.key !== "all" && (f.key !== "issues" || allCounts.issues > 0 || tab === "issues"));
   const TAB_INFO = {
-    packed:    { label: "Packed", color: C.green, hint: "Packed and waiting for the courier's pickup." },
-    shipped:   { label: "Shipped", color: "#15803D", hint: "Already handed over or shipped per the marketplace." },
+    packed:    { label: "Packed", color: C.green, hint: "Packed (or handed to the courier) but the marketplace doesn't show it shipped yet." },
+    shipped:   { label: "Shipped", color: "#15803D", hint: "The marketplace shows these as shipped." },
     cancelled: { label: "Cancelled", color: C.red, hint: "Don't hand these over — keep them aside." },
   };
   const submitTyped = () => { if (typed.trim()) { record(typed); setTyped(""); } };
@@ -1067,6 +1165,8 @@ function MobilePack({ desk, platform, setPlatform, businesses, onScopeChanged, s
                   </button>
                 )}
               </div>
+              <UnrecognisedBanner desk={desk} onOpen={() => setShowUnrec(true)} compact />
+              {showUnrec && <UnrecognisedPanel desk={desk} onClose={() => setShowUnrec(false)} />}
               <AlertBanner alerts={alerts} onOpen={() => setShowAlerts(true)} compact />
               <UnsentBanner desk={desk} onOpen={() => setShowShift(true)} compact />
               {showShift && <ShiftPanel desk={desk} onClose={(moved) => { setShowShift(false); if (moved) reloadAlerts(); }} />}
@@ -1093,8 +1193,7 @@ function MobilePack({ desk, platform, setPlatform, businesses, onScopeChanged, s
                 {!items.length ? "No orders assigned for this day — upload the labels first." : tab === "pending" ? "Everything is packed. 🎉" : "Nothing here."}
               </div>
             ) : shown.map((i) => <ItemRow key={`${i.business_id}-${i.order_id}`} item={i} compact showBusiness={multi}
-                  admin={sel.admin} selecting={sel.selecting} selected={sel.isPicked(i)} onToggle={() => sel.toggle(i)} onSetStatus={(st) => sel.applyOne(i, st)}
-                  onMoveBack={async () => { await desk.shiftOrders([i], { undo: true }); reloadAlerts(); }} />)}
+                  admin={sel.admin} selecting={sel.selecting} selected={sel.isPicked(i)} onToggle={() => sel.toggle(i)} onSetStatus={(st) => sel.applyOne(i, st)} />)}
           </div>
         )}
       </div>
@@ -1256,6 +1355,7 @@ function DesktopPack({ desk, platform, setPlatform, businesses, onScopeChanged, 
   const [alerts, reloadAlerts] = useScanAlerts(platform, scopeTick);
   const [showAlerts, setShowAlerts] = useState(false);
   const [showShift, setShowShift] = useState(false);
+  const [showUnrec, setShowUnrec] = useState(false);
   const input = useRef(null);
   const refocus = useCallback(() => setTimeout(() => input.current?.focus(), 0), []);
   useEffect(() => { if (view === "queue") refocus(); }, [view, refocus]);
@@ -1308,10 +1408,12 @@ function DesktopPack({ desk, platform, setPlatform, businesses, onScopeChanged, 
         <>
           <Notice>
             <DayNotice desk={desk} />
+            <UnrecognisedBanner desk={desk} onOpen={() => setShowUnrec(true)} />
             <AlertBanner alerts={alerts} onOpen={() => { setShowAlerts((v) => !v); reloadAlerts(); }} />
             <UnsentBanner desk={desk} onOpen={() => setShowShift(true)} />
           </Notice>
           {showShift && <ShiftPanel desk={desk} onClose={(moved) => { setShowShift(false); if (moved) reloadAlerts(); }} />}
+          {showUnrec && <UnrecognisedPanel desk={desk} onClose={() => setShowUnrec(false)} />}
           {showAlerts && alerts && <AlertsPanel alerts={alerts} onClose={() => setShowAlerts(false)} />}
 
           <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(360px, 420px)", gap: 20, alignItems: "start" }}>
@@ -1342,8 +1444,7 @@ function DesktopPack({ desk, platform, setPlatform, businesses, onScopeChanged, 
                     {!items.length ? "No orders assigned for this day — upload the labels first." : tab === "pending" ? "Everything is packed. 🎉" : "Nothing here."}
                   </div>
                 ) : shown.map((i) => <ItemRow key={`${i.business_id}-${i.order_id}`} item={i} showBusiness={multi}
-                      admin={sel.admin} selecting={sel.selecting} selected={sel.isPicked(i)} onToggle={() => sel.toggle(i)} onSetStatus={(st) => sel.applyOne(i, st)}
-                      onMoveBack={async () => { await desk.shiftOrders([i], { undo: true }); reloadAlerts(); }} />)}
+                      admin={sel.admin} selecting={sel.selecting} selected={sel.isPicked(i)} onToggle={() => sel.toggle(i)} onSetStatus={(st) => sel.applyOne(i, st)} />)}
               </div>
             </div>
 

@@ -12873,7 +12873,7 @@ def return_delivery_detail(request, business_id, pk):
 # The only fields a client may change on a recorded scan. Everything else is
 # either identity or scan bookkeeping: letting the UI rewrite those would make
 # the log unreliable, which is the one thing it exists to be.
-_SCAN_WRITABLE = {"status", "notes"}
+_SCAN_WRITABLE = {"status", "notes", "courier_name"}
 
 _SCAN_STATUSES = {c[0] for c in ScannedOrder.STATUS_CHOICES}
 
@@ -13766,8 +13766,8 @@ def _earlier_unsent(request, desk_ids, day, names):
         bucket = ScannedOrder.classify_ship_status(st)
         if _SHIP_PRIORITY[bucket] > _SHIP_PRIORITY[sheet.get((b, sub), ScannedOrder.SHIP_UNKNOWN)]:
             sheet[(b, sub)] = bucket
-    # Only a parcel that really left (dispatched here, or shipped per the
-    # marketplace) is settled. A CANCELLED order is not: if it was scanned and
+    # Only a parcel the marketplace shows as shipped is settled — marking it
+    # dispatched here is a hand-over, not proof it shipped. A CANCELLED order is not: if it was scanned and
     # packed, it is still physically in the bag and has to be counted on the
     # next day too — so a scanned cancelled order is offered like any unsent
     # one, flagged as cancelled. A cancelled label nobody ever scanned is not
@@ -13779,7 +13779,7 @@ def _earlier_unsent(request, desk_ids, day, names):
         ship = sheet_ship
         if sc and _SHIP_PRIORITY[sc.ship_status] > _SHIP_PRIORITY[ship]:
             ship = sc.ship_status
-        if ship == ScannedOrder.SHIP_SHIPPED or (sc and sc.status == ScannedOrder.STATUS_DISPATCHED):
+        if ship == ScannedOrder.SHIP_SHIPPED:
             continue
         cancelled = ship == ScannedOrder.SHIP_CANCELLED or (sc and sc.status == ScannedOrder.STATUS_CANCELLED)
         if cancelled and not sc:
@@ -13795,6 +13795,58 @@ def _earlier_unsent(request, desk_ids, day, names):
         by_day[i["day"]] = by_day.get(i["day"], 0) + 1
     return {"count": len(out), "by_day": [{"day": d, "count": n} for d, n in sorted(by_day.items(), reverse=True)],
             "items": out[:500]}
+
+
+SCAN_AUTO_CARRY_DAYS = 2
+
+
+def _carry_unshipped_into(request, desk_ids, day):
+    """
+    Orders scanned on a recent earlier day that the marketplace still doesn't
+    show as shipped are still with us, so they join `day`'s list on their own:
+    the label's packing day moves to `day`, and so does the scan, so today's
+    courier counts and hand-over labels include them. A cancelled one that was
+    scanned counts too — it is still in the bag. Orders never scanned are not
+    moved (an admin decides on those — see _earlier_unsent). Idempotent: once
+    moved, a label is no longer "earlier". Returns how many were moved.
+    """
+    labels = list(
+        _with_pack_day(_scope_labels(request, LabelOrder.objects.filter(business_id__in=desk_ids)))
+        .filter(eff_day__lt=day, eff_day__gte=day - timedelta(days=SCAN_AUTO_CARRY_DAYS))[:3000]
+    )
+    if not labels:
+        return 0
+    ids = [l.order_id for l in labels]
+    awbs = [l.awb_number for l in labels if l.awb_number]
+    q = DQ(sub_order_no__in=ids) | (DQ(awb_number__in=awbs) if awbs else DQ(pk__in=[]))
+    scans = list(ScannedOrder.objects.filter(business_id__in=desk_ids).filter(q))
+    by_sub = {(s.business_id, s.sub_order_no): s for s in scans}
+    by_awb = {(s.business_id, s.awb_number): s for s in scans if s.awb_number}
+    sheet = {}
+    for b, sub, st in Order.objects.filter(business_id__in=desk_ids, sub_order_no__in=ids) \
+            .values_list("business_id", "sub_order_no", "reason_for_credit_entry"):
+        bucket = ScannedOrder.classify_ship_status(st)
+        if _SHIP_PRIORITY[bucket] > _SHIP_PRIORITY[sheet.get((b, sub), ScannedOrder.SHIP_UNKNOWN)]:
+            sheet[(b, sub)] = bucket
+    move_labels, move_scans = [], []
+    for l in labels:
+        sc = by_sub.get((l.business_id, l.order_id)) or (by_awb.get((l.business_id, l.awb_number)) if l.awb_number else None)
+        if not sc:
+            continue
+        ship = sheet.get((l.business_id, l.order_id), ScannedOrder.SHIP_UNKNOWN)
+        if _SHIP_PRIORITY[sc.ship_status] > _SHIP_PRIORITY[ship]:
+            ship = sc.ship_status
+        if ship == ScannedOrder.SHIP_SHIPPED:
+            continue
+        move_labels.append(l.pk)
+        move_scans.append(sc.pk)
+    if not move_labels:
+        return 0
+    now = timezone.now()
+    with transaction.atomic():
+        LabelOrder.objects.filter(pk__in=move_labels).update(pack_day=day, updated_at=now)
+        ScannedOrder.objects.filter(pk__in=move_scans).update(scan_day=day, updated_at=now)
+    return len(move_labels)
 
 
 @api_view(["GET"])
@@ -13820,6 +13872,10 @@ def scan_queue(request, business_id):
     carried_over = False
     if not day:
         day, carried_over = _following_day(request, desk_ids)
+    # The day is really open (not the previous day held up after 12 pm): what
+    # was packed earlier and still hasn't shipped comes onto it.
+    if day == _current_business_date() and not carried_over:
+        _carry_unshipped_into(request, desk_ids, day)
 
     labels = list(
         _labels_on_day(_scope_labels(request, LabelOrder.objects.filter(business_id__in=desk_ids)), day)
@@ -13960,7 +14016,20 @@ def scan_queue(request, business_id):
     is_admin = _is_admin(request.user)
     latest_day = day == current_day or carried_over or (latest_labels and day >= latest_labels)
     earlier_unsent = _earlier_unsent(request, desk_ids, day, names) if is_admin and latest_day else None
+    # Scans nothing recognised and nobody has assigned a courier to yet — an
+    # admin checks each and files it under the right courier (scanned_order_detail).
+    unrec_qs = ScannedOrder.objects.filter(business_id__in=desk_ids, matched_from=ScannedOrder.MATCH_NONE,
+                                           courier_name="", scan_day__gte=day - timedelta(days=SCAN_SHIFT_DAYS),
+                                           scan_day__lte=day)
+    if platform:
+        unrec_qs = unrec_qs.filter(platform=platform)
+    unrecognised = [{
+        "id": r.id, "code": r.scanned_code, "order_id": r.sub_order_no, "business_id": r.business_id,
+        "scanned_at": r.last_scanned_at.isoformat(), "day": r.scan_day.isoformat() if r.scan_day else None,
+        "scan_count": r.scan_count,
+    } for r in unrec_qs.order_by("-last_scanned_at")[:200]]
     return Response({
+        "unrecognised": unrecognised,
         "latest_label_day": latest_labels.isoformat() if latest_labels else None,
         "businesses": [{"id": b.pk, "name": b.name} for b in desk],
         "date": day.isoformat(),
@@ -14018,6 +14087,13 @@ def scanned_order_detail(request, business_id, pk):
 
         if "notes" in payload:
             row.notes = str(payload["notes"] or "").strip()
+
+        # Which courier a parcel goes with is the admin's call — it is how a
+        # code the system didn't recognise gets counted under the right courier.
+        if "courier_name" in payload:
+            if not _is_admin(request.user):
+                return Response({"error": "Only an admin can assign a courier."}, status=status.HTTP_403_FORBIDDEN)
+            row.courier_name = " ".join(str(payload["courier_name"] or "").split())[:100]
 
         row.save()
 
@@ -14312,6 +14388,82 @@ def scan_queue_shift(request, business_id):
     asked = sum(len(v) for v in wanted.values())
     return Response({"moved": moved, "skipped": skipped, "not_found": max(0, asked - moved - skipped),
                      "to_day": to_day.isoformat() if to_day else None, "undo": undo})
+
+
+def _money_or_none(v):
+    return float(v) if v is not None else None
+
+
+@api_view(["GET"])
+def scan_lookup(request, business_id):
+    """
+    Everything the system knows about the listing behind a scanned AWB / order
+    number — the order, its SKU, the parent SKU, the photo(s), the bill of
+    materials with each master item, and the prices. Read-only: a lookup is
+    not a scan and records nothing.
+
+    Query params: code (AWB or order no, required), platform.
+    """
+    from . import object_storage
+
+    business = get_authorized_business(request, business_id)
+    code = (request.GET.get("code") or "").strip()
+    if not code:
+        return Response({"error": "code is required"}, status=status.HTTP_400_BAD_REQUEST)
+    platform = (request.GET.get("platform") or "").strip().lower() or None
+    owner, snap = _resolve_scan_code_pooled(request, business, code, platform)
+    if snap["matched_from"] == ScannedOrder.MATCH_NONE:
+        return Response({"found": False, "code": code})
+
+    order = {
+        "order_id": snap["sub_order_no"], "awb": snap["awb_number"], "platform": snap["platform"],
+        "business": owner.name, "business_id": owner.pk,
+        "courier": snap["courier_name"], "qty": snap["qty"], "size": snap["size"],
+        "payment_type": snap["payment_type"], "product_name": snap["product_name"],
+        "customer_city": snap["customer_city"], "customer_state": snap["customer_state"],
+        "order_date": snap["order_date"].isoformat() if snap["order_date"] else None,
+        "matched_from": snap["matched_from"],
+    }
+    scan = ScannedOrder.objects.filter(business=owner, sub_order_no=snap["sub_order_no"]).first()
+    if scan:
+        order.update({"scan_status": scan.status, "ship_status": scan.ship_status, "scan_count": scan.scan_count,
+                      "last_scanned_at": scan.last_scanned_at.isoformat()})
+
+    sku = snap["sku"]
+    result = {"found": True, "code": code, "order": order, "sku": sku, "parent": None, "components": [],
+              "photos": [], "siblings": [], "pricing": None}
+    if not sku:
+        return Response(result)
+
+    fp = FinalPrice.objects.filter(business=owner, sku_id__iexact=sku).select_related("parent").first()
+    parent = fp.parent if fp else None
+    photos = []
+    if parent:
+        for img in ListingImage.objects.filter(parent=parent, status=ListingImage.STATUS_UPLOADED).order_by("image_no")[:12]:
+            photos.append({"url": object_storage.public_url(img.key), "image_no": img.image_no, "product_name": img.product_name})
+        main = (parent.image_url or "").strip() or (photos[0]["url"] if photos else None)
+        result["parent"] = {"id": parent.id, "item_id": parent.item_id, "image_url": main}
+        for c in MasterItemComponent.objects.filter(parent=parent).select_related("master_item").order_by("id"):
+            unit = c.master_item.unit_price
+            result["components"].append({
+                "master_id": c.master_item_id, "name": c.master_item.name, "image_url": c.master_item.image_url,
+                "quantity": float(c.quantity), "unit_price": _money_or_none(unit),
+                "line_total": float(c.quantity * unit) if unit is not None else None,
+                "notes": c.master_item.notes,
+            })
+        result["siblings"] = list(
+            FinalPrice.objects.filter(business=owner, parent=parent).order_by("sku_id").values_list("sku_id", flat=True)[:40])
+    result["photos"] = photos
+    src = parent or fp
+    if src:
+        result["pricing"] = {
+            "source": "parent" if parent and parent.item_price else "sku",
+            "item_price": _money_or_none(src.item_price), "tax_percent": src.tax_percent,
+            "packaging_cost": _money_or_none(src.packaging_cost), "final_price": _money_or_none(src.final_price),
+            "from_master_list": bool(result["components"]),
+        }
+    result["sku_row_found"] = bool(fp)
+    return Response(result)
 
 
 @api_view(["GET"])

@@ -177,6 +177,7 @@ urlpatterns = [
     # Order scanning — log outgoing parcels at the desk and track their status
     path("order-scan/",              views.scanned_orders_list,        name="scanned_orders_list"),
     path("order-scan/queue/",        views.scan_queue,                 name="scan_queue"),
+    path("order-scan/lookup/",       views.scan_lookup,                name="scan_lookup"),
     path("order-scan/bulk-status/",  views.scanned_orders_bulk_status, name="scanned_orders_bulk_status"),
     path("order-scan/refresh-ship/", views.scanned_orders_refresh_ship, name="scanned_orders_refresh_ship"),
     path("order-scan/alerts/",       views.scan_alerts,                name="scan_alerts"),

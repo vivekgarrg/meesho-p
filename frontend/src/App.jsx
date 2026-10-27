@@ -45,6 +45,7 @@ import { MeeshoInventoryTab } from './Components/Tabs/MeeshoInventoryTab';
 import { MeeshoPricingTab } from './Components/Tabs/MeeshoPricingTab';
 import { ReturnScanTab } from './Components/Tabs/ReturnScanTab';
 import { OrderScanTab } from './Components/Tabs/OrderScanTab';
+import { ScanLookupTab } from './Components/Tabs/ScanLookupTab';
 import { ExtensionTab } from './Components/Tabs/ExtensionTab';
 import { BulkListingTab } from './Components/Tabs/BulkListingTab';
 import { ClaimSheetTab } from './Components/Tabs/ClaimSheetTab';
@@ -1205,7 +1206,7 @@ function AppShell() {
             business switches so it's never remounted, only its context value
             changes. Every tab reads the active range from useDateFilter(). */}
         {/* Order Scan is a live packing desk (its own noon-to-noon day), not a report — a period filter means nothing there. */}
-        {loc.pathname !== '/order-scan' && <GlobalDateFilterBar />}
+        {loc.pathname !== '/order-scan' && loc.pathname !== '/scan-lookup' && <GlobalDateFilterBar />}
         {/* key by active business + settlement mode so switching either remounts
             the routed view, forcing every tab (dashboard included) to refetch
             fresh data against the newly-set business-scoped API base / the
@@ -1228,6 +1229,7 @@ function AppShell() {
                 <Route path="/combined-dashboard" element={<CombinedDashboardTab />} />
                 <Route path="/orders" element={<OrdersTab />} />
                 <Route path="/order-scan" element={<OrderScanTab />} />
+                <Route path="/scan-lookup" element={<ScanLookupTab />} />
                 <Route path="/unsettled" element={<UnsettledOrdersTab />} />
                 <Route path="/payments" element={<PaymentsTab />} />
                 <Route path="/unscheduled" element={<UnscheduledPaymentTab />} />

@@ -31,6 +31,7 @@ export const NAV_GROUPS = [
     items: [
       { path: '/orders', label: 'Orders', icon: '⊡' },
       { path: '/order-scan', label: 'Order Scan', icon: '⌗' },
+      { path: '/scan-lookup', label: 'Listing Lookup', icon: '🔎' },
       { path: '/payments', label: 'Payments', icon: '◎' },
       { path: '/unscheduled', label: 'Unscheduled Pay', icon: '◷' },
       { path: '/unsettled', label: 'Unsettled', icon: '⚡' },
