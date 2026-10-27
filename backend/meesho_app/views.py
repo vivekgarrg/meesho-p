@@ -13762,18 +13762,29 @@ def _earlier_unsent(request, desk_ids, day, names):
         bucket = ScannedOrder.classify_ship_status(st)
         if _SHIP_PRIORITY[bucket] > _SHIP_PRIORITY[sheet.get((b, sub), ScannedOrder.SHIP_UNKNOWN)]:
             sheet[(b, sub)] = bucket
-    settled = (ScannedOrder.SHIP_SHIPPED, ScannedOrder.SHIP_CANCELLED)
+    # Only a parcel that really left (dispatched here, or shipped per the
+    # marketplace) is settled. A CANCELLED order is not: if it was scanned and
+    # packed, it is still physically in the bag and has to be counted on the
+    # next day too — so a scanned cancelled order is offered like any unsent
+    # one, flagged as cancelled. A cancelled label nobody ever scanned is not
+    # in the bag and stays out.
     out = []
     for l in labels:
         sc = by_sub.get((l.business_id, l.order_id)) or (by_awb.get((l.business_id, l.awb_number)) if l.awb_number else None)
-        if sc and (sc.status in (ScannedOrder.STATUS_DISPATCHED, ScannedOrder.STATUS_CANCELLED) or sc.ship_status in settled):
+        sheet_ship = sheet.get((l.business_id, l.order_id), ScannedOrder.SHIP_UNKNOWN)
+        ship = sheet_ship
+        if sc and _SHIP_PRIORITY[sc.ship_status] > _SHIP_PRIORITY[ship]:
+            ship = sc.ship_status
+        if ship == ScannedOrder.SHIP_SHIPPED or (sc and sc.status == ScannedOrder.STATUS_DISPATCHED):
             continue
-        if sheet.get((l.business_id, l.order_id)) in settled:
+        cancelled = ship == ScannedOrder.SHIP_CANCELLED or (sc and sc.status == ScannedOrder.STATUS_CANCELLED)
+        if cancelled and not sc:
             continue
         out.append({
             "order_id": l.order_id, "business_id": l.business_id, "business_name": names.get(l.business_id, ""),
             "awb": l.awb_number, "sku": l.sku, "qty": l.qty, "courier": l.courier_name,
             "day": l.eff_day.isoformat(), "state": sc.status if sc else "PENDING",
+            "ship_status": ScannedOrder.SHIP_CANCELLED if cancelled else ship,
         })
     by_day = {}
     for i in out:
@@ -13836,7 +13847,12 @@ def scan_queue(request, business_id):
     for l in labels:
         sc = by_sub.get((l.business_id, l.order_id)) or (by_awb.get((l.business_id, l.awb_number)) if l.awb_number else None)
         sheet = sheet_status.get((l.business_id, l.order_id))
-        ship = sc.ship_status if sc else ScannedOrder.classify_ship_status(sheet)
+        # The stored status is what the desk was told at scan time; a sheet
+        # uploaded since may know more (shipped, cancelled). Take whichever is
+        # further along, so a parcel Meesho has since shipped leaves "Packed".
+        ship = ScannedOrder.classify_ship_status(sheet)
+        if sc and _SHIP_PRIORITY[sc.ship_status] > _SHIP_PRIORITY[ship]:
+            ship = sc.ship_status
         items.append({
             # Moved here by an admin from the day it was uploaded for.
             "shifted_from": l.uploaded_date.isoformat() if l.pack_day and l.pack_day != l.uploaded_date else None,

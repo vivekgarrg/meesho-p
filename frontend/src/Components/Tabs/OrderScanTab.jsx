@@ -242,7 +242,7 @@ const KIND_STYLE = {
 function LatestPanel({ latest, busy, minHeight = 130 }) {
   const k = latest ? KIND_STYLE[latest.kind] : null;
   return (
-    <div style={{
+    <div role="status" aria-live="polite" style={{
       minHeight, borderRadius: 14, padding: "14px 16px", display: "flex", gap: 14, alignItems: "center",
       background: k ? k.bg : C.gray50, border: `2px solid ${k ? k.border : C.gray200}`,
     }}>
@@ -267,30 +267,17 @@ function LatestPanel({ latest, busy, minHeight = 130 }) {
   );
 }
 
-function ProgressBar({ done, total, label }) {
-  const pct = total ? Math.min(100, (done / total) * 100) : 0;
-  return (
-    <div>
-      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between" }}>
-        <span style={{ fontSize: 13, fontWeight: 700, color: C.gray600 }}>{label}</span>
-        <span style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 24, color: C.gray900 }}>
-          {done}<span style={{ color: C.gray400, fontSize: 16 }}> / {total}</span>
-        </span>
-      </div>
-      <div style={{ height: 10, borderRadius: 99, background: C.gray100, overflow: "hidden", marginTop: 6 }}>
-        <div style={{ height: "100%", width: `${pct}%`, background: C.green, borderRadius: 99, transition: "width 0.25s" }} />
-      </div>
-    </div>
-  );
-}
-
 function ItemRow({ item, compact, showBusiness, admin, selecting, selected, onToggle, onSetStatus, onMoveBack }) {
-  const st = STATE_META[item.state] || STATE_META.PENDING;
+  const bucket = bucketOf(item);
+  // The badge says where the order is now, not just the last thing scanned.
+  const st = bucket === "shipped" ? { label: "Shipped", tag: "green" }
+    : bucket === "cancelled" ? { label: "Cancelled", tag: "red" }
+    : (STATE_META[item.state] || STATE_META.PENDING);
   const ship = SHIP_META[item.ship_status] || SHIP_META.UNKNOWN;
-  const cancelled = item.ship_status === "CANCELLED";
+  const cancelled = bucket === "cancelled";
   return (
     <div onClick={selecting ? onToggle : undefined} style={{
-      display: "flex", gap: 12, alignItems: "center", padding: compact ? "10px 12px" : "11px 16px",
+      display: "flex", gap: 12, alignItems: "center", padding: compact ? "12px 12px" : "12px 16px",
       borderBottom: `1px solid ${C.gray100}`, background: selected ? C.orangeLight : cancelled ? C.redLight : C.white,
       cursor: selecting ? "pointer" : "default",
     }}>
@@ -299,10 +286,10 @@ function ItemRow({ item, compact, showBusiness, admin, selecting, selected, onTo
       <Photo url={item.image_url} size={compact ? 46 : 52} />
       <div style={{ minWidth: 0, flex: 1 }}>
         <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-          <span style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 13.5, color: C.gray900, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.sku || "—"}</span>
-          <span style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 13, color: C.orange }}>×{item.qty}</span>
+          <span style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 14.5, color: C.gray900, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.sku || "—"}</span>
+          <span style={{ fontFamily: "monospace", fontWeight: 900, fontSize: 12.5, color: C.orange, background: C.orangeLight, borderRadius: 6, padding: "1px 6px", flexShrink: 0 }}>×{item.qty}</span>
         </div>
-        <div style={{ fontSize: 11.5, color: C.gray500, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        <div style={{ fontSize: 12.5, color: C.gray600, marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {[showBusiness && item.business_name, item.courier, item.customer_city, item.awb].filter(Boolean).join(" · ")}
         </div>
         {item.shifted_from && (
@@ -324,7 +311,7 @@ function ItemRow({ item, compact, showBusiness, admin, selecting, selected, onTo
             {Object.entries(STATE_META).map(([k, m]) => <option key={k} value={k}>{m.label}</option>)}
           </select>
         ) : <Tag variant={st.tag}>{st.label}</Tag>}
-        {(item.state !== "PENDING" || cancelled) && item.ship_status !== "UNKNOWN" && (
+        {(item.state !== "PENDING" || cancelled) && item.ship_status !== "UNKNOWN" && bucket !== "shipped" && !cancelled && (
           <span style={{ fontSize: 10.5, fontWeight: 700, color: ship.color }}>{ship.label}</span>
         )}
       </div>
@@ -389,29 +376,66 @@ function AdminBar({ sel, shownCount, compact }) {
   );
 }
 
+/**
+ * Where an order sits on the desk — exactly one place, so the tab counts add up
+ * and an order never shows in two lists:
+ *   cancelled → shipped → on hold / problem → to pack (never scanned) → packed.
+ * "Shipped" is anything that has left — handed to the courier here, or shipped
+ * per the marketplace's sheet — so it drops out of Packed the moment it goes.
+ */
+function bucketOf(i) {
+  if (i.ship_status === "CANCELLED" || i.state === "CANCELLED") return "cancelled";
+  if (i.ship_status === "SHIPPED" || i.state === "DISPATCHED") return "shipped";
+  if (i.state === "ON_HOLD" || i.state === "ISSUE") return "issues";
+  if (i.state === "PENDING") return "pending";
+  return "packed";
+}
+
 const FILTERS = [
-  { key: "pending",   label: "To pack",   test: (i) => i.state === "PENDING" && i.ship_status !== "CANCELLED" },
-  { key: "done",      label: "Packed",    test: (i) => ["PACKED", "DISPATCHED", "SCANNED"].includes(i.state) },
-  { key: "issues",    label: "Issues",    test: (i) => ["ON_HOLD", "ISSUE"].includes(i.state) || i.ship_status === "CANCELLED" },
+  { key: "pending",   label: "To pack",   test: (i) => bucketOf(i) === "pending" },
+  { key: "packed",    label: "Packed",    test: (i) => bucketOf(i) === "packed" },
+  { key: "shipped",   label: "Shipped",   test: (i) => bucketOf(i) === "shipped" },
+  { key: "cancelled", label: "Cancelled", test: (i) => bucketOf(i) === "cancelled" },
+  { key: "issues",    label: "On hold",   test: (i) => bucketOf(i) === "issues" },
   { key: "all",       label: "All",       test: () => true },
 ];
+// On a phone only these show their orders; the rest show per-courier counts.
+const PHONE_LIST_TABS = ["pending", "issues"];
+
+const cleanCourier = (c) => (c || "").split(/\s+/).filter(Boolean).join(" ") || "No courier on label";
 
 /**
- * Courier tiles from the list itself, so a tile ticks the moment a parcel is
+ * Courier tiles from the list itself, so a tile moves the moment a parcel is
  * scanned (the list is updated straight away; the server copy only after a pause).
+ * Each courier shows what is PACKED and waiting for its pickup, and how many
+ * are still left to pack — shipped and cancelled orders are not in it.
  */
 function courierStats(items) {
   const by = new Map();
   for (const i of items) {
-    const name = (i.courier || "").split(/\s+/).filter(Boolean).join(" ") || "No courier on label";
+    const b = bucketOf(i);
+    if (b !== "packed" && b !== "pending" && b !== "issues") continue;
+    const name = cleanCourier(i.courier);
     const key = name.toLowerCase();
-    if (!by.has(key)) by.set(key, { courier: name, assigned: 0, scanned: 0, dispatched: 0, left: 0 });
+    if (!by.has(key)) by.set(key, { courier: name, packed: 0, left: 0 });
     const c = by.get(key);
-    if (i.ship_status === "CANCELLED" && !i.scan_id) continue;
-    c.assigned += 1;
-    if (i.scan_id) { c.scanned += 1; if (i.state === "DISPATCHED") c.dispatched += 1; } else c.left += 1;
+    if (b === "packed") c.packed += 1; else if (b === "pending") c.left += 1;
   }
-  return [...by.values()].filter((c) => c.assigned).sort((a, b) => b.assigned - a.assigned || a.courier.localeCompare(b.courier));
+  return [...by.values()].filter((c) => c.packed || c.left)
+    .sort((a, b) => b.packed - a.packed || b.left - a.left || a.courier.localeCompare(b.courier));
+}
+
+/** Orders per courier for one set of items — the phone's stand-in for a list. */
+function countsByCourier(items) {
+  const by = new Map();
+  for (const i of items) {
+    const name = cleanCourier(i.courier);
+    const key = name.toLowerCase();
+    if (!by.has(key)) by.set(key, { courier: name, orders: 0, pieces: 0 });
+    const c = by.get(key);
+    c.orders += 1; c.pieces += Number(i.qty) || 0;
+  }
+  return [...by.values()].sort((a, b) => b.orders - a.orders || a.courier.localeCompare(b.courier));
 }
 
 const courierKey = (c) => (c || "").split(/\s+/).filter(Boolean).join(" ").toLowerCase() || "no courier on label";
@@ -541,85 +565,54 @@ function DeskBusinesses({ desk, onChanged, compact }) {
 
 // ── Courier tiles ─────────────────────────────────────────────────────────────
 
-/** One tile per courier: how many it takes today, how many are scanned, how many are left. */
-function CourierTiles({ couriers, offList, active, onPick, compact }) {
-  if (!couriers?.length && !offList) return null;
-  if (compact) {
-    // Phone: one line of chips, so the packing list keeps the screen.
-    return (
-      <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 2 }}>
-        {couriers.map((c) => {
-          const on = active === c.courier;
-          const done = c.left === 0;
-          return (
-            <button key={c.courier} onClick={() => onPick(on ? null : c.courier)}
-              style={{ flex: "0 0 auto", display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 10px", borderRadius: 999,
-                fontFamily: "inherit", fontSize: 12.5, fontWeight: 800, cursor: "pointer", whiteSpace: "nowrap",
-                border: `1.5px solid ${on ? C.orange : done ? C.greenBorder : C.gray200}`, background: on ? C.orangeLight : C.white,
-                color: C.gray800 }}>
-              🚚 {c.courier} <span style={{ fontFamily: "monospace" }}>{c.scanned}/{c.assigned}</span>
-              <span style={{ color: done ? C.green : C.red, fontWeight: 700 }}>{done ? "✓" : `${c.left} left`}</span>
-            </button>
-          );
-        })}
-        {offList > 0 && (
-          <span style={{ flex: "0 0 auto", padding: "6px 10px", borderRadius: 999, fontSize: 12, fontWeight: 700, whiteSpace: "nowrap",
-            border: `1.5px dashed ${C.amberBorder}`, background: C.amberLight, color: "#92400E" }}>+{offList} not on list</span>
-        )}
-      </div>
-    );
-  }
+/**
+ * One card per courier: the PACKED count, big, because that is the number the
+ * pickup is checked against — plus how many are still left to pack. Tapping a
+ * card narrows the list below to that courier. Two to a row on a phone.
+ */
+function CourierTiles({ couriers, active, onPick, compact }) {
+  if (!couriers?.length) return null;
   return (
-    <div style={{ display: compact ? "flex" : "grid", gap: 10, overflowX: compact ? "auto" : undefined,
-      gridTemplateColumns: compact ? undefined : "repeat(auto-fill, minmax(170px, 1fr))", paddingBottom: compact ? 2 : 0 }}>
-      {(couriers || []).map((c) => {
-        const pct = c.assigned ? Math.round((c.scanned / c.assigned) * 100) : 0;
+    <div style={{ display: "grid", gap: compact ? 8 : 10,
+      gridTemplateColumns: compact ? "repeat(2, minmax(0, 1fr))" : "repeat(auto-fill, minmax(170px, 1fr))" }}>
+      {couriers.map((c) => {
         const on = active === c.courier;
-        const done = c.left === 0 && c.assigned > 0;
+        const done = c.left === 0;
         return (
-          <button key={c.courier} onClick={() => onPick(on ? null : c.courier)}
-            style={{ flex: compact ? "0 0 150px" : undefined, textAlign: "left", cursor: "pointer", fontFamily: "inherit",
-              background: on ? C.orangeLight : C.white, border: `1.5px solid ${on ? C.orange : done ? C.greenBorder : C.gray200}`,
-              borderRadius: 12, padding: "10px 12px", display: "flex", flexDirection: "column", gap: 6 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 6, alignItems: "center" }}>
-              <span style={{ fontSize: 12.5, fontWeight: 800, color: C.gray800, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>🚚 {c.courier}</span>
-              {done && <span style={{ fontSize: 11, color: C.green, fontWeight: 800 }}>✓ done</span>}
-            </div>
-            <div style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 20, color: C.gray900, lineHeight: 1 }}>
-              {c.scanned}<span style={{ color: C.gray400, fontSize: 14 }}> / {c.assigned}</span>
-            </div>
-            <div style={{ height: 6, borderRadius: 99, background: C.gray100, overflow: "hidden" }}>
-              <div style={{ height: "100%", width: `${pct}%`, background: done ? C.green : C.orange, transition: "width .25s" }} />
-            </div>
-            <span style={{ fontSize: 11.5, fontWeight: 700, color: c.left ? C.red : C.green }}>
-              {c.left ? `${c.left} left to scan` : "All scanned"}{c.dispatched ? ` · ${c.dispatched} dispatched` : ""}
+          <button key={c.courier} onClick={() => onPick(on ? null : c.courier)} aria-pressed={on} className="os-btn"
+            aria-label={`${c.courier}: ${c.packed} packed, ${c.left} left to pack`}
+            style={{ textAlign: "left", cursor: "pointer", fontFamily: "inherit", minWidth: 0,
+              background: on ? C.orangeLight : C.white, border: `2px solid ${on ? C.orange : done ? C.greenBorder : C.gray200}`,
+              borderRadius: 14, padding: compact ? "10px 12px" : "12px 14px", display: "flex", flexDirection: "column", gap: 4 }}>
+            <span style={{ fontSize: compact ? 12.5 : 13, fontWeight: 800, color: C.gray700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              🚚 {c.courier}
+            </span>
+            <span style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+              <span style={{ fontFamily: "monospace", fontWeight: 900, fontSize: compact ? 30 : 34, lineHeight: 1, color: C.gray900 }}>{c.packed}</span>
+              <span style={{ fontSize: 12.5, fontWeight: 700, color: C.gray600 }}>packed</span>
+            </span>
+            <span style={{ fontSize: 12.5, fontWeight: 800, color: done ? "#15803D" : C.red }}>
+              {done ? "✓ all packed" : `${c.left} left to pack`}
             </span>
           </button>
         );
       })}
-      {offList > 0 && (
-        <div style={{ flex: compact ? "0 0 150px" : undefined, borderRadius: 12, padding: "10px 12px", border: `1.5px dashed ${C.amberBorder}`,
-          background: C.amberLight, display: "flex", flexDirection: "column", gap: 4 }}>
-          <span style={{ fontSize: 12.5, fontWeight: 800, color: "#92400E" }}>Scanned, not on this list</span>
-          <span style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 20, color: "#92400E" }}>{offList}</span>
-          <span style={{ fontSize: 11, color: "#92400E" }}>Kept in the scan record</span>
-        </div>
-      )}
     </div>
   );
 }
 
 /**
- * The courier KPIs, always shown. With labels for the day: each courier's
- * scanned / left. Scans that aren't on the day's labels are counted per courier
- * too. With nothing for the day, it says why and offers the latest day that
- * has labels.
+ * The courier KPIs, always shown: each courier's packed count (waiting for
+ * pickup) and how many are left to pack. Scans that aren't on the day's labels
+ * are counted per courier too. With nothing for the day, it says why and offers
+ * the latest day that has labels.
  */
 function CourierSection({ desk, items, sum, active, onPick, compact }) {
   const tiles = courierStats(items);
   const off = (sum?.off_list_by_courier || []).filter((c) => c.scanned);
   const latest = desk.queue?.latest_label_day;
-  if (!tiles.length && !off.length) {
+  const packedTotal = tiles.reduce((n, c) => n + c.packed, 0);
+  if (!items.length && !off.length) {
     if (desk.loading && !desk.queue) return null;
     const msg = `No labels uploaded for ${fmtDay(desk.date)} yet — courier-wise counts appear once that day's labels are uploaded on Labels.`;
     return (
@@ -634,18 +627,61 @@ function CourierSection({ desk, items, sum, active, onPick, compact }) {
   }
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-      {tiles.length > 0 && <CourierTiles couriers={tiles} offList={0} active={active} onPick={onPick} compact={compact} />}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
+        <span style={{ fontSize: 12.5, fontWeight: 800, color: C.gray700 }}>Packed by courier</span>
+        <span style={{ fontSize: 12, fontWeight: 700, color: C.gray500 }}>
+          <b style={{ fontFamily: "monospace", color: C.gray900, fontSize: 14 }}>{packedTotal}</b> waiting for pickup
+        </span>
+      </div>
+      {tiles.length > 0
+        ? <CourierTiles couriers={tiles} active={active} onPick={onPick} compact={compact} />
+        : <div style={{ fontSize: 12.5, fontWeight: 700, color: C.green }}>✓ Nothing waiting — every order has shipped or is cancelled.</div>}
       {off.length > 0 && (
-        <div style={{ display: "flex", gap: 6, flexWrap: compact ? "nowrap" : "wrap", overflowX: compact ? "auto" : undefined, alignItems: "center" }}>
-          <span style={{ fontSize: 11.5, fontWeight: 800, color: "#92400E", whiteSpace: "nowrap" }}>Scanned, not on this day's labels:</span>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+          <span style={{ fontSize: 11.5, fontWeight: 800, color: "#92400E" }}>Scanned, not on this day's labels:</span>
           {off.map((c) => (
-            <span key={c.courier} style={{ flex: "0 0 auto", padding: "4px 10px", borderRadius: 999, fontSize: 12, fontWeight: 700,
+            <span key={c.courier} style={{ padding: "4px 10px", borderRadius: 999, fontSize: 12, fontWeight: 700,
               whiteSpace: "nowrap", border: `1.5px dashed ${C.amberBorder}`, background: C.amberLight, color: "#92400E" }}>
               🚚 {c.courier} · {c.scanned}
             </span>
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * Phone stand-in for a list: orders per courier for the open tab. The full
+ * order-by-order list is for the bigger screen — on a phone the number per
+ * delivery partner is what matters and it can be read at a glance.
+ */
+function BucketCounts({ items, label, hint, color }) {
+  const rows = countsByCourier(items);
+  const total = items.length;
+  return (
+    <div style={{ padding: "14px" }}>
+      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 8 }}>
+        <span style={{ fontSize: 13, fontWeight: 800, color: C.gray700 }}>{label} by courier</span>
+        <span style={{ fontFamily: "monospace", fontWeight: 900, fontSize: 28, color }}>{total}</span>
+      </div>
+      {rows.length === 0 ? (
+        <div style={{ textAlign: "center", padding: 28, color: C.gray400, fontSize: 13 }}>Nothing here.</div>
+      ) : (
+        <div style={{ border: `1px solid ${C.gray100}`, borderRadius: 12, overflow: "hidden" }}>
+          {rows.map((r, idx) => (
+            <div key={r.courier} style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 14px",
+              borderTop: idx ? `1px solid ${C.gray100}` : "none", background: C.white }}>
+              <span style={{ flex: 1, minWidth: 0, fontSize: 14, fontWeight: 700, color: C.gray800, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                🚚 {r.courier}
+              </span>
+              <span style={{ fontSize: 12.5, color: C.gray500 }}>{r.pieces} pcs</span>
+              <span style={{ fontFamily: "monospace", fontWeight: 900, fontSize: 22, color, minWidth: 34, textAlign: "right" }}>{r.orders}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      <div style={{ fontSize: 12.5, color: C.gray500, marginTop: 10, lineHeight: 1.5 }}>{hint} The full order list opens on a larger screen.</div>
     </div>
   );
 }
@@ -715,10 +751,10 @@ function UnsentBanner({ desk, onOpen, compact }) {
       fontFamily: "inherit", background: "#FFFBEB", border: `1.5px solid ${C.amberBorder}`, borderRadius: 12, padding: compact ? "8px 12px" : "10px 14px" }}>
       <span style={{ fontSize: compact ? 16 : 18 }}>↻</span>
       <span style={{ flex: 1, minWidth: 0, fontSize: compact ? 12.5 : 13.5, fontWeight: 800, color: "#92400E" }}>
-        {u.count} order{u.count === 1 ? "" : "s"} from earlier days not sent
+        {u.count} order{u.count === 1 ? "" : "s"} from earlier days not picked up
         {!compact && <span style={{ fontWeight: 600 }}> · {u.by_day.map((d) => `${fmtDay(d.day)}: ${d.count}`).join(" · ")}</span>}
       </span>
-      <span style={{ fontSize: 12.5, fontWeight: 800, color: C.orange, whiteSpace: "nowrap" }}>Move to {fmtDay(desk.date)} →</span>
+      <span style={{ fontSize: 12.5, fontWeight: 800, color: C.orange, whiteSpace: "nowrap" }}>Move to today →</span>
     </button>
   );
 }
@@ -745,8 +781,8 @@ function ShiftPanel({ desk, onClose }) {
         <div style={{ padding: "14px 16px", borderBottom: `1px solid ${C.gray100}` }}>
           <div style={{ fontSize: 16, fontWeight: 900, color: C.gray900 }}>Move unsent orders to {fmtDay(desk.date)}</div>
           <div style={{ fontSize: 12.5, color: C.gray500, marginTop: 3 }}>
-            These never went out on their own day — not dispatched here, and not shipped or cancelled on the marketplace.
-            The ones you move join {fmtDay(desk.date)}'s list and courier counts; the rest stay where they are.
+            Packed but never picked up on their own day. Cancelled orders you already scanned are included — they are still
+            in the bag. The ones you move join {fmtDay(desk.date)}'s list and courier counts; the rest stay where they are.
           </div>
           <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap", alignItems: "center" }}>
             <button onClick={() => setPicked(new Set(u.items.map(key)))} style={btn("ghost", "sm")}>Select all</button>
@@ -772,7 +808,9 @@ function ShiftPanel({ desk, onClose }) {
                       {[i.business_name, i.courier, i.awb, i.order_id].filter(Boolean).join(" · ")}
                     </div>
                   </div>
-                  <Tag variant={(STATE_META[i.state] || STATE_META.PENDING).tag}>{(STATE_META[i.state] || STATE_META.PENDING).label}</Tag>
+                  {i.ship_status === "CANCELLED"
+                    ? <Tag variant="red">Cancelled · in bag</Tag>
+                    : <Tag variant={(STATE_META[i.state] || STATE_META.PENDING).tag}>{(STATE_META[i.state] || STATE_META.PENDING).label}</Tag>}
                 </label>
               ))}
             </div>
@@ -811,6 +849,91 @@ function AlertBanner({ alerts, onOpen, compact }) {
   );
 }
 
+// ── Shared layout pieces ──────────────────────────────────────────────────────
+
+const TAB_TONE = { pending: C.orange, packed: C.green, shipped: "#15803D", cancelled: C.red, issues: "#B45309", all: C.gray700 };
+
+/** Focus rings and reduced motion for the whole desk — keyboard and switch users can see where they are. */
+const DESK_CSS = `
+  .os-btn:focus-visible, .os-in:focus-visible { outline: 3px solid #2563EB; outline-offset: 2px; }
+  @media (prefers-reduced-motion: reduce) { .os-desk * { transition: none !important; } }
+`;
+
+/**
+ * The status tabs. The big number IS the tab: one control that both reports the
+ * count and switches the list, instead of a row of tiles repeating a row of tabs.
+ */
+function StatTabs({ tabs, tab, onPick, counts, compact }) {
+  return (
+    <div role="tablist" aria-label="Orders by status"
+      style={{ display: "grid", gridTemplateColumns: `repeat(${tabs.length}, minmax(0, 1fr))`, gap: compact ? 6 : 8 }}>
+      {tabs.map((f) => {
+        const on = tab === f.key;
+        const tone = TAB_TONE[f.key] || C.gray700;
+        return (
+          <button key={f.key} role="tab" aria-selected={on} className="os-btn" onClick={() => onPick(f.key)}
+            style={{ cursor: "pointer", fontFamily: "inherit", minHeight: compact ? 64 : 74, padding: "8px 4px", borderRadius: 14,
+              border: `2px solid ${on ? tone : C.gray200}`, background: on ? tone : C.white, color: on ? "#fff" : C.gray800,
+              display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 3, transition: "background .15s" }}>
+            <span style={{ fontFamily: "monospace", fontWeight: 900, fontSize: compact ? 24 : 28, lineHeight: 1 }}>{counts[f.key] ?? 0}</span>
+            <span style={{ fontSize: compact ? 12 : 13, fontWeight: 700, color: on ? "rgba(255,255,255,.95)" : C.gray600 }}>{f.label}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/** One line of progress: how much of the day has gone out, and what is left to pack. */
+function DayProgress({ counts, pieces }) {
+  const total = counts.pending + counts.packed + counts.shipped + counts.issues;
+  const done = counts.packed + counts.shipped;
+  const pct = total ? Math.min(100, (done / total) * 100) : 0;
+  const left = counts.pending;
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+        <span style={{ fontSize: 14, fontWeight: 800, color: C.gray800 }}>
+          <span style={{ fontFamily: "monospace", fontSize: 22, color: C.gray900 }}>{done}</span>
+          <span style={{ color: C.gray500 }}> of {total} packed</span>
+          {pieces ? <span style={{ color: C.gray500, fontWeight: 600, fontSize: 12.5 }}> · {pieces.packed}/{pieces.total} pcs</span> : null}
+        </span>
+        <span style={{ fontSize: 14, fontWeight: 800, color: left ? C.orange : C.green }}>
+          {total === 0 ? "" : left ? `${left} left to pack` : "✓ All packed"}
+        </span>
+      </div>
+      <div role="progressbar" aria-valuemin={0} aria-valuemax={total} aria-valuenow={done} aria-label="Orders packed"
+        style={{ height: 10, borderRadius: 99, background: C.gray100, overflow: "hidden", marginTop: 8 }}>
+        <div style={{ height: "100%", width: `${pct}%`, background: C.green, borderRadius: 99, transition: "width .25s" }} />
+      </div>
+    </div>
+  );
+}
+
+/** Pack / Dispatch — what a scan will do. Large enough to hit, and says what it means. */
+function ModeSwitch({ mode, setMode, onChanged, showHelp }) {
+  return (
+    <div>
+      <div role="radiogroup" aria-label="What a scan does" style={{ display: "flex", background: C.gray100, borderRadius: 12, padding: 4, gap: 4 }}>
+        {MODES.map((m) => {
+          const on = mode === m.key;
+          return (
+            <button key={m.key} role="radio" aria-checked={on} className="os-btn" onClick={() => { setMode(m.key); onChanged?.(); }}
+              style={{ flex: 1, minHeight: 44, border: "none", borderRadius: 9, padding: "8px 12px", fontSize: 14, fontWeight: 800, fontFamily: "inherit",
+                cursor: "pointer", background: on ? C.white : "transparent", color: on ? C.orange : C.gray600,
+                boxShadow: on ? "0 1px 3px rgba(0,0,0,.15)" : "none" }}>
+              {m.key === "PACKED" ? "📦 Pack" : "🚚 Dispatch"}
+            </button>
+          );
+        })}
+      </div>
+      {showHelp && <div style={{ fontSize: 12, color: C.gray500, marginTop: 6 }}>Scans are {MODES.find((m) => m.key === mode).help}.</div>}
+    </div>
+  );
+}
+
+function Notice({ children }) { return <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>{children}</div>; }
+
 // ── Phone: full screen, stable ────────────────────────────────────────────────
 
 function MobilePack({ desk, platform, setPlatform, businesses, onScopeChanged, scopeTick, multi }) {
@@ -829,9 +952,18 @@ function MobilePack({ desk, platform, setPlatform, businesses, onScopeChanged, s
   const sum = queue?.summary;
   const inCourier = courier ? items.filter((i) => courierKey(i.courier) === courierKey(courier)) : items;
   const counts = useMemo(() => summaryCounts(inCourier), [inCourier]);
+  const allCounts = useMemo(() => summaryCounts(items), [items]);
   const shown = inCourier.filter(FILTERS.find((f) => f.key === tab).test);
   const sel = useAdminSelect(desk, shown);
   const progress = { done: sum?.packed ?? 0, total: (sum?.assigned ?? 0) - (sum?.cancelled ?? 0), label: `${MODES.find((m) => m.key === mode).label}` };
+  const listTab = PHONE_LIST_TABS.includes(tab);
+  const tabs = FILTERS.filter((f) => f.key !== "all" && (f.key !== "issues" || allCounts.issues > 0 || tab === "issues"));
+  const TAB_INFO = {
+    packed:    { label: "Packed", color: C.green, hint: "Packed and waiting for the courier's pickup." },
+    shipped:   { label: "Shipped", color: "#15803D", hint: "Already handed over or shipped per the marketplace." },
+    cancelled: { label: "Cancelled", color: C.red, hint: "Don't hand these over — keep them aside." },
+  };
+  const submitTyped = () => { if (typed.trim()) { record(typed); setTyped(""); } };
 
   // Lock the page behind the fixed screen so it can't scroll under it.
   useEffect(() => {
@@ -841,10 +973,11 @@ function MobilePack({ desk, platform, setPlatform, businesses, onScopeChanged, s
   }, []);
 
   return (
-    <div style={{
-      position: "fixed", inset: 0, zIndex: 3000, background: C.white, display: "flex", flexDirection: "column",
+    <div className="os-desk" style={{
+      position: "fixed", inset: 0, zIndex: 3000, background: C.gray50, display: "flex", flexDirection: "column",
       height: "100dvh", paddingTop: "env(safe-area-inset-top)",
     }}>
+      <style>{DESK_CSS}</style>
       {camera && (
         <BarcodeScanner
           continuous
@@ -858,99 +991,97 @@ function MobilePack({ desk, platform, setPlatform, businesses, onScopeChanged, s
         />
       )}
 
-      {/* Header */}
-      <div style={{ padding: "10px 14px", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", borderBottom: `1px solid ${C.gray100}`, flexShrink: 0 }}>
-        <button onClick={() => navigate(-1)} aria-label="Back" style={{ background: "none", border: "none", padding: 4, cursor: "pointer", lineHeight: 0, color: C.gray700 }}>
-          <ArrowBackIcon />
-        </button>
-        <div style={{ flex: "1 1 150px", minWidth: 150 }}>
-          <div style={{ fontSize: 17, fontWeight: 800, color: C.gray900, whiteSpace: "nowrap" }}>Pack orders</div>
-          <select value={date} onChange={(e) => setDate(e.target.value)}
-            style={{ border: "none", background: "none", fontSize: 12, color: C.gray500, fontWeight: 600, padding: 0, fontFamily: "inherit", maxWidth: "100%" }}>
-            {[...new Set([date, ...(queue?.dates || [])])].filter(Boolean).sort().reverse().map((d) => <option key={d} value={d}>{dayLabel(d, desk.currentDay)}</option>)}
-          </select>
+      {/* Header — title and day on one line, the rest in one scrollable row */}
+      <div style={{ padding: "8px 12px", display: "flex", flexDirection: "column", gap: 8, background: C.white, borderBottom: `1px solid ${C.gray200}`, flexShrink: 0 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <button onClick={() => navigate(-1)} aria-label="Back" className="os-btn"
+            style={{ background: "none", border: "none", width: 44, height: 44, cursor: "pointer", lineHeight: 0, color: C.gray700, flexShrink: 0 }}>
+            <ArrowBackIcon />
+          </button>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 18, fontWeight: 800, color: C.gray900, whiteSpace: "nowrap" }}>Pack orders</div>
+            <select value={date} onChange={(e) => setDate(e.target.value)} aria-label="Packing day" className="os-in"
+              style={{ border: "none", background: "none", fontSize: 13, color: C.gray600, fontWeight: 700, padding: 0, fontFamily: "inherit", maxWidth: "100%" }}>
+              {[...new Set([date, ...(queue?.dates || [])])].filter(Boolean).sort().reverse().map((d) => <option key={d} value={d}>{dayLabel(d, desk.currentDay)}</option>)}
+            </select>
+          </div>
+          <PlatformToggle platform={platform} onChange={setPlatform} />
         </div>
-        <DeskBusinesses desk={businesses} onChanged={onScopeChanged} compact />
-        <PlatformToggle platform={platform} onChange={setPlatform} />
-        <button onClick={() => setShowSummary(true)} style={{ ...btn("ghost", "sm"), minHeight: 38 }}>🖨 Courier summary</button>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", overflowX: "auto" }}>
+          <DeskBusinesses desk={businesses} onChanged={onScopeChanged} compact />
+          <button onClick={() => setShowSummary(true)} className="os-btn" style={{ ...btn("ghost", "sm"), minHeight: 40, whiteSpace: "nowrap", flexShrink: 0 }}>🖨 Courier summary</button>
+        </div>
       </div>
       {showSummary && (
         <div style={{ position: "fixed", inset: 0, zIndex: 3200, background: C.white, overflowY: "auto",
           padding: "calc(12px + env(safe-area-inset-top)) 14px calc(16px + env(safe-area-inset-bottom))" }}>
-          <button onClick={() => setShowSummary(false)} style={{ ...btn("ghost", "sm"), marginBottom: 12 }}>← Back to scanning</button>
+          <button onClick={() => setShowSummary(false)} className="os-btn" style={{ ...btn("ghost", "md"), marginBottom: 12 }}>← Back to scanning</button>
           <CourierSummary platform={platform} day={date} compact />
         </div>
       )}
 
-      {/* Everything between the header and the scan bar scrolls as one, so the
-          list always has room however many notices are showing. */}
+      {/* Everything between the header and the scan bar scrolls as one. */}
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
-      {/* Progress + last result */}
-      <div style={{ padding: "12px 14px 10px", display: "flex", flexDirection: "column", gap: 12 }}>
-        {loading && !queue ? (
-          <div style={{ display: "flex", justifyContent: "center", padding: 24 }}><CircularProgress style={{ color: C.orange }} /></div>
+        <div style={{ padding: "12px 12px 10px", display: "flex", flexDirection: "column", gap: 12 }}>
+          {loading && !queue ? (
+            <div style={{ display: "flex", justifyContent: "center", padding: 24 }}><CircularProgress style={{ color: C.orange }} /></div>
+          ) : (
+            <>
+              <DayNotice desk={desk} compact />
+              <div style={{ background: C.white, border: `1px solid ${C.gray200}`, borderRadius: 16, padding: 12, display: "flex", flexDirection: "column", gap: 12 }}>
+                <DayProgress counts={allCounts} pieces={sum ? { packed: sum.pieces_packed ?? 0, total: sum.pieces ?? 0 } : null} />
+                <StatTabs tabs={tabs} tab={tab} onPick={setTab} counts={counts} compact />
+                {courier && (
+                  <button onClick={() => setCourier(null)} className="os-btn" style={{ ...btn("ghostOrange", "sm"), alignSelf: "flex-start", minHeight: 36 }}>
+                    🚚 {courier} · show all couriers ✕
+                  </button>
+                )}
+              </div>
+              <CourierSection desk={desk} items={items} sum={sum} active={courier} onPick={setCourier} compact />
+              <AlertBanner alerts={alerts} onOpen={() => setShowAlerts(true)} compact />
+              <UnsentBanner desk={desk} onOpen={() => setShowShift(true)} compact />
+              {showShift && <ShiftPanel desk={desk} onClose={(moved) => { setShowShift(false); if (moved) reloadAlerts(); }} />}
+              <LatestPanel latest={latest} busy={busy} minHeight={110} />
+            </>
+          )}
+        </div>
+
+        {showAlerts && alerts && (
+          <div style={{ position: "fixed", inset: 0, zIndex: 3100, background: "rgba(0,0,0,.35)", padding: 12, overflowY: "auto" }}>
+            <AlertsPanel alerts={alerts} onClose={() => setShowAlerts(false)} />
+          </div>
+        )}
+
+        {sel.admin && listTab && <div style={{ padding: "0 12px 8px" }}><AdminBar sel={sel} shownCount={shown.length} compact /></div>}
+        {!listTab ? (
+          <div style={{ background: C.white, borderTop: `1px solid ${C.gray200}` }}>
+            <BucketCounts items={shown} {...(TAB_INFO[tab] || TAB_INFO.packed)} />
+          </div>
         ) : (
-          <>
-            <DayNotice desk={desk} compact />
-            <ProgressBar done={progress.done} total={progress.total} label={`${progress.label} · ${sum?.pieces_packed ?? 0} of ${sum?.pieces ?? 0} pieces`} />
-            <CourierSection desk={desk} items={items} sum={sum} active={courier} onPick={setCourier} compact />
-            <AlertBanner alerts={alerts} onOpen={() => setShowAlerts(true)} compact />
-            <UnsentBanner desk={desk} onOpen={() => setShowShift(true)} compact />
-            {showShift && <ShiftPanel desk={desk} onClose={(moved) => { setShowShift(false); if (moved) reloadAlerts(); }} />}
-            <LatestPanel latest={latest} busy={busy} minHeight={118} />
-          </>
+          <div style={{ background: C.white, borderTop: `1px solid ${C.gray200}` }}>
+            {shown.length === 0 ? (
+              <div style={{ textAlign: "center", padding: 36, color: C.gray500, fontSize: 14 }}>
+                {!items.length ? "No orders assigned for this day — upload the labels first." : tab === "pending" ? "Everything is packed. 🎉" : "Nothing here."}
+              </div>
+            ) : shown.map((i) => <ItemRow key={`${i.business_id}-${i.order_id}`} item={i} compact showBusiness={multi}
+                  admin={sel.admin} selecting={sel.selecting} selected={sel.isPicked(i)} onToggle={() => sel.toggle(i)} onSetStatus={(st) => sel.applyOne(i, st)}
+                  onMoveBack={async () => { await desk.shiftOrders([i], { undo: true }); reloadAlerts(); }} />)}
+          </div>
         )}
       </div>
 
-      {showAlerts && alerts && (
-        <div style={{ position: "fixed", inset: 0, zIndex: 3100, background: "rgba(0,0,0,.35)", padding: 12, overflowY: "auto" }}>
-          <AlertsPanel alerts={alerts} onClose={() => setShowAlerts(false)} />
-        </div>
-      )}
-
-      {/* Queue — the filters stay in view while the list scrolls */}
-      <div style={{ display: "flex", gap: 6, padding: "8px 14px", position: "sticky", top: 0, zIndex: 2, background: C.white }}>
-        {FILTERS.map((f) => (
-          <button key={f.key} onClick={() => setTab(f.key)}
-            style={{
-              flex: 1, padding: "8px 4px", borderRadius: 10, fontSize: 12.5, fontWeight: 700, fontFamily: "inherit", cursor: "pointer",
-              border: `1.5px solid ${tab === f.key ? C.orange : C.gray200}`,
-              background: tab === f.key ? C.orange : C.white, color: tab === f.key ? "#fff" : C.gray600,
-            }}>
-            {f.label} {counts[f.key] ?? 0}
-          </button>
-        ))}
-      </div>
-      {sel.admin && <div style={{ padding: "0 14px 8px" }}><AdminBar sel={sel} shownCount={shown.length} compact /></div>}
-      <div style={{ borderTop: `1px solid ${C.gray100}` }}>
-        {shown.length === 0 ? (
-          <div style={{ textAlign: "center", padding: 36, color: C.gray400, fontSize: 13 }}>
-            {!items.length ? "No orders assigned for this day — upload the labels first." : tab === "pending" ? "Everything is packed. 🎉" : "Nothing here."}
-          </div>
-        ) : shown.map((i) => <ItemRow key={`${i.business_id}-${i.order_id}`} item={i} compact showBusiness={multi}
-              admin={sel.admin} selecting={sel.selecting} selected={sel.isPicked(i)} onToggle={() => sel.toggle(i)} onSetStatus={(st) => sel.applyOne(i, st)}
-              onMoveBack={async () => { await desk.shiftOrders([i], { undo: true }); reloadAlerts(); }} />)}
-      </div>
-      </div>
-
-      {/* Bottom bar */}
-      <div style={{ flexShrink: 0, padding: "10px 14px calc(10px + env(safe-area-inset-bottom))", borderTop: `1px solid ${C.gray200}`, background: C.white, display: "flex", flexDirection: "column", gap: 8 }}>
-        <div style={{ display: "flex", gap: 8 }}>
-          <input value={typed} onChange={(e) => setTyped(e.target.value)} placeholder="…or type AWB / order no"
-            onKeyDown={(e) => { if (e.key === "Enter") { record(typed); setTyped(""); } }}
-            autoComplete="off" style={{ ...S.inp, flex: 1, fontFamily: "monospace", minWidth: 0 }} />
-          <div style={{ display: "flex", background: C.gray100, borderRadius: 10, padding: 3 }}>
-            {MODES.map((m) => (
-              <button key={m.key} onClick={() => setMode(m.key)}
-                style={{ border: "none", borderRadius: 8, padding: "6px 9px", fontSize: 11.5, fontWeight: 700, fontFamily: "inherit", cursor: "pointer",
-                  background: mode === m.key ? C.white : "transparent", color: mode === m.key ? C.orange : C.gray500 }}>{m.label}</button>
-            ))}
-          </div>
-        </div>
-        <button onClick={() => setCamera(true)}
-          style={{ ...btn("primary", "lg"), padding: "17px 20px", fontSize: 18, borderRadius: 14, width: "100%" }}>
+      {/* Bottom bar — in thumb reach: the big action, then the mode and a typed fallback */}
+      <div style={{ flexShrink: 0, padding: "10px 12px calc(10px + env(safe-area-inset-bottom))", borderTop: `1px solid ${C.gray200}`, background: C.white, display: "flex", flexDirection: "column", gap: 8 }}>
+        <button onClick={() => setCamera(true)} className="os-btn"
+          style={{ ...btn("primary", "lg"), minHeight: 58, padding: "14px 20px", fontSize: 18, borderRadius: 14, width: "100%" }}>
           <QrCodeScannerIcon style={{ fontSize: 26, verticalAlign: "-7px" }} />&nbsp;Scan parcel
         </button>
+        <div style={{ display: "flex", gap: 8, alignItems: "stretch" }}>
+          <div style={{ width: 168, flexShrink: 0 }}><ModeSwitch mode={mode} setMode={setMode} /></div>
+          <input value={typed} onChange={(e) => setTyped(e.target.value)} placeholder="Type AWB / order no" aria-label="Type an AWB or order number"
+            onKeyDown={(e) => { if (e.key === "Enter") submitTyped(); }} enterKeyHint="go"
+            autoComplete="off" className="os-in" style={{ ...S.inp, flex: 1, fontFamily: "monospace", minWidth: 0, minHeight: 52, fontSize: 15 }} />
+        </div>
       </div>
     </div>
   );
@@ -1104,8 +1235,10 @@ function DesktopPack({ desk, platform, setPlatform, businesses, onScopeChanged, 
   const sum = queue?.summary;
   const inCourier = courier ? items.filter((i) => courierKey(i.courier) === courierKey(courier)) : items;
   const counts = useMemo(() => summaryCounts(inCourier), [inCourier]);
+  const allCounts = useMemo(() => summaryCounts(items), [items]);
   const shown = inCourier.filter(FILTERS.find((f) => f.key === tab).test);
   const sel = useAdminSelect(desk, shown);
+  const tabs = FILTERS.filter((f) => f.key !== "issues" || allCounts.issues > 0 || tab === "issues");
 
   const submit = async () => {
     const code = scan.trim();
@@ -1115,25 +1248,25 @@ function DesktopPack({ desk, platform, setPlatform, businesses, onScopeChanged, 
     refocus();
   };
 
-  const toGo = (sum?.assigned ?? 0) - (sum?.cancelled ?? 0);
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+    <div className="os-desk" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <style>{DESK_CSS}</style>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
         <div>
-          <h1 style={{ fontSize: 20, fontWeight: 800, color: C.gray900 }}>Order scan</h1>
-          <p style={{ fontSize: 12, color: C.gray400, marginTop: 3 }}>Every label for the day is an order to pack — scan each parcel to tick it off and keep the record.</p>
+          <h1 style={{ fontSize: 22, fontWeight: 800, color: C.gray900, margin: 0 }}>Order scan</h1>
+          <p style={{ fontSize: 13, color: C.gray500, marginTop: 3 }}>Scan each parcel to tick it off the day's list and keep the record.</p>
         </div>
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
           <DeskBusinesses desk={businesses} onChanged={onScopeChanged} />
           <PlatformToggle platform={platform} onChange={setPlatform} />
-          <select value={date} onChange={(e) => setDate(e.target.value)} style={{ ...S.inp, width: "auto" }}>
+          <select value={date} onChange={(e) => setDate(e.target.value)} aria-label="Packing day" className="os-in" style={{ ...S.inp, width: "auto", fontWeight: 700 }}>
             {[...new Set([date, ...(queue?.dates || [])])].filter(Boolean).sort().reverse().map((d) => <option key={d} value={d}>{dayLabel(d, desk.currentDay)}</option>)}
           </select>
-          <div style={{ display: "flex", background: C.gray100, borderRadius: 10, padding: 3 }}>
+          <div role="tablist" aria-label="Screen" style={{ display: "flex", background: C.gray100, borderRadius: 10, padding: 3 }}>
             {["queue", "record", "summary"].map((v) => (
-              <button key={v} onClick={() => setView(v)}
-                style={{ border: "none", borderRadius: 8, padding: "7px 16px", fontSize: 13, fontWeight: 700, fontFamily: "inherit", cursor: "pointer",
-                  background: view === v ? C.white : "transparent", color: view === v ? C.orange : C.gray500 }}>
+              <button key={v} role="tab" aria-selected={view === v} className="os-btn" onClick={() => setView(v)}
+                style={{ border: "none", borderRadius: 8, padding: "8px 16px", fontSize: 13, fontWeight: 700, fontFamily: "inherit", cursor: "pointer",
+                  background: view === v ? C.white : "transparent", color: view === v ? C.orange : C.gray600 }}>
                 {v === "queue" ? "Today's list" : v === "record" ? "Scan record" : "🖨 Courier summary"}
               </button>
             ))}
@@ -1144,82 +1277,68 @@ function DesktopPack({ desk, platform, setPlatform, businesses, onScopeChanged, 
       {view === "summary" ? <CourierSummary key={scopeTick} platform={platform} day={date} /> :
        view === "record" ? <ScanRecord key={scopeTick} platform={platform} multi={multi} /> : (
         <>
-          <DayNotice desk={desk} />
-          <AlertBanner alerts={alerts} onOpen={() => { setShowAlerts((v) => !v); reloadAlerts(); }} />
-          <UnsentBanner desk={desk} onOpen={() => setShowShift(true)} />
+          <Notice>
+            <DayNotice desk={desk} />
+            <AlertBanner alerts={alerts} onOpen={() => { setShowAlerts((v) => !v); reloadAlerts(); }} />
+            <UnsentBanner desk={desk} onOpen={() => setShowShift(true)} />
+          </Notice>
           {showShift && <ShiftPanel desk={desk} onClose={(moved) => { setShowShift(false); if (moved) reloadAlerts(); }} />}
           {showAlerts && alerts && <AlertsPanel alerts={alerts} onClose={() => setShowAlerts(false)} />}
-          <div>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 8 }}>
-              <span style={{ fontSize: 13, fontWeight: 800, color: C.gray700 }}>By courier — scanned / to send</span>
-              {courier && <button onClick={() => setCourier(null)} style={btn("ghost", "sm")}>Show all couriers</button>}
-            </div>
-            <CourierSection desk={desk} items={items} sum={sum} active={courier} onPick={(c) => { setCourier(c); setTab(c ? "pending" : tab); refocus(); }} />
-          </div>
-          <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-            <Tile label="Assigned" value={sum?.assigned} color={C.gray600} onClick={() => setTab("all")} active={tab === "all"} />
-            <Tile label="Packed" value={sum?.packed} color={C.green} onClick={() => setTab("done")} active={tab === "done"} />
-            <Tile label="To pack" value={sum?.remaining} color={C.orange} onClick={() => setTab("pending")} active={tab === "pending"} />
-            <Tile label={`Shipped (${platform === "flipkart" ? "Flipkart" : "Meesho"})`} value={sum?.shipped} color={C.green} />
-            <Tile label="Not shipped yet" value={sum?.not_shipped} color={C.amber} />
-            <Tile label="Cancelled" value={sum?.cancelled} color={C.red} onClick={() => setTab("issues")} active={tab === "issues"} />
-          </div>
 
-          <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(380px, 440px)", gap: 18, alignItems: "start" }}>
-            <div style={{ ...S.card, padding: 0, overflow: "hidden" }}>
-              <div style={{ display: "flex", gap: 8, padding: "12px 16px", borderBottom: `1px solid ${C.gray100}`, alignItems: "center" }}>
-                {FILTERS.map((f) => (
-                  <button key={f.key} onClick={() => { setTab(f.key); refocus(); }}
-                    style={{ padding: "6px 13px", borderRadius: 20, fontSize: 12.5, fontWeight: 700, fontFamily: "inherit", cursor: "pointer",
-                      border: `1.5px solid ${tab === f.key ? C.orange : C.gray200}`, background: tab === f.key ? C.orange : C.white, color: tab === f.key ? "#fff" : C.gray600 }}>
-                    {f.label} · {counts[f.key] ?? 0}
-                  </button>
-                ))}
-                {courier && <Tag variant="orange">🚚 {courier}</Tag>}
-                <button onClick={() => { reload(); refocus(); }} style={{ ...btn("ghost", "sm"), marginLeft: "auto" }}>
-                  <RefreshIcon style={{ fontSize: 15, verticalAlign: "-3px" }} />&nbsp;Refresh
-                </button>
+          <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(360px, 420px)", gap: 20, alignItems: "start" }}>
+            {/* Left: where every courier stands, then the list */}
+            <div style={{ display: "flex", flexDirection: "column", gap: 16, minWidth: 0 }}>
+              <div style={{ ...S.card, padding: 16, display: "flex", flexDirection: "column", gap: 14 }}>
+                <DayProgress counts={allCounts} pieces={sum ? { packed: sum.pieces_packed ?? 0, total: sum.pieces ?? 0 } : null} />
+                <CourierSection desk={desk} items={items} sum={sum} active={courier} onPick={(c) => { setCourier(c); setTab(c ? "packed" : tab); refocus(); }} />
               </div>
-              {sel.admin && <div style={{ padding: "10px 16px", borderBottom: `1px solid ${C.gray100}` }}><AdminBar sel={sel} shownCount={shown.length} /></div>}
-              {loading && !queue ? (
-                <div style={{ display: "flex", justifyContent: "center", padding: 44 }}><CircularProgress style={{ color: C.orange }} /></div>
-              ) : shown.length === 0 ? (
-                <div style={{ textAlign: "center", padding: 44, color: C.gray400, fontSize: 13 }}>
-                  {!items.length ? "No orders assigned for this day — upload the labels first." : tab === "pending" ? "Everything is packed. 🎉" : "Nothing here."}
-                </div>
-              ) : shown.map((i) => <ItemRow key={`${i.business_id}-${i.order_id}`} item={i} showBusiness={multi}
-                    admin={sel.admin} selecting={sel.selecting} selected={sel.isPicked(i)} onToggle={() => sel.toggle(i)} onSetStatus={(st) => sel.applyOne(i, st)}
-              onMoveBack={async () => { await desk.shiftOrders([i], { undo: true }); reloadAlerts(); }} />)}
-            </div>
 
-            <div style={{ position: "sticky", top: 12, display: "flex", flexDirection: "column", gap: 14 }}>
-              <div style={{ ...S.card, padding: "16px 18px", borderTop: `3px solid ${C.orange}`, display: "flex", flexDirection: "column", gap: 14 }}>
-                <ProgressBar done={sum?.packed ?? 0} total={toGo} label={`Packed · ${sum?.pieces_packed ?? 0} of ${sum?.pieces ?? 0} pieces`} />
-                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                  <span style={{ fontSize: 12, fontWeight: 700, color: C.gray500 }}>Marking as</span>
-                  <div style={{ display: "flex", background: C.gray100, borderRadius: 10, padding: 3 }}>
-                    {MODES.map((m) => (
-                      <button key={m.key} onClick={() => { setMode(m.key); refocus(); }}
-                        style={{ border: "none", borderRadius: 8, padding: "6px 14px", fontSize: 12.5, fontWeight: 700, fontFamily: "inherit", cursor: "pointer",
-                          background: mode === m.key ? C.white : "transparent", color: mode === m.key ? C.orange : C.gray500 }}>{m.label}</button>
-                    ))}
+              <div style={{ ...S.card, padding: 0, overflow: "hidden" }}>
+                <div style={{ padding: 14, borderBottom: `1px solid ${C.gray100}`, display: "flex", flexDirection: "column", gap: 10 }}>
+                  <StatTabs tabs={tabs} tab={tab} onPick={(k) => { setTab(k); refocus(); }} counts={counts} />
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", minHeight: 32 }}>
+                    {courier
+                      ? <button onClick={() => setCourier(null)} className="os-btn" style={btn("ghostOrange", "sm")}>🚚 {courier} · show all couriers ✕</button>
+                      : <span style={{ fontSize: 12.5, color: C.gray500 }}>Showing {shown.length} order{shown.length === 1 ? "" : "s"} · all couriers</span>}
+                    <button onClick={() => { reload(); refocus(); }} className="os-btn" style={{ ...btn("ghost", "sm"), marginLeft: "auto" }}>
+                      <RefreshIcon style={{ fontSize: 15, verticalAlign: "-3px" }} />&nbsp;Refresh
+                    </button>
                   </div>
                 </div>
+                {sel.admin && <div style={{ padding: "10px 16px", borderBottom: `1px solid ${C.gray100}` }}><AdminBar sel={sel} shownCount={shown.length} /></div>}
+                {loading && !queue ? (
+                  <div style={{ display: "flex", justifyContent: "center", padding: 44 }}><CircularProgress style={{ color: C.orange }} /></div>
+                ) : shown.length === 0 ? (
+                  <div style={{ textAlign: "center", padding: 44, color: C.gray500, fontSize: 14 }}>
+                    {!items.length ? "No orders assigned for this day — upload the labels first." : tab === "pending" ? "Everything is packed. 🎉" : "Nothing here."}
+                  </div>
+                ) : shown.map((i) => <ItemRow key={`${i.business_id}-${i.order_id}`} item={i} showBusiness={multi}
+                      admin={sel.admin} selecting={sel.selecting} selected={sel.isPicked(i)} onToggle={() => sel.toggle(i)} onSetStatus={(st) => sel.applyOne(i, st)}
+                      onMoveBack={async () => { await desk.shiftOrders([i], { undo: true }); reloadAlerts(); }} />)}
+              </div>
+            </div>
+
+            {/* Right: the scan desk — always in view */}
+            <div style={{ position: "sticky", top: 12 }}>
+              <div style={{ ...S.card, padding: 18, borderTop: `4px solid ${C.orange}`, display: "flex", flexDirection: "column", gap: 14 }}>
+                <div style={{ fontSize: 16, fontWeight: 800, color: C.gray900 }}>Scan a parcel</div>
+                <ModeSwitch mode={mode} setMode={setMode} onChanged={refocus} showHelp />
                 <div style={{ position: "relative" }}>
-                  <QrCodeScannerIcon style={{ position: "absolute", left: 13, top: "50%", transform: "translateY(-50%)", color: C.orange, fontSize: 24 }} />
+                  <QrCodeScannerIcon aria-hidden style={{ position: "absolute", left: 13, top: "50%", transform: "translateY(-50%)", color: C.orange, fontSize: 26 }} />
                   <input
                     ref={input}
                     value={scan}
                     onChange={(e) => setScan(e.target.value)}
                     onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
                     onBlur={(e) => { if (view === "queue" && !e.relatedTarget) refocus(); }}
-                    placeholder="Scan the parcel…"
-                    autoComplete="off" spellCheck={false}
+                    placeholder="Scan or type AWB / order no…"
+                    aria-label="Scan or type an AWB or order number"
+                    autoComplete="off" spellCheck={false} className="os-in"
                     style={{ ...S.inp, width: "100%", boxSizing: "border-box", fontSize: 20, fontFamily: "monospace", fontWeight: 700,
-                      padding: "14px 16px 14px 48px", background: C.orangeLight, borderColor: C.orangeBorder }}
+                      padding: "16px 16px 16px 52px", background: C.orangeLight, borderColor: C.orangeBorder }}
                   />
                 </div>
-                <LatestPanel latest={latest} busy={busy} />
+                <LatestPanel latest={latest} busy={busy} minHeight={150} />
               </div>
             </div>
           </div>

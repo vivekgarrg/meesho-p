@@ -1204,7 +1204,8 @@ function AppShell() {
         {/* Global period filter — stays mounted across route changes and
             business switches so it's never remounted, only its context value
             changes. Every tab reads the active range from useDateFilter(). */}
-        <GlobalDateFilterBar />
+        {/* Order Scan is a live packing desk (its own noon-to-noon day), not a report — a period filter means nothing there. */}
+        {loc.pathname !== '/order-scan' && <GlobalDateFilterBar />}
         {/* key by active business + settlement mode so switching either remounts
             the routed view, forcing every tab (dashboard included) to refetch
             fresh data against the newly-set business-scoped API base / the

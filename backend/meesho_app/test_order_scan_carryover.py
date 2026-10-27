@@ -170,6 +170,21 @@ class ShiftTests(CarryTestCase):
         self.assertEqual({i["order_id"] for i in unsent["items"]}, {"Y1_1", "Y5_1"})
         self.assertEqual(unsent["by_day"], [{"day": self.yesterday.isoformat(), "count": 2}])
 
+    def test_a_scanned_cancelled_order_is_still_in_the_bag_and_offered(self):
+        self.scan("Y3_1", status=ScannedOrder.STATUS_PACKED, awb_number="YAWB3",
+                  ship_status=ScannedOrder.SHIP_CANCELLED)        # packed, then Meesho cancelled it
+        unsent = {i["order_id"]: i for i in self.queue()["earlier_unsent"]["items"]}
+        self.assertEqual(set(unsent), {"Y1_1", "Y3_1", "Y5_1"})
+        self.assertEqual(unsent["Y3_1"]["ship_status"], "CANCELLED")
+        self.shift(["Y3_1"], to_day=self.today.isoformat())
+        item = next(i for i in self.queue()["items"] if i["order_id"] == "Y3_1")
+        self.assertEqual(item["ship_status"], "CANCELLED")
+
+    def test_a_sheet_that_arrived_after_the_scan_moves_it_to_shipped(self):
+        Order.objects.create(business=self.biz, sub_order_no="Y1_1", reason_for_credit_entry="SHIPPED")
+        item = next(i for i in self.queue(self.yesterday)["items"] if i["order_id"] == "Y1_1")
+        self.assertEqual(item["ship_status"], "SHIPPED")
+
     def test_moving_them_puts_them_on_the_latest_day_only(self):
         r = self.shift(["Y1_1", "Y5_1"], to_day=self.today.isoformat())
         self.assertEqual(r.data["moved"], 2)
