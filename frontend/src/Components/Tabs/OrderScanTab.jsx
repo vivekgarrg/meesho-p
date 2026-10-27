@@ -408,14 +408,17 @@ const cleanCourier = (c) => (c || "").split(/\s+/).filter(Boolean).join(" ") || 
 
 /**
  * Brand colour per courier, so a card is recognised before it is read:
- * Valmo blue, Ekart sky blue, Delhivery / XpressBees / Shadowfax red. Anything
- * else stays neutral.
+ * Valmo blue, Ekart sky blue, Delhivery red, XpressBees orange (#F58220) and
+ * Shadowfax green (#008771) — the last two from their published brand palettes.
+ * Anything else stays neutral.
  */
 function courierTone(name) {
   const n = (name || "").toLowerCase();
   if (n.includes("valmo")) return { fg: "#1D4ED8", bg: "#EFF6FF", border: "#93C5FD", solid: "#2563EB" };
   if (n.includes("ekart")) return { fg: "#0369A1", bg: "#F0F9FF", border: "#7DD3FC", solid: "#0EA5E9" };
-  if (/delhivery|delivery|xpress|shadowfax/.test(n)) return { fg: "#B91C1C", bg: "#FEF2F2", border: "#FCA5A5", solid: "#DC2626" };
+  if (/delhivery|delivery/.test(n)) return { fg: "#B91C1C", bg: "#FEF2F2", border: "#FCA5A5", solid: "#DC2626" };
+  if (n.includes("xpress")) return { fg: "#B45309", bg: "#FFF7ED", border: "#FDBA74", solid: "#F58220" };
+  if (n.includes("shadowfax")) return { fg: "#006B5A", bg: "#F0FDFA", border: "#5EEAD4", solid: "#008771" };
   return { fg: C.gray700, bg: C.gray50, border: C.gray200, solid: C.gray500 };
 }
 
@@ -428,7 +431,7 @@ function courierTone(name) {
  * on screen until the new day starts. `left` is what is still to pack.
  * Cancelled orders are not in it.
  */
-function courierStats(items) {
+function courierStats(items, offList = []) {
   const by = new Map();
   for (const i of items) {
     const b = bucketOf(i);
@@ -440,6 +443,17 @@ function courierStats(items) {
     if (b === "packed") c.packed += 1;
     else if (b === "shipped") c.shipped += 1;
     else if (b === "pending") c.left += 1;
+    c.total = c.packed + c.shipped;
+  }
+  // Parcels scanned that day that aren't on its labels (labels not uploaded
+  // yet, or a code the system didn't know) are still packed — count them under
+  // their courier so the day's number is never short.
+  for (const o of offList) {
+    const name = cleanCourier(o.courier);
+    const key = name.toLowerCase();
+    if (!by.has(key)) by.set(key, { courier: name, packed: 0, shipped: 0, left: 0, total: 0 });
+    const c = by.get(key);
+    c.packed += o.scanned;
     c.total = c.packed + c.shipped;
   }
   return [...by.values()].filter((c) => c.total || c.left)
@@ -476,7 +490,7 @@ function DayNotice({ desk, compact }) {
       <div style={{ background: "#EFF6FF", border: "1.5px solid #BFDBFE", borderRadius: 12, padding: compact ? "8px 12px" : "10px 14px",
         display: "flex", gap: 10, alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" }}>
         <span style={{ fontSize: compact ? 12.5 : 13, fontWeight: 700, color: "#1E3A8A" }}>
-          Showing {fmtDay(date)}'s orders{compact ? "" : ` — today's list (from 12 pm) takes over with the first order scanned today.`}
+          Showing {fmtDay(date)}'s counts{compact ? " until today's first scan" : ` — they stay up until the first new order is scanned today (from 12 pm), then today's list takes over.`}
         </span>
         <button onClick={startToday} style={{ ...btn("ghost", "sm") }}>Start today's list</button>
       </div>
@@ -634,8 +648,8 @@ function CourierTiles({ couriers, active, onPick, compact }) {
  * the latest day that has labels.
  */
 function CourierSection({ desk, items, sum, active, onPick, compact }) {
-  const tiles = courierStats(items);
   const off = (sum?.off_list_by_courier || []).filter((c) => c.scanned);
+  const tiles = courierStats(items, off);
   const latest = desk.queue?.latest_label_day;
   const packedTotal = tiles.reduce((n, c) => n + c.total, 0);
   if (!items.length && !off.length) {
@@ -662,17 +676,6 @@ function CourierSection({ desk, items, sum, active, onPick, compact }) {
       {tiles.length > 0
         ? <CourierTiles couriers={tiles} active={active} onPick={onPick} compact={compact} />
         : <div style={{ fontSize: 12.5, fontWeight: 700, color: C.green }}>Nothing packed or left to pack for this day.</div>}
-      {off.length > 0 && (
-        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-          <span style={{ fontSize: 11.5, fontWeight: 800, color: "#92400E" }}>Scanned, not on this day's labels:</span>
-          {off.map((c) => (
-            <span key={c.courier} style={{ padding: "4px 10px", borderRadius: 999, fontSize: 12, fontWeight: 700,
-              whiteSpace: "nowrap", border: `1.5px dashed ${C.amberBorder}`, background: C.amberLight, color: "#92400E" }}>
-              🚚 {c.courier} · {c.scanned}
-            </span>
-          ))}
-        </div>
-      )}
     </div>
   );
 }
