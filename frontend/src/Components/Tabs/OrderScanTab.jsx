@@ -290,7 +290,9 @@ function ItemRow({ item, compact, showBusiness, admin, selecting, selected, onTo
           <span style={{ fontFamily: "monospace", fontWeight: 900, fontSize: 12.5, color: C.orange, background: C.orangeLight, borderRadius: 6, padding: "1px 6px", flexShrink: 0 }}>×{item.qty}</span>
         </div>
         <div style={{ fontSize: 12.5, color: C.gray600, marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-          {[showBusiness && item.business_name, item.courier, item.customer_city, item.awb].filter(Boolean).join(" · ")}
+          {item.courier && <span style={{ fontWeight: 800, color: courierTone(item.courier).fg, background: courierTone(item.courier).bg,
+            border: `1px solid ${courierTone(item.courier).border}`, borderRadius: 6, padding: "0 6px", marginRight: 6 }}>{cleanCourier(item.courier)}</span>}
+          {[showBusiness && item.business_name, item.customer_city, item.awb].filter(Boolean).join(" · ")}
         </div>
         {item.shifted_from && (
           <div style={{ marginTop: 3, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
@@ -405,24 +407,43 @@ const PHONE_LIST_TABS = ["pending", "issues"];
 const cleanCourier = (c) => (c || "").split(/\s+/).filter(Boolean).join(" ") || "No courier on label";
 
 /**
+ * Brand colour per courier, so a card is recognised before it is read:
+ * Valmo blue, Ekart sky blue, Delhivery / XpressBees / Shadowfax red. Anything
+ * else stays neutral.
+ */
+function courierTone(name) {
+  const n = (name || "").toLowerCase();
+  if (n.includes("valmo")) return { fg: "#1D4ED8", bg: "#EFF6FF", border: "#93C5FD", solid: "#2563EB" };
+  if (n.includes("ekart")) return { fg: "#0369A1", bg: "#F0F9FF", border: "#7DD3FC", solid: "#0EA5E9" };
+  if (/delhivery|delivery|xpress|shadowfax/.test(n)) return { fg: "#B91C1C", bg: "#FEF2F2", border: "#FCA5A5", solid: "#DC2626" };
+  return { fg: C.gray700, bg: C.gray50, border: C.gray200, solid: C.gray500 };
+}
+
+/**
  * Courier tiles from the list itself, so a tile moves the moment a parcel is
  * scanned (the list is updated straight away; the server copy only after a pause).
- * Each courier shows what is PACKED and waiting for its pickup, and how many
- * are still left to pack — shipped and cancelled orders are not in it.
+ * `total` is everything packed for that courier on the day — still waiting for
+ * pickup (`packed`) plus already shipped (`shipped`) — so the number holds
+ * steady after a sheet marks parcels shipped, and a previous day's figure stays
+ * on screen until the new day starts. `left` is what is still to pack.
+ * Cancelled orders are not in it.
  */
 function courierStats(items) {
   const by = new Map();
   for (const i of items) {
     const b = bucketOf(i);
-    if (b !== "packed" && b !== "pending" && b !== "issues") continue;
+    if (b === "cancelled") continue;
     const name = cleanCourier(i.courier);
     const key = name.toLowerCase();
-    if (!by.has(key)) by.set(key, { courier: name, packed: 0, left: 0 });
+    if (!by.has(key)) by.set(key, { courier: name, packed: 0, shipped: 0, left: 0, total: 0 });
     const c = by.get(key);
-    if (b === "packed") c.packed += 1; else if (b === "pending") c.left += 1;
+    if (b === "packed") c.packed += 1;
+    else if (b === "shipped") c.shipped += 1;
+    else if (b === "pending") c.left += 1;
+    c.total = c.packed + c.shipped;
   }
-  return [...by.values()].filter((c) => c.packed || c.left)
-    .sort((a, b) => b.packed - a.packed || b.left - a.left || a.courier.localeCompare(b.courier));
+  return [...by.values()].filter((c) => c.total || c.left)
+    .sort((a, b) => b.total - a.total || b.left - a.left || a.courier.localeCompare(b.courier));
 }
 
 /** Orders per courier for one set of items — the phone's stand-in for a list. */
@@ -455,7 +476,7 @@ function DayNotice({ desk, compact }) {
       <div style={{ background: "#EFF6FF", border: "1.5px solid #BFDBFE", borderRadius: 12, padding: compact ? "8px 12px" : "10px 14px",
         display: "flex", gap: 10, alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" }}>
         <span style={{ fontSize: compact ? 12.5 : 13, fontWeight: 700, color: "#1E3A8A" }}>
-          Showing {fmtDay(date)}'s orders{compact ? "" : ` — today's list (from 12 pm) takes over once a new order is scanned or today's labels are uploaded.`}
+          Showing {fmtDay(date)}'s orders{compact ? "" : ` — today's list (from 12 pm) takes over with the first order scanned today.`}
         </span>
         <button onClick={startToday} style={{ ...btn("ghost", "sm") }}>Start today's list</button>
       </div>
@@ -566,33 +587,38 @@ function DeskBusinesses({ desk, onChanged, compact }) {
 // ── Courier tiles ─────────────────────────────────────────────────────────────
 
 /**
- * One card per courier: the PACKED count, big, because that is the number the
- * pickup is checked against — plus how many are still left to pack. Tapping a
- * card narrows the list below to that courier. Two to a row on a phone.
+ * One card per courier, in the courier's colour: the PACKED total, big — the
+ * number the pickup is checked against — with how many are still waiting, how
+ * many have shipped, and how many are left to pack. Tapping a card narrows the
+ * list below to that courier. Two to a row on a phone.
  */
 function CourierTiles({ couriers, active, onPick, compact }) {
   if (!couriers?.length) return null;
   return (
     <div style={{ display: "grid", gap: compact ? 8 : 10,
-      gridTemplateColumns: compact ? "repeat(2, minmax(0, 1fr))" : "repeat(auto-fill, minmax(170px, 1fr))" }}>
+      gridTemplateColumns: compact ? "repeat(2, minmax(0, 1fr))" : "repeat(auto-fill, minmax(190px, 1fr))" }}>
       {couriers.map((c) => {
         const on = active === c.courier;
+        const t = courierTone(c.courier);
         const done = c.left === 0;
+        const detail = [c.packed ? `${c.packed} waiting` : null, c.shipped ? `${c.shipped} shipped` : null].filter(Boolean).join(" · ");
         return (
           <button key={c.courier} onClick={() => onPick(on ? null : c.courier)} aria-pressed={on} className="os-btn"
-            aria-label={`${c.courier}: ${c.packed} packed, ${c.left} left to pack`}
-            style={{ textAlign: "left", cursor: "pointer", fontFamily: "inherit", minWidth: 0,
-              background: on ? C.orangeLight : C.white, border: `2px solid ${on ? C.orange : done ? C.greenBorder : C.gray200}`,
-              borderRadius: 14, padding: compact ? "10px 12px" : "12px 14px", display: "flex", flexDirection: "column", gap: 4 }}>
-            <span style={{ fontSize: compact ? 12.5 : 13, fontWeight: 800, color: C.gray700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              🚚 {c.courier}
+            aria-label={`${c.courier}: ${c.total} packed${detail ? ` (${detail})` : ""}, ${c.left} left to pack`}
+            style={{ textAlign: "left", cursor: "pointer", fontFamily: "inherit", minWidth: 0, overflow: "hidden",
+              background: on ? t.bg : C.white, border: `2px solid ${on ? t.solid : t.border}`, borderTop: `6px solid ${t.solid}`,
+              borderRadius: 14, padding: compact ? "8px 12px 10px" : "10px 14px 12px", display: "flex", flexDirection: "column", gap: 4,
+              boxShadow: on ? `0 0 0 2px ${t.border}` : "none" }}>
+            <span style={{ fontSize: compact ? 13 : 14, fontWeight: 900, color: t.fg, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {c.courier}
             </span>
             <span style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
-              <span style={{ fontFamily: "monospace", fontWeight: 900, fontSize: compact ? 30 : 34, lineHeight: 1, color: C.gray900 }}>{c.packed}</span>
+              <span style={{ fontFamily: "monospace", fontWeight: 900, fontSize: compact ? 34 : 38, lineHeight: 1, color: C.gray900 }}>{c.total}</span>
               <span style={{ fontSize: 12.5, fontWeight: 700, color: C.gray600 }}>packed</span>
             </span>
+            {detail && <span style={{ fontSize: 12, fontWeight: 600, color: C.gray600 }}>{detail}</span>}
             <span style={{ fontSize: 12.5, fontWeight: 800, color: done ? "#15803D" : C.red }}>
-              {done ? "✓ all packed" : `${c.left} left to pack`}
+              {done ? "✓ none left to pack" : `${c.left} left to pack`}
             </span>
           </button>
         );
@@ -611,7 +637,7 @@ function CourierSection({ desk, items, sum, active, onPick, compact }) {
   const tiles = courierStats(items);
   const off = (sum?.off_list_by_courier || []).filter((c) => c.scanned);
   const latest = desk.queue?.latest_label_day;
-  const packedTotal = tiles.reduce((n, c) => n + c.packed, 0);
+  const packedTotal = tiles.reduce((n, c) => n + c.total, 0);
   if (!items.length && !off.length) {
     if (desk.loading && !desk.queue) return null;
     const msg = `No labels uploaded for ${fmtDay(desk.date)} yet — courier-wise counts appear once that day's labels are uploaded on Labels.`;
@@ -628,14 +654,14 @@ function CourierSection({ desk, items, sum, active, onPick, compact }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
-        <span style={{ fontSize: 12.5, fontWeight: 800, color: C.gray700 }}>Packed by courier</span>
-        <span style={{ fontSize: 12, fontWeight: 700, color: C.gray500 }}>
-          <b style={{ fontFamily: "monospace", color: C.gray900, fontSize: 14 }}>{packedTotal}</b> waiting for pickup
+        <span style={{ fontSize: 13.5, fontWeight: 800, color: C.gray800 }}>Packed by courier · {fmtDay(desk.date)}</span>
+        <span style={{ fontSize: 12.5, fontWeight: 700, color: C.gray600 }}>
+          <b style={{ fontFamily: "monospace", color: C.gray900, fontSize: 16 }}>{packedTotal}</b> in total
         </span>
       </div>
       {tiles.length > 0
         ? <CourierTiles couriers={tiles} active={active} onPick={onPick} compact={compact} />
-        : <div style={{ fontSize: 12.5, fontWeight: 700, color: C.green }}>✓ Nothing waiting — every order has shipped or is cancelled.</div>}
+        : <div style={{ fontSize: 12.5, fontWeight: 700, color: C.green }}>Nothing packed or left to pack for this day.</div>}
       {off.length > 0 && (
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
           <span style={{ fontSize: 11.5, fontWeight: 800, color: "#92400E" }}>Scanned, not on this day's labels:</span>
@@ -671,9 +697,9 @@ function BucketCounts({ items, label, hint, color }) {
         <div style={{ border: `1px solid ${C.gray100}`, borderRadius: 12, overflow: "hidden" }}>
           {rows.map((r, idx) => (
             <div key={r.courier} style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 14px",
-              borderTop: idx ? `1px solid ${C.gray100}` : "none", background: C.white }}>
-              <span style={{ flex: 1, minWidth: 0, fontSize: 14, fontWeight: 700, color: C.gray800, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                🚚 {r.courier}
+              borderTop: idx ? `1px solid ${C.gray100}` : "none", borderLeft: `6px solid ${courierTone(r.courier).solid}`, background: C.white }}>
+              <span style={{ flex: 1, minWidth: 0, fontSize: 14, fontWeight: 800, color: courierTone(r.courier).fg, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {r.courier}
               </span>
               <span style={{ fontSize: 12.5, color: C.gray500 }}>{r.pieces} pcs</span>
               <span style={{ fontFamily: "monospace", fontWeight: 900, fontSize: 22, color, minWidth: 34, textAlign: "right" }}>{r.orders}</span>
@@ -1028,6 +1054,7 @@ function MobilePack({ desk, platform, setPlatform, businesses, onScopeChanged, s
           ) : (
             <>
               <DayNotice desk={desk} compact />
+              <CourierSection desk={desk} items={items} sum={sum} active={courier} onPick={setCourier} compact />
               <div style={{ background: C.white, border: `1px solid ${C.gray200}`, borderRadius: 16, padding: 12, display: "flex", flexDirection: "column", gap: 12 }}>
                 <DayProgress counts={allCounts} pieces={sum ? { packed: sum.pieces_packed ?? 0, total: sum.pieces ?? 0 } : null} />
                 <StatTabs tabs={tabs} tab={tab} onPick={setTab} counts={counts} compact />
@@ -1037,7 +1064,6 @@ function MobilePack({ desk, platform, setPlatform, businesses, onScopeChanged, s
                   </button>
                 )}
               </div>
-              <CourierSection desk={desk} items={items} sum={sum} active={courier} onPick={setCourier} compact />
               <AlertBanner alerts={alerts} onOpen={() => setShowAlerts(true)} compact />
               <UnsentBanner desk={desk} onOpen={() => setShowShift(true)} compact />
               {showShift && <ShiftPanel desk={desk} onClose={(moved) => { setShowShift(false); if (moved) reloadAlerts(); }} />}
@@ -1289,8 +1315,8 @@ function DesktopPack({ desk, platform, setPlatform, businesses, onScopeChanged, 
             {/* Left: where every courier stands, then the list */}
             <div style={{ display: "flex", flexDirection: "column", gap: 16, minWidth: 0 }}>
               <div style={{ ...S.card, padding: 16, display: "flex", flexDirection: "column", gap: 14 }}>
-                <DayProgress counts={allCounts} pieces={sum ? { packed: sum.pieces_packed ?? 0, total: sum.pieces ?? 0 } : null} />
                 <CourierSection desk={desk} items={items} sum={sum} active={courier} onPick={(c) => { setCourier(c); setTab(c ? "packed" : tab); refocus(); }} />
+                <DayProgress counts={allCounts} pieces={sum ? { packed: sum.pieces_packed ?? 0, total: sum.pieces ?? 0 } : null} />
               </div>
 
               <div style={{ ...S.card, padding: 0, overflow: "hidden" }}>

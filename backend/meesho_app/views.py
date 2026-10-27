@@ -13463,9 +13463,13 @@ def _following_day(request, desk_ids):
     platform = _label_view_platform(request)
     if platform:
         scans = scans.filter(platform=platform)
-    if _labels_on_day(labels, today).exists() or scans.filter(scan_day=today).exists():
+    # Only a scan starts the new day. Today's labels arriving (they are often
+    # uploaded just after noon) must not blank out the previous day's courier
+    # counts while the last pickups are still being checked against them.
+    if scans.filter(scan_day=today).exists():
         return today, False
-    since = today - timedelta(days=7)
+    has_labels_today = _labels_on_day(labels, today).exists()
+    since = today - timedelta(days=1 if has_labels_today else 7)
     last = [d for d in (
         _with_pack_day(labels).filter(eff_day__lt=today, eff_day__gte=since).aggregate(d=Max("eff_day"))["d"],
         scans.filter(scan_day__lt=today, scan_day__gte=since).aggregate(d=Max("scan_day"))["d"],

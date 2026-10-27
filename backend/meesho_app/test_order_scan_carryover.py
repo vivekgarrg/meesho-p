@@ -64,11 +64,18 @@ class CarryOverTests(CarryTestCase):
         self.assertEqual(q["date"], self.yesterday.isoformat())
         self.assertEqual(q["summary"]["scanned"], 2)
 
-    def test_todays_labels_replace_them(self):
+    def test_todays_labels_alone_do_not_replace_them(self):
+        """Labels are often uploaded just after noon; yesterday's courier counts stay up until the first scan."""
         LabelOrder.objects.create(order_id="T0_1", awb_number="TAWB0", uploaded_date=self.today, business=self.biz)
         q = self.queue()
+        self.assertEqual(q["date"], self.yesterday.isoformat())
+        self.assertTrue(q["carried_over"])
+        self.assertEqual(q["summary"]["assigned"], 3)
+        # ...and the first scan of the day starts today's list, with today's labels on it.
+        self.client.post(f"{self.base}/order-scan/", {"code": "TAWB0"}, format="json")
+        q = self.queue()
         self.assertEqual(q["date"], self.today.isoformat())
-        self.assertEqual(q["summary"]["assigned"], 1)          # only today's own — nothing comes forward by itself
+        self.assertEqual(q["summary"]["assigned"], 1)
 
     def test_a_day_picked_by_hand_is_shown_as_is(self):
         q = self.queue(date=self.today.isoformat())
