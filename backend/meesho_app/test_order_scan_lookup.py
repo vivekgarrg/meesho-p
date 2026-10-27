@@ -89,3 +89,45 @@ class LookupTests(CarryTestCase):
         self.assertTrue(d["found"])
         self.assertIsNone(d["parent"])
         self.assertEqual(d["components"], [])
+
+
+class StatusClassificationTests(CarryTestCase):
+    """The order sheet's status words, as the desk reads them."""
+
+    def test_each_status_lands_in_its_bucket(self):
+        S = ScannedOrder
+        cases = {
+            "READY_TO_SHIP": S.SHIP_NOT_SHIPPED, "PENDING": S.SHIP_NOT_SHIPPED,
+            "SHIPPED": S.SHIP_SHIPPED, "Delivered": S.SHIP_SHIPPED, "DELIVERED": S.SHIP_SHIPPED,
+            "CANCELLED": S.SHIP_CANCELLED, "Cancelled": S.SHIP_CANCELLED,
+            "RTO": S.SHIP_RETURNED, "RTO_LOCKED": S.SHIP_RETURNED, "RTO_COMPLETE": S.SHIP_RETURNED,
+            "RTO_INITIATED": S.SHIP_RETURNED, "Return": S.SHIP_RETURNED,
+            "": S.SHIP_UNKNOWN, None: S.SHIP_UNKNOWN,
+        }
+        for raw, want in cases.items():
+            self.assertEqual(S.classify_ship_status(raw), want, raw)
+
+    def test_ready_to_ship_is_not_shipped_in_the_scan_record_either(self):
+        from .views import _meesho_bucket
+        self.assertEqual(_meesho_bucket("READY_TO_SHIP"), "pending")
+        self.assertEqual(_meesho_bucket("Ready To Ship"), "pending")
+        self.assertEqual(_meesho_bucket("SHIPPED"), "shipped")
+        self.assertEqual(_meesho_bucket("DELIVERED"), "delivered")
+        self.assertEqual(_meesho_bucket("RTO_COMPLETE"), "rto")
+        self.assertEqual(_meesho_bucket("RTO_LOCKED"), "rto")
+        self.assertEqual(_meesho_bucket("CANCELLED"), "cancelled")
+
+    def test_the_list_reads_the_furthest_status_from_either_sheet(self):
+        from .models import Order, OrderPayment
+        LabelOrder.objects.create(order_id="S1_1", awb_number="SAWB1", courier_name="Valmo", uploaded_date=self.today, business=self.biz)
+        LabelOrder.objects.create(order_id="S2_1", awb_number="SAWB2", courier_name="Valmo", uploaded_date=self.today, business=self.biz)
+        LabelOrder.objects.create(order_id="S3_1", awb_number="SAWB3", courier_name="Valmo", uploaded_date=self.today, business=self.biz)
+        Order.objects.create(business=self.biz, sub_order_no="S1_1", reason_for_credit_entry="READY_TO_SHIP")
+        Order.objects.create(business=self.biz, sub_order_no="S1_1", reason_for_credit_entry="SHIPPED")
+        Order.objects.create(business=self.biz, sub_order_no="S2_1", reason_for_credit_entry="READY_TO_SHIP")
+        Order.objects.create(business=self.biz, sub_order_no="S3_1", reason_for_credit_entry="SHIPPED")
+        OrderPayment.objects.create(business=self.biz, sub_order_no="S3_1", live_order_status="RTO_COMPLETE")
+        q = self.client.get(f"{self.base}/order-scan/queue/", {"date": self.today.isoformat()}).data
+        got = {i["order_id"]: i["ship_status"] for i in q["items"]}
+        self.assertEqual(got, {"S1_1": "SHIPPED", "S2_1": "NOT_SHIPPED", "S3_1": "RETURNED"})
+        self.assertEqual(q["summary"]["returned"], 1)

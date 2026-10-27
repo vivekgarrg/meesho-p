@@ -21,6 +21,7 @@ const SHIP = {
   NOT_SHIPPED: { label: "Not shipped yet", tag: "amber" },
   CANCELLED:   { label: "Cancelled", tag: "red" },
   UNKNOWN:     { label: "No marketplace status yet", tag: "gray" },
+  RETURNED:    { label: "Returned (RTO)", tag: "orange" },
 };
 const SCAN = { SCANNED: "Scanned", PACKED: "Packed", DISPATCHED: "Dispatched", ON_HOLD: "On hold", ISSUE: "Problem", CANCELLED: "Cancelled" };
 

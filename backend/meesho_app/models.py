@@ -1575,20 +1575,23 @@ class ScannedOrder(models.Model):
     SHIP_NOT_SHIPPED = "NOT_SHIPPED"  # Meesho still has it as pending / ready-to-ship
     SHIP_CANCELLED   = "CANCELLED"    # cancelled before dispatch
     SHIP_UNKNOWN     = "UNKNOWN"      # no sheet covers this order yet
+    SHIP_RETURNED    = "RETURNED"     # went out and came back (RTO*, or a return)
 
     SHIP_STATUS_CHOICES = [
         (SHIP_SHIPPED,     "Shipped"),
         (SHIP_NOT_SHIPPED, "Not shipped yet"),
         (SHIP_CANCELLED,   "Cancelled"),
         (SHIP_UNKNOWN,     "No status yet"),
+        (SHIP_RETURNED,    "Returned"),
     ]
 
-    # Raw sheet values, upper-cased, that mean the parcel has left. RTO_* counts
-    # as shipped: it went out and came back, so it is emphatically not "waiting
-    # to be dispatched", which is the thing the desk needs to catch.
+    # What each raw sheet value (upper-cased) means. Shipped is the marketplace's
+    # SHIPPED status — DELIVERED is that parcel one step on, so it is shipped too.
+    # READY_TO_SHIP and PENDING are the opposite: not shipped (and not yet
+    # downloaded / handed over). Anything starting RTO (RTO, RTO_LOCKED,
+    # RTO_COMPLETE…) or RETURN means it went out and came back.
     SHIPPED_MARKERS = (
-        "SHIPPED", "DELIVERED", "RTO", "RTO_COMPLETE", "RTO_LOCKED",
-        "RETURN", "EXCHANGE", "DOOR_STEP_EXCHANGED",
+        "SHIPPED", "DELIVERED", "EXCHANGE", "DOOR_STEP_EXCHANGED",
         # Flipkart's own wording
         "PICKUP_COMPLETE", "IN_TRANSIT",
     )
@@ -1597,6 +1600,7 @@ class ScannedOrder(models.Model):
         # Flipkart: accepted / packed / waiting for pickup — still with us
         "READY_TO_DISPATCH", "APPROVED", "PACKED", "UPCOMING",
     )
+    RETURNED_PREFIXES = ("RTO", "RETURN")
     CANCELLED_MARKERS = ("CANCELLED",)
 
     # ── Which table the scanned code was recognised from ──────────────────
@@ -1702,19 +1706,20 @@ class ScannedOrder(models.Model):
     @classmethod
     def classify_ship_status(cls, raw):
         """
-        Turn a sheet's status string into one of our four buckets.
+        Turn a sheet's status string into one of our buckets.
 
-        Matching is substring-based on purpose: the Orders sheet says
-        RTO_COMPLETE while the Payments sheet says RTO for the same thing, and
-        new Meesho variants (DOOR_STEP_EXCHANGED) keep appearing. Cancelled is
-        checked before the shipped markers so "CANCELLED" can never be read as
-        shipped by a partial match.
+        Order matters: cancelled first; then returned (starts with RTO or
+        RETURN); then the "not shipped" values, so READY_TO_SHIP can never be
+        read as shipped; then shipped, which includes DELIVERED. Anything else
+        is UNKNOWN rather than a guess.
         """
-        text = (raw or "").strip().upper()
+        text = (raw or "").strip().upper().replace(" ", "_")
         if not text:
             return cls.SHIP_UNKNOWN
         if any(m in text for m in cls.CANCELLED_MARKERS):
             return cls.SHIP_CANCELLED
+        if text.startswith(cls.RETURNED_PREFIXES):
+            return cls.SHIP_RETURNED
         if any(m in text for m in cls.NOT_SHIPPED_MARKERS):
             return cls.SHIP_NOT_SHIPPED
         if any(m in text for m in cls.SHIPPED_MARKERS):

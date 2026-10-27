@@ -12879,23 +12879,30 @@ _SCAN_STATUSES = {c[0] for c in ScannedOrder.STATUS_CHOICES}
 
 # Meesho's own live_order_status strings, normalised to the buckets the UI
 # colours. Anything unrecognised is passed through as-is rather than dropped.
-_MEESHO_STATUS_BUCKETS = (
-    ("DELIVERED", "delivered"),
-    ("RTO",       "rto"),
-    ("RETURN",    "return"),
-    ("CANCEL",    "cancelled"),
-    ("SHIP",      "shipped"),
-    ("DOOR",      "shipped"),      # "Door Step Exchanged" and friends
-)
-
-
 def _meesho_bucket(raw):
-    """Which coarse bucket a Meesho status string falls into."""
-    s = (raw or "").upper()
-    for needle, bucket in _MEESHO_STATUS_BUCKETS:
-        if needle in s:
-            return bucket
-    return "other" if s else None
+    """
+    Which coarse bucket a Meesho status string falls into.
+
+    Matched on meaning, not on stray substrings: READY_TO_SHIP contains "SHIP"
+    and used to be read as shipped. Order: cancelled; returned (starts RTO or
+    RETURN); not yet shipped (READY_TO_SHIP, PENDING); delivered; shipped.
+    """
+    s = (raw or "").strip().upper().replace(" ", "_")
+    if not s:
+        return None
+    if "CANCEL" in s:
+        return "cancelled"
+    if s.startswith("RTO"):
+        return "rto"
+    if s.startswith("RETURN"):
+        return "return"
+    if "READY_TO_SHIP" in s or "PENDING" in s:
+        return "pending"
+    if "DELIVERED" in s and "EXCHANGE" not in s:
+        return "delivered"
+    if "SHIPPED" in s or "DOOR" in s or "EXCHANGE" in s:
+        return "shipped"
+    return "other"
 
 
 def _local_day_start(day):
@@ -13168,6 +13175,7 @@ def _attach_meesho_status(business, rows):
 # parcel has shipped, no later row makes it un-shipped. CANCELLED outranks
 # NOT_SHIPPED because a cancelled order is settled, not still waiting.
 _SHIP_PRIORITY = {
+    ScannedOrder.SHIP_RETURNED: 4,
     ScannedOrder.SHIP_SHIPPED: 3,
     ScannedOrder.SHIP_CANCELLED: 2,
     ScannedOrder.SHIP_NOT_SHIPPED: 1,
@@ -13210,6 +13218,38 @@ def _status_raws(businesses, sub_orders):
             if dispatched:
                 found.append(("SHIPPED", b, "flipkart dispatch date"))
     return found
+
+
+def _sheet_status_raws(business_ids, sub_orders):
+    """
+    {(business_id, sub_order_no): raw status} — the most advanced status either
+    uploaded sheet gives each order (Orders sheet reason_for_credit_entry, and the
+    Payments sheet's live_order_status), so a list built from this agrees with
+    what the scan record shows. An order has several rows over its life
+    (READY_TO_SHIP, then SHIPPED, then DELIVERED / RTO_*): the furthest wins,
+    never merely the last row read.
+    """
+    subs = [x for x in sub_orders if x]
+    best = {}
+
+    def offer(biz, sub, raw):
+        if not raw:
+            return
+        bucket = ScannedOrder.classify_ship_status(raw)
+        cur = best.get((biz, sub))
+        if cur is None or _SHIP_PRIORITY[bucket] > _SHIP_PRIORITY[ScannedOrder.classify_ship_status(cur)]:
+            best[(biz, sub)] = raw
+
+    for i in range(0, len(subs), 800):
+        chunk = subs[i:i + 800]
+        for biz, sub, raw in Order.objects.filter(business_id__in=business_ids, sub_order_no__in=chunk) \
+                .values_list("business_id", "sub_order_no", "reason_for_credit_entry"):
+            offer(biz, sub, raw)
+        for biz, sub, raw in OrderPayment.objects.filter(business_id__in=business_ids, sub_order_no__in=chunk) \
+                .exclude(live_order_status__isnull=True).exclude(live_order_status="") \
+                .values_list("business_id", "sub_order_no", "live_order_status"):
+            offer(biz, sub, raw)
+    return best
 
 
 def _suborders_for_codes(businesses, codes):
@@ -13330,9 +13370,9 @@ def _resolve_ship_status(business, sub_order_no, status_hint=None, row=None, sco
         if best != ScannedOrder.SHIP_UNKNOWN:
             return best, best_raw, f"{best_src} · via AWB"
 
-    # 4 — it came back, so it must have gone out.
+    # 4 — it came back (a return is on file).
     if _returned_suborders(scope, candidates):
-        return ScannedOrder.SHIP_SHIPPED, "RETURNED", "return on file"
+        return ScannedOrder.SHIP_RETURNED, "RETURNED", "return on file"
 
     return ScannedOrder.SHIP_UNKNOWN, "", ""
 
@@ -13405,12 +13445,16 @@ def _scan_ship_check(business, codes):
     changed, newly_shipped = [], 0
     for row in rows:
         found = best.get(row.sub_order_no)
-        if not found or row.ship_status == S.SHIP_SHIPPED:
+        if not found:
             continue
         bucket, raw, source = found
+        # Only ever moves forward: an old export re-uploaded must not turn a
+        # shipped (or returned) parcel back into READY_TO_SHIP.
+        if _SHIP_PRIORITY[bucket] < _SHIP_PRIORITY[row.ship_status]:
+            continue
         if bucket == row.ship_status and raw[:100] == (row.ship_status_raw or ""):
             continue
-        if bucket == S.SHIP_SHIPPED:
+        if bucket in (S.SHIP_SHIPPED, S.SHIP_RETURNED) and row.ship_status not in (S.SHIP_SHIPPED, S.SHIP_RETURNED):
             newly_shipped += 1
         row.ship_status, row.ship_status_raw, row.ship_source, row.ship_checked_at = bucket, raw[:100], source[:100], now
         changed.append(row)
@@ -13520,6 +13564,7 @@ def _scanned_order_stats(scope):
         # Shipping cross-check: scanned by us, but what does the marketplace say?
         ship_shipped=c(ship_status=S.SHIP_SHIPPED), ship_not_shipped=c(ship_status=S.SHIP_NOT_SHIPPED),
         ship_cancelled=c(ship_status=S.SHIP_CANCELLED), ship_unknown=c(ship_status=S.SHIP_UNKNOWN),
+        ship_returned=c(ship_status=S.SHIP_RETURNED),
         ship_problem=c(ship_status__in=[S.SHIP_NOT_SHIPPED, S.SHIP_CANCELLED]),
         meesho=c(platform="meesho"), flipkart=c(platform="flipkart"),
     )
@@ -13780,12 +13825,7 @@ def _earlier_unsent(request, desk_ids, day, names):
                  .only("business_id", "sub_order_no", "awb_number", "status", "ship_status"))
     by_sub = {(s.business_id, s.sub_order_no): s for s in scans}
     by_awb = {(s.business_id, s.awb_number): s for s in scans if s.awb_number}
-    sheet = {}
-    for b, sub, st in Order.objects.filter(business_id__in=desk_ids, sub_order_no__in=ids) \
-            .values_list("business_id", "sub_order_no", "reason_for_credit_entry"):
-        bucket = ScannedOrder.classify_ship_status(st)
-        if _SHIP_PRIORITY[bucket] > _SHIP_PRIORITY[sheet.get((b, sub), ScannedOrder.SHIP_UNKNOWN)]:
-            sheet[(b, sub)] = bucket
+    sheet = {k: ScannedOrder.classify_ship_status(v) for k, v in _sheet_status_raws(desk_ids, ids).items()}
     # Only a parcel the marketplace shows as shipped is settled — marking it
     # dispatched here is a hand-over, not proof it shipped. A CANCELLED order is not: if it was scanned and
     # packed, it is still physically in the bag and has to be counted on the
@@ -13799,7 +13839,7 @@ def _earlier_unsent(request, desk_ids, day, names):
         ship = sheet_ship
         if sc and _SHIP_PRIORITY[sc.ship_status] > _SHIP_PRIORITY[ship]:
             ship = sc.ship_status
-        if ship == ScannedOrder.SHIP_SHIPPED:
+        if ship in (ScannedOrder.SHIP_SHIPPED, ScannedOrder.SHIP_RETURNED):
             continue
         cancelled = ship == ScannedOrder.SHIP_CANCELLED or (sc and sc.status == ScannedOrder.STATUS_CANCELLED)
         if cancelled and not sc:
@@ -13855,16 +13895,10 @@ def scan_queue(request, business_id):
     by_sub = {(s.business_id, s.sub_order_no): s for s in scans}
     by_awb = {(s.business_id, s.awb_number): s for s in scans if s.awb_number}
 
-    # What Meesho's Orders sheet says, for parcels nobody has scanned yet — an
-    # order cancelled on Meesho must not be packed.
-    # An order has several sheet rows over its life (SHIPPED, then RTO…), so the
-    # most advanced status wins rather than whichever row comes last.
-    sheet_status = {}
-    for b, sub, st in Order.objects.filter(business_id__in=desk_ids, sub_order_no__in=ids) \
-            .values_list("business_id", "sub_order_no", "reason_for_credit_entry"):
-        cur = sheet_status.get((b, sub))
-        if not cur or _SHIP_PRIORITY[ScannedOrder.classify_ship_status(st)] > _SHIP_PRIORITY[ScannedOrder.classify_ship_status(cur)]:
-            sheet_status[(b, sub)] = st
+    # What the uploaded sheets say (Orders and Payments), for every order on the
+    # list — the most advanced status wins, so READY_TO_SHIP never hides a later
+    # SHIPPED / DELIVERED / RTO row.
+    sheet_status = _sheet_status_raws(desk_ids, ids)
     image_map = return_image_map(labels)
 
     items = []
@@ -13875,8 +13909,9 @@ def scan_queue(request, business_id):
         # uploaded since may know more (shipped, cancelled). Take whichever is
         # further along, so a parcel Meesho has since shipped leaves "Packed".
         ship = ScannedOrder.classify_ship_status(sheet)
+        ship_raw = sheet or ""
         if sc and _SHIP_PRIORITY[sc.ship_status] > _SHIP_PRIORITY[ship]:
-            ship = sc.ship_status
+            ship, ship_raw = sc.ship_status, sc.ship_status_raw
         items.append({
             # Moved here by an admin from the day it was uploaded for.
             "shifted_from": l.uploaded_date.isoformat() if l.pack_day and l.pack_day != l.uploaded_date else None,
@@ -13897,7 +13932,7 @@ def scan_queue(request, business_id):
             "scan_count": sc.scan_count if sc else 0,
             "scanned_at": sc.last_scanned_at.isoformat() if sc else None,
             "ship_status": ship,
-            "ship_status_raw": sc.ship_status_raw if sc else (sheet or ""),
+            "ship_status_raw": ship_raw,
         })
 
     packed_states = (ScannedOrder.STATUS_PACKED, ScannedOrder.STATUS_DISPATCHED)
@@ -13910,6 +13945,7 @@ def scan_queue(request, business_id):
         "remaining":  sum(1 for i in items if i["state"] == "PENDING" and i["ship_status"] != ScannedOrder.SHIP_CANCELLED),
         "on_hold":    sum(1 for i in items if i["state"] in ScannedOrder.ATTENTION_STATUSES),
         "shipped":    sum(1 for i in items if i["ship_status"] == ScannedOrder.SHIP_SHIPPED),
+        "returned":   sum(1 for i in items if i["ship_status"] == ScannedOrder.SHIP_RETURNED),
         "not_shipped": sum(1 for i in items if i["ship_status"] == ScannedOrder.SHIP_NOT_SHIPPED),
         "cancelled":  sum(1 for i in items if i["ship_status"] == ScannedOrder.SHIP_CANCELLED),
         "unknown":    sum(1 for i in items if i["ship_status"] == ScannedOrder.SHIP_UNKNOWN),
@@ -14100,7 +14136,7 @@ def scanned_orders_refresh_ship(request, business_id):
             row.save()
             relinked += 1
 
-        qs = ScannedOrder.objects.filter(business=biz).exclude(ship_status=ScannedOrder.SHIP_SHIPPED)
+        qs = ScannedOrder.objects.filter(business=biz).exclude(ship_status=ScannedOrder.SHIP_RETURNED)
         if request.data.get("all"):
             qs = ScannedOrder.objects.filter(business=biz)
         rows = list(qs)
@@ -14226,9 +14262,8 @@ def scan_alerts(request, business_id):
             scanned_subs.add((biz, sub))
             if awb:
                 scanned_awbs.add((biz, awb))
-    sheet = {(b, sub): st for b, sub, st in Order.objects.filter(business_id__in=ids, sub_order_no__in=order_ids)
-             .values_list("business_id", "sub_order_no", "reason_for_credit_entry")} if order_ids else {}
-    settled_ship = (ScannedOrder.SHIP_CANCELLED, ScannedOrder.SHIP_SHIPPED)
+    sheet = _sheet_status_raws(ids, order_ids) if order_ids else {}
+    settled_ship = (ScannedOrder.SHIP_CANCELLED, ScannedOrder.SHIP_SHIPPED, ScannedOrder.SHIP_RETURNED)
     not_packed = [l for l in labels
                   if (l.business_id, l.order_id) not in scanned_subs
                   and not (l.awb_number and (l.business_id, l.awb_number) in scanned_awbs)

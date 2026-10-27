@@ -38,6 +38,7 @@ const SHIP_META = {
   NOT_SHIPPED: { label: "Not shipped yet", tag: "amber", color: C.amber },
   CANCELLED:   { label: "Cancelled",       tag: "red",   color: C.red },
   UNKNOWN:     { label: "No status yet",   tag: "gray",  color: C.gray500 },
+  RETURNED:    { label: "Returned (RTO)",  tag: "orange", color: "#7C3AED" },
 };
 const MODES = [
   { key: "PACKED",     label: "Packed",     help: "marking parcels as packed" },
@@ -307,6 +308,7 @@ function ItemRow({ item, compact, showBusiness, admin, selecting, selected, onTo
   // The badge says where the order is now, not just the last thing scanned.
   const st = bucket === "shipped" ? { label: "Shipped", tag: "green" }
     : bucket === "cancelled" ? { label: "Cancelled", tag: "red" }
+    : bucket === "returned" ? { label: "Returned", tag: "orange" }
     : item.state === "DISPATCHED" ? { label: "Dispatched · not shipped yet", tag: "amber" }
     : (STATE_META[item.state] || STATE_META.PENDING);
   const ship = SHIP_META[item.ship_status] || SHIP_META.UNKNOWN;
@@ -349,7 +351,7 @@ function ItemRow({ item, compact, showBusiness, admin, selecting, selected, onTo
             {Object.entries(STATE_META).map(([k, m]) => <option key={k} value={k}>{m.label}</option>)}
           </select>
         ) : <Tag variant={st.tag}>{st.label}</Tag>}
-        {(item.state !== "PENDING" || cancelled) && item.ship_status !== "UNKNOWN" && bucket !== "shipped" && !cancelled && item.state !== "DISPATCHED" && (
+        {(item.state !== "PENDING" || cancelled) && item.ship_status !== "UNKNOWN" && bucket !== "shipped" && bucket !== "returned" && !cancelled && item.state !== "DISPATCHED" && (
           <span style={{ fontSize: 10.5, fontWeight: 700, color: ship.color }}>{ship.label}</span>
         )}
       </div>
@@ -418,13 +420,17 @@ function AdminBar({ sel, shownCount, compact }) {
  * Where an order sits on the desk — exactly one place, so the tab counts add up
  * and an order never shows in two lists:
  *   cancelled → shipped → on hold / problem → to pack (never scanned) → packed.
- * "Shipped" means the MARKETPLACE shows it shipped. Marking a parcel Dispatched
+ * "Shipped" means the MARKETPLACE shows it shipped (SHIPPED, or DELIVERED —
+ * shipped and then delivered). READY_TO_SHIP and PENDING are NOT shipped.
+ * "Returned" is anything the sheet starts with RTO (or RETURN): it went out and
+ * came back. "Shipped" means the MARKETPLACE shows it shipped. Marking a parcel Dispatched
  * here is only our hand-over to the courier: it stays under Packed (with a
  * Dispatched badge) until Meesho / Flipkart's sheet confirms it shipped, and
  * until then an unshipped order carries over to the next day.
  */
 function bucketOf(i) {
   if (i.ship_status === "CANCELLED" || i.state === "CANCELLED") return "cancelled";
+  if (i.ship_status === "RETURNED") return "returned";
   if (i.ship_status === "SHIPPED") return "shipped";
   if (i.state === "ON_HOLD" || i.state === "ISSUE") return "issues";
   if (i.state === "PENDING") return "pending";
@@ -435,6 +441,7 @@ const FILTERS = [
   { key: "pending",   label: "To pack",   test: (i) => bucketOf(i) === "pending" },
   { key: "packed",    label: "Packed",    test: (i) => bucketOf(i) === "packed" },
   { key: "shipped",   label: "Shipped",   test: (i) => bucketOf(i) === "shipped" },
+  { key: "returned",  label: "Returned",  test: (i) => bucketOf(i) === "returned" },
   { key: "cancelled", label: "Cancelled", test: (i) => bucketOf(i) === "cancelled" },
   { key: "issues",    label: "On hold",   test: (i) => bucketOf(i) === "issues" },
   { key: "all",       label: "All",       test: () => true },
@@ -473,7 +480,7 @@ function courierStats(items, offList = []) {
   const by = new Map();
   for (const i of items) {
     const b = bucketOf(i);
-    if (b === "cancelled") continue;
+    if (b === "cancelled" || b === "returned") continue;
     const name = cleanCourier(i.courier);
     const key = name.toLowerCase();
     if (!by.has(key)) by.set(key, { courier: name, packed: 0, shipped: 0, left: 0, total: 0 });
@@ -1061,7 +1068,7 @@ function AlertBanner({ alerts, onOpen, compact }) {
 
 // ── Shared layout pieces ──────────────────────────────────────────────────────
 
-const TAB_TONE = { pending: C.orange, packed: C.green, shipped: "#15803D", cancelled: C.red, issues: "#B45309", all: C.gray700 };
+const TAB_TONE = { pending: C.orange, packed: C.green, shipped: "#15803D", returned: "#7C3AED", cancelled: C.red, issues: "#B45309", all: C.gray700 };
 
 /** Focus rings and reduced motion for the whole desk — keyboard and switch users can see where they are. */
 const DESK_CSS = `
@@ -1168,10 +1175,13 @@ function MobilePack({ desk, platform, setPlatform, businesses, onScopeChanged, s
   const sel = useAdminSelect(desk, shown);
   const progress = { done: sum?.packed ?? 0, total: (sum?.assigned ?? 0) - (sum?.cancelled ?? 0), label: `${MODES.find((m) => m.key === mode).label}` };
   const listTab = PHONE_LIST_TABS.includes(tab);
-  const tabs = FILTERS.filter((f) => f.key !== "all" && (f.key !== "issues" || allCounts.issues > 0 || tab === "issues"));
+  const tabs = FILTERS.filter((f) => f.key !== "all"
+    && (f.key !== "issues" || allCounts.issues > 0 || tab === "issues")
+    && (f.key !== "returned" || allCounts.returned > 0 || tab === "returned"));
   const TAB_INFO = {
     packed:    { label: "Packed", color: C.green, hint: "Packed (or handed to the courier) but the marketplace doesn't show it shipped yet." },
     shipped:   { label: "Shipped", color: "#15803D", hint: "The marketplace shows these as shipped." },
+    returned:  { label: "Returned", color: "#7C3AED", hint: "Went out and came back — the marketplace status starts with RTO." },
     cancelled: { label: "Cancelled", color: C.red, hint: "Don't hand these over — keep them aside." },
   };
   const submitTyped = () => { if (typed.trim()) { record(typed); setTyped(""); } };
@@ -1363,7 +1373,7 @@ function ScanRecord({ platform, multi }) {
     load();
   };
 
-  const SHIPS = [["", "All"], ["PROBLEM", "Cancelled / not shipped"], ["SHIPPED", "Shipped"], ["NOT_SHIPPED", "Not shipped yet"], ["CANCELLED", "Cancelled"], ["UNKNOWN", "No status"], ["UNMATCHED", "Not recognised"]];
+  const SHIPS = [["", "All"], ["PROBLEM", "Cancelled / not shipped"], ["SHIPPED", "Shipped"], ["NOT_SHIPPED", "Not shipped yet"], ["RETURNED", "Returned (RTO)"], ["CANCELLED", "Cancelled"], ["UNKNOWN", "No status"], ["UNMATCHED", "Not recognised"]];
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       {stats && (
@@ -1373,6 +1383,7 @@ function ScanRecord({ platform, multi }) {
           <Tile label="Shipped (marketplace)" value={stats.ship_shipped} color={C.green} />
           <Tile label="Not recognised" value={stats.unrecognised} color={C.amber} onClick={() => setShip("UNMATCHED")} active={ship === "UNMATCHED"} />
           <Tile label="Not shipped yet" value={stats.ship_not_shipped} color={C.amber} />
+          <Tile label="Returned (RTO)" value={stats.ship_returned} color="#7C3AED" />
           <Tile label="Cancelled" value={stats.ship_cancelled} color={C.red} />
           <Tile label="On hold / problem" value={stats.needs_attention} color={C.red} />
         </div>
@@ -1454,7 +1465,8 @@ function DesktopPack({ desk, platform, setPlatform, businesses, onScopeChanged, 
   const allCounts = useMemo(() => summaryCounts(items), [items]);
   const shown = inCourier.filter(FILTERS.find((f) => f.key === tab).test);
   const sel = useAdminSelect(desk, shown);
-  const tabs = FILTERS.filter((f) => f.key !== "issues" || allCounts.issues > 0 || tab === "issues");
+  const tabs = FILTERS.filter((f) => (f.key !== "issues" || allCounts.issues > 0 || tab === "issues")
+    && (f.key !== "returned" || allCounts.returned > 0 || tab === "returned"));
 
   const submit = async () => {
     const code = scan.trim();
