@@ -14357,6 +14357,9 @@ def scan_queue_shift(request, business_id):
                     if label.pack_day is not None:
                         label.pack_day = None
                         label.save(update_fields=["pack_day", "updated_at"])
+                        # Its scan goes back to the day it was uploaded for, so
+                        # it isn't left counting on the day it was moved to.
+                        ScannedOrder.objects.filter(business_id=biz, sub_order_no=label.order_id).update(scan_day=label.uploaded_date)
                         moved += 1
                     continue
                 own_day = label.pack_day or label.uploaded_date

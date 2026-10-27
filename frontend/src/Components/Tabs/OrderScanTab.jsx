@@ -826,6 +826,34 @@ function UnsentBanner({ desk, onOpen, compact }) {
   );
 }
 
+/**
+ * Admin: orders sitting on this day's list that came from an earlier day. One
+ * button sends them all back to their own day — for when a move was not wanted.
+ */
+function MovedInBar({ desk, compact, onDone }) {
+  const [busy, setBusy] = useState(false);
+  const moved = (desk.queue?.items || []).filter((i) => i.shifted_from);
+  if (!desk.queue?.is_admin || !moved.length) return null;
+  const back = async () => {
+    if (!window.confirm(`Send ${moved.length} order${moved.length === 1 ? "" : "s"} back to the day they came from?`)) return;
+    setBusy(true);
+    await desk.shiftOrders(moved, { undo: true });
+    setBusy(false);
+    onDone?.();
+  };
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", background: "#FFFBEB", border: `1.5px solid ${C.amberBorder}`,
+      borderRadius: 12, padding: compact ? "8px 12px" : "10px 14px" }}>
+      <span style={{ flex: "1 1 200px", fontSize: compact ? 12.5 : 13.5, fontWeight: 800, color: "#92400E" }}>
+        ↻ {moved.length} order{moved.length === 1 ? "" : "s"} here came from earlier days
+      </span>
+      <button onClick={back} disabled={busy} className="os-btn" style={{ ...btn("ghostOrange", "sm"), minHeight: 40, opacity: busy ? 0.6 : 1 }}>
+        {busy ? "Moving…" : `Move all ${moved.length} back`}
+      </button>
+    </div>
+  );
+}
+
 function ShiftPanel({ desk, onClose }) {
   const u = desk.queue?.earlier_unsent || { items: [], count: 0, by_day: [] };
   const key = (i) => `${i.business_id}-${i.order_id}`;
@@ -1223,6 +1251,7 @@ function MobilePack({ desk, platform, setPlatform, businesses, onScopeChanged, s
                 <UnrecognisedChip desk={desk} onOpen={() => setShowUnrec(true)} />
               </div>
               <EarlierAskBanner desk={desk} compact />
+              <MovedInBar desk={desk} compact onDone={reloadAlerts} />
               {showUnrec && <UnrecognisedPanel desk={desk} onClose={() => setShowUnrec(false)} />}
               <AlertBanner alerts={alerts} onOpen={() => setShowAlerts(true)} compact />
               <UnsentBanner desk={desk} onOpen={() => setShowShift(true)} compact />
@@ -1250,7 +1279,8 @@ function MobilePack({ desk, platform, setPlatform, businesses, onScopeChanged, s
                 {!items.length ? "No orders assigned for this day — upload the labels first." : tab === "pending" ? "Everything is packed. 🎉" : "Nothing here."}
               </div>
             ) : shown.map((i) => <ItemRow key={`${i.business_id}-${i.order_id}`} item={i} compact showBusiness={multi}
-                  admin={sel.admin} selecting={sel.selecting} selected={sel.isPicked(i)} onToggle={() => sel.toggle(i)} onSetStatus={(st) => sel.applyOne(i, st)} />)}
+                  admin={sel.admin} selecting={sel.selecting} selected={sel.isPicked(i)} onToggle={() => sel.toggle(i)} onSetStatus={(st) => sel.applyOne(i, st)}
+                  onMoveBack={async () => { await desk.shiftOrders([i], { undo: true }); reloadAlerts(); }} />)}
           </div>
         )}
       </div>
@@ -1466,6 +1496,7 @@ function DesktopPack({ desk, platform, setPlatform, businesses, onScopeChanged, 
           <Notice>
             <DayNotice desk={desk} />
             <EarlierAskBanner desk={desk} />
+            <MovedInBar desk={desk} onDone={reloadAlerts} />
             <AlertBanner alerts={alerts} onOpen={() => { setShowAlerts((v) => !v); reloadAlerts(); }} />
             <UnsentBanner desk={desk} onOpen={() => setShowShift(true)} />
           </Notice>
@@ -1502,7 +1533,8 @@ function DesktopPack({ desk, platform, setPlatform, businesses, onScopeChanged, 
                     {!items.length ? "No orders assigned for this day — upload the labels first." : tab === "pending" ? "Everything is packed. 🎉" : "Nothing here."}
                   </div>
                 ) : shown.map((i) => <ItemRow key={`${i.business_id}-${i.order_id}`} item={i} showBusiness={multi}
-                      admin={sel.admin} selecting={sel.selecting} selected={sel.isPicked(i)} onToggle={() => sel.toggle(i)} onSetStatus={(st) => sel.applyOne(i, st)} />)}
+                      admin={sel.admin} selecting={sel.selecting} selected={sel.isPicked(i)} onToggle={() => sel.toggle(i)} onSetStatus={(st) => sel.applyOne(i, st)}
+                  onMoveBack={async () => { await desk.shiftOrders([i], { undo: true }); reloadAlerts(); }} />)}
               </div>
             </div>
 

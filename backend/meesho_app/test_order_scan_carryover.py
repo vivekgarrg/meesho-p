@@ -233,6 +233,13 @@ class ShiftTests(CarryTestCase):
         # The label's own upload date is untouched.
         self.assertEqual(LabelOrder.objects.get(order_id="Y5_1").uploaded_date, self.yesterday)
 
+    def test_moving_back_returns_the_scan_to_its_own_day_too(self):
+        self.shift(["Y1_1"], to_day=self.today.isoformat())
+        self.shift(["Y1_1"], undo=True)
+        self.assertEqual(ScannedOrder.objects.get(sub_order_no="Y1_1").scan_day, self.yesterday)
+        self.assertNotIn("Y1_1", {i["order_id"] for i in self.queue()["items"]})
+        self.assertEqual(self.queue()["summary"]["off_list"], 0)
+
     def test_a_scan_of_a_moved_order_counts_today(self):
         self.shift(["Y5_1"], to_day=self.today.isoformat())
         self.client.post(f"{self.base}/order-scan/", {"code": "YAWB5", "status": "DISPATCHED"}, format="json")
