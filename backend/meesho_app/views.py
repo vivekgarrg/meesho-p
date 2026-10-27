@@ -13624,6 +13624,7 @@ def scanned_orders_list(request, business_id):
             _refresh_ship_status(owner, row, row.meesho_status,
                                  scope=accessible_businesses(request, include=owner))
             return Response({
+                "earlier_day": _earlier_day_of(owner, snapshot, scan_day),
                 "already_scanned": True,
                 "scan_count": row.scan_count,
                 "matched_from": row.matched_from,
@@ -13650,6 +13651,7 @@ def scanned_orders_list(request, business_id):
         _refresh_ship_status(owner, row, row.meesho_status,
                              scope=accessible_businesses(request, include=owner))
         return Response({
+            "earlier_day": _earlier_day_of(owner, snapshot, scan_day),
             "already_scanned": False,
             "scan_count": 1,
             "matched_from": row.matched_from,
@@ -13740,6 +13742,24 @@ def scanned_orders_list(request, business_id):
 SCAN_SHIFT_DAYS = 7
 
 
+def _earlier_day_of(owner, snapshot, scan_day):
+    """
+    When the scanned parcel's label belongs to an EARLIER packing day than the
+    one being scanned for, that day — so the desk can ask whether to add it to
+    today's list. Nothing is moved here: an order from another day only joins
+    today's list when someone says so (scan_queue_shift).
+    """
+    if snapshot["matched_from"] == ScannedOrder.MATCH_NONE:
+        return None
+    on = DQ(order_id=snapshot["sub_order_no"])
+    if snapshot.get("awb_number"):
+        on |= DQ(awb_number=snapshot["awb_number"])
+    label = _with_pack_day(LabelOrder.objects.filter(business=owner)).filter(on).order_by("-eff_day").first()
+    if label and label.eff_day < scan_day:
+        return {"day": label.eff_day.isoformat(), "order_id": label.order_id, "business_id": owner.pk}
+    return None
+
+
 def _earlier_unsent(request, desk_ids, day, names):
     """
     Orders from the SCAN_SHIFT_DAYS before `day` that still haven't gone out:
@@ -13797,58 +13817,6 @@ def _earlier_unsent(request, desk_ids, day, names):
             "items": out[:500]}
 
 
-SCAN_AUTO_CARRY_DAYS = 2
-
-
-def _carry_unshipped_into(request, desk_ids, day):
-    """
-    Orders scanned on a recent earlier day that the marketplace still doesn't
-    show as shipped are still with us, so they join `day`'s list on their own:
-    the label's packing day moves to `day`, and so does the scan, so today's
-    courier counts and hand-over labels include them. A cancelled one that was
-    scanned counts too — it is still in the bag. Orders never scanned are not
-    moved (an admin decides on those — see _earlier_unsent). Idempotent: once
-    moved, a label is no longer "earlier". Returns how many were moved.
-    """
-    labels = list(
-        _with_pack_day(_scope_labels(request, LabelOrder.objects.filter(business_id__in=desk_ids)))
-        .filter(eff_day__lt=day, eff_day__gte=day - timedelta(days=SCAN_AUTO_CARRY_DAYS))[:3000]
-    )
-    if not labels:
-        return 0
-    ids = [l.order_id for l in labels]
-    awbs = [l.awb_number for l in labels if l.awb_number]
-    q = DQ(sub_order_no__in=ids) | (DQ(awb_number__in=awbs) if awbs else DQ(pk__in=[]))
-    scans = list(ScannedOrder.objects.filter(business_id__in=desk_ids).filter(q))
-    by_sub = {(s.business_id, s.sub_order_no): s for s in scans}
-    by_awb = {(s.business_id, s.awb_number): s for s in scans if s.awb_number}
-    sheet = {}
-    for b, sub, st in Order.objects.filter(business_id__in=desk_ids, sub_order_no__in=ids) \
-            .values_list("business_id", "sub_order_no", "reason_for_credit_entry"):
-        bucket = ScannedOrder.classify_ship_status(st)
-        if _SHIP_PRIORITY[bucket] > _SHIP_PRIORITY[sheet.get((b, sub), ScannedOrder.SHIP_UNKNOWN)]:
-            sheet[(b, sub)] = bucket
-    move_labels, move_scans = [], []
-    for l in labels:
-        sc = by_sub.get((l.business_id, l.order_id)) or (by_awb.get((l.business_id, l.awb_number)) if l.awb_number else None)
-        if not sc:
-            continue
-        ship = sheet.get((l.business_id, l.order_id), ScannedOrder.SHIP_UNKNOWN)
-        if _SHIP_PRIORITY[sc.ship_status] > _SHIP_PRIORITY[ship]:
-            ship = sc.ship_status
-        if ship == ScannedOrder.SHIP_SHIPPED:
-            continue
-        move_labels.append(l.pk)
-        move_scans.append(sc.pk)
-    if not move_labels:
-        return 0
-    now = timezone.now()
-    with transaction.atomic():
-        LabelOrder.objects.filter(pk__in=move_labels).update(pack_day=day, updated_at=now)
-        ScannedOrder.objects.filter(pk__in=move_scans).update(scan_day=day, updated_at=now)
-    return len(move_labels)
-
-
 @api_view(["GET"])
 def scan_queue(request, business_id):
     """
@@ -13872,10 +13840,6 @@ def scan_queue(request, business_id):
     carried_over = False
     if not day:
         day, carried_over = _following_day(request, desk_ids)
-    # The day is really open (not the previous day held up after 12 pm): what
-    # was packed earlier and still hasn't shipped comes onto it.
-    if day == _current_business_date() and not carried_over:
-        _carry_unshipped_into(request, desk_ids, day)
 
     labels = list(
         _labels_on_day(_scope_labels(request, LabelOrder.objects.filter(business_id__in=desk_ids)), day)
@@ -14332,8 +14296,10 @@ def scanned_orders_bulk_status(request, business_id):
 @api_view(["POST"])
 def scan_queue_shift(request, business_id):
     """
-    Admin only: move orders that didn't go out on their own day onto a later
-    packing day's list — or back to their own day.
+    Move orders that didn't go out on their own day onto a later packing day's
+    list — or back to their own day. Nothing moves by itself. An admin moves any
+    order; anyone else only orders they have scanned (the "add to today's list?"
+    question after scanning an earlier day's parcel).
 
     Body: {"to_day": "YYYY-MM-DD", "items": [{"business_id": 1, "order_id": "123_1"}, …]}
           {"undo": true, "items": [...]}  — back to the day they were uploaded for
@@ -14342,9 +14308,10 @@ def scan_queue_shift(request, business_id):
     and everything scanned stay as they are.
     """
     business = get_authorized_business(request, business_id)
-    if not _is_admin(request.user):
-        return Response({"error": "Only an admin can move orders between days."}, status=status.HTTP_403_FORBIDDEN)
+    admin = _is_admin(request.user)
     data = request.data if isinstance(request.data, dict) else {}
+    if not admin and data.get("undo"):
+        return Response({"error": "Only an admin can move orders between days."}, status=status.HTTP_403_FORBIDDEN)
     items = data.get("items") or []
     if not isinstance(items, list) or not items or len(items) > 3000:
         return Response({"error": "Give a list of orders (business_id + order_id)."}, status=status.HTTP_400_BAD_REQUEST)
@@ -14368,6 +14335,20 @@ def scan_queue_shift(request, business_id):
         if biz in desk_ids and str(it.get("order_id") or "").strip():
             wanted.setdefault(biz, set()).add(str(it["order_id"]).strip())
 
+    # A worker may add an order they have just scanned to the day's list (the
+    # "add to today's list?" question after a scan). Orders nobody scanned are
+    # the admin's to move.
+    if not admin:
+        for biz in list(wanted):
+            scanned = set(ScannedOrder.objects.filter(business_id=biz, sub_order_no__in=wanted[biz])
+                          .values_list("sub_order_no", flat=True))
+            wanted[biz] &= scanned
+            if not wanted[biz]:
+                del wanted[biz]
+        if not wanted:
+            return Response({"error": "Only an admin can move orders that haven't been scanned."},
+                            status=status.HTTP_403_FORBIDDEN)
+
     moved = skipped = 0
     with transaction.atomic():
         for biz, orders in wanted.items():
@@ -14384,6 +14365,9 @@ def scan_queue_shift(request, business_id):
                     continue
                 label.pack_day = None if to_day == label.uploaded_date else to_day
                 label.save(update_fields=["pack_day", "updated_at"])
+                # Its scan counts for the day it now belongs to, so that day's
+                # courier counts and hand-over labels include it.
+                ScannedOrder.objects.filter(business_id=biz, sub_order_no=label.order_id).update(scan_day=to_day)
                 moved += 1
     asked = sum(len(v) for v in wanted.values())
     return Response({"moved": moved, "skipped": skipped, "not_found": max(0, asked - moved - skipped),

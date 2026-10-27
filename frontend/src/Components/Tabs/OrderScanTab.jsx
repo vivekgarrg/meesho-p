@@ -94,6 +94,9 @@ function useScanDesk(platform) {
   const [error, setError] = useState(null);
   const queueRef = useRef(null);
   queueRef.current = queue;
+  // Parcels scanned that belong to an earlier day's list. Nothing is added to
+  // today's list until someone says yes (addEarlier) — or an admin moves them.
+  const [asks, setAsks] = useState([]);
   const seq = useRef(0);
   const reloadTimer = useRef(null);
 
@@ -179,6 +182,12 @@ function useScanDesk(platform) {
         kind = "warn"; title = "Dispatched · Meesho not showing shipped";
         lines.push("The panel still lists it as ready to ship.");
       }
+      if (data.earlier_day) {
+        lines.push(`From ${fmtDay(data.earlier_day.day)}'s list — not on today's. Add it to today's list below.`);
+        if (kind === "ok") { kind = "warn"; title = `${title} · earlier day's order`; }
+        setAsks((a) => (a.some((x) => x.order_id === data.earlier_day.order_id && x.business_id === data.earlier_day.business_id)
+          ? a : [...a, { ...data.earlier_day, sku: row.sku, qty: row.qty, courier: row.courier_name }]));
+      }
       if (data.cross_business) lines.push(`Filed under ${data.business_name}`);
       if (row.platform && row.platform !== platform) lines.push(`${row.platform === "flipkart" ? "Flipkart" : "Meesho"} parcel`);
 
@@ -200,6 +209,20 @@ function useScanDesk(platform) {
       setBusy(false);
     }
   };
+
+  /** Yes to "add to today's list?": move the asked-about orders onto the open day. */
+  const addEarlier = async (items) => {
+    const res = await fetch(`${API}/order-scan/shift/`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ to_day: queueRef.current?.date, items: items.map((i) => ({ business_id: i.business_id, order_id: i.order_id })) }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) return { error: data.error || "Could not add those orders." };
+    setAsks((a) => a.filter((x) => !items.some((i) => i.order_id === x.order_id && i.business_id === x.business_id)));
+    await load();
+    return data;
+  };
+  const dismissAsks = () => setAsks([]);
 
   /** Admin: file a scan nothing recognised under a courier, so it counts there. */
   const assignCourier = async (scanId, courier) => {
@@ -239,7 +262,7 @@ function useScanDesk(platform) {
   const currentDay = queue?.current_day || packingDayISO();
   const backToToday = () => setPicked("");
   const startToday = () => setPicked(currentDay);
-  return { date, setDate, following, currentDay, backToToday, startToday, queue, loading, mode, setMode, latest, busy, error, setError, record, reload: load, setStatusByHand, shiftOrders, assignCourier };
+  return { date, setDate, following, currentDay, backToToday, startToday, queue, loading, mode, setMode, latest, busy, error, setError, record, reload: load, setStatusByHand, shiftOrders, assignCourier, asks, addEarlier, dismissAsks };
 }
 
 // ── Pieces ────────────────────────────────────────────────────────────────────
@@ -795,7 +818,7 @@ function UnsentBanner({ desk, onOpen, compact }) {
       fontFamily: "inherit", background: "#FFFBEB", border: `1.5px solid ${C.amberBorder}`, borderRadius: 12, padding: compact ? "8px 12px" : "10px 14px" }}>
       <span style={{ fontSize: compact ? 16 : 18 }}>↻</span>
       <span style={{ flex: 1, minWidth: 0, fontSize: compact ? 12.5 : 13.5, fontWeight: 800, color: "#92400E" }}>
-        {u.count} earlier order{u.count === 1 ? "" : "s"} never scanned
+        {u.count} order{u.count === 1 ? "" : "s"} from earlier days not sent
         {!compact && <span style={{ fontWeight: 600 }}> · {u.by_day.map((d) => `${fmtDay(d.day)}: ${d.count}`).join(" · ")}</span>}
       </span>
       <span style={{ fontSize: 12.5, fontWeight: 800, color: C.orange, whiteSpace: "nowrap" }}>Move to today →</span>
@@ -825,8 +848,9 @@ function ShiftPanel({ desk, onClose }) {
         <div style={{ padding: "14px 16px", borderBottom: `1px solid ${C.gray100}` }}>
           <div style={{ fontSize: 16, fontWeight: 900, color: C.gray900 }}>Move unsent orders to {fmtDay(desk.date)}</div>
           <div style={{ fontSize: 12.5, color: C.gray500, marginTop: 3 }}>
-            Orders you scanned that haven't shipped come onto the day's list on their own. These were never scanned at all.
-            The ones you move join {fmtDay(desk.date)}'s list and courier counts; the rest stay where they are.
+            Nothing moves by itself — you pick which ones. They haven't shipped on the marketplace; packed ones and
+            cancelled ones you scanned (still in the bag) are included. The ones you move join {fmtDay(desk.date)}'s
+            list and courier counts; the rest stay where they are.
           </div>
           <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap", alignItems: "center" }}>
             <button onClick={() => setPicked(new Set(u.items.map(key)))} style={btn("ghost", "sm")}>Select all</button>
@@ -872,19 +896,51 @@ function ShiftPanel({ desk, onClose }) {
   );
 }
 
-/** Parcels nothing recognised — shown to everyone as an error; an admin files them under a courier. */
-function UnrecognisedBanner({ desk, onOpen, compact }) {
+/**
+ * Scanned parcels that belong to an earlier day's list. They are only added to
+ * today's list when someone says so — scanning one never moves it by itself.
+ */
+function EarlierAskBanner({ desk, compact }) {
+  const { asks, addEarlier, dismissAsks, date } = desk;
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  if (!asks.length) return null;
+  const days = [...new Set(asks.map((a) => fmtDay(a.day)))].join(", ");
+  const add = async () => {
+    setBusy(true); setError(null);
+    const d = await addEarlier(asks);
+    setBusy(false);
+    if (d.error) setError(d.error);
+  };
+  return (
+    <div role="alert" style={{ background: "#EFF6FF", border: "2px solid #60A5FA", borderRadius: 12, padding: compact ? "10px 12px" : "12px 14px", display: "flex", flexDirection: "column", gap: 8 }}>
+      <div style={{ fontSize: compact ? 13.5 : 14.5, fontWeight: 800, color: "#1E3A8A", lineHeight: 1.4 }}>
+        {asks.length} scanned parcel{asks.length === 1 ? " is" : "s are"} from an earlier day ({days}).
+        <span style={{ fontWeight: 600 }}> Add {asks.length === 1 ? "it" : "them"} to {date === desk.currentDay ? "today's" : `${fmtDay(date)}'s`} list?</span>
+      </div>
+      <div style={{ fontSize: 12.5, color: "#1E3A8A", fontFamily: "monospace", wordBreak: "break-all" }}>
+        {asks.slice(0, 3).map((a) => a.sku || a.order_id).join(" · ")}{asks.length > 3 ? ` · +${asks.length - 3} more` : ""}
+      </div>
+      {error && <div style={{ fontSize: 12.5, color: C.red, fontWeight: 700 }}>{error}</div>}
+      <div style={{ display: "flex", gap: 8 }}>
+        <button onClick={add} disabled={busy} className="os-btn" style={{ ...btn("primary", "md"), minHeight: 44, flex: 1, opacity: busy ? 0.6 : 1 }}>
+          {busy ? "Adding…" : `Add ${asks.length} to today's list`}
+        </button>
+        <button onClick={dismissAsks} disabled={busy} className="os-btn" style={{ ...btn("ghost", "md"), minHeight: 44 }}>Not now</button>
+      </div>
+    </div>
+  );
+}
+
+/** A small pill — the list of parcels nothing recognised opens only when it is clicked. */
+function UnrecognisedChip({ desk, onOpen }) {
   const n = desk.queue?.unrecognised?.length || 0;
   if (!n) return null;
   return (
-    <button onClick={onOpen} className="os-btn" style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", textAlign: "left", cursor: "pointer",
-      fontFamily: "inherit", background: C.redLight, border: `2px solid ${C.red}`, borderRadius: 12, padding: compact ? "10px 12px" : "12px 14px" }}>
-      <span style={{ fontSize: compact ? 18 : 20 }} aria-hidden>✕</span>
-      <span style={{ flex: 1, minWidth: 0, fontSize: compact ? 13 : 14, fontWeight: 800, color: C.red }}>
-        {n} parcel{n === 1 ? "" : "s"} not recognised
-        <span style={{ fontWeight: 600 }}>{desk.queue?.is_admin ? " — assign a courier" : " — an admin will check"}</span>
-      </span>
-      <span style={{ fontSize: 12.5, fontWeight: 800, color: C.red, whiteSpace: "nowrap" }}>{desk.queue?.is_admin ? "Check →" : "View →"}</span>
+    <button onClick={onOpen} className="os-btn" aria-label={`${n} parcels not recognised — view`}
+      style={{ alignSelf: "flex-start", display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer", fontFamily: "inherit",
+        minHeight: 36, padding: "6px 12px", borderRadius: 999, background: C.white, border: `1.5px solid ${C.red}`, color: C.red, fontSize: 12.5, fontWeight: 800 }}>
+      ✕ Not recognised · {n}
     </button>
   );
 }
@@ -1164,8 +1220,9 @@ function MobilePack({ desk, platform, setPlatform, businesses, onScopeChanged, s
                     🚚 {courier} · show all couriers ✕
                   </button>
                 )}
+                <UnrecognisedChip desk={desk} onOpen={() => setShowUnrec(true)} />
               </div>
-              <UnrecognisedBanner desk={desk} onOpen={() => setShowUnrec(true)} compact />
+              <EarlierAskBanner desk={desk} compact />
               {showUnrec && <UnrecognisedPanel desk={desk} onClose={() => setShowUnrec(false)} />}
               <AlertBanner alerts={alerts} onOpen={() => setShowAlerts(true)} compact />
               <UnsentBanner desk={desk} onOpen={() => setShowShift(true)} compact />
@@ -1408,7 +1465,7 @@ function DesktopPack({ desk, platform, setPlatform, businesses, onScopeChanged, 
         <>
           <Notice>
             <DayNotice desk={desk} />
-            <UnrecognisedBanner desk={desk} onOpen={() => setShowUnrec(true)} />
+            <EarlierAskBanner desk={desk} />
             <AlertBanner alerts={alerts} onOpen={() => { setShowAlerts((v) => !v); reloadAlerts(); }} />
             <UnsentBanner desk={desk} onOpen={() => setShowShift(true)} />
           </Notice>
@@ -1431,6 +1488,7 @@ function DesktopPack({ desk, platform, setPlatform, businesses, onScopeChanged, 
                     {courier
                       ? <button onClick={() => setCourier(null)} className="os-btn" style={btn("ghostOrange", "sm")}>🚚 {courier} · show all couriers ✕</button>
                       : <span style={{ fontSize: 12.5, color: C.gray500 }}>Showing {shown.length} order{shown.length === 1 ? "" : "s"} · all couriers</span>}
+                    <UnrecognisedChip desk={desk} onOpen={() => setShowUnrec(true)} />
                     <button onClick={() => { reload(); refocus(); }} className="os-btn" style={{ ...btn("ghost", "sm"), marginLeft: "auto" }}>
                       <RefreshIcon style={{ fontSize: 15, verticalAlign: "-3px" }} />&nbsp;Refresh
                     </button>
