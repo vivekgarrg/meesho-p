@@ -1,12 +1,11 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
-import { useNavigate } from "react-router-dom";
 import { API, C, S, btn, Tag, useIsMobile } from "../../App";
 import { BarcodeScanner } from "../shared/BarcodeScanner";
 import { PlatformToggle, useLabelPlatform } from "../PlatformToggle";
 import { CourierSummary } from "./CourierSummary";
 import QrCodeScannerIcon from "@mui/icons-material/QrCodeScanner";
 import RefreshIcon from "@mui/icons-material/Refresh";
-import ArrowBackIcon from "@mui/icons-material/ArrowBack";
+import MenuIcon from "@mui/icons-material/Menu";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutlineOutlined";
 import { CircularProgress } from "@mui/material";
 
@@ -1154,7 +1153,6 @@ function Notice({ children }) { return <div style={{ display: "flex", flexDirect
 // ── Phone: full screen, stable ────────────────────────────────────────────────
 
 function MobilePack({ desk, platform, setPlatform, businesses, onScopeChanged, scopeTick, multi }) {
-  const navigate = useNavigate();
   const { queue, loading, mode, setMode, latest, busy, date, setDate, record } = desk;
   const [camera, setCamera] = useState(false);
   const [showSummary, setShowSummary] = useState(false);
@@ -1215,9 +1213,11 @@ function MobilePack({ desk, platform, setPlatform, businesses, onScopeChanged, s
       {/* Header — title and day on one line, the rest in one scrollable row */}
       <div style={{ padding: "8px 12px", display: "flex", flexDirection: "column", gap: 8, background: C.white, borderBottom: `1px solid ${C.gray200}`, flexShrink: 0 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <button onClick={() => navigate(-1)} aria-label="Back" className="os-btn"
+          {/* This desk covers the app's top bar, so it carries the menu itself —
+              every other tab is one tap away, even when opened directly. */}
+          <button onClick={() => window.dispatchEvent(new Event("app:open-menu"))} aria-label="Menu — other tabs" className="os-btn"
             style={{ background: "none", border: "none", width: 44, height: 44, cursor: "pointer", lineHeight: 0, color: C.gray700, flexShrink: 0 }}>
-            <ArrowBackIcon />
+            <MenuIcon />
           </button>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontSize: 18, fontWeight: 800, color: C.gray900, whiteSpace: "nowrap" }}>Pack orders</div>

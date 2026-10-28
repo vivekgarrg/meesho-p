@@ -712,7 +712,9 @@ function Sidebar({ collapsed, setCollapsed, compact, mobileOpen, closeMobile }) 
         transform: mobileOpen ? 'translateX(0)' : 'translateX(-100%)',
         transition: 'transform 0.24s cubic-bezier(.4,0,.2,1)',
         boxShadow: mobileOpen ? '4px 0 28px rgba(0,0,0,0.4)' : 'none',
-        zIndex: 1200,
+        // Above full-screen desks too (Order Scan sits at 3000), so the menu
+        // can always be opened from them.
+        zIndex: mobileOpen ? 3600 : 1200,
       }
     : {
         width: W,
@@ -1154,6 +1156,13 @@ function AppShell() {
   useEffect(() => {
     if (!sidebarCompact) setDrawerOpen(false);
   }, [sidebarCompact]);
+  // Full-screen pages that hide the top bar (the phone Order Scan desk) open
+  // the menu with this event, so every other tab stays one tap away.
+  useEffect(() => {
+    const open = () => setDrawerOpen(true);
+    window.addEventListener('app:open-menu', open);
+    return () => window.removeEventListener('app:open-menu', open);
+  }, []);
 
   // Don't let the page behind the drawer scroll under your finger.
   useEffect(() => {
@@ -1194,7 +1203,7 @@ function AppShell() {
           style={{
             position: 'fixed',
             inset: 0,
-            zIndex: 1100,
+            zIndex: 3500,
             background: 'rgba(0,0,0,0.5)',
           }}
         />
