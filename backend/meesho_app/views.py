@@ -13521,7 +13521,7 @@ def _following_day(request, desk_ids):
     return (max(last), True) if last else (today, False)
 
 
-def _scan_desk_scope(request, business):
+def _scan_desk_scope(request, business, api_path="order-scan/"):
     """
     The businesses this person's Order Scan desk combines.
 
@@ -13531,7 +13531,7 @@ def _scan_desk_scope(request, business):
     """
     from accounts.access import api_access_denied
     allowed = [b for b in accessible_businesses(request, include=business)
-               if b.pk == business.pk or not api_access_denied(request.user, b, "order-scan/")]
+               if b.pk == business.pk or not api_access_denied(request.user, b, api_path)]
     setting = OrderScanSetting.objects.filter(user=request.user).first()
     if setting and setting.business_ids and _is_admin(request.user):
         wanted = {int(i) for i in setting.business_ids}
@@ -14351,9 +14351,12 @@ def scan_queue_shift(request, business_id):
     if not isinstance(items, list) or not items or len(items) > 3000:
         return Response({"error": "Give a list of orders (business_id + order_id)."}, status=status.HTTP_400_BAD_REQUEST)
     undo = bool(data.get("undo"))
+    # "keep": answer No to "add to today's list?" — the scan stays counted on
+    # the order's own day instead of today's.
+    keep = bool(data.get("keep")) and not undo
     current_day = _current_business_date()
     to_day = None
-    if not undo:
+    if not undo and not keep:
         to_day = _parse_day(str(data.get("to_day") or ""))
         if not to_day:
             return Response({"error": "to_day must be YYYY-MM-DD."}, status=status.HTTP_400_BAD_REQUEST)
@@ -14398,8 +14401,15 @@ def scan_queue_shift(request, business_id):
                         moved += 1
                     continue
                 own_day = label.pack_day or label.uploaded_date
-                if own_day >= to_day:
-                    skipped += 1          # already on that day, or a later one
+                if keep:
+                    # "Keep it on its own day": the scan counts there, not today.
+                    ScannedOrder.objects.filter(business_id=biz, sub_order_no=label.order_id).update(scan_day=own_day)
+                    moved += 1
+                    continue
+                # An admin moves an order to any day, forwards or back; anyone
+                # else only forwards (adding an earlier order they just scanned).
+                if own_day == to_day or (not admin and own_day > to_day):
+                    skipped += 1
                     continue
                 label.pack_day = None if to_day == label.uploaded_date else to_day
                 label.save(update_fields=["pack_day", "updated_at"])
@@ -14409,7 +14419,7 @@ def scan_queue_shift(request, business_id):
                 moved += 1
     asked = sum(len(v) for v in wanted.values())
     return Response({"moved": moved, "skipped": skipped, "not_found": max(0, asked - moved - skipped),
-                     "to_day": to_day.isoformat() if to_day else None, "undo": undo})
+                     "to_day": to_day.isoformat() if to_day else None, "undo": undo, "keep": keep})
 
 
 def _money_or_none(v):

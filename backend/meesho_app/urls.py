@@ -3,6 +3,7 @@ from . import views
 from . import flipkart_views
 from . import api_cache
 from . import upload_cleanup
+from . import return_desk
 from . import bulk_listing_views
 from . import listing_images_views
 from . import insights
@@ -175,6 +176,9 @@ urlpatterns = [
     path("returns/lookup/",             views.return_delivery_lookup,   name="return_delivery_lookup"),
     path("returns/<int:pk>/",           views.return_delivery_detail,   name="return_delivery_detail"),
     # Order scanning — log outgoing parcels at the desk and track their status
+    path("return-scan/queue/",      return_desk.return_scan_queue,    name="return_scan_queue"),
+    path("return-scan/",            return_desk.return_scan_record,   name="return_scan_record"),
+    path("return-scan/<int:pk>/",   return_desk.return_scan_delete,   name="return_scan_delete"),
     path("order-scan/",              views.scanned_orders_list,        name="scanned_orders_list"),
     path("order-scan/queue/",        views.scan_queue,                 name="scan_queue"),
     path("order-scan/lookup/",       views.scan_lookup,                name="scan_lookup"),

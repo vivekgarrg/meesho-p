@@ -271,11 +271,27 @@ class ShiftTests(CarryTestCase):
                                                       "to_day": self.today.isoformat()}, format="json")
         self.assertEqual(r.status_code, 403)
 
-    def test_never_to_a_day_not_started_or_backwards(self):
+    def test_never_to_a_day_not_started(self):
         r = self.shift(["Y5_1"], to_day=(self.today + timedelta(days=1)).isoformat())
         self.assertEqual(r.status_code, 400)
+
+    def test_an_admin_moves_one_order_to_any_day_even_back(self):
         r = self.shift(["T0_1"], to_day=self.yesterday.isoformat())
+        self.assertEqual(r.data["moved"], 1)
+        self.assertIn("T0_1", {i["order_id"] for i in self.queue(self.yesterday)["items"]})
+        self.assertNotIn("T0_1", {i["order_id"] for i in self.queue()["items"]})
+        r = self.shift(["T0_1"], to_day=self.yesterday.isoformat())          # already there
         self.assertEqual((r.data["moved"], r.data["skipped"]), (0, 1))
+
+    def test_keep_on_its_own_day_counts_the_scan_there(self):
+        self.client.post(f"{self.base}/order-scan/", {"code": "TAWB0", "status": "PACKED"}, format="json")  # today has begun
+        r = self.client.post(f"{self.base}/order-scan/", {"code": "YAWB5", "status": "PACKED"}, format="json")
+        self.assertEqual(r.data["earlier_day"]["day"], self.yesterday.isoformat())     # the desk asks
+        self.assertEqual(ScannedOrder.objects.get(sub_order_no="Y5_1").scan_day, self.today)
+        r = self.shift(["Y5_1"], keep=True)
+        self.assertEqual(r.data["moved"], 1)
+        self.assertEqual(ScannedOrder.objects.get(sub_order_no="Y5_1").scan_day, self.yesterday)
+        self.assertEqual(self.queue()["summary"]["off_list"], 0)
 
 
 class CourierSummaryTests(CarryTestCase):

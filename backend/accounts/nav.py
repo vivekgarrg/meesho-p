@@ -35,6 +35,7 @@ NAV_CATALOG = [
     {"path": "/labels",            "label": "Labels",            "group": "Operations"},
     {"path": "/bulk-labels",       "label": "Labels (Bulk)",     "group": "Operations"},
     {"path": "/returns",           "label": "Returns & Claims",  "group": "Operations"},
+    {"path": "/return-scan",       "label": "Return Scan",       "group": "Operations"},
     {"path": "/claims",            "label": "Claim Sheet",       "group": "Operations"},
     {"path": "/tasks",             "label": "Team Tasks",        "group": "Operations"},
     {"path": "/employees",         "label": "Employees",         "group": "Operations"},
@@ -120,6 +121,8 @@ API_OWNERSHIP = {
     "legacy-listings/":      ["/tasks"],
     "return-claim-batches/": ["/tasks"],
     "order-scan/":           ["/order-scan"],
+    # The returns desk works off the Returns & Claims sheets, so either tab opens it.
+    "return-scan/":          ["/return-scan", "/returns"],
     # The lookup tab scans a code and reads the listing behind it.
     "order-scan/lookup/":    ["/scan-lookup", "/order-scan"],
     # The Overview dashboard shows the "orders not sent" alert too.

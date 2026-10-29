@@ -3134,6 +3134,46 @@ class ListingHubPause(models.Model):
         return f"paused: {self.parent.item_id}"
 
 
+class ReturnScan(models.Model):
+    """
+    One returned parcel received at the returns desk (Return Scan).
+
+    The Delivered returns sheet says which returns Meesho delivered back on a
+    day; scanning each parcel as it is unpacked is how the desk proves they
+    all came. A scan links to its ReturnDelivery when the code matches one —
+    one row per return, a re-scan just bumps the count — and is still kept
+    when nothing matches (return_delivery empty), so a parcel with no sheet
+    row yet is on record and links up later.
+    """
+
+    business = models.ForeignKey("accounts.Business", on_delete=models.PROTECT)
+    return_delivery = models.ForeignKey("ReturnDelivery", on_delete=models.SET_NULL, null=True, blank=True,
+                                        related_name="desk_scans")
+    scanned_code = models.CharField(max_length=150)
+    # Snapshot of what the scan matched, so the record reads on its own.
+    suborder_no  = models.CharField(max_length=100, blank=True, db_index=True)
+    awb_number   = models.CharField(max_length=100, blank=True, db_index=True)
+    courier_name = models.CharField(max_length=100, blank=True)
+    sku          = models.CharField(max_length=300, blank=True)
+    qty          = models.PositiveIntegerField(default=1)
+    # The day the parcel was received at the desk — a calendar day, the same
+    # kind of day as the sheet's Delivered Date it is matched against.
+    scan_day         = models.DateField(db_index=True)
+    scan_count       = models.PositiveIntegerField(default=1)
+    first_scanned_at = models.DateTimeField(auto_now_add=True)
+    last_scanned_at  = models.DateTimeField()
+    scanned_by = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True, blank=True,
+                                   related_name="return_scans")
+
+    class Meta:
+        db_table = "return_scans"
+        ordering = ["-last_scanned_at"]
+        indexes = [models.Index(fields=["business", "scan_day"], name="return_scan_day_idx")]
+
+    def __str__(self):
+        return f"{self.scanned_code} | {self.scan_day}"
+
+
 class OrderScanSetting(models.Model):
     """
     Which businesses one person's Order Scan desk combines — saved to their

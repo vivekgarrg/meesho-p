@@ -61,6 +61,7 @@ _NEVER_CACHE_PREFIXES = (
     # per-business cache version can't invalidate; "late" is measured in hours;
     # the day changes at noon; and it changes with every scan anyway.
     "order-scan/",
+    "return-scan/",           # the returns desk — same reasons
 )
 # All-time figures that only change when data does: no date in the key and a long
 # expiry, so they are recomputed only after an upload or edit (a version bump).
