@@ -195,14 +195,3 @@ class MeeshoInventoryJobTest < ActiveSupport::TestCase
     assert_equal 1, account.runs.where(kind: "INVENTORY").count
   end
 end
-
-# Swap a constant for the length of a block.
-class Module
-  def stub_const(name, value)
-    old = const_get(name)
-    silence_warnings { const_set(name, value) }
-    yield
-  ensure
-    silence_warnings { const_set(name, old) }
-  end
-end

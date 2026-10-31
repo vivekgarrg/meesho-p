@@ -55,15 +55,25 @@ class MeeshoScheduleJob
   EVERY = { MeeshoSyncRun::KIND_INVENTORY => :inventory_every, MeeshoSyncRun::KIND_PAYMENTS => :payments_every,
             MeeshoSyncRun::KIND_RETURNS => :returns_every }.freeze
 
+  # A job with a STAGGER (seconds) has each further account's read start that
+  # much later — Meesho rate-limits the server's address, not each account.
   def queue_every(now, kind, job)
     every = MeeshoSyncSetting.value(EVERY.fetch(kind), job::INTERVAL).to_i
     return if every <= 0
+    stagger = job.const_defined?(:STAGGER) ? job::STAGGER : 0
+    queued = 0
     MeeshoAccount.where(sync_enabled: true, status: MeeshoAccount::STATUS_ACTIVE)
                  .where.not(supplier_id: "").where.not(supplier_identifier: "").find_each do |account|
       recent = account.runs.where(kind: kind).where("queued_at > ?", now - every.minutes).exists?
       next if recent
       run = account.runs.create!(kind: kind, trigger: MeeshoSyncRun::TRIGGER_SCHEDULE, status: "QUEUED", queued_at: now)
-      job.perform_async(account.id, run.id, MeeshoSyncRun::TRIGGER_SCHEDULE)
+      delay = stagger * queued
+      queued += 1
+      if delay.positive?
+        job.perform_in(delay, account.id, run.id, MeeshoSyncRun::TRIGGER_SCHEDULE)
+      else
+        job.perform_async(account.id, run.id, MeeshoSyncRun::TRIGGER_SCHEDULE)
+      end
     end
   end
 end

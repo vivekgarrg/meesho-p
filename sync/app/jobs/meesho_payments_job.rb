@@ -7,8 +7,16 @@ require "tmpdir"
 #      Payments tab shows;
 #   2. the payment file for the last PAID_DAYS days (completed) → the
 #      payments tables, through the same importer as the Payments upload;
-#   3. the payment file for the next UPCOMING_DAYS days (outstanding) →
-#      meesho_outstanding_payments, replaced each time.
+#   3. the outstanding payment file, from today to the last payout day the
+#      summary lists (up to UPCOMING_DAYS ahead) → meesho_outstanding_payments,
+#      replaced each time. Should Meesho refuse that one file, then one file
+#      per listed day — replaced only when every one of them was read.
+#
+# Meesho rations payment files per supplier and answers HTTP 429 past it —
+# hence one outstanding file rather than one a day. A 429 is never taken as
+# "no data": the call waits and tries again, and still refused it fails the
+# read and the tables keep what they had, instead of replacing hundreds of
+# outstanding payments with a few.
 #
 # Meesho builds a file in the background: it is requested, then the download
 # history is read until it is ready, then fetched from Meesho's storage —
@@ -20,11 +28,16 @@ class MeeshoPaymentsJob
   INTERVAL = 120                 # minutes between scheduled reads
   PAID_DAYS = 30
   UPCOMING_DAYS = 7
-  POLL_SECONDS = 5
-  POLL_TIMES = 36                # up to three minutes for Meesho to build a file
+  POLL_SECONDS = 6
+  POLL_TIMES = 30                # up to three minutes for Meesho to build a file
   REQUEST_TRIES = 3
   RETRY_SECONDS = 20
-  LOCK_TTL = 20 * 60
+  RATE_WAIT = 30                 # seconds to wait after a 429 (×1, ×2, ×3)
+  RATE_RETRIES = 3
+  GAP = 6                        # seconds between outstanding days' requests
+  STAGGER = 300                  # seconds between accounts' scheduled reads — one at a time
+  BUDGET = 15 * 60               # a whole read never waits on Meesho longer than this…
+  LOCK_TTL = 20 * 60             # …so it is done well before its lock runs out
 
   def perform(account_id, run_id = nil, trigger = MeeshoSyncRun::TRIGGER_MANUAL)
     account = MeeshoAccount.find_by(id: account_id)
@@ -36,6 +49,7 @@ class MeeshoPaymentsJob
       return
     end
     run.start!
+    @deadline = Time.current + BUDGET
     begin
       if account.supplier_id.blank? || account.supplier_identifier.blank?
         raise MeeshoClient::RequestError, "the supplier's ID and code aren't known — set them under Meesho → Settings"
@@ -66,7 +80,7 @@ class MeeshoPaymentsJob
   def pull(account)
     @paid_days = MeeshoSyncSetting.value(:payments_paid_days, PAID_DAYS).to_i
     @upcoming_days = MeeshoSyncSetting.value(:payments_upcoming_days, UPCOMING_DAYS).to_i
-    summary = relogin(account) { MeeshoPayments.summary(@client, account, paid_days: @paid_days, upcoming_days: @upcoming_days) }
+    summary = patient(account) { MeeshoPayments.summary(@client, account, paid_days: @paid_days, upcoming_days: @upcoming_days) }
     MeeshoSyncSnapshot.find_or_initialize_by(account_id: account.id, endpoint: "payments_summary")
                       .update!(http_status: 200, payload: summary, fetched_at: Time.current)
 
@@ -76,7 +90,7 @@ class MeeshoPaymentsJob
     # afterwards whatever happens.
     Dir.mktmpdir("meesho-payments") do |dir|
       files["completed"] = completed(account, today - @paid_days, today, dir)
-      files["outstanding"] = outstanding(account, today, dir)
+      files["outstanding"] = outstanding(account, today, dir, payout_days(summary))
     end
     { "files" => files }
   end
@@ -93,31 +107,66 @@ class MeeshoPaymentsJob
     out.merge("error" => e.message)
   end
 
-  # Outstanding payments, one day at a time from today, for up to UPCOMING_DAYS
-  # days — stopping at the first day Meesho has no file for. The days found
-  # replace the outstanding payments together; none found keeps the last ones.
-  def outstanding(account, today, dir)
-    paths = []
-    days = []
-    stopped = nil
-    (0..@upcoming_days).each do |i|
-      day = today + i
+  # Outstanding payments: one file from today to the last listed payout day.
+  # Refused (not rate-limited), one file a day instead — today, and each day
+  # the summary lists a payout for; a listed day that can't be read keeps the
+  # last outstanding payments, today with no file is nothing due today. With
+  # no listing, day by day from today, stopping at the first day without a file.
+  def outstanding(account, today, dir, listed)
+    last = today + @upcoming_days
+    listed = listed.select { |d| d > today && d <= last }
+    base = { "from" => today.iso8601, "listed" => listed.map(&:iso8601) }
+    if listed.any?
+      begin
+        path = fetch_file(account, "outstanding", today, listed.max, dir)
+        return import_outstanding(account, base.merge("to" => listed.max.iso8601, "days" => [today, listed.max].map(&:iso8601)), [path])
+      rescue MeeshoClient::RequestError => e
+        return base.merge("error" => outstanding_kept(listed.max, e)) if rate_limited?(e)
+        base["whole_file"] = e.message
+      end
+    end
+    plan = listed.any? ? [today, *listed] : (today..last).to_a
+    paths, days, skipped, stopped = [], [], [], nil
+    plan.each_with_index do |day, i|
+      sleep GAP if i.positive?
       begin
         paths << fetch_file(account, "outstanding", day, day, dir)
         days << day.iso8601
       rescue MeeshoClient::RequestError => e
-        stopped = { "day" => day.iso8601, "why" => e.message }
-        break
+        return base.merge("days" => days, "error" => outstanding_kept(day, e)) if rate_limited?(e) || listed.include?(day)
+        if listed.any?
+          skipped << day.iso8601                    # today, with nothing due today
+        else
+          stopped = { "day" => day.iso8601, "why" => e.message }
+          break
+        end
       end
     end
-    out = { "from" => today.iso8601, "to" => (days.last || today.iso8601), "days" => days, "stopped" => stopped }
+    out = base.merge("to" => (days.last || today.iso8601), "days" => days, "skipped" => skipped, "stopped" => stopped)
     if paths.empty?
       return out.merge("rows" => 0, "note" => "no outstanding file from #{today.strftime('%-d %b')} (#{stopped&.dig('why')}) — the last ones are kept")
     end
+    import_outstanding(account, out, paths)
+  end
+
+  def import_outstanding(account, out, paths)
     counts = MeeshoPayments.import(account.business_id, paths, "outstanding")
     out.merge("counts" => counts, "rows" => counts.dig("outstanding", "rows").to_i)
   rescue MeeshoPayments::ImportError => e
     out.merge("error" => e.message)
+  end
+
+  def outstanding_kept(day, error)
+    "couldn't read the file for #{day.strftime('%-d %b')} (#{error.message}) — the last outstanding payments are kept"
+  end
+
+  # The days the summary lists an upcoming payout for.
+  def payout_days(summary)
+    Array(summary.dig("upcoming", "daywisePayments")).filter_map do |d|
+      Date.iso8601(d["date"].to_s) if d.is_a?(Hash) && d["date"].present?
+    rescue Date::Error
+      nil
+    end.uniq.sort
   end
 
   # Request one file, wait for Meesho to build it, download it into `dir`.
@@ -129,27 +178,31 @@ class MeeshoPaymentsJob
     MeeshoPayments.download(entry["filePath"], dir)
   end
 
-  # Ask for a file; Meesho now and then refuses (HTTP 5xx) — try again shortly.
   def request_file(account, kind, from, to)
-    tries = 0
-    begin
-      tries += 1
-      relogin(account) { MeeshoPayments.request_file(@client, account, kind, from, to) }
-    rescue MeeshoClient::RequestError => e
-      raise unless tries < REQUEST_TRIES && e.message.match?(/HTTP 5\d\d/)
-      sleep RETRY_SECONDS
-      retry
-    end
+    patient(account) { MeeshoPayments.request_file(@client, account, kind, from, to) }
   end
 
-  # Read the download history until the file is ready (or failed).
+  # Read the download history until the file is ready (or failed). Too many
+  # requests here just means a longer wait before the next look.
   def wait_for(account, job_id)
     POLL_TIMES.times do |i|
       sleep POLL_SECONDS if i.positive?
-      e = relogin(account) { MeeshoPayments.history(@client, account) }[job_id]
+      begin
+        e = relogin(account) { MeeshoPayments.history(@client, account) }[job_id]
+      rescue MeeshoClient::RequestError => err
+        raise unless rate_limited?(err)
+        pause(RATE_WAIT, err)
+        next
+      end
       return e if e && (e["filePath"].present? || e["error"].present? || e["status"].to_s.upcase == "FAILED")
     end
     nil
+  end
+
+  # Sleep, unless that would take the read past its budget — then give up with `error`.
+  def pause(seconds, error)
+    raise error if @deadline && Time.current + seconds > @deadline
+    sleep seconds
   end
 
   def message(result)
@@ -172,6 +225,29 @@ class MeeshoPaymentsJob
                "Outstanding (#{span}): #{o['rows'].to_i} orders#{" — no file from #{Date.parse(o['stopped']['day']).strftime('%-d %b')}" if o['stopped']}."
              end
     parts.join(" ")
+  end
+
+  # One call to Meesho, tried again when it says too many requests (429,
+  # waiting longer each time) or refuses for a moment (5xx).
+  def patient(account)
+    waits = tries = 0
+    begin
+      relogin(account) { yield }
+    rescue MeeshoClient::RequestError => e
+      if rate_limited?(e) && waits < RATE_RETRIES
+        waits += 1
+        pause(RATE_WAIT * waits, e)
+        retry
+      elsif e.message.match?(/HTTP 5\d\d/) && (tries += 1) < REQUEST_TRIES
+        pause(RETRY_SECONDS, e)
+        retry
+      end
+      raise
+    end
+  end
+
+  def rate_limited?(error)
+    error.message.include?("HTTP 429")
   end
 
   def relogin(account)
