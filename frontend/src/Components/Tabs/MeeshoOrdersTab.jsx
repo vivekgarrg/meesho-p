@@ -10,7 +10,9 @@ import { CircularProgress } from "@mui/material";
  * the sync pulls on its own every few minutes (Meesho Sync page).
  */
 
-const TONE = { hold: "#B45309", pending: C.orange, ready_to_ship: "#2563EB", cancelled: C.red };
+const TONE = { hold: "#B45309", pending: C.orange, ready_to_ship: "#2563EB", shipped: "#059669", cancelled: C.red };
+// Tabs already out of the seller's hands — no SLA, no dispatch date to chase.
+const DONE = ["shipped", "cancelled"];
 const SLA = {
   breached: { label: "SLA breached", tag: "red" },
   breaching_soon: { label: "Breaching soon", tag: "amber" },
@@ -111,11 +113,11 @@ function Img({ src, size = 44 }) {
 
 function TabTile({ t, on, onClick }) {
   const tone = TONE[t.key];
-  const open = t.key !== "cancelled";      // SLA means nothing once cancelled
+  const open = !DONE.includes(t.key);      // SLA means nothing once shipped or cancelled
   const notes = [
     open && t.breached ? { text: `${t.breached} past SLA`, color: C.red } : null,
     open && t.breaching_soon ? { text: `${t.breaching_soon} breaching soon`, color: "#B45309" } : null,
-    t.key !== "cancelled" && t.due_today ? { text: `${t.due_today} to dispatch today`, color: C.gray600 } : null,
+    open && t.due_today ? { text: `${t.due_today} to dispatch today`, color: C.gray600 } : null,
     t.key === "ready_to_ship" && t.label_pending ? { text: `${t.label_pending} labels not downloaded`, color: C.gray600 } : null,
   ].filter(Boolean);
   return (
@@ -129,12 +131,12 @@ function TabTile({ t, on, onClick }) {
       <span style={{ fontFamily: "monospace", fontSize: 34, fontWeight: 900, lineHeight: 1 }}>{t.count}</span>
       {notes.length ? notes.map((n) => (
         <span key={n.text} style={{ fontSize: 12, fontWeight: 700, color: on ? "#fff" : n.color }}>{n.text}</span>
-      )) : <span style={{ fontSize: 12, color: on ? "rgba(255,255,255,.85)" : C.gray400 }}>{!t.count ? "None" : open ? "All on time" : "Recent cancellations"}</span>}
+      )) : <span style={{ fontSize: 12, color: on ? "rgba(255,255,255,.85)" : C.gray400 }}>{!t.count ? "None" : open ? "All on time" : t.key === "shipped" ? "On the way" : "Recent cancellations"}</span>}
     </button>
   );
 }
 
-function OrderCard({ r, cancelled, selectable, picked, onPick, showBiz }) {
+function OrderCard({ r, cancelled, shipped, selectable, picked, onPick, showBiz }) {
   const sla = slaOf(r.sla_status);
   return (
     <div onClick={selectable ? onPick : undefined}
@@ -154,7 +156,8 @@ function OrderCard({ r, cancelled, selectable, picked, onPick, showBiz }) {
           {showBiz && <Tag variant="gray">{r.business_name}</Tag>}
           {cancelled
             ? <Tag variant="red">{r.cancelled_message || "Cancelled"}</Tag>
-            : <>{sla && <Tag variant={sla.tag}>{sla.label}</Tag>}<span style={{ fontSize: 12, fontWeight: 700, color: C.gray700 }}>Dispatch by {day(r.dispatch_by)}</span></>}
+            : shipped ? <Tag variant="green">Shipped</Tag>
+              : <>{sla && <Tag variant={sla.tag}>{sla.label}</Tag>}<span style={{ fontSize: 12, fontWeight: 700, color: C.gray700 }}>Dispatch by {day(r.dispatch_by)}</span></>}
           {r.is_express && <Tag variant="blue">Express</Tag>}
         </div>
       </div>
@@ -261,7 +264,7 @@ function ConfirmAccept({ count, businesses, onYes, onNo, busy }) {
   );
 }
 
-export function MeeshoOrdersTab() {
+export function MeeshoOrdersTab({ embedded = false }) {
   const isMobile = useIsMobile();
   const [data, setData] = useState(null);
   const [tab, setTab] = useState("pending");
@@ -394,14 +397,14 @@ export function MeeshoOrdersTab() {
   });
   const bizOptions = [{ key: "all", label: "All businesses", test: () => true },
   ...accounts.map((x) => ({ key: String(x.business_id), label: x.business_name, test: (r) => r.business_id === x.business_id }))];
-  const total = data.tabs.filter((t) => t.key !== "cancelled").reduce((n, t) => n + t.count, 0);
+  const total = data.tabs.filter((t) => !DONE.includes(t.key)).reduce((n, t) => n + t.count, 0);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
         <div style={{ minWidth: 0 }}>
-          <h1 style={{ fontSize: 22, fontWeight: 800, color: C.gray900, margin: 0 }}>Meesho Orders</h1>
-          <p style={{ fontSize: 13, color: C.gray500, marginTop: 3 }}>
+          {!embedded && <h1 style={{ fontSize: 22, fontWeight: 800, color: C.gray900, margin: 0 }}>Meesho Orders</h1>}
+          <p style={{ fontSize: 13, color: C.gray500, marginTop: embedded ? 0 : 3 }}>
             {data.connected
               ? <>Live from the Meesho panel · {multi ? `${accounts.length} businesses combined (${accounts.map((x) => x.business_name).join(", ")})` : (accounts[0]?.supplier_name || accounts[0]?.business_name)}
                 {" "}· updated <b>{ago(synced)}</b>{nextPull ? ` · next pull ${time(nextPull)}` : ""}</>
@@ -409,7 +412,7 @@ export function MeeshoOrdersTab() {
           </p>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <Link to="/meesho-sync" style={{ ...btn("ghost", "md"), textDecoration: "none" }}>Sync settings</Link>
+          {!embedded && <Link to="/meesho-orders?tab=sync" style={{ ...btn("ghost", "md"), textDecoration: "none" }}>Sync settings</Link>}
           {data.connected && (
             <button onClick={refresh} disabled={syncing} style={{ ...btn("primary", "md"), minWidth: 140, opacity: syncing ? 0.7 : 1 }}>
               {syncing ? <><CircularProgress size={14} style={{ color: "#fff", marginRight: 6, verticalAlign: "-2px" }} />Syncing…</> : "↻ Refresh"}
@@ -421,7 +424,7 @@ export function MeeshoOrdersTab() {
       {!data.connected && (
         <div style={{ ...S.card, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", borderTop: `4px solid ${C.orange}` }}>
           <span style={{ flex: 1, fontSize: 14, fontWeight: 700, color: C.gray700 }}>No Meesho account connected yet.</span>
-          <Link to="/meesho-sync" style={{ ...btn("primary", "md"), textDecoration: "none" }}>Connect Meesho</Link>
+          <Link to="/meesho-orders?tab=sync" style={{ ...btn("primary", "md"), textDecoration: "none" }}>Connect Meesho</Link>
         </div>
       )}
       {data.connected && (!data.queue || !data.worker) && (
@@ -431,12 +434,12 @@ export function MeeshoOrdersTab() {
       )}
       {failedAccounts.map((x) => (
         <div key={x.business_id} style={{ background: C.redLight, border: `1.5px solid ${C.redBorder}`, borderRadius: 12, padding: "10px 14px", color: C.red, fontSize: 13, fontWeight: 700 }}>
-          {multi ? `${x.business_name}: last` : "Last"} sync failed: {x.last_sync_message || x.status_message} <Link to="/meesho-sync" style={{ color: C.red }}>Open Meesho Sync →</Link>
+          {multi ? `${x.business_name}: last` : "Last"} sync failed: {x.last_sync_message || x.status_message} <Link to="/meesho-orders?tab=sync" style={{ color: C.red }}>Fix it under Accounts &amp; sync →</Link>
         </div>
       ))}
       {error && <div style={{ color: C.red, fontWeight: 700, fontSize: 13 }}>{error}</div>}
 
-      <div style={{ display: "grid", gap: 10, gridTemplateColumns: isMobile ? "repeat(2, minmax(0, 1fr))" : "repeat(4, minmax(0, 1fr))" }}>
+      <div style={{ display: "grid", gap: 10, gridTemplateColumns: isMobile ? "repeat(2, minmax(0, 1fr))" : `repeat(${data.tabs.length}, minmax(0, 1fr))` }}>
         {data.tabs.map((t) => <TabTile key={t.key} t={t} on={tab === t.key} onClick={() => setTab(t.key)} />)}
       </div>
       {data.connected && <div style={{ fontSize: 12.5, color: C.gray500 }}>{total} open order{total === 1 ? "" : "s"} on the panel (on hold, pending and ready to ship).</div>}
@@ -498,15 +501,16 @@ export function MeeshoOrdersTab() {
                     : `No ${current.label.toLowerCase()} orders right now.`}
           </div>
         ) : isMobile ? (
-          rows.map((r) => <OrderCard key={keyOf(r)} r={r} cancelled={tab === "cancelled"} showBiz={multi}
+          rows.map((r) => <OrderCard key={keyOf(r)} r={r} cancelled={tab === "cancelled"} shipped={tab === "shipped"} showBiz={multi}
             selectable={canAccept && !accepting} picked={picked.has(keyOf(r))} onPick={() => togglePick(keyOf(r))} />)
         ) : (
           <div style={{ overflowX: "auto" }}>
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-              <thead><tr>{canAccept && <th style={{ ...S.th, width: 36 }} />}{["Product", ...(multi ? ["Business"] : []), "Qty", "Sub-order", ...(tab === "ready_to_ship" ? ["Packet ID / AWB"] : []), "Ordered", tab === "cancelled" ? "Status" : "Dispatch by", tab === "cancelled" ? "" : "SLA", tab === "ready_to_ship" ? "Label" : ""]
+              <thead><tr>{canAccept && <th style={{ ...S.th, width: 36 }} />}{["Product", ...(multi ? ["Business"] : []), "Qty", "Sub-order", ...(["ready_to_ship", "shipped"].includes(tab) ? ["Packet ID / AWB"] : []), "Ordered", tab === "cancelled" ? "Status" : "Dispatch by", DONE.includes(tab) ? "" : "SLA", tab === "ready_to_ship" ? "Label" : ""]
                 .map((h, i) => <th key={i} style={{ ...S.th, whiteSpace: "nowrap" }}>{h}</th>)}</tr></thead>
               <tbody>
                 {rows.map((r) => {
+                  console.log(r, "~r")
                   const sla = slaOf(r.sla_status);
                   return (
                     <tr key={keyOf(r)} style={{ background: picked.has(keyOf(r)) ? C.orangeLight : undefined }}>
@@ -530,12 +534,12 @@ export function MeeshoOrdersTab() {
                       {multi && <td style={{ ...S.td, whiteSpace: "nowrap" }}><Tag variant="gray">{r.business_name}</Tag></td>}
                       <td style={{ ...S.td, fontFamily: "monospace", fontWeight: 800 }}>{r.quantity ?? 1}</td>
                       <td style={{ ...S.td, fontFamily: "monospace", fontSize: 12 }}>{r.sub_order_num}</td>
-                      {tab === "ready_to_ship" && <td style={{ ...S.td, whiteSpace: "nowrap" }}><ShipIds r={r} /></td>}
+                      {["ready_to_ship", "shipped"].includes(tab) && <td style={{ ...S.td, whiteSpace: "nowrap" }}><ShipIds r={r} /></td>}
                       <td style={{ ...S.td, whiteSpace: "nowrap" }}>{time(r.created_iso)}</td>
                       {tab === "cancelled"
                         ? <td style={S.td}><Tag variant="red">{r.cancelled_message || "Cancelled"}</Tag></td>
                         : <td style={{ ...S.td, whiteSpace: "nowrap", fontWeight: r.dispatch_by === data.today ? 800 : 500 }}>{day(r.dispatch_by)}{r.dispatch_by === data.today ? " · today" : ""}</td>}
-                      <td style={S.td}>{tab !== "cancelled" && sla && <Tag variant={sla.tag}>{sla.label}</Tag>}{r.is_express && <> <Tag variant="blue">Express</Tag></>}</td>
+                      <td style={S.td}>{!DONE.includes(tab) && sla && <Tag variant={sla.tag}>{sla.label}</Tag>}{r.is_express && <> <Tag variant="blue">Express</Tag></>}</td>
                       <td style={{ ...S.td, fontSize: 12, color: C.gray600 }}>{tab === "ready_to_ship" ? labelText(r.label) : ""}</td>
                     </tr>
                   );

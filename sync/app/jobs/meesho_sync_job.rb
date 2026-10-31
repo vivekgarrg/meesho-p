@@ -18,7 +18,7 @@ class MeeshoSyncJob
     end
     run.start!
     begin
-      records, notes = pull(account)
+      records, notes = pull(account, trigger)
       message = notes.join(" ")
       account.update!(last_sync_at: Time.current, last_sync_status: "OK", last_sync_message: message)
       run.finish!(true, message, records: records)
@@ -39,7 +39,7 @@ class MeeshoSyncJob
 
   private
 
-  def pull(account)
+  def pull(account, trigger = MeeshoSyncRun::TRIGGER_MANUAL)
     @client = account.cookies.present? ? MeeshoClient.new(account) : MeeshoLoginJob.login!(account)
     endpoints = MeeshoEndpoints.all
     if endpoints.empty?
@@ -50,26 +50,29 @@ class MeeshoSyncJob
     panel_rows = []
     pulled = []
     endpoints.each do |ep|
+      next if trigger == MeeshoSyncRun::TRIGGER_SCHEDULE && fresh?(account, ep)
       missing = Array(ep[:needs]).select { |f| account.public_send(f).blank? }
       if missing.any?
         raise MeeshoClient::RequestError,
               "#{ep[:key]}: the supplier's #{missing.map { |f| f.to_s.tr('_', ' ') }.join(' and ')} isn't known — " \
               "set it under Advanced on the Meesho Sync page."
       end
-      rows, pages, status = fetch_all(account, ep)
+      rows, pages, status, total = fetch_all(account, ep)
       if ep[:orders_tab]
         rows = rows.map { |r| PanelOrders.normalize(r, ep[:orders_tab]) }
         panel_rows.concat(rows)
       end
-      pulled << [ep, rows, pages, status]
+      pulled << [ep, rows, pages, status, total]
     end
     # Nothing is written until everything is pulled and checked.
     PanelOrders.check_business!(account.business_id, panel_rows)
-    pulled.each do |ep, rows, pages, status|
+    pulled.each do |ep, rows, pages, status, total|
       snap = MeeshoSyncSnapshot.find_or_initialize_by(account_id: account.id, endpoint: ep[:key])
       snap.update!(http_status: status, payload: rows, fetched_at: Time.current)
       records += rows.size
-      notes << "#{ep[:key].tr('_', ' ')}: #{rows.size}#{" (#{pages} pages)" if pages > 1}."
+      short = total && self.class.counted(rows) < total
+      notes << "#{ep[:key].tr('_', ' ')}: #{rows.size}#{" (#{pages} pages)" if pages > 1}" \
+               "#{" — short of the #{total} Meesho lists" if short}."
     end
     if panel_rows.any?
       m = PanelOrders.mirror!(account.business_id, panel_rows)
@@ -82,27 +85,56 @@ class MeeshoSyncJob
     [records, notes]
   end
 
-  # Every page of one endpoint. A cursor-paged API is asked again with the
-  # cursor each page hands back, until a page is empty or says there is no more.
+  # An endpoint pulled less often (`every:` minutes) whose snapshot is recent enough.
+  def fresh?(account, ep)
+    return false unless ep[:every]
+    at = MeeshoSyncSnapshot.where(account_id: account.id, endpoint: ep[:key]).pick(:fetched_at)
+    at.present? && at > ep[:every].minutes.ago
+  end
+
+  # Every page of one endpoint. Meesho says on the first page how many orders
+  # the tab holds (total_count) and hands back a cursor for the next page —
+  # Ready to ship's first page is just the orders still waiting for a label. Pages are asked for until
+  # that many are in hand; an empty page or a has_more: false doesn't stop it
+  # short of the total, only the cursor running out (or MAX_PAGES) does.
+  # Returns [rows, pages, http status, total_count or nil].
   def fetch_all(account, ep)
     rows = []
+    seen = {}
     cursor = nil
     status = 0
     pages = 0
+    total = nil
+    idle = 0
     loop do
       res = fetch(account, ep, cursor)
       status = res.status
       pages += 1
       page = self.class.rows_in(res.body)
-      rows.concat(page)
-      break unless ep[:paginate] == :cursor && page.any? && pages < MeeshoEndpoints::MAX_PAGES
-      total = res.body.is_a?(Hash) ? res.body["total_count"] : nil
-      break if total.is_a?(Integer) && rows.size >= total
+      # A cursor can hand back an order already read — keep each sub-order once.
+      fresh = page.select do |r|
+        k = r["sub_order_num"]
+        next true if k.blank?
+        next false if seen.key?(k)
+        seen[k] = true
+      end
+      rows.concat(fresh)
+      break unless ep[:paginate] == :cursor && pages < MeeshoEndpoints::MAX_PAGES
+      # Only the first page says how many there are; later pages say 0.
+      t = res.body.is_a?(Hash) ? res.body["total_count"] : nil
+      total ||= t if t.is_a?(Integer) && t.positive?
+      if total
+        break if self.class.counted(rows) >= total
+        idle = fresh.empty? ? idle + 1 : 0
+        break if idle >= 2                      # two pages with nothing new: the cursor is going round
+      else
+        break if page.empty? || self.class.no_more?(res.body)
+      end
       nxt = self.class.cursor_in(res.body)
-      break if nxt.blank? || nxt == cursor || self.class.no_more?(res.body)
+      break if nxt.blank? || nxt == cursor
       cursor = nxt
     end
-    [rows, pages, status]
+    [rows, pages, status, total]
   end
 
   # One request; if the session has lapsed, log in again once and retry.
@@ -148,6 +180,14 @@ class MeeshoSyncJob
       return found if found.present?
     end
     []
+  end
+
+  # How many of what total_count counts have been read. Ready to ship counts
+  # shipments, not the sub-orders listed under them — so count the coarsest
+  # unit the rows carry. Counting low only costs one extra (empty) page;
+  # counting high stopped Ready to ship short.
+  def self.counted(rows)
+    rows.map { |r| r["grouping_key"].presence || r["order_num"].presence || r["sub_order_num"] || r.object_id }.uniq.size
   end
 
   def self.cursor_in(body, depth = 0)

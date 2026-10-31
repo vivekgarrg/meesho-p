@@ -14,6 +14,7 @@ server-side check, a restricted user could still call the endpoint directly, so
 # ── Navigable areas, in sidebar order ────────────────────────────────────────
 # group is only used to lay the admin screen out in the same shape as the sidebar.
 NAV_CATALOG = [
+    # Orders, Inventory and the account/sync settings, as tabs of one page.
     {"path": "/meesho-orders",     "label": "Meesho Orders",     "group": "Analytics"},
     {"path": "/",                  "label": "Overview",          "group": "Analytics"},
     {"path": "/combined-dashboard", "label": "Combined Dashboard", "group": "Analytics"},
@@ -54,7 +55,6 @@ NAV_CATALOG = [
     {"path": "/expenses",          "label": "Expenses",          "group": "Catalog"},
 
     {"path": "/upload",            "label": "Upload Data",       "group": "Tools"},
-    {"path": "/meesho-sync",       "label": "Meesho Sync",       "group": "Tools"},
     {"path": "/product-photos",    "label": "AI Photos",         "group": "Tools"},
     {"path": "/quadrant-cropper",  "label": "Quadrant Cropper",  "group": "Tools"},
     {"path": "/extension",         "label": "Browser Extension", "group": "Tools"},
@@ -91,10 +91,12 @@ API_OWNERSHIP = {
     "upload/":               ["/upload"],
     "upload-orders/":        ["/upload"],
     "upload-cleanup/":       ["/upload"],
-    "meesho-sync/":          ["/meesho-sync"],
-    # The dashboard's Refresh button queues a pull, so it may use this one.
-    "meesho-sync/refresh/":  ["/meesho-sync", "/meesho-orders"],
-    "meesho-orders/":        ["/meesho-orders", "/meesho-sync"],
+    # Meesho Orders holds the Sync and Inventory pages as tabs.
+    "meesho-sync/":          ["/meesho-orders"],
+    "meesho-orders/":        ["/meesho-orders"],
+    "meesho-live-inventory/": ["/meesho-orders"],
+    # Meesho Stock's "Sync now" queues the same inventory pull.
+    "meesho-live-inventory/refresh/": ["/meesho-orders", "/meesho-inventory"],
 
     "labels/":               ["/labels"],
     "bulk-labels/":          ["/bulk-labels"],

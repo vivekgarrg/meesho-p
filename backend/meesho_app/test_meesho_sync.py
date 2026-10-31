@@ -98,6 +98,56 @@ class MeeshoSyncTests(TestCase):
         self.assertEqual(MeeshoSyncRun.objects.get().status, "FAILED")
 
 
+    CURL = ("curl 'https://supplier.meesho.com/api/v3/orders/search' \\\n"
+            "  -H 'accept: application/json' \\\n"
+            "  -H 'browser-id: YnJ3MTIz' \\\n"
+            "  -H 'identifier: xzvey' \\\n"
+            "  -b '_abck=aaa; connect.sid=s%3Areal.sig; s_id=4313711; current_az_identifier=xzvey' \\\n"
+            "  --data-raw '{\"page\":1}'")
+
+    def paste(self, session, client=None, **body):
+        return (client or self.client_for(self.admin)).post(f"{self.base}/session/", {"session": session, **body}, format="json")
+
+    def test_a_pasted_curl_becomes_the_session_and_queues_a_pull(self):
+        r = self.paste(self.CURL)
+        self.assertEqual(r.status_code, 200, r.data)
+        a = MeeshoAccount.objects.get()
+        self.assertEqual(json.loads(meesho_sync.decrypt(a.cookies_enc)),
+                         {"_abck": "aaa", "connect.sid": "s%3Areal.sig", "s_id": "4313711", "current_az_identifier": "xzvey"})
+        self.assertNotIn("s%3Areal", a.cookies_enc)
+        self.assertEqual((a.status, a.browser_id, a.supplier_identifier, a.supplier_id, a.password_enc), ("ACTIVE", "YnJ3MTIz", "xzvey", "4313711", ""))
+        self.assertEqual([q[0] for q in self.queued], ["MeeshoSyncJob"])
+        self.assertNotIn("s%3Areal", json.dumps(r.data, default=str))
+        self.assertFalse(r.data["account"]["has_password"])
+
+    def test_cookie_header_and_json_exports_are_read_too(self):
+        parse = meesho_sync._parse_pasted_session
+        self.assertEqual(parse("cookie: connect.sid=abc; bm_sz=x=y")[0], {"connect.sid": "abc", "bm_sz": "x=y"})
+        self.assertEqual(parse('[{"name": "connect.sid", "value": "abc"}]')[0], {"connect.sid": "abc"})
+        self.assertEqual(parse('{"connect.sid": "abc"}')[0], {"connect.sid": "abc"})
+        self.assertEqual(parse("curl 'https://x' -H 'Cookie: connect.sid=abc'")[0], {"connect.sid": "abc"})
+
+    def test_a_paste_without_the_session_cookie_is_refused(self):
+        r = self.paste("_abck=aaa; bm_sz=bbb")
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("connect.sid", r.data["error"])
+        self.assertFalse(MeeshoAccount.objects.exists())
+
+    def test_pasting_keeps_a_saved_password_and_only_admins_paste(self):
+        self.assertEqual(self.paste(self.CURL, self.client_for(self.worker)).status_code, 403)
+        self.connect()
+        self.paste("connect.sid=fresh")
+        a = MeeshoAccount.objects.get()
+        self.assertEqual(meesho_sync.decrypt(a.password_enc), "s3cret!")
+        self.assertEqual((a.phone_number, a.status), ("9000000001", "ACTIVE"))
+
+    def test_pasting_after_disconnect_doesnt_bring_the_password_back(self):
+        self.connect()
+        self.client_for(self.admin).post(f"{self.base}/disconnect/")
+        self.paste("connect.sid=fresh")
+        a = MeeshoAccount.objects.get()
+        self.assertEqual((a.status, a.password_enc, a.sync_enabled), ("ACTIVE", "", True))
+
 @mock.patch.dict(os.environ, {"MEESHO_SYNC_KEY": KEY})
 @mock.patch.object(meesho_sync, "_worker_alive", lambda: True)
 class FetchedDataTests(TestCase):
@@ -149,7 +199,7 @@ class DashboardTests(TestCase):
     def test_tabs_counts_and_rows(self):
         d = self.c.get(self.url).data
         tabs = {t["key"]: t for t in d["tabs"]}
-        self.assertEqual([t["key"] for t in d["tabs"]], ["hold", "pending", "ready_to_ship", "cancelled"])
+        self.assertEqual([t["key"] for t in d["tabs"]], ["hold", "pending", "ready_to_ship", "shipped", "cancelled"])
         self.assertEqual((tabs["hold"]["count"], tabs["hold"]["fetched_at"]), (0, None))
         p = tabs["pending"]
         self.assertEqual((p["count"], p["breached"], p["breaching_soon"], p["due_today"]), (2, 1, 1, 1))
@@ -345,7 +395,8 @@ class CombinedBusinessesTests(TestCase):
                                                                       "label": label, "sla_status": sla}
             a.snapshots.create(endpoint="orders_pending", http_status=200, fetched_at=now, payload=[row(f"{sid}1"), row(f"{sid}2")])
             a.snapshots.create(endpoint="orders_ready_to_ship", http_status=200, fetched_at=now,
-                               payload=[{**row(f"{sid}3", "Downloaded", "breached"), "awb": f"VL{sid}3"}, row(f"{sid}4")])
+                               payload=[{**row(f"{sid}3", "Downloaded", "breached"), "awb": f"VL{sid}3"}, row(f"{sid}4"),
+                                        {**row(f"{sid}5"), "packet_id": f"PANEL{sid}5"}])
             return a
         self.acct_a, self.acct_b, self.acct_c = acct(self.a, 1), acct(self.b, 2), acct(self.c, 3)
         Order.objects.create(business=self.a, sub_order_no="13_1", reason_for_credit_entry="READY_TO_SHIP", packet_id="KP2NUJE1")
@@ -365,6 +416,7 @@ class CombinedBusinessesTests(TestCase):
         rts = {r["sub_order_num"]: r for r in tabs["ready_to_ship"]["rows"]}
         self.assertEqual((rts["13_1"]["awb"], rts["13_1"]["packet_id"]), ("VL13", "KP2NUJE1"))   # packet id from the Orders CSV
         self.assertIsNone(rts["14_1"]["packet_id"])
+        self.assertEqual(rts["15_1"]["packet_id"], "PANEL15")                # packet id pulled from the panel
         self.assertEqual(tabs["ready_to_ship"]["breached"], 2)
         self.assertEqual({a["business_name"] for a in d["accounts"]}, {"Rudam", "Cosmify"})
 
@@ -484,3 +536,281 @@ class NeverCachedTests(TestCase):
         from .api_cache import _NEVER_CACHE_PREFIXES
         for path in ("meesho-sync/", "meesho-orders/", "meesho-orders/accept/"):
             self.assertTrue(any(path.startswith(p) for p in _NEVER_CACHE_PREFIXES), path)
+
+
+@mock.patch.dict(os.environ, {"MEESHO_SYNC_KEY": KEY})
+@mock.patch.object(meesho_sync, "_worker_alive", lambda: True)
+class LiveInventoryTests(TestCase):
+    def setUp(self):
+        from django.utils import timezone
+        from .models import FinalPrice, MeeshoCatalog, MeeshoListing, ParentItemPrice
+        now = timezone.now()
+        self.biz = Business.objects.create(name="Cosmify")
+        self.admin = User.objects.create_user(username="a", password="pw", role=User.ROLE_SUPER_ADMIN)
+        self.worker = User.objects.create_user(username="w", password="pw", role=User.ROLE_BUSINESS_USER)
+        for u in (self.admin, self.worker):
+            Membership.objects.create(user=u, business=self.biz)
+        self.acct = MeeshoAccount.objects.create(business=self.biz, phone_number="9000000001", password_enc="v1:x",
+                                                 status="ACTIVE", supplier_id="3564327", supplier_identifier="lffy4")
+        self.acct.snapshots.create(endpoint="inventory_counts", http_status=200, fetched_at=now,
+                                   payload={"active": 2, "paused": 1, "activation_pending": 1, "blocked": 3})
+        cat = lambda cid, **kw: MeeshoCatalog.objects.create(**{"account": self.acct, "catalog_id": cid, "name": f"Cat {cid}",
+                                                               "seen_at": now, "products_fetched_at": now, **kw})
+        c1, c2, c3 = cat(1, in_active=True), cat(2, in_active=True, in_paused=True), cat(3, in_paused=True)
+        cat(4, in_pending=True, products_fetched_at=None)
+        row = lambda c, pid, sku, archived=False: MeeshoListing.objects.create(
+            account=self.acct, catalog=c, product_id=pid, variation_id=167, sku_id=sku, inventory=5, archived=archived, seen_at=now)
+        self.l11, self.l21 = row(c1, 11, "thali-a"), row(c2, 21, "thali-b")
+        self.l22, self.l31 = row(c2, 22, "lota", archived=True), row(c3, 31, "diya")
+        parent = ParentItemPrice.objects.create(item_id="Brass Thali", business=self.biz)
+        for sku in ("thali-a", "thali-b"):
+            FinalPrice.objects.create(sku_id=sku, parent=parent, business=self.biz)
+        self.base = f"/api/business/{self.biz.id}/meesho-live-inventory"
+        self.queued = []
+        p = mock.patch.object(meesho_sync, "enqueue", side_effect=lambda job, args, queue="critical": self.queued.append((job, args)) or "jid")
+        p.start()
+        self.addCleanup(p.stop)
+
+    def client_for(self, user):
+        c = APIClient()
+        c.force_authenticate(user)
+        return c
+
+    def test_skus_are_grouped_by_their_parent(self):
+        d = self.client_for(self.worker).get(self.base + "/").data
+        groups = {g["parent"]: g for g in d["groups"]}
+        self.assertEqual([s["sku_id"] for s in groups["Brass Thali"]["skus"]], ["thali-a", "thali-b"])
+        self.assertEqual({s["sku_id"] for s in groups[None]["skus"]}, {"lota", "diya"})       # not linked to a parent
+        self.assertEqual(d["groups"][-1]["parent"], None)                                     # unlinked last
+        lota = next(s for s in groups[None]["skus"] if s["sku_id"] == "lota")["listings"][0]
+        self.assertEqual((lota["catalog_id"], lota["archived"]), (2, True))
+        self.assertEqual(d["accounts"][0]["counts"]["blocked"], 3)
+        self.assertEqual([c["catalog_id"] for c in d["pending"]], [4])
+        self.assertFalse(d["is_admin"])
+
+    def test_pause_groups_the_skus_by_catalog_for_the_worker(self):
+        r = self.client_for(self.admin).post(self.base + "/pause/", {"listings": [self.l11.pk, self.l21.pk, self.l22.pk]}, format="json")
+        self.assertEqual(r.status_code, 202, r.data)
+        (job, (acct_id, run_id, items)), = self.queued
+        self.assertEqual((job, acct_id), ("MeeshoArchiveJob", self.acct.pk))
+        # The paused one (22) isn't sent again; one entry per catalog.
+        self.assertEqual(sorted(items, key=lambda i: i["catalog_id"]), [
+            {"catalog_id": 1, "products": [{"product_id": 11, "variation_id": 167}]},
+            {"catalog_id": 2, "products": [{"product_id": 21, "variation_id": 167}]}])
+        self.assertEqual(MeeshoSyncRun.objects.get(pk=run_id).records, 2)
+        # One at a time.
+        r = self.client_for(self.admin).post(self.base + "/pause/", {"listings": [self.l31.pk]}, format="json")
+        self.assertEqual(r.status_code, 409)
+
+    def test_only_an_admin_pauses_and_only_what_is_listed_here(self):
+        self.assertEqual(self.client_for(self.worker).post(self.base + "/pause/", {"listings": [self.l11.pk]}, format="json").status_code, 403)
+        c = self.client_for(self.admin)
+        self.assertEqual(c.post(self.base + "/pause/", {"listings": [self.l11.pk, 999999]}, format="json").status_code, 409)
+        self.assertEqual(c.post(self.base + "/pause/", {"listings": [self.l22.pk]}, format="json").status_code, 400)   # already paused
+        self.assertEqual(self.queued, [])
+
+    def test_refresh_queues_an_inventory_read(self):
+        r = self.client_for(self.worker).post(self.base + "/refresh/")
+        self.assertEqual(r.status_code, 202)
+        self.assertEqual([j for j, _ in self.queued], ["MeeshoInventoryJob"])
+        self.assertEqual(MeeshoSyncRun.objects.get().kind, "INVENTORY")
+
+    def test_meesho_stock_shows_it_is_synced(self):
+        from django.utils import timezone
+        MeeshoSyncRun.objects.create(account=self.acct, kind="INVENTORY", status="OK", finished_at=timezone.now(),
+                                     message="Active 2 …")
+        d = self.client_for(self.admin).get(f"/api/business/{self.biz.id}/meesho-inventory/").data
+        self.assertTrue(d["sync"]["connected"])
+        self.assertIsNotNone(d["sync"]["last_ok_at"])
+        self.assertFalse(d["sync"]["running"])
+
+    def test_an_uploaded_sheet_matches_rows_by_product_not_serial_number(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        from .models import MeeshoInventory
+        # Synced rows: serial 1 is product 11, serial 2 is product 21.
+        for sno, pid in ((1, 11), (2, 21)):
+            MeeshoInventory.objects.create(business=self.biz, serial_no=sno, catalog_name="c", catalog_id=1, product_name="p",
+                                           product_id=pid, style_id=f"s{pid}", variation_id=167, system_stock_count=5)
+        # A fresh Meesho export numbers its rows from 1 again: serial 1 is now product 21, serial 2 a new product 31.
+        csv = ("SERIAL NO,CATALOG NAME,CATALOG ID,PRODUCT NAME,PRODUCT ID,STYLE ID,VARIATION ID,VARIATION,STOCK,SYSTEM STOCK COUNT,YOUR STOCK COUNT\n"
+               "1,c,1,p,21,s21,167,Free Size,IN_STOCK,9,\n"
+               "2,c,1,p,31,s31,167,Free Size,IN_STOCK,4,\n")
+        r = self.client_for(self.admin).post(f"/api/business/{self.biz.id}/meesho-inventory/upload/",
+                                             {"file": SimpleUploadedFile("inv.csv", csv.encode())}, format="multipart")
+        self.assertEqual((r.data["created"], r.data["updated"]), (1, 1), r.data)
+        rows = {i.product_id: (i.serial_no, i.system_stock_count) for i in MeeshoInventory.objects.filter(business=self.biz)}
+        self.assertEqual(rows, {11: (1, 5), 21: (2, 9), 31: (3, 4)})       # nothing written over another product
+
+    def test_the_meesho_page_overview_and_its_tabs_permissions(self):
+        from accounts.nav import NAV_PATHS, owners_for_api_path
+        d = self.client_for(self.worker).get(f"/api/business/{self.biz.id}/meesho-orders/overview/").data
+        (b,) = d["businesses"]
+        self.assertEqual((b["business_name"], b["connected"], d["current_business_id"]), ("Cosmify", True, self.biz.id))
+        self.assertIn("stock_rows", b["inventory"])
+        # Sync and Inventory are tabs of Meesho Orders: one nav entry grants all three.
+        self.assertNotIn("/meesho-sync", NAV_PATHS)
+        self.assertNotIn("/meesho-live-inventory", NAV_PATHS)
+        for api in ("meesho-sync/connect/", "meesho-live-inventory/pause/", "meesho-orders/overview/"):
+            self.assertEqual(owners_for_api_path(api), ["/meesho-orders"], api)
+
+
+def _payment_workbook(path, rows):
+    """A Meesho payment file in miniature: the three header rows, then order payments."""
+    import openpyxl
+    from .views import ORDER_PAYMENT_COLUMNS
+    wb = openpyxl.Workbook()
+    wb.active.title = "Disclaimer"
+    ws = wb.create_sheet("Order Payments")
+    ws.append(["Order Related Details"] + [None] * (len(ORDER_PAYMENT_COLUMNS) - 1))
+    ws.append(ORDER_PAYMENT_COLUMNS)
+    ws.append(["A"] * len(ORDER_PAYMENT_COLUMNS))
+    for r in rows:
+        ws.append([r.get(c) for c in ORDER_PAYMENT_COLUMNS])
+    wb.save(path)
+
+
+@mock.patch.dict(os.environ, {"MEESHO_SYNC_KEY": KEY})
+@mock.patch.object(meesho_sync, "_worker_alive", lambda: True)
+class MeeshoPaymentsTests(TestCase):
+    def setUp(self):
+        import tempfile
+        self.biz = Business.objects.create(name="Cosmify")
+        self.admin = User.objects.create_user(username="a", password="pw", role=User.ROLE_SUPER_ADMIN)
+        Membership.objects.create(user=self.admin, business=self.biz)
+        self.acct = MeeshoAccount.objects.create(business=self.biz, phone_number="9000000001", password_enc="v1:x",
+                                                 status="ACTIVE", supplier_id="3564327", supplier_identifier="lffy4")
+        self.dir = tempfile.mkdtemp()
+        self.c = APIClient()
+        self.c.force_authenticate(self.admin)
+        self.base = f"/api/business/{self.biz.id}/meesho-orders/payments"
+
+    def file(self, name, rows):
+        path = os.path.join(self.dir, name)
+        _payment_workbook(path, rows)
+        return path
+
+    def run_command(self, kind, path):
+        from io import StringIO
+        from django.core.management import call_command
+        out = StringIO()
+        call_command("import_meesho_payments", business=self.biz.pk, file=path, kind=kind, stdout=out)
+        return json.loads(out.getvalue())
+
+    def test_completed_payments_land_in_the_payments_table_like_an_upload(self):
+        from .models import OrderPayment
+        row = {"sub_order_no": "111_1", "order_date": "2026-10-01 10:00", "supplier_sku": "lota", "live_order_status": "Delivered",
+               "quantity": 1, "transaction_id": "AXIS1", "payment_date": "2026-10-08", "final_settlement_amount": 250.5}
+        path = self.file("done.xlsx", [row])
+        self.assertEqual(self.run_command("completed", path)["order_payments"], {"created": 1, "updated": 0})
+        self.assertEqual(self.run_command("completed", path)["order_payments"], {"created": 0, "updated": 1})   # every 2 hours: no duplicates
+        p = OrderPayment.objects.get(business=self.biz)
+        self.assertEqual((p.sub_order_no, p.transaction_id, float(p.final_settlement_amount)), ("111_1", "AXIS1", 250.5))
+
+    def test_outstanding_payments_are_kept_apart_and_replaced_each_time(self):
+        from .models import MeeshoOutstandingPayment, OrderPayment
+        first = self.file("o1.xlsx", [{"sub_order_no": "1_1", "payment_date": "2026-11-02", "final_settlement_amount": 100, "live_order_status": "Shipped"},
+                                      {"sub_order_no": "2_1", "payment_date": "2026-11-03", "final_settlement_amount": -40, "live_order_status": "RTO"}])
+        self.assertEqual(self.run_command("outstanding", first), {"outstanding": {"rows": 2, "replaced": 0}})
+        second = self.file("o2.xlsx", [{"sub_order_no": "3_1", "payment_date": "2026-11-04", "final_settlement_amount": 70}])
+        self.run_command("outstanding", second)
+        self.assertEqual(list(MeeshoOutstandingPayment.objects.values_list("sub_order_no", flat=True)), ["3_1"])
+        self.assertFalse(OrderPayment.objects.exists())          # not paid yet: never counted as settled
+
+    def test_the_payments_tab_shows_summaries_and_outstanding(self):
+        from django.utils import timezone
+        from .models import MeeshoOutstandingPayment
+        self.acct.snapshots.create(endpoint="payments_summary", http_status=200, fetched_at=timezone.now(), payload={
+            "previous": {"daywisePayments": [{"date": "2026-10-30", "netAmount": 16766.47, "netOrderAmount": 16916.52,
+                                              "transferId": "AXIS1", "netPlatformRecovery": {"adsCost": -150.05}}]},
+            "upcoming": {"daywisePayments": [{"date": "2026-11-02", "netAmount": 45535.92}]},
+            "previous_total": {"netAmount": 836640.97}, "upcoming_total": {"netAmount": 141071.14}})
+        MeeshoOutstandingPayment.objects.create(business=self.biz, sub_order_no="9_1", final_settlement_amount=99, imported_at=timezone.now())
+        d = self.c.get(self.base + "/").data
+        (a,) = d["accounts"]
+        self.assertEqual((a["paid_total"], a["upcoming_total"]), (836640.97, 141071.14))
+        self.assertEqual(a["paid"][0]["transfer_id"], "AXIS1")
+        self.assertEqual(a["paid"][0]["ads"], -150.05)
+        self.assertEqual((d["outstanding_count"], d["outstanding_total"]), (1, 99.0))
+
+    def test_refresh_queues_a_payments_read(self):
+        with mock.patch.object(meesho_sync, "enqueue", return_value="jid") as enq:
+            r = self.c.post(self.base + "/refresh/")
+        self.assertEqual(r.status_code, 202)
+        self.assertEqual(enq.call_args[0][0], "MeeshoPaymentsJob")
+        self.assertEqual(MeeshoSyncRun.objects.get().kind, "PAYMENTS")
+
+
+@mock.patch.dict(os.environ, {"MEESHO_SYNC_KEY": KEY})
+class AutoLabelsSendTests(TestCase):
+    def setUp(self):
+        self.biz = Business.objects.create(name="Cosmify")
+        self.admin = User.objects.create_user(username="a", password="pw", role=User.ROLE_SUPER_ADMIN)
+        self.acct = MeeshoAccount.objects.create(business=self.biz, phone_number="9000000001", password_enc="v1:x",
+                                                 status="ACTIVE", supplier_id="3564327", supplier_identifier="lffy4")
+
+    def send(self, batch="auto-1", summary="Cosmify: 2 of 2 pending accepted"):
+        from io import StringIO
+        from django.core.management import call_command
+        out = StringIO()
+        with mock.patch("meesho_app.notify.send", return_value={"telegram": "sent"}) as send:
+            call_command("meesho_send_labels", batch=batch, summary=summary, stdout=out)
+        return json.loads(out.getvalue()), send
+
+    def test_no_new_labels_still_says_so(self):
+        out, send = self.send()
+        self.assertEqual(out["labels"], 0)
+        subject, text = send.call_args[0][:2]
+        self.assertIn("Meesho labels", subject)
+        self.assertIn("No new labels", text)
+        self.assertIn("2 of 2 pending accepted", text)
+
+    def test_labels_are_merged_sorted_saved_and_sent_as_one_pdf(self):
+        from .models import LabelOrder
+        from .test_label_engine import make_labels_pdf
+        MeeshoSyncRun.objects.create(account=self.acct, kind="LABELS", status="OK", records=2,
+                                     result={"batch": "auto-1", "label_url": "https://storage.googleapis.com/a.pdf", "success": 2})
+        MeeshoSyncRun.objects.create(account=self.acct, kind="LABELS", status="OK", result={"batch": "other", "label_url": "x"})
+        pdf = make_labels_pdf([("lota-b", "2_1", "X"), ("lota-a", "1_1", "Y")])
+        with mock.patch.object(meesho_sync, "_fetch_label_pdf", return_value=pdf) as fetch:
+            out, send = self.send()
+        fetch.assert_called_once_with("https://storage.googleapis.com/a.pdf")          # only this run's batch
+        self.assertEqual(out["labels"], 2)
+        kwargs = send.call_args.kwargs
+        self.assertTrue(kwargs["data"].startswith(b"%PDF"))
+        self.assertTrue(kwargs["filename"].startswith("meesho-labels-"))
+        self.assertIn("sorted by parent SKU", send.call_args[0][1])
+        self.assertTrue(LabelOrder.objects.exists())                                # saved for Order Scan, as an upload would
+
+    def test_telegram_and_email_go_out_where_set_up(self):
+        from django.core import mail
+        from . import notify
+        env = {"TELEGRAM_BOT_TOKEN": "123:abc", "TELEGRAM_CHAT_ID": "111, 222", "LABELS_EMAIL_TO": "me@example.com"}
+        sent = []
+
+        class Resp:
+            def __init__(self, req): sent.append(req)
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self): return b'{"ok": true}'
+
+        with mock.patch.dict(os.environ, env), mock.patch("meesho_app.notify.urlopen", side_effect=lambda req, timeout: Resp(req)):
+            result = notify.send("Meesho labels", "12 labels", filename="l.pdf", data=b"%PDF-1.4 x")
+        self.assertEqual(result, {"telegram": "sent", "email": "sent"})
+        self.assertEqual(len(sent), 2)                                              # one per chat
+        self.assertTrue(sent[0].full_url.endswith("/bot123:abc/sendDocument"))
+        self.assertIn(b'name="document"; filename="l.pdf"', sent[0].data)
+        self.assertIn(b"%PDF-1.4 x", sent[0].data)
+        self.assertEqual(mail.outbox[0].to, ["me@example.com"])
+        self.assertEqual(mail.outbox[0].attachments[0][0], "l.pdf")
+
+    def test_one_channel_failing_doesnt_stop_the_other(self):
+        from django.core import mail
+        from . import notify
+        with mock.patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "t", "TELEGRAM_CHAT_ID": "1", "LABELS_EMAIL_TO": "me@example.com"}), \
+                mock.patch("meesho_app.notify.urlopen", side_effect=OSError("network down")):
+            result = notify.send("s", "t")
+        self.assertEqual(result["telegram"], "error: network down")
+        self.assertEqual(result["email"], "sent")
+        self.assertEqual(len(mail.outbox), 1)
+        with mock.patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "", "LABELS_EMAIL_TO": ""}):
+            self.assertEqual(notify.send("s", "t"), {})                            # nothing set up: nothing sent

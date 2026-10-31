@@ -78,9 +78,69 @@ ActiveRecord::Schema.define do
     t.datetime :fetched_at, null: false
     t.check_constraint "JSON_VALID(payload) OR payload IS NULL", name: "payload_is_json"
   end
+  create_table :meesho_inventory_catalogs do |t|
+    t.integer :account_id, null: false
+    t.bigint :catalog_id, null: false
+    t.string :name, null: false
+    t.string :category, null: false
+    t.text :image_url, null: false
+    t.boolean :in_active, null: false
+    t.boolean :in_paused, null: false
+    t.boolean :in_pending, null: false
+    %i[sku_count active_count archived_count blocked_count out_of_stock_count low_stock_count].each { |c| t.integer c, null: false }
+    t.datetime :expected_live_at
+    t.boolean :live_delayed, null: false
+    t.datetime :seen_at, null: false
+    t.datetime :products_fetched_at
+    t.index %i[account_id catalog_id], unique: true
+  end
+  create_table :meesho_inventory do |t|
+    t.integer :serial_no, null: false
+    t.string :catalog_name, null: false
+    t.bigint :catalog_id, null: false
+    t.text :product_name, null: false
+    t.bigint :product_id, null: false
+    t.string :style_id, null: false
+    t.bigint :variation_id
+    t.string :variation, null: false
+    t.string :stock_type, null: false
+    t.integer :system_stock_count, null: false
+    t.integer :seller_stock_count
+    t.datetime :uploaded_at, null: false
+    t.datetime :updated_at, null: false
+    t.integer :business_id, null: false
+    t.index %i[business_id serial_no], unique: true
+  end
+  create_table :meesho_price_updates do |t|
+    t.integer :inventory_id, null: false
+  end
+  create_table :meesho_inventory_listings do |t|
+    t.integer :account_id, null: false
+    t.integer :catalog_id, null: false          # meesho_inventory_catalogs.id
+    t.bigint :product_id, null: false
+    t.bigint :variation_id, null: false
+    t.string :sku_id, null: false
+    t.text :name, null: false
+    t.string :variation, null: false
+    t.text :image_url, null: false
+    t.integer :inventory
+    t.decimal :selling_price
+    t.boolean :archived, null: false
+    t.string :archived_at, null: false
+    t.string :out_of_stock_since, null: false
+    t.datetime :seen_at, null: false
+    t.index %i[account_id product_id variation_id], unique: true
+  end
 end
 
 # No Redis in tests: the per-account lock always succeeds.
+[MeeshoSyncJob, MeeshoInventoryJob, MeeshoPaymentsJob].each do |job|
+  job.class_eval do
+    private
+    def lock(_account) = true
+    def unlock(_account) = nil
+  end
+end
 MeeshoSyncJob.class_eval do
   private
   def lock(_account) = true
@@ -95,6 +155,9 @@ class ActiveSupport::TestCase
     Order.delete_all
     Business.delete_all
     MeeshoSyncSnapshot.delete_all
+    MeeshoListing.delete_all
+    MeeshoStockRow.delete_all
+    MeeshoCatalog.delete_all
     MeeshoSyncRun.delete_all
     MeeshoAccount.delete_all
   end

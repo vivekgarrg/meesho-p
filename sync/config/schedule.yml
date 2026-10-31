@@ -4,3 +4,15 @@ meesho_schedule:
   class: "MeeshoScheduleJob"
   queue: "default"
   description: "Queue a Meesho pull for every account whose interval has passed (5 min by default)"
+meesho_auto_accept:
+  cron: "0 8 * * * Asia/Kolkata"
+  class: "MeeshoAutoLabelsJob"
+  args: ["accept"]
+  queue: "critical"
+  description: "8 AM IST: accept every pending Meesho order (only when MEESHO_AUTO_LABELS=true)"
+meesho_auto_labels:
+  cron: "0 17 * * * Asia/Kolkata"
+  class: "MeeshoAutoLabelsJob"
+  args: ["labels"]
+  queue: "critical"
+  description: "5 PM IST: accept pending orders, then make the labels of every ready-to-ship order not downloaded yet (only when MEESHO_AUTO_LABELS=true)"

@@ -6,8 +6,28 @@ module PanelOrders
     "hold" => "HOLD",
     "pending" => "PENDING",
     "ready-to-ship" => "READY_TO_SHIP",
+    "shipped" => "SHIPPED",
     "cancelled" => "CANCELLED",
   }.freeze
+
+  # How far along an order is. The panel's tabs only ever move an order
+  # forward; a status from an Orders CSV that is further on (DELIVERED, RTO…,
+  # RETURN…) is newer news than a panel tab still listing it, and is kept.
+  STAGE = { "HOLD" => 1, "PENDING" => 1, "READY_TO_SHIP" => 2, "SHIPPED" => 3 }.freeze
+  # Anything not listed above (DELIVERED, RTO_COMPLETE, RETURN…) is past shipping.
+  AFTER_SHIPPING = 4
+
+  def self.stage(status)
+    STAGE.fetch(status.to_s, status.present? ? AFTER_SHIPPING : 0)
+  end
+
+  # Whether the panel's status should replace the order's current one.
+  def self.moves_on?(current, panel)
+    # Listed live on the panel again: whatever cancelled it was wrong.
+    return true if current.blank? || current == "CANCELLED"
+    return stage(current) < AFTER_SHIPPING if panel == "CANCELLED"
+    stage(panel) >= stage(current)
+  end
 
   # Each order is kept with just these — no customer details.
   FIELDS = {
@@ -20,6 +40,8 @@ module PanelOrders
     "id" => "sub_order_id", "grouping_key" => "grouping_key",
     # Once its label is made, a Ready-to-ship shipment has an AWB.
     "awb" => "awb", "carrier_id" => "carrier_id",
+    # Ready to ship carries the packet ID on the order, not the sub-order.
+    "packet_id" => "packet_id",
   }.freeze
 
   module_function
@@ -31,17 +53,26 @@ module PanelOrders
     data = body.is_a?(Hash) ? body["data"] : nil
     return nil unless data.is_a?(Hash) && (data.key?("subOrders") || data.key?("groups"))
     subs = Array(data["subOrders"]).select { |s| s.is_a?(Hash) }
-    return subs if subs.any?
-    Array(data["groups"]).flat_map do |g|
+    # Both lists are read: a page may carry some of its orders in each.
+    grouped = Array(data["groups"]).flat_map do |g|
       next [] unless g.is_a?(Hash)
       Array(g["orders"]).flat_map do |o|
         Array(o["sub_orders"]).map do |s|
           s.merge("order_num" => s["order_num"] || o["order_num"], "created_iso" => s["created_iso"] || o["created_iso"],
                   "grouping_key" => s["grouping_key"] || g["grouping_key"], "awb" => s["awb"] || g["awb"],
-                  "carrier_id" => s["carrier_id"] || g["carrier_id"]).compact
+                  "carrier_id" => s["carrier_id"] || g["carrier_id"],
+                  "packet_id" => s["packet_id"].presence || o["packet_id"].presence || g["packet_id"].presence).compact
         end
       end
     end
+    # Pending lists the same sub-orders in both: keep each once, its two
+    # copies merged (the grouped one carries the AWB, packet ID…).
+    keyed = {}
+    (subs + grouped).each_with_index do |r, i|
+      k = r["sub_order_num"].presence || "row#{i}"
+      keyed[k] = keyed.key?(k) ? keyed[k].merge(r) { |_, mine, theirs| mine.presence || theirs } : r
+    end
+    keyed.values
   end
 
   class WrongBusiness < StandardError; end
@@ -77,9 +108,9 @@ module PanelOrders
 
   # Bring the orders table up to date from what the panel shows now, as an
   # Orders CSV upload would: an order already in the table gets its details
-  # (SKU, size, quantity, product) refreshed and — if its status changed — a
-  # row for the new status; one that isn't there yet is added. Nothing is
-  # ever deleted. Returns { added:, status_changed:, updated: }.
+  # (SKU, size, quantity, product, packet ID) refreshed and — if its status
+  # moved on (see moves_on?) — a row for the new status; one that isn't there
+  # yet is added. Nothing is ever deleted. Returns { added:, status_changed:, updated: }.
   def mirror!(business_id, rows)
     stats = { added: 0, status_changed: 0, updated: 0 }
     by_sub = rows.select { |r| r["sub_order_num"].present? }.index_by { |r| r["sub_order_num"] }
@@ -90,7 +121,7 @@ module PanelOrders
       by_sub.each do |sub, row|
         status = STATUS[row["tab"]] or next
         details = { sku: row["sku"].presence, size: row["variation"].presence, quantity: row["quantity"].presence,
-                    product_name: row["product_name"].presence }.compact
+                    product_name: row["product_name"].presence, packet_id: row["packet_id"].presence }.compact
         have = existing[sub] || []
         if have.empty?
           Order.create!(business_id: business_id, sub_order_no: sub, reason_for_credit_entry: status,
@@ -106,6 +137,7 @@ module PanelOrders
         # Django's Order.latest_per_order (order_date, then created_at, then id).
         latest = have.max_by { |o| [o.order_date || Date.new(1970), o.created_at || Time.at(0), o.id] }
         next if latest.reason_for_credit_entry == status
+        next unless moves_on?(latest.reason_for_credit_entry, status)
         day = latest.order_date || order_date(row)
         if (back = have.find { |o| o.reason_for_credit_entry == status && o.order_date == day })
           # Back to a status it had before on that date (the row is unique per

@@ -132,8 +132,8 @@ class MeeshoSyncJobTest < ActiveSupport::TestCase
       b = JSON.parse(sig.body)
       asked << [b["type"], b["status"], sig.headers["Referer"].split("/").last]
     end
-    assert_equal [["cancelled", 5, "cancelled"], ["hold", 0, "hold"], ["pending", 1, "pending"], ["ready-to-ship", 3, "ready-to-ship"]], asked.sort
-    assert_equal %w[orders_cancelled orders_hold orders_pending orders_ready_to_ship], MeeshoSyncSnapshot.pluck(:endpoint).sort
+    assert_equal [["cancelled", 5, "cancelled"], ["hold", 0, "hold"], ["pending", 1, "pending"], ["ready-to-ship", 3, "ready-to-ship"], ["shipped", 4, "shipped"]], asked.sort
+    assert_equal %w[orders_cancelled orders_hold orders_pending orders_ready_to_ship orders_shipped], MeeshoSyncSnapshot.pluck(:endpoint).sort
   end
 
   # ── The panel's real response shapes ──
@@ -148,7 +148,7 @@ class MeeshoSyncJobTest < ActiveSupport::TestCase
     data = if groups
       { "count" => subs.size, "subOrders" => [],
         "groups" => subs.map { |s| { "awb" => "VL#{s["order_num"]}", "carrier_id" => 19,
-                                     "orders" => [{ "order_num" => s["order_num"], "created_iso" => s["created_iso"],
+                                     "orders" => [{ "order_num" => s["order_num"], "created_iso" => s["created_iso"], "packet_id" => "PKT#{s["order_num"]}",
                                                     "sub_orders" => [s.except("order_num", "created_iso")] }] } } }
     else
       { "count" => subs.size, "subOrders" => subs, "groups" => [] }
@@ -178,8 +178,102 @@ class MeeshoSyncJobTest < ActiveSupport::TestCase
     rts_rows = MeeshoSyncSnapshot.find_by(endpoint: "orders_ready_to_ship").payload
     assert_equal [["3_1", "3"], ["4_1", "4"]], rts_rows.map { |r| [r["sub_order_num"], r["order_num"]] }
     assert_equal ["VL3", "VL4"], rts_rows.map { |r| r["awb"] }                # the shipment's AWB, from its group
+    assert_equal ["PKT3", "PKT4"], rts_rows.map { |r| r["packet_id"] }       # the packet ID, from its order
     # Pending had all 2 in one page (no second call); ready-to-ship stopped at its total of 2.
     assert_requested(:post, PENDING_URL, times: 3)
+  end
+
+  test "ready to ship keeps paging when its total counts shipments, not sub-orders" do
+    account = supplier_account
+    rts = MeeshoEndpoints.orders_tab("ready-to-ship", 3)
+    two_subs = ->(n) { real_page([real_sub(n), real_sub(n, "sub_order_num" => "#{n}_2", "id" => "#{n}_2_FORWARD")],
+                                 total: 2, cursor: "after#{n}", groups: true) }
+    stub_request(:post, PENDING_URL).with { |r| JSON.parse(r.body)["cursor"].nil? }.to_return(two_subs.(3))
+    stub_request(:post, PENDING_URL).with { |r| JSON.parse(r.body)["cursor"] == "after3" }.to_return(real_page([real_sub(4)], total: 2, cursor: "after4", groups: true))
+    with_endpoints([rts]) { MeeshoSyncJob.new.perform(account.id) }
+    rows = MeeshoSyncSnapshot.find_by(endpoint: "orders_ready_to_ship").payload
+    assert_equal %w[3_1 3_2 4_1], rows.map { |r| r["sub_order_num"] }   # 2 sub-orders on page 1 didn't stop it short
+    assert_requested(:post, PENDING_URL, times: 2)
+  end
+
+  test "pages are fetched until Meesho's total is in hand, past an empty page and has_more false" do
+    account = supplier_account
+    rts = MeeshoEndpoints.orders_tab("ready-to-ship", 3)
+    empty = { status: 200, headers: { "Content-Type" => "application/json" },
+              body: { "total_count" => 3, "cursor" => "p3", "has_more" => false, "data" => { "subOrders" => [], "groups" => [] } }.to_json }
+    stub_request(:post, PENDING_URL).with { |r| JSON.parse(r.body)["cursor"].nil? }.to_return(real_page([real_sub(3)], total: 3, cursor: "p2", groups: true))
+    stub_request(:post, PENDING_URL).with { |r| JSON.parse(r.body)["cursor"] == "p2" }.to_return(empty)
+    # The next page repeats order 3 alongside 4 and 5: kept once.
+    stub_request(:post, PENDING_URL).with { |r| JSON.parse(r.body)["cursor"] == "p3" }
+      .to_return(real_page([real_sub(3), real_sub(4), real_sub(5)], total: 3, cursor: "p4", groups: true))
+    with_endpoints([rts]) { MeeshoSyncJob.new.perform(account.id) }
+    rows = MeeshoSyncSnapshot.find_by(endpoint: "orders_ready_to_ship").payload
+    assert_equal %w[3_1 4_1 5_1], rows.map { |r| r["sub_order_num"] }
+    assert_requested(:post, PENDING_URL, times: 3)
+    refute_match(/short of/, account.runs.last.message)
+  end
+
+  test "only the first page carries the total — later pages' 0 doesn't end the pull" do
+    account = supplier_account
+    rts = MeeshoEndpoints.orders_tab("ready-to-ship", 3)
+    stub_request(:post, PENDING_URL).with { |r| JSON.parse(r.body)["cursor"].nil? }.to_return(real_page([real_sub(3)], total: 3, cursor: "p2", groups: true))
+    stub_request(:post, PENDING_URL).with { |r| JSON.parse(r.body)["cursor"] == "p2" }.to_return(real_page([real_sub(4)], total: 0, cursor: "p3", groups: true))
+    stub_request(:post, PENDING_URL).with { |r| JSON.parse(r.body)["cursor"] == "p3" }.to_return(real_page([real_sub(5)], total: 0, cursor: "p4", groups: true))
+    with_endpoints([rts]) { MeeshoSyncJob.new.perform(account.id) }
+    assert_equal %w[3_1 4_1 5_1], MeeshoSyncSnapshot.find_by(endpoint: "orders_ready_to_ship").payload.map { |r| r["sub_order_num"] }
+    assert_requested(:post, PENDING_URL, times: 3)
+  end
+
+  test "a pull that ends short of Meesho's total says so" do
+    account = supplier_account
+    rts = MeeshoEndpoints.orders_tab("ready-to-ship", 3)
+    stub_request(:post, PENDING_URL).to_return(real_page([real_sub(3)], total: 69, cursor: nil, groups: true))
+    with_endpoints([rts]) { MeeshoSyncJob.new.perform(account.id) }
+    assert_match(/ready to ship: 1 — short of the 69 Meesho lists/, account.runs.last.message)
+  end
+
+  test "shipped orders move on in the orders table, with their packet id, and never move back" do
+    account = supplier_account
+    now = Time.current
+    day = Date.new(2026, 10, 30)
+    Order.create!(business_id: 1, sub_order_no: "1_1", reason_for_credit_entry: "READY_TO_SHIP", order_date: day, sku: "golden-plate", size: "Free Size", product_name: "Golden Plate", created_at: now, updated_at: now)
+    Order.create!(business_id: 1, sub_order_no: "2_1", reason_for_credit_entry: "DELIVERED", order_date: day, created_at: now, updated_at: now)
+    Order.create!(business_id: 1, sub_order_no: "3_1", reason_for_credit_entry: "SHIPPED", order_date: day, created_at: now, updated_at: now)
+    shipped = MeeshoEndpoints.orders_tab("shipped", 4)
+    rts = MeeshoEndpoints.orders_tab("ready-to-ship", 3)
+    stub_request(:post, PENDING_URL).with { |r| JSON.parse(r.body)["type"] == "shipped" }
+      .to_return(real_page([real_sub(1, "packet_id" => "KP1"), real_sub(2, "packet_id" => "KP2")], total: 2))
+    stub_request(:post, PENDING_URL).with { |r| JSON.parse(r.body)["type"] == "ready-to-ship" }
+      .to_return(real_page([real_sub(3)], total: 1, groups: true))
+    with_endpoints([shipped, rts]) { MeeshoSyncJob.new.perform(account.id) }
+
+    latest = ->(sub) { Order.where(business_id: 1, sub_order_no: sub).order(:order_date, :created_at, :id).last }
+    assert_equal ["SHIPPED", "KP1"], [latest.("1_1").reason_for_credit_entry, latest.("1_1").packet_id]
+    assert_equal "DELIVERED", latest.("2_1").reason_for_credit_entry          # further on already: kept
+    assert_equal "KP2", latest.("2_1").packet_id                              # its details still refreshed
+    assert_equal "SHIPPED", latest.("3_1").reason_for_credit_entry            # not back to ready to ship
+  end
+
+  test "the status rules" do
+    assert PanelOrders.moves_on?(nil, "PENDING")
+    assert PanelOrders.moves_on?("PENDING", "HOLD")
+    assert PanelOrders.moves_on?("READY_TO_SHIP", "SHIPPED")
+    assert PanelOrders.moves_on?("READY_TO_SHIP", "CANCELLED")
+    refute PanelOrders.moves_on?("SHIPPED", "READY_TO_SHIP")
+    refute PanelOrders.moves_on?("RTO_COMPLETE", "SHIPPED")
+    refute PanelOrders.moves_on?("DELIVERED", "CANCELLED")
+    assert PanelOrders.moves_on?("CANCELLED", "READY_TO_SHIP")             # the live panel beats a CSV's cancel
+  end
+
+  test "a scheduled pull skips shipped while its last pull is recent; refresh doesn't" do
+    account = supplier_account
+    shipped = MeeshoEndpoints.orders_tab("shipped", 4, every: 15)
+    MeeshoSyncSnapshot.create!(account_id: account.id, endpoint: "orders_shipped", http_status: 200, payload: [], fetched_at: 5.minutes.ago)
+    stub_request(:post, PENDING_URL).to_return(real_page([real_sub(1)], total: 1))
+    with_endpoints([shipped]) { MeeshoSyncJob.new.perform(account.id, nil, MeeshoSyncRun::TRIGGER_SCHEDULE) }
+    assert_not_requested(:post, PENDING_URL)
+    with_endpoints([shipped]) { MeeshoSyncJob.new.perform(account.id, nil, MeeshoSyncRun::TRIGGER_MANUAL) }
+    assert_requested(:post, PENDING_URL, times: 1)
   end
 
   test "the orders table is brought up to date like an Orders CSV upload" do

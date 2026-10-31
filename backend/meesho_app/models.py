@@ -3299,3 +3299,89 @@ class MeeshoSyncSnapshot(models.Model):
     class Meta:
         db_table = "meesho_sync_snapshots"
         unique_together = [("account", "endpoint")]
+
+
+class MeeshoOutstandingPayment(models.Model):
+    """
+    An order payment Meesho has scheduled but not paid yet — the panel's
+    outstanding payments for the next few days, as the sync last read them
+    (MeeshoPaymentsJob → import_meesho_payments). Replaced on every read, and
+    kept apart from OrderPayment on purpose: an OrderPayment row means the
+    money has landed (Unsettled, profit), and this hasn't.
+    """
+
+    business = models.ForeignKey("accounts.Business", on_delete=models.CASCADE, related_name="meesho_outstanding")
+    sub_order_no = models.CharField(max_length=100, db_index=True)
+    order_date = models.DateTimeField(null=True, blank=True)
+    dispatch_date = models.DateField(null=True, blank=True)
+    product_name = models.TextField(blank=True)
+    supplier_sku = models.CharField(max_length=255, blank=True)
+    catalog_id = models.BigIntegerField(null=True, blank=True)
+    live_order_status = models.CharField(max_length=100, blank=True)
+    quantity = models.IntegerField(null=True, blank=True)
+    expected_payment_date = models.DateField(null=True, blank=True, db_index=True)
+    final_settlement_amount = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    total_sale_amount = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    details = models.JSONField(default=dict, blank=True)     # every column of the sheet's row
+    imported_at = models.DateTimeField()
+
+    class Meta:
+        db_table = "meesho_outstanding_payments"
+        ordering = ["expected_payment_date", "sub_order_no"]
+
+
+class MeeshoCatalog(models.Model):
+    """
+    One catalog on the Meesho panel's Inventory page, as the sync worker last
+    read it. A catalog with some SKUs live and some paused is listed under
+    both Active and Paused, so each list it appears in is a flag.
+    """
+
+    account = models.ForeignKey(MeeshoAccount, on_delete=models.CASCADE, related_name="catalogs")
+    catalog_id = models.BigIntegerField()
+    name = models.CharField(max_length=500, blank=True)
+    category = models.CharField(max_length=255, blank=True)
+    image_url = models.TextField(blank=True)
+    in_active = models.BooleanField(default=False)
+    in_paused = models.BooleanField(default=False)
+    in_pending = models.BooleanField(default=False)
+    sku_count = models.IntegerField(default=0)
+    active_count = models.IntegerField(default=0)
+    archived_count = models.IntegerField(default=0)
+    blocked_count = models.IntegerField(default=0)
+    out_of_stock_count = models.IntegerField(default=0)
+    low_stock_count = models.IntegerField(default=0)
+    # Activation pending only: when Meesho expects it to go live.
+    expected_live_at = models.DateTimeField(null=True, blank=True)
+    live_delayed = models.BooleanField(default=False)
+    seen_at = models.DateTimeField()
+    # Meesho lists a catalog's SKUs one catalog per request, so they are read
+    # again only when the catalog changed or this is old (see MeeshoInventoryJob).
+    products_fetched_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "meesho_inventory_catalogs"
+        unique_together = [("account", "catalog_id")]
+
+
+class MeeshoListing(models.Model):
+    """One SKU (product + variation) in one Meesho catalog — what Pause acts on."""
+
+    account = models.ForeignKey(MeeshoAccount, on_delete=models.CASCADE, related_name="listings")
+    catalog = models.ForeignKey(MeeshoCatalog, on_delete=models.CASCADE, related_name="listings")
+    product_id = models.BigIntegerField()
+    variation_id = models.BigIntegerField()
+    sku_id = models.CharField(max_length=255, db_index=True)
+    name = models.TextField(blank=True)
+    variation = models.CharField(max_length=255, blank=True)
+    image_url = models.TextField(blank=True)
+    inventory = models.IntegerField(null=True, blank=True)
+    selling_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    archived = models.BooleanField(default=False)       # paused on the panel
+    archived_at = models.CharField(max_length=40, blank=True)          # as Meesho words it: "Oct 31, 2026"
+    out_of_stock_since = models.CharField(max_length=40, blank=True)
+    seen_at = models.DateTimeField()
+
+    class Meta:
+        db_table = "meesho_inventory_listings"
+        unique_together = [("account", "product_id", "variation_id")]

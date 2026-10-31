@@ -53,6 +53,16 @@ class MeeshoLoginJobTest < ActiveSupport::TestCase
     stub_login(status: 403, body: "<html>Access Denied … Reference #18.abc</html>", cookies: [])
     MeeshoLoginJob.new.perform(account.id)
     assert_match(/bot protection/, account.reload.status_message)
+    assert_match(/Paste a new session/, account.status_message)
+  end
+
+  test "a pasted session with no password asks for a new paste instead of logging in" do
+    account = make_account(status: "ACTIVE", password_enc: "")
+    assert_raises(MeeshoClient::AuthError) { MeeshoLoginJob.login!(account) }
+    account.reload
+    assert_equal "FAILED", account.status
+    assert_match(/session has expired.*Paste a new session/, account.status_message)
+    assert_not_requested(:post, LOGIN_URL)
   end
 
   test "a disconnected account is left alone" do

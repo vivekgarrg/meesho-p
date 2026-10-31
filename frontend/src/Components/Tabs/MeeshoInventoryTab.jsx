@@ -40,6 +40,8 @@ export function MeeshoInventoryTab() {
   const [savedIds, setSavedIds]     = useState(new Set());
   const fileRef                     = useRef();
   const [dragging, setDragging]     = useState(false);
+  const [sync, setSync]             = useState(null);   // kept up to date from the Meesho panel?
+  const [showUpload, setShowUpload] = useState(false);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -52,6 +54,7 @@ export function MeeshoInventoryTab() {
       setItems(data.items || []);
       setTotal(data.total ?? 0);
       setLowCount(data.low_stock_count ?? 0);
+      setSync(data.sync || null);
     } finally {
       setLoading(false);
     }
@@ -113,6 +116,24 @@ export function MeeshoInventoryTab() {
     }
   };
 
+  // While the sync worker reads the panel, check back until it's done.
+  useEffect(() => {
+    if (!sync?.running) return undefined;
+    const t = setTimeout(fetchData, 5000);
+    return () => clearTimeout(t);
+  }, [sync, fetchData]);
+
+  const syncNow = async () => {
+    setUploadMsg(null);
+    const res = await fetch(`${API}/meesho-live-inventory/refresh/`, { method: "POST" }).catch(() => null);
+    if (!res || !res.ok) {
+      const d = res ? await res.json().catch(() => ({})) : {};
+      setUploadMsg({ type: "error", text: d.error || "Couldn't start a sync." });
+      return;
+    }
+    setSync((s) => ({ ...s, running: true }));
+  };
+
   const handleDownload = () => {
     window.location.href = `${API}/meesho-inventory/download/`;
   };
@@ -153,8 +174,32 @@ export function MeeshoInventoryTab() {
         </div>
       </div>
 
+      {/* ── Kept in step with the Meesho panel ── */}
+      {sync?.connected && (
+        <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", padding: "12px 16px", borderRadius: 12,
+          background: C.greenLight, border: `1px solid ${C.greenBorder}`, color: "#166534", fontSize: 13.5 }}>
+          <CheckCircleIcon style={{ fontSize: 18, color: C.green }} />
+          <span style={{ flex: 1, minWidth: 220 }}>
+            <b>Synced from Meesho</b> — catalog IDs, products, variations and stock update by themselves every half hour; no sheet to upload.
+            {" "}{sync.running ? "Syncing now…" : sync.last_ok_at ? `Last synced ${new Date(sync.last_ok_at).toLocaleString("en-IN", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}.` : "First sync not done yet."}
+            {sync.last_status === "FAILED" && <span style={{ color: C.red }}> Last attempt failed: {sync.last_message}</span>}
+          </span>
+          <button onClick={syncNow} disabled={sync.running} style={{ ...btn("ghost", "sm"), opacity: sync.running ? 0.6 : 1 }}>
+            {sync.running ? <CircularProgress size={12} style={{ color: C.green }} /> : "↻"}&nbsp;Sync now
+          </button>
+          <button onClick={() => setShowUpload((v) => !v)} style={{ ...btn("ghost", "sm"), color: C.gray600 }}>
+            {showUpload ? "Hide upload" : "Upload a sheet instead"}
+          </button>
+        </div>
+      )}
+      {sync && !sync.connected && (
+        <div style={{ fontSize: 13, color: C.gray500 }}>
+          Connect this business's Meesho account on <a href="/meesho-orders?tab=sync" style={{ color: C.orange, fontWeight: 700 }}>Meesho Orders → Accounts &amp; sync</a> and this list keeps itself up to date — no more sheet uploads.
+        </div>
+      )}
+
       {/* ── Upload card ── */}
-      <div
+      {(!sync?.connected || showUpload) && <div
         onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
         onDragLeave={() => setDragging(false)}
         onDrop={(e) => { e.preventDefault(); setDragging(false); handleFile(e.dataTransfer.files[0]); }}
@@ -181,7 +226,7 @@ export function MeeshoInventoryTab() {
             <p style={{ fontSize: 12, color: C.gray400, marginTop: 4 }}>Supports .xlsx / .xls / .csv — matches Meesho stock upload format</p>
           </>
         )}
-      </div>
+      </div>}
 
       {/* ── Upload message ── */}
       {uploadMsg && (
@@ -262,7 +307,7 @@ export function MeeshoInventoryTab() {
                 <tbody>
                   {pageItems.length === 0 ? (
                     <tr><td colSpan={7} style={{ ...S.td, textAlign: "center", padding: 48, color: C.gray400 }}>
-                      {total === 0 ? "No inventory data — upload a Meesho inventory sheet to get started" : "No results matching your search"}
+                      {total === 0 ? (sync?.connected ? "Nothing synced yet — press Sync now" : "No inventory data — upload a Meesho inventory sheet to get started") : "No results matching your search"}
                     </td></tr>
                   ) : pageItems.map((item, idx) => {
                     const globalIdx = (page - 1) * PAGE_SIZE + idx;

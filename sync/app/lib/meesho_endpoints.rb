@@ -11,6 +11,8 @@
 #   headers:  ->(account) { ... }           extra headers for this API
 #   paginate: :cursor — keep asking with the cursor the last page returned
 #   needs:    account fields that must be known first
+#   every:    minutes — a scheduled pull skips it until its snapshot is this
+#             old (Refresh always pulls it)
 #
 # Add one by copying the panel's request from the browser (DevTools → Network
 # → Copy as cURL).
@@ -20,13 +22,14 @@ module MeeshoEndpoints
 
   # Fulfilment → Orders, one tab at a time — the same request the panel makes,
   # with that tab's status number and type.
-  def self.orders_tab(type, status)
+  def self.orders_tab(type, status, every: nil)
     {
       key: "orders_#{type.tr('-', '_')}",
       orders_tab: type,
       method: :post,
       path: "/api/fulfillment/orders",
       paginate: :cursor,
+      every: every,
       needs: %i[supplier_id supplier_identifier],
       headers: ->(a) {
         { "identifier" => a.supplier_identifier, "client-package-version" => "1.0.4",
@@ -42,10 +45,12 @@ module MeeshoEndpoints
     }.freeze
   end
 
-  ORDER_TABS = [["hold", 0], ["pending", 1], ["ready-to-ship", 3], ["cancelled", 5]].freeze
+  # Shipped holds every order until it is delivered — hundreds, 50 a page —
+  # so the schedule pulls it less often than the tabs that need acting on.
+  ORDER_TABS = [["hold", 0], ["pending", 1], ["ready-to-ship", 3], ["shipped", 4, 15], ["cancelled", 5]].freeze
   ORDERS_PENDING = orders_tab("pending", 1)
 
-  LIST = ORDER_TABS.map { |type, status| orders_tab(type, status) }.freeze
+  LIST = ORDER_TABS.map { |type, status, every| orders_tab(type, status, every: every) }.freeze
 
   def self.all
     LIST

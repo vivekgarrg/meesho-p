@@ -25,11 +25,15 @@ from rest_framework import status
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
-from .models import MeeshoAccount, MeeshoSyncRun, MeeshoSyncSnapshot
+from .models import MeeshoAccount, MeeshoCatalog, MeeshoListing, MeeshoSyncRun, MeeshoSyncSnapshot
 
 QUEUE_MANUAL = "critical"     # Refresh / login — ahead of the scheduled pulls
 LOGIN_JOB = "MeeshoLoginJob"
 SYNC_JOB = "MeeshoSyncJob"
+INVENTORY_JOB = "MeeshoInventoryJob"
+KIND_INVENTORY = "INVENTORY"
+PAYMENTS_JOB = "MeeshoPaymentsJob"
+KIND_PAYMENTS = "PAYMENTS"
 
 
 class SyncNotConfigured(Exception):
@@ -104,7 +108,7 @@ def _queue_run(account, kind, trigger):
     if recent:
         return recent, False
     run = MeeshoSyncRun.objects.create(account=account, kind=kind, trigger=trigger)
-    job = LOGIN_JOB if kind == MeeshoSyncRun.KIND_LOGIN else SYNC_JOB
+    job = {MeeshoSyncRun.KIND_LOGIN: LOGIN_JOB, KIND_INVENTORY: INVENTORY_JOB, KIND_PAYMENTS: PAYMENTS_JOB}.get(kind, SYNC_JOB)
     try:
         enqueue(job, [account.pk, run.pk])
     except Exception as exc:
@@ -131,7 +135,7 @@ def _account_json(a):
     return {
         "phone": _mask(a.phone_number), "status": a.status, "status_message": a.status_message,
         "supplier_id": a.supplier_id, "supplier_name": a.supplier_name, "supplier_identifier": a.supplier_identifier,
-        "has_session": bool(a.cookies_enc), "last_login_at": a.last_login_at,
+        "has_session": bool(a.cookies_enc), "has_password": bool(a.password_enc), "last_login_at": a.last_login_at,
         "sync_enabled": a.sync_enabled, "sync_interval_minutes": a.sync_interval_minutes,
         "last_sync_at": a.last_sync_at, "last_sync_status": a.last_sync_status, "last_sync_message": a.last_sync_message,
         "next_sync_at": (a.last_sync_at + timedelta(minutes=a.sync_interval_minutes)) if a.last_sync_at and a.sync_enabled else None,
@@ -246,6 +250,115 @@ def meesho_sync_connect(request, business_id):
     return Response(_state(request, business), status=status.HTTP_201_CREATED)
 
 
+SESSION_COOKIE = "connect.sid"
+
+
+def _parse_pasted_session(text):
+    """
+    Cookies (and the browser-id / identifier headers, when present) out of what
+    an admin copied from their own logged-in browser: a whole "Copy as cURL",
+    the request's "cookie:" header line, a bare "a=b; c=d" string, or a cookie
+    extension's JSON export ([{name, value}…] or {name: value}).
+    Returns (cookies, headers).
+    """
+    import re
+    import shlex
+    text = (text or "").strip()
+    cookies, headers = {}, {}
+
+    def add_pairs(line):
+        for part in line.split(";"):
+            name, sep, value = part.strip().partition("=")
+            if sep and name.strip():
+                cookies[name.strip()] = value.strip()
+
+    if text[:1] in "[{":
+        try:
+            data = json.loads(text)
+        except ValueError:
+            data = None
+        if isinstance(data, dict):
+            data = [{"name": k, "value": v} for k, v in data.items()]
+        if isinstance(data, list):
+            for c in data:
+                if isinstance(c, dict) and c.get("name"):
+                    cookies[str(c["name"])] = str(c.get("value") or "")
+            return cookies, headers
+
+    if re.match(r"^curl\s", text):
+        # bash ("Copy as cURL (bash)") line continuations
+        try:
+            tokens = shlex.split(text.replace("\\\n", " "))
+        except ValueError:
+            tokens = []
+        for flag, value in zip(tokens, tokens[1:]):
+            if flag in ("-b", "--cookie"):
+                add_pairs(value)
+            elif flag in ("-H", "--header"):
+                name, _, val = value.partition(":")
+                name = name.strip().lower()
+                if name == "cookie":
+                    add_pairs(val)
+                elif name in ("browser-id", "identifier"):
+                    headers[name] = val.strip()
+        return cookies, headers
+
+    text = re.sub(r"^\s*cookie\s*:\s*", "", text, flags=re.I)
+    add_pairs(" ".join(text.splitlines()))
+    return cookies, headers
+
+
+@api_view(["POST"])
+def meesho_sync_session(request, business_id):
+    """
+    Admin: use a session from their own browser instead of logging in from the
+    server — for when Meesho's bot protection refuses the server's login.
+    Body: {session: <cURL / cookie header / JSON export>, phone_number?}.
+    The cookies are encrypted before they are stored and never sent back.
+    A saved password is kept; with none, an expired session waits for a new paste.
+    """
+    v = _views()
+    business = v.get_authorized_business(request, business_id)
+    if not v._is_admin(request.user):
+        return Response({"error": "Only an admin can connect a Meesho account."}, status=status.HTTP_403_FORBIDDEN)
+    d = request.data if isinstance(request.data, dict) else {}
+    cookies, headers = _parse_pasted_session(str(d.get("session") or ""))
+    if SESSION_COOKIE not in cookies:
+        return Response({"error": f"No {SESSION_COOKIE} cookie found. Log in to supplier.meesho.com in Chrome, then copy a "
+                                  "supplier.meesho.com/api/… request (DevTools → Network → right-click → Copy → Copy as cURL)."},
+                        status=status.HTTP_400_BAD_REQUEST)
+    try:
+        cookies_enc = encrypt(json.dumps(cookies))
+    except SyncNotConfigured as exc:
+        return Response({"error": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+    a = MeeshoAccount.objects.filter(business=business).first() or MeeshoAccount(business=business, created_by=request.user)
+    phone = "".join(ch for ch in str(d.get("phone_number") or "") if ch.isdigit())
+    if phone:
+        a.phone_number = phone
+    if a.status == MeeshoAccount.STATUS_DISABLED:
+        a.password_enc = ""          # disconnecting wiped it; don't log in with nothing
+    a.cookies_enc = cookies_enc
+    if headers.get("browser-id"):
+        a.browser_id = headers["browser-id"][:128]
+    # The panel sets the supplier's id and short code as cookies too.
+    code = headers.get("identifier", "")
+    if code and code != "login":
+        a.supplier_identifier = code[:64]
+    elif cookies.get("current_az_identifier") and not a.supplier_identifier:
+        a.supplier_identifier = cookies["current_az_identifier"][:64]
+    if cookies.get("s_id", "").isdigit():
+        a.supplier_id = cookies["s_id"][:64]
+    a.status, a.status_message = MeeshoAccount.STATUS_ACTIVE, "Using the session pasted from the browser."
+    a.last_login_at, a.sync_enabled = timezone.now(), True
+    a.save()
+    try:
+        _queue_run(a, MeeshoSyncRun.KIND_SYNC, MeeshoSyncRun.TRIGGER_MANUAL)
+    except SyncNotConfigured as exc:
+        return Response({**_state(request, business), "error": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+    return Response(_state(request, business))
+
+
 @api_view(["POST"])
 def meesho_sync_refresh(request, business_id):
     """Pull everything now, ahead of the schedule (logs in first if the session has lapsed)."""
@@ -315,8 +428,11 @@ ORDER_TABS = [
     ("hold", "On hold"),
     ("pending", "Pending"),
     ("ready_to_ship", "Ready to ship"),
+    ("shipped", "Shipped"),
     ("cancelled", "Cancelled"),
 ]
+# Tabs already out of the seller's hands: newest first, no SLA.
+DONE_TABS = ("shipped", "cancelled")
 DASHBOARD_ROWS = 2000
 DESK_PATH = "meesho-orders/"
 
@@ -340,8 +456,8 @@ def _desk_accounts(request, business):
 
 
 def _packet_ids(rows_by_business):
-    """Packet IDs the Orders CSV recorded, per (business, sub-order) — Meesho's
-    order tabs don't carry them."""
+    """Packet IDs the Orders CSV recorded, per (business, sub-order) — for the
+    tabs whose pulled orders don't carry one (only Ready to ship does)."""
     from .models import Order
     out = {}
     for biz_id, subs in rows_by_business.items():
@@ -384,7 +500,7 @@ def meesho_orders_dashboard(request, business_id):
     The Meesho panel's order tabs as last pulled by the sync, across every
     business this desk combines: how many orders sit in each tab, which are
     close to or past their dispatch SLA, and the orders themselves (each with
-    its business, AWB and — when the Orders CSV has it — packet ID).
+    its business, AWB and packet ID — from the panel, else the Orders CSV).
     """
     business = _views().get_authorized_business(request, business_id)
     desk, accounts = _desk_accounts(request, business)
@@ -409,18 +525,19 @@ def meesho_orders_dashboard(request, business_id):
     for key, label in ORDER_TABS:
         rows = tab_rows[key]
         for r in rows:
-            r["packet_id"] = packets.get((r["business_id"], r.get("sub_order_num")))
+            # The panel's own packet ID (Ready to ship) first, else the Orders CSV's.
+            r["packet_id"] = r.get("packet_id") or packets.get((r["business_id"], r.get("sub_order_num")))
         fetched = [s.fetched_at for s in snaps.get(f"orders_{key}", [])]
         sla = {}
-        for r in rows:
+        for r in ([] if key in DONE_TABS else rows):
             sla[r.get("sla_status") or "none"] = sla.get(r.get("sla_status") or "none", 0) + 1
-        ordered = (sorted(rows, key=lambda r: r.get("created_iso") or "", reverse=True) if key == "cancelled"
+        ordered = (sorted(rows, key=lambda r: r.get("created_iso") or "", reverse=True) if key in DONE_TABS
                    else sorted(rows, key=lambda r: (r.get("dispatch_by") or "9999", r.get("created_iso") or "")))
         tabs.append({
             "key": key, "label": label, "count": len(rows), "fetched_at": min(fetched) if fetched else None,
             "breached": sum(v for k, v in sla.items() if "breach" in k and "soon" not in k),
             "breaching_soon": sla.get("breaching_soon", 0),
-            "due_today": sum(1 for r in rows if r.get("dispatch_by") == today),
+            "due_today": 0 if key in DONE_TABS else sum(1 for r in rows if r.get("dispatch_by") == today),
             "label_pending": sum(1 for r in rows if r.get("label") in (False, "Not Downloaded")),
             "rows": ordered[:DASHBOARD_ROWS],
         })
@@ -449,6 +566,52 @@ def meesho_orders_dashboard(request, business_id):
         "accepts": accepts,
         "label_batches": _label_batches(accounts),
     })
+
+
+def _payments_overview(a):
+    last = a.runs.filter(kind=KIND_PAYMENTS).first()
+    ok = a.runs.filter(kind=KIND_PAYMENTS, status=MeeshoSyncRun.STATUS_OK).first()
+    return {"at": ok.finished_at if ok else None, "status": last.status if last else None,
+            "message": last.message if last else ""}
+
+
+@api_view(["GET"])
+def meesho_overview(request, business_id):
+    """
+    The Meesho page's header: for every business on this desk, whether its
+    Meesho account is connected, when its orders and inventory were last read,
+    and when the app's own tables (orders, Meesho Stock) were last brought up
+    to date from them. Light — no order or SKU rows.
+    """
+    from .models import MeeshoInventory
+    business = _views().get_authorized_business(request, business_id)
+    desk, accounts = _desk_accounts(request, business)
+    by_biz = {a.business_id: a for a in accounts}
+    busy = [MeeshoSyncRun.STATUS_QUEUED, MeeshoSyncRun.STATUS_RUNNING]
+    recent = timezone.now() - STUCK_AFTER
+    out = []
+    for b in desk:
+        a = by_biz.get(b.pk)
+        if not a:
+            out.append({"business_id": b.pk, "business_name": b.name, "connected": False, "status": None})
+            continue
+        inv = a.runs.filter(kind=KIND_INVENTORY).first()
+        inv_ok = a.runs.filter(kind=KIND_INVENTORY, status=MeeshoSyncRun.STATUS_OK).first()
+        stock = MeeshoInventory.objects.filter(business_id=b.pk)
+        out.append({
+            "business_id": b.pk, "business_name": b.name, "connected": a.status == MeeshoAccount.STATUS_ACTIVE,
+            "status": a.status, "status_message": a.status_message, "supplier_name": a.supplier_name,
+            "orders": {"at": a.last_sync_at, "status": a.last_sync_status, "message": a.last_sync_message,
+                       "table_changed_at": a.orders_changed_at},
+            "inventory": {"at": inv_ok.finished_at if inv_ok else None, "status": inv.status if inv else None,
+                          "message": inv.message if inv else "", "stock_rows": stock.count(),
+                          "stock_changed_at": stock.order_by("-updated_at").values_list("updated_at", flat=True).first()},
+            "payments": _payments_overview(a),
+            "busy": a.runs.filter(status__in=busy, queued_at__gte=recent).exists(),
+        })
+    alive = _worker_alive()
+    return Response({"is_admin": _views()._is_admin(request.user), "businesses": out,
+                     "current_business_id": business.pk, "queue": alive is not None, "worker": bool(alive)})
 
 
 @api_view(["POST"])
@@ -666,3 +829,279 @@ def meesho_orders_labels_pdf(request, business_id, run_id):
     if not run or not (run.result or {}).get("label_url"):
         return Response({"error": "Those labels aren't ready."}, status=status.HTTP_404_NOT_FOUND)
     return _sorted_labels_response(request, business, [run], f"meesho-labels-{timezone.localtime(run.queued_at):%Y-%m-%d-%H%M}.pdf")
+
+
+# ── Meesho Inventory (live) ───────────────────────────────────────────────────
+# The panel's Inventory page as the sync worker last read it
+# (MeeshoInventoryJob → MeeshoCatalog / MeeshoListing), for every business on
+# this desk, grouped by parent SKU (FinalPrice.parent). Pausing goes to the
+# worker (MeeshoArchiveJob), one request per catalog.
+
+ARCHIVE_JOB = "MeeshoArchiveJob"
+KIND_ARCHIVE = "ARCHIVE"
+PAUSE_MAX = 2000
+INVENTORY_PATH = "meesho-live-inventory/"
+
+
+def _inventory_accounts(request, business):
+    desk = _views()._scan_desk_scope(request, business, api_path=INVENTORY_PATH)
+    accounts = list(MeeshoAccount.objects.filter(business__in=desk).select_related("business"))
+    return desk, accounts
+
+
+def _parents_of(skus_by_business):
+    """{(business_id, sku_id): (parent item_id, parent image)} from SKU Pricing's links."""
+    from .models import FinalPrice
+    out = {}
+    for biz_id, skus in skus_by_business.items():
+        skus = sorted(skus)
+        for i in range(0, len(skus), 500):
+            rows = (FinalPrice.objects.filter(business_id=biz_id, sku_id__in=skus[i:i + 500], parent__isnull=False)
+                    .values_list("sku_id", "parent__item_id", "parent__image_url"))
+            for sku, parent, image in rows:
+                out[(biz_id, sku)] = (parent, image or "")
+    return out
+
+
+@api_view(["GET"])
+def meesho_live_inventory(request, business_id):
+    """
+    Every SKU listed on the Meesho panel, per business, grouped by its parent
+    SKU — each SKU with the catalogs it's listed in, its stock and whether it's
+    live or paused. Also Meesho's own tab counts and the catalogs still
+    waiting for activation.
+    """
+    business = _views().get_authorized_business(request, business_id)
+    _desk, accounts = _inventory_accounts(request, business)
+    by_id = {a.pk: a for a in accounts}
+
+    listings = list(MeeshoListing.objects.filter(account__in=accounts).select_related("catalog")
+                    .order_by("sku_id", "catalog__catalog_id"))
+    skus_by_biz = {}
+    for l in listings:
+        skus_by_biz.setdefault(by_id[l.account_id].business_id, set()).add(l.sku_id)
+    parents = _parents_of(skus_by_biz)
+
+    groups = {}
+    for l in listings:
+        a = by_id[l.account_id]
+        parent, image = parents.get((a.business_id, l.sku_id), (None, ""))
+        key = f"{a.business_id}:{parent or ''}"
+        g = groups.setdefault(key, {"key": key, "business_id": a.business_id, "business_name": a.business.name,
+                                    "parent": parent, "image": image, "skus": {}})
+        sku = g["skus"].setdefault(l.sku_id, {"sku_id": l.sku_id, "listings": []})
+        sku["listings"].append({
+            "id": l.pk, "catalog_id": l.catalog.catalog_id, "catalog_name": l.catalog.name, "category": l.catalog.category,
+            "product_id": l.product_id, "variation_id": l.variation_id, "name": l.name, "variation": l.variation,
+            "image": l.image_url, "inventory": l.inventory, "price": l.selling_price, "archived": l.archived,
+            "archived_at": l.archived_at, "out_of_stock_since": l.out_of_stock_since,
+        })
+        if not g["image"] and l.image_url:
+            g["image"] = l.image_url
+    out_groups = []
+    # Parents A→Z per business; each business's unlinked SKUs last.
+    for g in sorted(groups.values(), key=lambda g: (g["business_name"], g["parent"] is None, (g["parent"] or "").lower())):
+        g["skus"] = sorted(g["skus"].values(), key=lambda x: x["sku_id"].lower())
+        out_groups.append(g)
+
+    counts = {snap.account_id: snap.payload for snap in
+              MeeshoSyncSnapshot.objects.filter(account__in=accounts, endpoint="inventory_counts")}
+    acc_json = []
+    for a in accounts:
+        cats = MeeshoCatalog.objects.filter(account=a)
+        last = a.runs.filter(kind=KIND_INVENTORY).first()
+        acc_json.append({
+            "business_id": a.business_id, "business_name": a.business.name, "status": a.status,
+            "counts": counts.get(a.pk) or {},
+            "catalogs": cats.filter(in_active=True).count() + cats.filter(in_active=False, in_paused=True).count(),
+            "catalogs_waiting": cats.filter(products_fetched_at__isnull=True).exclude(in_active=False, in_paused=False).count(),
+            "last_run": _run_json(last) if last else None,
+        })
+    pending = [{"business_id": c.account.business_id, "business_name": c.account.business.name, "catalog_id": c.catalog_id,
+                "name": c.name, "category": c.category, "image": c.image_url,
+                "expected_live_at": c.expected_live_at, "delayed": c.live_delayed}
+               for c in MeeshoCatalog.objects.filter(account__in=accounts, in_pending=True).select_related("account").order_by("expected_live_at")]
+    live = [a for a in accounts if a.status != MeeshoAccount.STATUS_DISABLED]
+    busy = [MeeshoSyncRun.STATUS_QUEUED, MeeshoSyncRun.STATUS_RUNNING]
+    recent = timezone.now() - STUCK_AFTER
+    pauses = []
+    for r in MeeshoSyncRun.objects.filter(account__in=accounts, kind=KIND_ARCHIVE).select_related("account__business")[:10]:
+        pauses.append({**_run_json(r), "business_name": r.account.business.name,
+                       "failed": (r.result or {}).get("failed") or []})
+    return Response({
+        "is_admin": _views()._is_admin(request.user),
+        "connected": bool(live),
+        "accounts": acc_json,
+        "syncing": MeeshoSyncRun.objects.filter(account__in=live, kind=KIND_INVENTORY, status__in=busy, queued_at__gte=recent).exists(),
+        "pausing": MeeshoSyncRun.objects.filter(account__in=live, kind=KIND_ARCHIVE, status__in=busy, queued_at__gte=recent).exists(),
+        "groups": out_groups,
+        "pending": pending,
+        "pauses": pauses,
+    })
+
+
+@api_view(["POST"])
+def meesho_live_inventory_refresh(request, business_id):
+    """Read the Inventory page of every combined business's Meesho account now."""
+    business = _views().get_authorized_business(request, business_id)
+    _desk, accounts = _inventory_accounts(request, business)
+    live = [a for a in accounts if a.status == MeeshoAccount.STATUS_ACTIVE]
+    if not live:
+        return Response({"error": "No connected Meesho account here — connect one on Meesho Sync."}, status=status.HTTP_400_BAD_REQUEST)
+    queued = 0
+    try:
+        for a in live:
+            _, fresh = _queue_run(a, KIND_INVENTORY, MeeshoSyncRun.TRIGGER_MANUAL)
+            queued += fresh
+    except SyncNotConfigured as exc:
+        return Response({"error": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+    return Response({"queued": queued}, status=status.HTTP_202_ACCEPTED)
+
+
+@api_view(["POST"])
+def meesho_live_inventory_pause(request, business_id):
+    """
+    Admin: pause SKUs on the Meesho panel. Body: {"listings": [ids…]} — the
+    rows of the inventory list (a parent or SKU picks all of its live ones).
+    Each business's SKUs go to its own Meesho account, grouped by catalog —
+    one request per catalog (MeeshoArchiveJob). Nothing is sent unless every
+    business's part checks out.
+    """
+    v = _views()
+    business = v.get_authorized_business(request, business_id)
+    if not v._is_admin(request.user):
+        return Response({"error": "Only an admin can pause products on Meesho."}, status=status.HTTP_403_FORBIDDEN)
+    _desk, accounts = _inventory_accounts(request, business)
+    data = request.data if isinstance(request.data, dict) else {}
+    ids = []
+    for x in data.get("listings") or []:
+        try:
+            ids.append(int(x))
+        except (TypeError, ValueError):
+            continue
+    ids = list(dict.fromkeys(ids))
+    if not ids:
+        return Response({"error": "Choose what to pause first."}, status=status.HTTP_400_BAD_REQUEST)
+    if len(ids) > PAUSE_MAX:
+        return Response({"error": f"At most {PAUSE_MAX} SKUs at a time."}, status=status.HTTP_400_BAD_REQUEST)
+    rows = list(MeeshoListing.objects.filter(pk__in=ids, account__in=accounts).select_related("catalog", "account__business"))
+    if len(rows) != len(ids):
+        return Response({"error": "Some of these are no longer listed — refresh and choose again."}, status=status.HTTP_409_CONFLICT)
+    rows = [r for r in rows if not r.archived]
+    if not rows:
+        return Response({"error": "These are already paused."}, status=status.HTTP_400_BAD_REQUEST)
+
+    plan = {}
+    for r in rows:
+        plan.setdefault(r.account, {}).setdefault(r.catalog.catalog_id, []).append(
+            {"product_id": r.product_id, "variation_id": r.variation_id})
+    for a in plan:
+        name = a.business.name
+        if a.status != MeeshoAccount.STATUS_ACTIVE:
+            return Response({"error": f"{name}: the Meesho account isn't connected — fix it on Meesho Sync."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if not (a.supplier_id and a.supplier_identifier):
+            return Response({"error": f"{name}: set the supplier ID and code on Meesho Sync first."}, status=status.HTTP_400_BAD_REQUEST)
+        if a.runs.filter(kind=KIND_ARCHIVE, status__in=[MeeshoSyncRun.STATUS_QUEUED, MeeshoSyncRun.STATUS_RUNNING],
+                         queued_at__gte=timezone.now() - STUCK_AFTER).exists():
+            return Response({"error": f"{name}: a pause is already in progress — wait for it to finish."},
+                            status=status.HTTP_409_CONFLICT)
+    work = {a: ([{"catalog_id": cid, "products": prods} for cid, prods in cats.items()], sum(len(p) for p in cats.values()))
+            for a, cats in plan.items()}
+    try:
+        runs = _send(work, KIND_ARCHIVE, ARCHIVE_JOB,
+                     lambda n: f"Pausing {n} SKU{'' if n == 1 else 's'}…")
+    except SyncNotConfigured as exc:
+        return Response({"error": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+    return Response({"runs": [_run_json(r) for r in runs]}, status=status.HTTP_202_ACCEPTED)
+
+
+# ── Meesho Payments ───────────────────────────────────────────────────────────
+# The panel's Payments page as the sync worker last read it (MeeshoPaymentsJob):
+# its day-by-day summaries, the outstanding payments of the next few days, and
+# how the last import into the payments tables went.
+
+OUTSTANDING_ROWS = 3000
+
+
+def _money(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _payout_days(block):
+    days = []
+    for d in (block or {}).get("daywisePayments") or []:
+        if not isinstance(d, dict):
+            continue
+        rec = d.get("netPlatformRecovery") or {}
+        days.append({"date": d.get("date"), "net": _money(d.get("netAmount")), "orders": _money(d.get("netOrderAmount")),
+                     "ads": _money(rec.get("adsCost")), "recovery": _money(d.get("platformRecovery")),
+                     "compensation": _money(d.get("platformCompensation")), "transfer_id": d.get("transferId") or ""})
+    return days
+
+
+@api_view(["GET"])
+def meesho_payments(request, business_id):
+    """Paid and upcoming payouts, outstanding orders and the last payments import, for every business on this desk."""
+    from django.db.models import Max, Sum
+    from .models import MeeshoOutstandingPayment, OrderPayment
+    business = _views().get_authorized_business(request, business_id)
+    _desk, accounts = _desk_accounts(request, business)
+    snaps = {s.account_id: s for s in MeeshoSyncSnapshot.objects.filter(account__in=accounts, endpoint="payments_summary")}
+    out = []
+    for a in accounts:
+        snap = snaps.get(a.pk)
+        p = snap.payload if snap and isinstance(snap.payload, dict) else {}
+        last = a.runs.filter(kind=KIND_PAYMENTS).first()
+        table = OrderPayment.objects.filter(business_id=a.business_id).aggregate(last=Max("payment_date"))
+        out.append({
+            "business_id": a.business_id, "business_name": a.business.name, "status": a.status,
+            "fetched_at": snap.fetched_at if snap else None,
+            "paid_total": _money((p.get("previous_total") or {}).get("netAmount")),
+            "upcoming_total": _money((p.get("upcoming_total") or {}).get("netAmount")),
+            "paid": _payout_days(p.get("previous")), "upcoming": _payout_days(p.get("upcoming")),
+            "last_run": _run_json(last) if last else None, "last_result": (last.result or {}) if last else {},
+            "table_last_payment_date": table["last"],
+        })
+    biz_ids = [a.business_id for a in accounts]
+    names = {a.business_id: a.business.name for a in accounts}
+    qs = MeeshoOutstandingPayment.objects.filter(business_id__in=biz_ids)
+    outstanding = [{
+        "business_id": o.business_id, "business_name": names.get(o.business_id, ""), "sub_order_no": o.sub_order_no,
+        "order_date": o.order_date, "expected": o.expected_payment_date, "sku": o.supplier_sku, "product": o.product_name,
+        "status": o.live_order_status, "quantity": o.quantity, "amount": _money(o.final_settlement_amount),
+        "sale": _money(o.total_sale_amount),
+    } for o in qs.order_by("expected_payment_date", "sub_order_no")[:OUTSTANDING_ROWS]]
+    busy = [MeeshoSyncRun.STATUS_QUEUED, MeeshoSyncRun.STATUS_RUNNING]
+    live = [a for a in accounts if a.status != MeeshoAccount.STATUS_DISABLED]
+    return Response({
+        "is_admin": _views()._is_admin(request.user),
+        "connected": bool(live),
+        "accounts": out,
+        "outstanding": outstanding,
+        "outstanding_count": qs.count(),
+        "outstanding_total": _money(qs.aggregate(t=Sum("final_settlement_amount"))["t"]) or 0,
+        "syncing": MeeshoSyncRun.objects.filter(account__in=live, kind=KIND_PAYMENTS, status__in=busy,
+                                                queued_at__gte=timezone.now() - STUCK_AFTER).exists(),
+    })
+
+
+@api_view(["POST"])
+def meesho_payments_refresh(request, business_id):
+    """Read every combined business's Meesho payments now."""
+    business = _views().get_authorized_business(request, business_id)
+    _desk, accounts = _desk_accounts(request, business)
+    live = [a for a in accounts if a.status == MeeshoAccount.STATUS_ACTIVE]
+    if not live:
+        return Response({"error": "No connected Meesho account here."}, status=status.HTTP_400_BAD_REQUEST)
+    queued = 0
+    try:
+        for a in live:
+            _, fresh = _queue_run(a, KIND_PAYMENTS, MeeshoSyncRun.TRIGGER_MANUAL)
+            queued += fresh
+    except SyncNotConfigured as exc:
+        return Response({"error": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+    return Response({"queued": queued}, status=status.HTTP_202_ACCEPTED)

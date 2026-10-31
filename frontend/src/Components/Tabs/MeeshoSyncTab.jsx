@@ -90,6 +90,35 @@ function LoginForm({ onSubmit, busy, existing, onCancel }) {
   );
 }
 
+function SessionForm({ onSubmit, busy, existing, onCancel }) {
+  const [session, setSession] = useState("");
+  const [phone, setPhone] = useState("");
+  const submit = (e) => { e.preventDefault(); onSubmit({ session, phone_number: phone }); };
+  return (
+    <form onSubmit={submit} style={{ display: "flex", flexDirection: "column", gap: 12, maxWidth: 640 }} autoComplete="off">
+      <ol style={{ margin: 0, paddingLeft: 18, fontSize: 13, color: C.gray600, display: "flex", flexDirection: "column", gap: 3 }}>
+        <li>In Chrome, log in to <b>supplier.meesho.com</b> and open the orders page.</li>
+        <li>Open DevTools (F12) → <b>Network</b>, and click any request to <span style={{ fontFamily: "monospace" }}>supplier.meesho.com/api/…</span></li>
+        <li>Right-click it → <b>Copy</b> → <b>Copy as cURL (bash)</b>, and paste it below.</li>
+      </ol>
+      <Field label="Session from your browser" hint="A cURL command, the request's cookie header, or a cookie-extension JSON export. Saved encrypted and never shown again. Don't log out of Meesho in that browser — it ends this session too.">
+        <textarea value={session} onChange={(e) => setSession(e.target.value)} required rows={6} spellCheck={false}
+          placeholder="curl 'https://supplier.meesho.com/api/…' -H 'cookie: connect.sid=…'"
+          style={{ ...S.inp, fontFamily: "monospace", fontSize: 12, resize: "vertical" }} />
+      </Field>
+      {!existing?.phone && (
+        <Field label="Meesho login phone number (optional)" hint="Only to show which account is connected.">
+          <input value={phone} onChange={(e) => setPhone(e.target.value)} inputMode="numeric" style={{ ...S.inp, maxWidth: 260 }} autoComplete="off" />
+        </Field>
+      )}
+      <div style={{ display: "flex", gap: 8 }}>
+        <button type="submit" disabled={busy} style={{ ...btn("primary", "md"), opacity: busy ? 0.6 : 1 }}>{busy ? "Saving…" : "Use this session"}</button>
+        {onCancel && <button type="button" onClick={onCancel} style={btn("ghost", "md")}>Cancel</button>}
+      </div>
+    </form>
+  );
+}
+
 function SetupNotice({ setup }) {
   if (!setup) return null;
   const issues = [];
@@ -104,11 +133,12 @@ function SetupNotice({ setup }) {
   );
 }
 
-export function MeeshoSyncTab() {
+export function MeeshoSyncTab({ embedded = false }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState(false);
+  const [mode, setMode] = useState("session");   // how to connect: "session" (pasted from a browser) or "login"
   const timer = useRef(null);
 
   const load = useCallback(async () => {
@@ -151,8 +181,8 @@ export function MeeshoSyncTab() {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16, maxWidth: 1000 }}>
       <div>
-        <h1 style={{ fontSize: 22, fontWeight: 800, color: C.gray900, margin: 0 }}>Meesho Sync</h1>
-        <p style={{ fontSize: 13, color: C.gray500, marginTop: 3 }}>
+        {!embedded && <h1 style={{ fontSize: 22, fontWeight: 800, color: C.gray900, margin: 0 }}>Meesho Sync</h1>}
+        <p style={{ fontSize: 13, color: C.gray500, marginTop: embedded ? 0 : 3 }}>
           Log in to the Meesho supplier panel once — the data is then pulled automatically every few minutes. Refresh pulls it now.
         </p>
       </div>
@@ -162,8 +192,23 @@ export function MeeshoSyncTab() {
       {(!connected || editing) ? (
         <Card title={connected ? "Change the Meesho login" : "Connect your Meesho account"}>
           {admin ? (
-            <LoginForm busy={busy} existing={a} onCancel={connected ? () => setEditing(false) : null}
-              onSubmit={async (body) => { if (await call("connect/", "POST", body)) setEditing(false); }} />
+            <>
+              <div style={{ display: "flex", gap: 6 }}>
+                {[["session", "Paste session from browser"], ["login", "Phone & password"]].map(([k, label]) => (
+                  <button key={k} type="button" onClick={() => setMode(k)} style={{ ...btn(mode === k ? "primary" : "ghost", "sm") }}>{label}</button>
+                ))}
+              </div>
+              {mode === "session" ? (
+                <SessionForm busy={busy} existing={a} onCancel={connected ? () => setEditing(false) : null}
+                  onSubmit={async (body) => { if (await call("session/", "POST", body)) setEditing(false); }} />
+              ) : (
+                <>
+                  <div style={{ fontSize: 12.5, color: C.gray500 }}>The server logs in by itself. If Meesho's bot protection refuses it (HTTP 403), paste a session from your browser instead.</div>
+                  <LoginForm busy={busy} existing={a} onCancel={connected ? () => setEditing(false) : null}
+                    onSubmit={async (body) => { if (await call("connect/", "POST", body)) setEditing(false); }} />
+                </>
+              )}
+            </>
           ) : (
             <div style={{ fontSize: 13.5, color: C.gray600 }}>Ask an admin to connect the Meesho account.</div>
           )}
@@ -173,7 +218,7 @@ export function MeeshoSyncTab() {
         <>
           <Card title="Meesho account" right={st && <Tag variant={st.tag}>{st.label}</Tag>}>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 12 }}>
-              <div><div style={{ fontSize: 11.5, color: C.gray500, fontWeight: 700 }}>Login</div><div style={{ fontFamily: "monospace", fontWeight: 800 }}>{a.phone}</div></div>
+              <div><div style={{ fontSize: 11.5, color: C.gray500, fontWeight: 700 }}>Login</div><div style={{ fontFamily: "monospace", fontWeight: 800 }}>{a.phone || <span style={{ fontFamily: "inherit", color: C.gray500 }}>browser session</span>}</div></div>
               <div><div style={{ fontSize: 11.5, color: C.gray500, fontWeight: 700 }}>Supplier</div>
                 <div style={{ fontWeight: 800 }}>{a.supplier_name || <span style={{ color: C.gray400 }}>name not set</span>} · {a.supplier_id || <span style={{ color: C.red }}>ID not set</span>}
                   {admin && <button onClick={() => {
@@ -199,7 +244,8 @@ export function MeeshoSyncTab() {
             )}
             {admin && (
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                <button onClick={() => setEditing(true)} style={btn("ghost", "sm")}>{a.status === "FAILED" ? "Fix the login" : "Change login"}</button>
+                <button onClick={() => { setMode("session"); setEditing(true); }} style={btn(a.status === "FAILED" ? "primary" : "ghost", "sm")}>Paste new session</button>
+                <button onClick={() => { setMode("login"); setEditing(true); }} style={btn("ghost", "sm")}>{a.status === "FAILED" && a.has_password ? "Fix the login" : "Change login"}</button>
                 <button onClick={() => { if (window.confirm("Disconnect Meesho? The saved password and session are deleted and syncing stops.")) call("disconnect/"); }}
                   style={{ ...btn("ghost", "sm"), color: C.red }}>Disconnect</button>
               </div>

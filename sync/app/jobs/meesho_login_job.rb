@@ -8,6 +8,7 @@ class MeeshoLoginJob
   SUPPLIER_NAME_KEYS = %w[supplier_name supplierName business_name businessName name].freeze
   # The short code in panel URLs ("xzvey") — the data APIs' "identifier".
   SUPPLIER_CODE_KEYS = %w[supplier_identifier supplierIdentifier supplier_tag supplierTag].freeze
+  PASTE_HINT = "Paste a new session from your browser on the Meesho Sync page.".freeze
 
   def perform(account_id, run_id = nil)
     account = MeeshoAccount.find_by(id: account_id)
@@ -27,12 +28,25 @@ class MeeshoLoginJob
 
   # Log in and store the session on the account; raises on failure.
   def self.login!(account)
+    # Connected with a session pasted from a browser and no password: there is
+    # nothing to log in with, so the admin pastes a fresh one.
+    if account.password_enc.blank?
+      message = "The Meesho session has expired. #{PASTE_HINT}"
+      account.update!(status: MeeshoAccount::STATUS_FAILED, status_message: message, cookies_enc: "")
+      raise MeeshoClient::AuthError, message
+    end
     ensure_device_ids(account)
     account.update!(status: MeeshoAccount::STATUS_LOGGING_IN, status_message: "Logging in…")
     client = MeeshoClient.new(account, cookies: {})
     begin
       res = client.login(account.password)
-    rescue MeeshoClient::AuthError, MeeshoClient::RequestError, SecretBox::NotConfigured => e
+    rescue MeeshoClient::AuthError => e
+      # Usually Meesho's bot protection refusing the server; a session from
+      # the admin's own browser gets round it.
+      message = e.message.include?("bot protection") ? "#{e.message}. #{PASTE_HINT}" : e.message
+      account.update!(status: MeeshoAccount::STATUS_FAILED, status_message: message, cookies_enc: "")
+      raise MeeshoClient::AuthError, message
+    rescue MeeshoClient::RequestError, SecretBox::NotConfigured => e
       account.update!(status: MeeshoAccount::STATUS_FAILED, status_message: e.message, cookies_enc: "")
       raise
     end

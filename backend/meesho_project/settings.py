@@ -199,6 +199,18 @@ if any(m == "whitenoise.middleware.WhiteNoiseMiddleware" for m in MIDDLEWARE):
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
+# ── Outgoing email (SMTP) ─────────────────────────────────────────────────────
+# Used to send the 8 AM / 5 PM Meesho labels PDF (meesho_send_labels) when
+# LABELS_EMAIL_TO is set. Any SMTP works — e.g. Gmail with an app password:
+# EMAIL_HOST=smtp.gmail.com, EMAIL_PORT=587, EMAIL_USE_TLS=true.
+EMAIL_HOST = os.environ.get("EMAIL_HOST", "localhost")
+EMAIL_PORT = int(os.environ.get("EMAIL_PORT", "587"))
+EMAIL_HOST_USER = os.environ.get("EMAIL_HOST_USER", "")
+EMAIL_HOST_PASSWORD = os.environ.get("EMAIL_HOST_PASSWORD", "")
+EMAIL_USE_TLS = os.environ.get("EMAIL_USE_TLS", "true").lower() in ("1", "true", "yes", "on")
+DEFAULT_FROM_EMAIL = os.environ.get("DEFAULT_FROM_EMAIL", EMAIL_HOST_USER or "noreply@rudam.in")
+EMAIL_TIMEOUT = 60
+
 # CORS/CSRF
 CORS_ALLOW_ALL_ORIGINS = os.environ.get("CORS_ALLOW_ALL", "true").lower() == "true"
 raw_cors = os.environ.get("CORS_ALLOWED_ORIGINS", "")

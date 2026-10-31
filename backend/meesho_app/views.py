@@ -192,30 +192,46 @@ def upload_excel(request, business_id):
         return Response({"error": f"Could not read Excel file{hint}: {e}"},
                         status=status.HTTP_400_BAD_REQUEST)
 
+    results = import_payment_workbook(business, xl)
+    return Response({"success": True, "results": results}, status=status.HTTP_201_CREATED)
+
+
+# Meesho's "Order Payments" sheet, column by column (completed and outstanding
+# files alike).
+ORDER_PAYMENT_COLUMNS = [
+    "sub_order_no", "order_date", "dispatch_date", "product_name",
+    "supplier_sku", "catalog_id", "order_source", "live_order_status",
+    "product_gst_percent", "listing_price_incl_taxes", "quantity",
+    "transaction_id", "payment_date", "final_settlement_amount",
+    "price_type", "total_sale_amount", "total_sale_return_amount",
+    "fixed_fee_revenue", "warehousing_fee", "return_premium",
+    "return_premium_of_return", "meesho_commission_percentage",
+    "meesho_commission_incl_gst", "meesho_gold_platform_fee",
+    "meesho_mall_platform_fee", "fixed_fee_deduction",
+    "warehousing_fee_deduction", "return_shipping_charge",
+    "gst_compensation_prp_shipping", "shipping_charge_incl_gst",
+    "other_support_service_charges", "waivers",
+    "net_other_support_service_charges",
+    "gst_on_net_other_support_service_charges",
+    "tcs", "tds_rate_percent", "tds",
+    "compensation", "claims", "recovery",
+    "compensation_reason", "claims_reason", "recovery_reason",
+]
+
+
+def import_payment_workbook(business, xl):
+    """
+    Read a Meesho payment workbook (pd.ExcelFile) — Order Payments, Ads Cost,
+    Referral Payments, Compensation and Recovery — into this business's tables.
+    Shared by the upload above and the Meesho sync's payment import
+    (management command import_meesho_payments). Returns per-sheet counts.
+    """
     results = {}
 
     # ── 1. Order Payments ───────────────────────────────────────────────────
     if "Order Payments" in xl.sheet_names:
         df = pd.read_excel(xl, sheet_name="Order Payments", header=None, skiprows=2)
-        df.columns = [
-            "sub_order_no", "order_date", "dispatch_date", "product_name",
-            "supplier_sku", "catalog_id", "order_source", "live_order_status",
-            "product_gst_percent", "listing_price_incl_taxes", "quantity",
-            "transaction_id", "payment_date", "final_settlement_amount",
-            "price_type", "total_sale_amount", "total_sale_return_amount",
-            "fixed_fee_revenue", "warehousing_fee", "return_premium",
-            "return_premium_of_return", "meesho_commission_percentage",
-            "meesho_commission_incl_gst", "meesho_gold_platform_fee",
-            "meesho_mall_platform_fee", "fixed_fee_deduction",
-            "warehousing_fee_deduction", "return_shipping_charge",
-            "gst_compensation_prp_shipping", "shipping_charge_incl_gst",
-            "other_support_service_charges", "waivers",
-            "net_other_support_service_charges",
-            "gst_on_net_other_support_service_charges",
-            "tcs", "tds_rate_percent", "tds",
-            "compensation", "claims", "recovery",
-            "compensation_reason", "claims_reason", "recovery_reason",
-        ]
+        df.columns = ORDER_PAYMENT_COLUMNS
         # Drop the formula-description row (row index 0 has letters like A, B, C...)
         df = df[df["sub_order_no"].notna()]
         df = df[~df["sub_order_no"].astype(str).str.match(r"^[A-Z\s\(\)\+\-\*\/]+$")]
@@ -382,7 +398,7 @@ def upload_excel(request, business_id):
                 created += 1
         results["compensation_recovery"] = {"created": created, "skipped": skipped}
 
-    return Response({"success": True, "results": results}, status=status.HTTP_201_CREATED)
+    return results
 
 
 def _inc(d, key, value=None):
@@ -5391,6 +5407,12 @@ def upload_final_price(request, business_id):
         )
 
     created = updated = skipped = 0
+    # Rows are matched by product + variation, as the Meesho sync matches them
+    # (meesho_stock_sheet.rb): a sheet's SERIAL NO is only its row number in
+    # that export, so matching on it would write one product over another.
+    existing = {(r.product_id, r.variation_id): r for r in MeeshoInventory.objects.filter(business=business)}
+    serials = set(MeeshoInventory.objects.filter(business=business).values_list("serial_no", flat=True))
+    next_serial = max(serials, default=0) + 1
     with transaction.atomic():
         for _, row in df.iterrows():
             pk = safe_str(row.get("sku_id"))
@@ -9765,6 +9787,12 @@ def meesho_inventory_upload(request, business_id):
     df = df[~df.apply(_is_description_row, axis=1)].reset_index(drop=True)
 
     created = updated = skipped = 0
+    # Rows are matched by product + variation, as the Meesho sync matches them
+    # (meesho_stock_sheet.rb): a sheet's SERIAL NO is only its row number in
+    # that export, so matching on it would write one product over another.
+    existing = {(r.product_id, r.variation_id): r for r in MeeshoInventory.objects.filter(business=business)}
+    serials = set(MeeshoInventory.objects.filter(business=business).values_list("serial_no", flat=True))
+    next_serial = max(serials, default=0) + 1
     with transaction.atomic():
         for _, row in df.iterrows():
             sno     = _safe_inv_int(row.get("serial_no"))
@@ -9789,13 +9817,20 @@ def meesho_inventory_upload(request, business_id):
                 "system_stock_count": _safe_inv_int(row.get("system_stock_count"), 0),
                 "seller_stock_count": seller_count,
             }
-            _, was_created = MeeshoInventory.objects.update_or_create(
-                business=business, serial_no=sno, defaults=defaults,
-            )
-            if was_created:
-                created += 1
-            else:
+            inv = existing.get((prod_id, defaults["variation_id"])) or existing.get((prod_id, None))
+            if inv:
+                for k, v in defaults.items():
+                    setattr(inv, k, v)
+                inv.save()
                 updated += 1
+                continue
+            if sno in serials:
+                sno, next_serial = next_serial, next_serial + 1
+            inv = MeeshoInventory.objects.create(business=business, serial_no=sno, **defaults)
+            serials.add(sno)
+            next_serial = max(next_serial, sno + 1)
+            existing[(prod_id, defaults["variation_id"])] = inv
+            created += 1
 
     return Response(
         {"success": True, "created": created, "updated": updated, "skipped": skipped},
@@ -9841,7 +9876,27 @@ def meesho_inventory_list(request, business_id):
     ))
     total           = MeeshoInventory.objects.filter(business=business).count()
     low_stock_count = MeeshoInventory.objects.filter(business=business, system_stock_count__lt=100).count()
-    return Response({"items": data, "total": total, "low_stock_count": low_stock_count})
+    return Response({"items": data, "total": total, "low_stock_count": low_stock_count,
+                     "sync": _meesho_stock_sync_state(business)})
+
+
+def _meesho_stock_sync_state(business):
+    """Whether this page is kept up to date from the Meesho panel (the sync
+    worker's inventory pull, MeeshoInventoryJob) and how its last pull went."""
+    from .models import MeeshoAccount, MeeshoSyncRun
+    a = MeeshoAccount.objects.filter(business=business).exclude(status=MeeshoAccount.STATUS_DISABLED).first()
+    if not a:
+        return {"connected": False}
+    runs = a.runs.filter(kind="INVENTORY")
+    last = runs.first()
+    ok = runs.filter(status=MeeshoSyncRun.STATUS_OK).first()
+    return {
+        "connected": a.status == MeeshoAccount.STATUS_ACTIVE,
+        "last_ok_at": ok.finished_at if ok else None,
+        "last_status": last.status if last else None,
+        "last_message": last.message if last else "",
+        "running": bool(last and last.status in (MeeshoSyncRun.STATUS_QUEUED, MeeshoSyncRun.STATUS_RUNNING)),
+    }
 
 
 # ── Meesho's "Inventory Update File" format ───────────────────────────────────

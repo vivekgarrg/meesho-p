@@ -70,7 +70,6 @@ export const NAV_GROUPS = [
     color: '#FBBF24',
     items: [
       { path: '/upload', label: 'Upload Data', icon: '⇧' },
-      { path: '/meesho-sync', label: 'Meesho Sync', icon: '⟳' },
       { path: '/product-photos', label: 'AI Photos', icon: '✦' },
       { path: '/quadrant-cropper', label: 'Quadrant Cropper', icon: '✂️' },
       { path: '/extension', label: 'Browser Extension', icon: '⧉' },
