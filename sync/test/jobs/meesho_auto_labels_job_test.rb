@@ -46,12 +46,12 @@ class MeeshoAutoLabelsJobTest < ActiveSupport::TestCase
     end
   end
 
-  test "8 AM: every pending order is accepted, and no labels are made" do
+  test "every 30 minutes: every pending order is accepted, and no labels are made" do
     snapshot("orders_pending", [row(1, key: "shared"), row(2, key: "shared"), row(3), { "sub_order_num" => "4_1" }])
     snapshot("orders_ready_to_ship", [row(5)])
     with_fake_jobs do |calls|
       ENV["MEESHO_AUTO_LABELS"] = "true"
-      summary = MeeshoAutoLabelsJob.new.perform("accept")
+      summary = travel_to(Time.zone.parse("2026-11-02 10:30 +0530")) { MeeshoAutoLabelsJob.new.perform("accept") }
       # One accept request, grouped by grouping key; a row without ids is left alone.
       assert_equal [[{ "grouping_key" => "shared", "sub_order_ids" => %w[1_1_FORWARD 2_1_FORWARD], "shipment_type" => "forward" },
                      { "grouping_key" => "g3", "sub_order_ids" => %w[3_1_FORWARD], "shipment_type" => "forward" }]], calls[:accept]
@@ -84,6 +84,19 @@ class MeeshoAutoLabelsJobTest < ActiveSupport::TestCase
     ENV.delete("MEESHO_AUTO_LABELS")
   end
 
+  test "the half-hourly accept leaves 5 PM to the labels run, which accepts itself" do
+    snapshot("orders_pending", [row(1)])
+    with_fake_jobs do |calls|
+      ENV["MEESHO_AUTO_LABELS"] = "true"
+      assert_equal [], travel_to(Time.zone.parse("2026-11-02 17:00 +0530")) { MeeshoAutoLabelsJob.new.perform("accept") }
+      assert_empty calls[:accept]
+      travel_to(Time.zone.parse("2026-11-02 17:30 +0530")) { MeeshoAutoLabelsJob.new.perform("accept") }
+      assert_equal 1, calls[:accept].size
+    end
+  ensure
+    ENV.delete("MEESHO_AUTO_LABELS")
+  end
+
   test "an account that fails doesn't stop the others" do
     account
     with_fake_jobs do |calls|
@@ -95,12 +108,15 @@ class MeeshoAutoLabelsJobTest < ActiveSupport::TestCase
     ENV.delete("MEESHO_AUTO_LABELS")
   end
 
-  test "it accepts at 8 AM and makes labels at 5 PM, India time" do
+  test "it accepts every 30 minutes and makes labels at 5 PM, India time" do
     schedule = YAML.load_file(Rails.root.join("config/schedule.yml"))
     ist = ActiveSupport::TimeZone["Asia/Kolkata"]
     from = ist.local(2026, 11, 2, 6, 0)
     at = ->(name) { Fugit.parse_cron(schedule.fetch(name)["cron"]).next_time(from).to_t.in_time_zone(ist).strftime("%H:%M") }
-    assert_equal ["08:00", ["accept"]], [at.("meesho_auto_accept"), schedule["meesho_auto_accept"]["args"]]
+    accept = Fugit.parse_cron(schedule.fetch("meesho_auto_accept")["cron"])
+    slots = 3.times.each_with_object([]) { |_, acc| acc << accept.next_time(acc.last || from).to_t.in_time_zone(ist) }
+    assert_equal %w[06:30 07:00 07:30], slots.map { |t| t.strftime("%H:%M") }            # every 30 minutes, India time
+    assert_equal ["accept"], schedule["meesho_auto_accept"]["args"]
     assert_equal ["17:00", ["labels"]], [at.("meesho_auto_labels"), schedule["meesho_auto_labels"]["args"]]
     assert_equal ["MeeshoAutoLabelsJob"], schedule.values_at("meesho_auto_accept", "meesho_auto_labels").map { |e| e["class"] }.uniq
   end

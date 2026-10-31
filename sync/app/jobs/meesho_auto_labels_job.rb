@@ -1,11 +1,14 @@
 # The daily Meesho run (config/schedule.yml), for every connected account:
 #
-#   8 AM IST  "accept": accept every Pending order.
-#   5 PM IST  "labels": accept again (orders since the morning), then have
-#             Meesho make the labels of every Ready-to-ship order whose label
-#             isn't downloaded yet. They share one batch, so they're on Meesho
-#             Orders → Ready to ship as one "Download merged labels" (one PDF,
-#             sorted by parent SKU).
+#   every 30 min  "accept": accept every Pending order.
+#   5 PM IST      "labels": accept again, then have
+#                 Meesho make the labels of every Ready-to-ship order whose
+#                 label isn't downloaded yet. They share one batch, so they're on
+#                 Meesho Orders → Ready to ship as one "Download merged labels"
+#                 (one PDF, sorted by parent SKU).
+#
+# The 5 PM run does that slot's accepting itself, so the half-hourly accept
+# skips 5:00 — two accept requests at once would collide on Meesho.
 #
 # The same steps an admin takes on Meesho Orders (Accept, then Generate
 # labels), with the same jobs, run one after another. Off unless
@@ -21,6 +24,14 @@ class MeeshoAutoLabelsJob
   CHUNK = 500                                          # orders per accept / label request
   NOT_DOWNLOADED = [false, "Not Downloaded"].freeze
 
+  LABELS_AT = 17                                       # 5 PM IST — config/schedule.yml's meesho_auto_labels
+
+  # Whether now is the 5 PM labels run's slot (it accepts as well).
+  def self.labels_slot?(now = Time.current)
+    t = now.in_time_zone("Asia/Kolkata")
+    t.hour == LABELS_AT && t.min < 15
+  end
+
   def self.enabled?
     ENV["MEESHO_AUTO_LABELS"].to_s.strip.downcase.in?(%w[1 true yes on])
   end
@@ -32,6 +43,7 @@ class MeeshoAutoLabelsJob
   def perform(step = "labels", force = false)
     return unless force || self.class.enabled?
     raise ArgumentError, "unknown step #{step.inspect}" unless STEPS.include?(step)
+    return [] if step == "accept" && !force && self.class.labels_slot?
     batch = "auto-#{Time.current.in_time_zone('Asia/Kolkata').strftime('%Y%m%d-%H%M')}-#{SecureRandom.hex(3)}"
     summary = accounts.map do |account|
       "#{account_name(account)}: #{run_account(account, batch, labels: step == 'labels')}"
