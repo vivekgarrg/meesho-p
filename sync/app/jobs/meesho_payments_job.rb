@@ -86,7 +86,9 @@ class MeeshoPaymentsJob
     out = { "from" => from.iso8601, "to" => to.iso8601 }
     path = fetch_file(account, "completed", from, to, dir)
     counts = MeeshoPayments.import(account.business_id, [path], "completed")
-    out.merge("counts" => counts, "rows" => counts.values.sum { |c| c.is_a?(Hash) ? c.values.sum(&:to_i) : 0 })
+    sheets = counts.except("rejected", "reject_reasons", "rejected_samples")
+    out.merge("counts" => counts, "rows" => sheets.values.sum { |c| c.is_a?(Hash) ? c.values.sum(&:to_i) : 0 },
+              "rejected" => counts["rejected"].to_i)
   rescue MeeshoClient::RequestError, MeeshoPayments::ImportError => e
     out.merge("error" => e.message)
   end
@@ -159,7 +161,7 @@ class MeeshoPaymentsJob
     elsif (op = c.dig("counts", "order_payments"))
       ads = c.dig("counts", "ads_cost") || {}
       parts << "Payments table (#{c['from']} to #{c['to']}): #{op['created'].to_i} new, #{op['updated'].to_i} updated order payments; " \
-               "#{ads['created'].to_i} new ads costs."
+               "#{ads['created'].to_i} new ads costs#{"; #{c['rejected']} rows refused" if c['rejected'].to_i.positive?}."
     end
     parts << if o["error"]
                "Outstanding: #{o['error']}"

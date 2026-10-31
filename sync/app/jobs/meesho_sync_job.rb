@@ -22,7 +22,8 @@ class MeeshoSyncJob
       message = notes.join(" ")
       account.update!(last_sync_at: Time.current, last_sync_status: "OK", last_sync_message: message)
       run.finish!(true, message, records: records)
-    rescue MeeshoClient::AuthError, MeeshoClient::RequestError, SecretBox::NotConfigured, PanelOrders::WrongBusiness => e
+    rescue MeeshoClient::AuthError, MeeshoClient::RequestError, SecretBox::NotConfigured, PanelOrders::WrongBusiness,
+           DjangoCommand::Failed => e
       account.update!(last_sync_at: Time.current, last_sync_status: "FAILED", last_sync_message: e.message)
       run.finish!(false, e.message)
     rescue StandardError => e
@@ -70,15 +71,21 @@ class MeeshoSyncJob
       snap = MeeshoSyncSnapshot.find_or_initialize_by(account_id: account.id, endpoint: ep[:key])
       snap.update!(http_status: status, payload: rows, fetched_at: Time.current)
       records += rows.size
-      short = total && self.class.counted(rows) < total
+      # Short only when fewer rows came than Meesho lists (Ready to ship's
+      # total counts shipments, which can hold several of its rows).
+      short = total && rows.size < total && self.class.counted(rows) < total
       notes << "#{ep[:key].tr('_', ' ')}: #{rows.size}#{" (#{pages} pages)" if pages > 1}" \
                "#{" — short of the #{total} Meesho lists" if short}."
     end
     if panel_rows.any?
-      m = PanelOrders.mirror!(account.business_id, panel_rows)
-      notes << "Orders table: #{m[:added]} added, #{m[:status_changed]} status changes, #{m[:updated]} updated."
-      # Django's response cache can't see these writes; this stamp tells it.
-      account.orders_changed_at = Time.current if m.values.sum.positive?
+      # The orders middleware (Django, sync_middleware/orders.py) brings the
+      # orders table up to date from these snapshots, and has the cached
+      # screens (profit…) recomputed.
+      m = DjangoCommand.run("meesho_inject", "--account", account.id, "--kind", "orders")
+      notes << "Orders table: #{m['added'].to_i} added, #{m['status_changed'].to_i} status changes, #{m['updated'].to_i} updated" \
+               "#{", #{m['kept_further_on']} kept further on" if m['kept_further_on'].to_i.positive?}" \
+               "#{", #{m['rejected']} refused (#{m['reject_reasons'].keys.join('; ')})" if m['rejected'].to_i.positive?}."
+      account.orders_changed_at = Time.current if (m["added"].to_i + m["status_changed"].to_i + m["updated"].to_i).positive?
     end
     account.cookies = @client.cookies
     account.save!

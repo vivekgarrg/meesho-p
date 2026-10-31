@@ -715,7 +715,8 @@ class MeeshoPaymentsTests(TestCase):
         from .models import MeeshoOutstandingPayment, OrderPayment
         first = self.file("o1.xlsx", [{"sub_order_no": "1_1", "payment_date": "2026-11-02", "final_settlement_amount": 100, "live_order_status": "Shipped"},
                                       {"sub_order_no": "2_1", "payment_date": "2026-11-03", "final_settlement_amount": -40, "live_order_status": "RTO"}])
-        self.assertEqual(self.run_command("outstanding", first), {"outstanding": {"rows": 2, "replaced": 0, "files": 1}})
+        out = self.run_command("outstanding", first)
+        self.assertEqual((out["outstanding"], out["rejected"]), ({"rows": 2, "replaced": 0, "files": 1}, 0))
         second = self.file("o2.xlsx", [{"sub_order_no": "3_1", "payment_date": "2026-11-04", "final_settlement_amount": 70}])
         self.run_command("outstanding", second)
         self.assertEqual(list(MeeshoOutstandingPayment.objects.values_list("sub_order_no", flat=True)), ["3_1"])
@@ -745,7 +746,8 @@ class MeeshoPaymentsTests(TestCase):
         out = StringIO()
         call_command("import_meesho_payments", "--business", str(self.biz.pk), "--kind", "outstanding",
                      "--file", day1, "--file", day2, stdout=out)                 # as the worker runs it
-        self.assertEqual(json.loads(out.getvalue())["outstanding"], {"rows": 2, "replaced": 0, "files": 2})
+        out = json.loads(out.getvalue())
+        self.assertEqual((out["outstanding"], out["duplicates"]), ({"rows": 2, "replaced": 0, "files": 2}, 1))
         self.assertEqual(sorted(MeeshoOutstandingPayment.objects.values_list("sub_order_no", flat=True)), ["1_1", "2_1"])
 
     def test_unpaid_rows_already_in_the_table_can_be_removed(self):
@@ -764,6 +766,52 @@ class MeeshoPaymentsTests(TestCase):
         self.assertEqual(OrderPayment.objects.count(), 3)                         # a dry run by default
         call_command("remove_unpaid_order_payments", apply=True, stdout=StringIO())
         self.assertEqual(sorted(OrderPayment.objects.values_list("sub_order_no", flat=True)), ["7_1", "8_1"])
+
+    def test_a_paid_file_replaces_what_was_only_expected_and_never_counts_a_payment_twice(self):
+        from .models import OrderPayment
+        import datetime as dt
+        d = dt.date(2026, 10, 12)
+        # An outstanding sheet uploaded earlier: expected payments, no bank transfer.
+        OrderPayment.objects.create(business=self.biz, sub_order_no="1_1", payment_date=d, live_order_status="Delivered",
+                                    final_settlement_amount=489.58)
+        OrderPayment.objects.create(business=self.biz, sub_order_no="2_1", payment_date=d, live_order_status="Delivered",
+                                    final_settlement_amount=541.54)                     # never paid on that payout
+        OrderPayment.objects.create(business=self.biz, sub_order_no="9_1", payment_date=dt.date(2026, 6, 1),
+                                    final_settlement_amount=100)                        # an old export without transfers: kept
+        # The same payment read before, when the order was still Shipped.
+        OrderPayment.objects.create(business=self.biz, sub_order_no="3_1", payment_date=d, live_order_status="Shipped",
+                                    transaction_id="AXIS1", final_settlement_amount=290.42)
+        path = self.file("paid.xlsx", [
+            {"sub_order_no": "1_1", "payment_date": "2026-10-12", "transaction_id": "AXIS1", "live_order_status": "Return", "final_settlement_amount": -157},
+            {"sub_order_no": "3_1", "payment_date": "2026-10-12", "transaction_id": "AXIS1", "live_order_status": "Delivered", "final_settlement_amount": 290.42},
+            {"sub_order_no": "4_1", "payment_date": "2026-10-12", "transaction_id": None, "live_order_status": "Delivered", "final_settlement_amount": 10},
+        ])
+        out = self.run_command("completed", path)["order_payments"]
+        rows = sorted(OrderPayment.objects.values_list("sub_order_no", "live_order_status", "final_settlement_amount"))
+        self.assertEqual([(a, b, float(c)) for a, b, c in rows],
+                         [("1_1", "Return", -157.0), ("3_1", "Delivered", 290.42), ("4_1", "Delivered", 10.0), ("9_1", None, 100.0)])
+        self.assertEqual(out["projections_replaced"], 2)                               # 1_1's and 2_1's expectations
+        self.assertEqual(OrderPayment.objects.filter(sub_order_no="3_1").count(), 1)  # updated, not a second copy
+
+    def test_the_cleanup_finds_what_counts_money_twice(self):
+        from io import StringIO
+        from django.core.management import call_command
+        from .models import OrderPayment
+        import datetime as dt
+        d = dt.date(2026, 10, 12)
+        mk = lambda sub, **kw: OrderPayment.objects.create(business=self.biz, sub_order_no=sub, payment_date=kw.pop("day", d), **kw)
+        mk("1_1", transaction_id="AXIS1", final_settlement_amount=100, live_order_status="Delivered")
+        mk("1_1", final_settlement_amount=100, live_order_status="Shipped")                 # superseded: the order was paid
+        mk("2_1", final_settlement_amount=50, live_order_status="Delivered")                # superseded: that payout was made
+        mk("3_1", transaction_id="AXIS1", final_settlement_amount=70, live_order_status="Shipped")
+        mk("3_1", transaction_id="AXIS1", final_settlement_amount=70, live_order_status="Delivered")   # status-only copy
+        mk("5_1", final_settlement_amount=9, day=dt.date(2026, 6, 1))                        # old export: kept
+        out = StringIO()
+        call_command("remove_unpaid_order_payments", stdout=out)
+        self.assertIn("3 rows would be removed", out.getvalue())
+        self.assertEqual(OrderPayment.objects.count(), 6)
+        call_command("remove_unpaid_order_payments", apply=True, stdout=StringIO())
+        self.assertEqual(sorted(OrderPayment.objects.values_list("sub_order_no", flat=True)), ["1_1", "3_1", "5_1"])
 
     def test_the_payments_tab_shows_summaries_and_outstanding(self):
         from django.utils import timezone

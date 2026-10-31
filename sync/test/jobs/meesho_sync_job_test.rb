@@ -232,39 +232,6 @@ class MeeshoSyncJobTest < ActiveSupport::TestCase
     assert_match(/ready to ship: 1 — short of the 69 Meesho lists/, account.runs.last.message)
   end
 
-  test "shipped orders move on in the orders table, with their packet id, and never move back" do
-    account = supplier_account
-    now = Time.current
-    day = Date.new(2026, 10, 30)
-    Order.create!(business_id: 1, sub_order_no: "1_1", reason_for_credit_entry: "READY_TO_SHIP", order_date: day, sku: "golden-plate", size: "Free Size", product_name: "Golden Plate", created_at: now, updated_at: now)
-    Order.create!(business_id: 1, sub_order_no: "2_1", reason_for_credit_entry: "DELIVERED", order_date: day, created_at: now, updated_at: now)
-    Order.create!(business_id: 1, sub_order_no: "3_1", reason_for_credit_entry: "SHIPPED", order_date: day, created_at: now, updated_at: now)
-    shipped = MeeshoEndpoints.orders_tab("shipped", 4)
-    rts = MeeshoEndpoints.orders_tab("ready-to-ship", 3)
-    stub_request(:post, PENDING_URL).with { |r| JSON.parse(r.body)["type"] == "shipped" }
-      .to_return(real_page([real_sub(1, "packet_id" => "KP1"), real_sub(2, "packet_id" => "KP2")], total: 2))
-    stub_request(:post, PENDING_URL).with { |r| JSON.parse(r.body)["type"] == "ready-to-ship" }
-      .to_return(real_page([real_sub(3)], total: 1, groups: true))
-    with_endpoints([shipped, rts]) { MeeshoSyncJob.new.perform(account.id) }
-
-    latest = ->(sub) { Order.where(business_id: 1, sub_order_no: sub).order(:order_date, :created_at, :id).last }
-    assert_equal ["SHIPPED", "KP1"], [latest.("1_1").reason_for_credit_entry, latest.("1_1").packet_id]
-    assert_equal "DELIVERED", latest.("2_1").reason_for_credit_entry          # further on already: kept
-    assert_equal "KP2", latest.("2_1").packet_id                              # its details still refreshed
-    assert_equal "SHIPPED", latest.("3_1").reason_for_credit_entry            # not back to ready to ship
-  end
-
-  test "the status rules" do
-    assert PanelOrders.moves_on?(nil, "PENDING")
-    assert PanelOrders.moves_on?("PENDING", "HOLD")
-    assert PanelOrders.moves_on?("READY_TO_SHIP", "SHIPPED")
-    assert PanelOrders.moves_on?("READY_TO_SHIP", "CANCELLED")
-    refute PanelOrders.moves_on?("SHIPPED", "READY_TO_SHIP")
-    refute PanelOrders.moves_on?("RTO_COMPLETE", "SHIPPED")
-    refute PanelOrders.moves_on?("DELIVERED", "CANCELLED")
-    assert PanelOrders.moves_on?("CANCELLED", "READY_TO_SHIP")             # the live panel beats a CSV's cancel
-  end
-
   test "a scheduled pull skips shipped while its last pull is recent; refresh doesn't" do
     account = supplier_account
     shipped = MeeshoEndpoints.orders_tab("shipped", 4, every: 15)
@@ -276,59 +243,28 @@ class MeeshoSyncJobTest < ActiveSupport::TestCase
     assert_requested(:post, PENDING_URL, times: 1)
   end
 
-  test "the orders table is brought up to date like an Orders CSV upload" do
+  test "the orders middleware (Django) brings the orders table up to date from the pull, and the run says what it did" do
     account = supplier_account
-    Order.create!(business_id: 1, sub_order_no: "1_1", reason_for_credit_entry: "PENDING", order_date: Date.new(2026, 10, 30), sku: "old-sku", quantity: 1, created_at: Time.current, updated_at: Time.current)
-    Order.create!(business_id: 1, sub_order_no: "2_1", reason_for_credit_entry: "PENDING", order_date: Date.new(2026, 10, 30), sku: "golden-plate", size: "Free Size", quantity: 1, product_name: "Golden Plate", created_at: Time.current, updated_at: Time.current)
-    Order.create!(business_id: 9, sub_order_no: "3_1", reason_for_credit_entry: "PENDING", created_at: Time.current, updated_at: Time.current)   # another business
-    cancelled = MeeshoEndpoints.orders_tab("cancelled", 5)
-    pending = MeeshoEndpoints.orders_tab("pending", 1)
-    stub_request(:post, PENDING_URL).with { |r| JSON.parse(r.body)["type"] == "pending" }.to_return(real_page([real_sub(1)], total: 1))
-    stub_request(:post, PENDING_URL).with { |r| JSON.parse(r.body)["type"] == "cancelled" }.to_return(real_page([real_sub(2), real_sub(3)], total: 2))
-    with_endpoints([pending, cancelled]) { MeeshoSyncJob.new.perform(account.id) }
+    calls = []
+    original = DjangoCommand.method(:run)
+    DjangoCommand.define_singleton_method(:run) do |*a, **|
+      calls << a
+      { "added" => 2, "status_changed" => 1, "updated" => 0, "kept_further_on" => 1, "rejected" => 1, "reject_reasons" => { "missing sub_order_num" => 1 } }
+    end
+    stub_request(:post, PENDING_URL).to_return(real_page([real_sub(1), real_sub(2)], total: 2))
+    with_endpoints([MeeshoEndpoints.orders_tab("pending", 1)]) { MeeshoSyncJob.new.perform(account.id) }
+    run = account.runs.last
+    assert_equal "OK", run.status, run.message
+    assert_equal [["meesho_inject", "--account", account.id, "--kind", "orders"]], calls
+    assert MeeshoSyncSnapshot.find_by(endpoint: "orders_pending")                # snapshot first, then the middleware reads it
+    assert_match(/Orders table: 2 added, 1 status changes, 0 updated, 1 kept further on, 1 refused \(missing sub_order_num\)\./, run.message)
+    assert account.reload.orders_changed_at.present?                             # tells Django's response cache
 
-    rows = Order.where(business_id: 1).order(:sub_order_no, :id).map { |o| [o.sub_order_no, o.reason_for_credit_entry, o.sku] }
-    assert_equal [["1_1", "PENDING", "golden-plate"],                        # existing: details refreshed
-                  ["2_1", "PENDING", "golden-plate"], ["2_1", "CANCELLED", "golden-plate"],   # status changed: a new row
-                  ["3_1", "CANCELLED", "golden-plate"]], rows                # not here yet: added
-    added = Order.find_by(business_id: 1, sub_order_no: "3_1")
-    assert_equal [Date.new(2026, 10, 30), "Free Size", "Meesho panel sync"], [added.order_date, added.size, added.order_source]
-    assert_equal 1, Order.where(business_id: 9).count                    # other businesses untouched
-    assert_match(/1 added, 1 status changes, 1 updated/, account.runs.last.message)
-    stamp = account.reload.orders_changed_at
-    assert stamp.present?                                                # tells Django's cache
-
-    with_endpoints([pending, cancelled]) { MeeshoSyncJob.new.perform(account.id) }   # again: nothing new
-    assert_equal 4, Order.where(business_id: 1).count
-    assert_match(/0 added, 0 status changes, 0 updated/, account.runs.last.message)
-    assert_equal stamp, account.reload.orders_changed_at                 # nothing changed, nothing to drop
-  end
-
-  test "a status is compared with the order's current row, not any old one" do
-    account = supplier_account
-    t = 2.days.ago
-    row = ->(st, at) { Order.create!(business_id: 1, sub_order_no: "2_1", reason_for_credit_entry: st, order_date: Date.new(2026, 10, 30),
-                                     sku: "golden-plate", size: "Free Size", quantity: 1, product_name: "Golden Plate", created_at: at, updated_at: at) }
-    # It was ready to ship, then cancelled (CSV), and Meesho now says ready to ship again.
-    rts = row.call("READY_TO_SHIP", t)
-    row.call("CANCELLED", t + 1.hour)
-    stub_request(:post, PENDING_URL).to_return(real_page([real_sub(2)], total: 1))
-    with_endpoints([MeeshoEndpoints.orders_tab("ready-to-ship", 3)]) { MeeshoSyncJob.new.perform(account.id) }
-    latest = Order.where(business_id: 1, sub_order_no: "2_1").order(order_date: :desc, created_at: :desc, id: :desc).first
-    assert_equal ["READY_TO_SHIP", rts.id], [latest.reason_for_credit_entry, latest.id]    # the old row is current again
-    assert_equal 2, Order.where(business_id: 1).count
-  end
-
-  test "a new status row takes the date of the order's latest row" do
-    account = supplier_account
-    Order.create!(business_id: 1, sub_order_no: "2_1", reason_for_credit_entry: "DELIVERED", order_date: Date.new(2026, 9, 1),
-                  sku: "golden-plate", size: "Free Size", quantity: 1, product_name: "Golden Plate", created_at: 3.days.ago, updated_at: 3.days.ago)
-    Order.create!(business_id: 1, sub_order_no: "2_1", reason_for_credit_entry: "READY_TO_SHIP", order_date: Date.new(2026, 10, 20),
-                  sku: "golden-plate", size: "Free Size", quantity: 1, product_name: "Golden Plate", created_at: 2.days.ago, updated_at: 2.days.ago)
-    stub_request(:post, PENDING_URL).to_return(real_page([real_sub(2)], total: 1))
-    with_endpoints([MeeshoEndpoints.orders_tab("cancelled", 5)]) { MeeshoSyncJob.new.perform(account.id) }
-    added = Order.find_by(business_id: 1, sub_order_no: "2_1", reason_for_credit_entry: "CANCELLED")
-    assert_equal Date.new(2026, 10, 20), added.order_date                # so it ranks as the latest
+    DjangoCommand.define_singleton_method(:run) { |*a, **| raise DjangoCommand::Failed, "meesho_inject failed: boom" }
+    with_endpoints([MeeshoEndpoints.orders_tab("pending", 1)]) { MeeshoSyncJob.new.perform(account.id) }
+    assert_equal ["FAILED", "meesho_inject failed: boom"], [account.runs.last.status, account.runs.last.message]
+  ensure
+    DjangoCommand.define_singleton_method(:run, original)
   end
 
   test "orders that belong to another business are not written anywhere" do
@@ -347,11 +283,4 @@ class MeeshoSyncJobTest < ActiveSupport::TestCase
     assert_equal 0, MeeshoSyncSnapshot.count
   end
 
-  test "a new business with no orders anywhere yet is filled in" do
-    account = supplier_account
-    stub_request(:post, PENDING_URL).to_return(real_page((1..12).map { |i| real_sub(200 + i) }, total: 12))
-    with_endpoints([MeeshoEndpoints.orders_tab("pending", 1)]) { MeeshoSyncJob.new.perform(account.id) }
-    assert_equal "OK", account.runs.last.status
-    assert_equal 12, Order.where(business_id: 1).count
-  end
 end

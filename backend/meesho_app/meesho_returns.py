@@ -1,16 +1,8 @@
 """
-Meesho returns and delivery OTPs, from the panel's Returns page.
-
-The sync worker (MeeshoReturnsJob, every 10 minutes) reads each return status
-— in transit, out for delivery, delivered, lost, disposed — and the couriers'
-delivery OTPs into snapshots. This module is the go-between: `normalize` turns
-each Meesho return into the row shape of the Returns export the Returns &
-Claims page imports, and `sync_account` writes them through that same importer
-(views.upsert_return_rows) — so a return synced and a return uploaded are the
-same row, and neither can overwrite claim work.
-
-The OTPs are served to Meesho → Returns & OTPs, across every business on the
-desk, straight from the last read.
+Meesho returns and delivery OTPs, from the panel's Returns page — the API of
+Meesho → Returns & OTPs. The sync worker (MeeshoReturnsJob) reads them into
+snapshots; the returns middleware (sync_middleware/returns.py) writes them into
+the returns table. The OTPs are served straight from the last read.
 """
 
 from django.db.models import Count
@@ -21,79 +13,8 @@ from rest_framework.response import Response
 
 from .models import MeeshoAccount, MeeshoSyncSnapshot, ReturnDelivery
 
-# Meesho's return status (its "shipment_status" filter) → the import kind, our
-# words for it, and the date field that closes it. Written in this order, so
-# a return that moved on between two reads ends in its latest state.
-STATUSES = [
-    ("intransit", "in_transit", "In transit"),
-    ("ofd_reverse", "in_transit", "Out for delivery"),
-    ("completed_lost", "lost", "Lost"),
-    ("reverse_disposed", "disposed", "Disposed"),
-    ("completed_delivered", "delivered", "Delivered"),
-]
-SNAPSHOT = "returns_{}"
-OTP_SNAPSHOT = "delivery_otps"
-RETURN_TYPES = {"RTO": "Courier Return (RTO)", "RET": "Customer Return"}
-
-
-def _v(x):
-    """A value as the importer wants it: None for missing, never ''."""
-    return x if x not in ("", None, {}, []) else None
-
-
-def normalize(r, meesho_status):
-    """One Meesho return (fetchReturnClaims data row) → a Returns export row."""
-    product = r.get("product") or {}
-    reasons = r.get("return_reason_details") or {}
-    attempt = r.get("ofd_reverse_attempt") or {}
-    pod = r.get("proof_of_delivery") or {}
-    row = {
-        "synced": True,
-        "suborder_no": _v(r.get("sub_order_num")), "order_no": _v(r.get("order_num")), "awb_number": _v(r.get("awb")),
-        "product_name": _v(product.get("name")), "sku": _v(product.get("sku")), "variation": _v(product.get("variation")),
-        "meesho_pid": _v(product.get("meesho_pid")), "category": _v(product.get("category")), "qty": product.get("quantity"),
-        "dispatch_date": _v(r.get("order_dispatch_date_iso")), "return_created_date": _v(r.get("created_date_iso")),
-        "type_of_return": RETURN_TYPES.get(r.get("type"), _v(r.get("type"))), "sub_type": _v(r.get("sub_type")),
-        "courier_partner": _v(r.get("carrier_name")), "tracking_link": _v(r.get("tracking_url")),
-        "return_price_type": _v(r.get("return_price_type")),
-        "return_reason": _v(reasons.get("return_reason")), "detailed_return_reason": _v(reasons.get("detailed_reason")),
-        "meesho_status": _v(r.get("shipment_status")),
-        "delivery_attempts": attempt.get("reverse_ofd_attempt_count_value"),
-    }
-    if meesho_status in ("intransit", "ofd_reverse"):
-        row.update({
-            "transit_status": "Out for delivery" if meesho_status == "ofd_reverse" else _v(r.get("shipment_status")),
-            "expected_delivery_date": _v(r.get("expected_delivery_date_iso")),
-            "delivery_attempt": _v(attempt.get("reverse_ofd_attempt_count_label")),
-        })
-    elif meesho_status == "completed_delivered":
-        row.update({
-            "delivered_date": _v(r.get("delivered_date_iso")),
-            "proof_of_delivery": _v(pod.get("digital_pod_url")) or _v(pod.get("label")),
-            "otp_verified_at": _v(pod.get("otp_verified_time")),
-        })
-    elif meesho_status == "completed_lost":
-        row.update({"closed_at": _v(r.get("lost_date_iso")), "meesho_note": _v(r.get("payment_status"))})
-    elif meesho_status == "reverse_disposed":
-        row["closed_at"] = _v(r.get("disposed_date_iso"))
-    return row
-
-
-def sync_account(account):
-    """Write the account's last-read returns into ReturnDelivery. Returns counts per status."""
-    from . import views
-    snaps = {s.endpoint: s for s in MeeshoSyncSnapshot.objects.filter(
-        account=account, endpoint__in=[SNAPSHOT.format(st) for st, _, _ in STATUSES])}
-    out = {}
-    now = timezone.now()
-    for meesho_status, kind, _label in STATUSES:
-        snap = snaps.get(SNAPSHOT.format(meesho_status))
-        if not snap or not isinstance(snap.payload, list):
-            continue
-        rows = [normalize(r, meesho_status) for r in snap.payload if isinstance(r, dict)]
-        out[meesho_status] = views.upsert_return_rows(account.business, rows, kind, now=now)
-    return out
-
+from .sync_middleware.returns import (OTP_SNAPSHOT, SNAPSHOT, STATUSES, normalize,  # noqa: F401 — the middleware
+                                     sync_account)
 
 # ── API: Meesho → Returns & OTPs ──────────────────────────────────────────────
 

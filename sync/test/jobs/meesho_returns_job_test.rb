@@ -52,7 +52,7 @@ class MeeshoReturnsJobTest < ActiveSupport::TestCase
     assert_match(/in transit 1, out for delivery 1, delivered 1, lost 1, disposed 1\. OTPs for 1 courier\./, run.message)
     snaps = MeeshoSyncSnapshot.where(account_id: account.id).pluck(:endpoint).sort
     assert_equal %w[delivery_otps returns_completed_delivered returns_completed_lost returns_intransit returns_ofd_reverse returns_reverse_disposed], snaps
-    assert_equal [["sync_meesho_returns", "--account", account.id]], @django
+    assert_equal [["meesho_inject", "--account", account.id, "--kind", "returns"]], @django
     # Delivered and lost are read for the last two weeks, as the panel shows them.
     assert_requested(:post, "#{BASE}fetchReturnClaims") { |r| JSON.parse(r.body)["filters"] == { "shipment_status" => "completed_delivered", "delivered_date" => { "value" => "last_2_week" } } }
     assert_requested(:post, "#{BASE}fetchReturnClaims", times: 5) { |r| r.headers["Identifier"] == "lffy4" && JSON.parse(r.body)["supplier_details"] == { "identifier" => "lffy4", "id" => 3564327 } }

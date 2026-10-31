@@ -111,6 +111,9 @@ class MeeshoInventoryJob
     end
 
     sheet = MeeshoStockSheet.mirror!(account, complete: left.zero? && failed.zero?)
+    # Django's response cache can't see these writes (Meesho Stock is cached
+    # like any page): this stamp, part of every cache key, tells it.
+    account.orders_changed_at = Time.current if stored.positive? || sheet.values.sum.positive?
 
     named = { "active" => "Active", "paused" => "Paused", "activation_pending" => "Activation pending", "blocked" => "Blocked" }
     message = named.filter_map { |k, label| "#{label} #{counts[k]}" if counts.key?(k) }.join(" · ")

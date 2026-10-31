@@ -60,14 +60,15 @@ class MeeshoReturnsJob
         save(account, "returns_#{st}", rows)
       end
       raise MeeshoClient::RequestError, "Meesho wouldn't hand over any returns: #{partial.values.first}" if read.empty?
-      written = DjangoCommand.run("sync_meesho_returns", "--account", account.id)
+      written = DjangoCommand.run("meesho_inject", "--account", account.id, "--kind", "returns")
       account.cookies = @client.cookies
       account.save!
       couriers = Array(otps["supplier_delivery_otp"]).size
       run.update!(result: { "read" => read.transform_values(&:size), "partial" => partial, "written" => written })
       counts = LABELS.filter_map { |st, label| "#{label} #{read[st].size}#{' (partial)' if partial[st]}" if read[st] }
       gone = LABELS.filter_map { |st, label| "#{label}: not read (#{partial[st]})" unless read[st] }
-      run.finish!(true, "Returns — #{counts.join(', ')}. #{gone.join('. ')}#{'. ' if gone.any?}" \
+      refused = written["rejected"].to_i.positive? ? "#{written['rejected']} refused (#{written['reject_reasons'].keys.join('; ')}). " : ""
+      run.finish!(true, "Returns — #{counts.join(', ')}. #{gone.join('. ')}#{'. ' if gone.any?}#{refused}" \
                         "OTPs for #{couriers} courier#{'s' unless couriers == 1}.", records: read.values.sum(&:size))
     rescue MeeshoClient::AuthError, MeeshoClient::RequestError, SecretBox::NotConfigured, DjangoCommand::Failed => e
       run.finish!(false, e.message)

@@ -202,6 +202,9 @@ def _ist_today():
     return _dt.datetime.now(ZoneInfo("Asia/Kolkata")).date()
 
 
+_NO_TXN = ("", "nan", "None", "none", "-")
+
+
 def _paid_txn(value):
     """Whether a sheet's transaction id is a real bank transfer (not blank/nan)."""
     v = safe_str(value)
@@ -248,7 +251,10 @@ def import_payment_workbook(business, xl):
         df = df[df["sub_order_no"].notna()]
         df = df[~df["sub_order_no"].astype(str).str.match(r"^[A-Z\s\(\)\+\-\*\/]+$")]
 
-        created = updated = unpaid = 0
+        created = updated = unpaid = superseded = 0
+        projections_cleared = set()
+        paid_dates = set()
+        written_no_txn = set()
         today = _ist_today()
         with transaction.atomic():
             for _, row in df.iterrows():
@@ -310,6 +316,30 @@ def import_payment_workbook(business, xl):
                 # alongside the main delivery row).
                 lookup_payment_date    = defaults.pop("payment_date")
                 lookup_live_status     = defaults.pop("live_order_status")
+                if _paid_txn(defaults.get("transaction_id")):
+                    if lookup_payment_date:
+                        paid_dates.add(lookup_payment_date)
+                    # A payment Meesho has made replaces what was only expected
+                    # of it: an outstanding sheet's rows for the order (no bank
+                    # transfer) would count it twice.
+                    if pk not in projections_cleared:
+                        projections_cleared.add(pk)
+                        superseded += OrderPayment.objects.filter(business=business, sub_order_no=pk).filter(
+                            DQ(transaction_id__isnull=True) | DQ(transaction_id__in=_NO_TXN)).delete()[0]
+                    # The same payment read again after the order's live status
+                    # moved on (Shipped → Delivered…) is that row, not a new one.
+                    same = (OrderPayment.objects.filter(
+                        business=business, sub_order_no=pk, payment_date=lookup_payment_date,
+                        transaction_id=defaults["transaction_id"], final_settlement_amount=defaults["final_settlement_amount"])
+                        .exclude(live_order_status=lookup_live_status).first())
+                    if same and not OrderPayment.objects.filter(business=business, sub_order_no=pk, payment_date=lookup_payment_date,
+                                                                live_order_status=lookup_live_status).exists():
+                        for k, v in defaults.items():
+                            setattr(same, k, v)
+                        same.live_order_status = lookup_live_status
+                        same.save()
+                        updated += 1
+                        continue
                 obj, was_created = OrderPayment.objects.update_or_create(
                     business=business,
                     sub_order_no=pk,
@@ -317,13 +347,22 @@ def import_payment_workbook(business, xl):
                     live_order_status=lookup_live_status,
                     defaults=defaults,
                 )
+                if not _paid_txn(defaults.get("transaction_id")):
+                    written_no_txn.add(obj.pk)            # this file's own row: never taken for a projection
                 if was_created:
                     created += 1
                 else:
                     updated += 1
         results["order_payments"] = {"created": created, "updated": updated}
+        # A payout this file shows as made: any row for that date with no bank
+        # transfer was only what an outstanding sheet expected.
+        if paid_dates:
+            superseded += OrderPayment.objects.filter(business=business, payment_date__in=paid_dates).filter(
+                DQ(transaction_id__isnull=True) | DQ(transaction_id__in=_NO_TXN)).exclude(pk__in=written_no_txn).delete()[0]
         if unpaid:
             results["order_payments"]["skipped_unpaid"] = unpaid
+        if superseded:
+            results["order_payments"]["projections_replaced"] = superseded
 
     # ── 2. Ads Cost ─────────────────────────────────────────────────────────
     if "Ads Cost" in xl.sheet_names:
@@ -6872,6 +6911,11 @@ def _process_labels_upload(request, business, pdf_bytes, upload_date_str, crop_l
                     updated += len(to_update)
 
                 per_business[owner.name] = len(owner_rows)
+                # bulk_create / bulk_update send no model signals: tell the
+                # response cache this business's labels changed (label counts,
+                # the day's packing list, the Overview).
+                from . import api_cache
+                api_cache.note_change(owner.pk)
 
     # ── Resolve parent NAME (ParentItemPrice.item_id) for each child SKU ─────────
     # Use the human parent name (not the surrogate parent_id) so the upload

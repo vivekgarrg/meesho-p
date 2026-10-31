@@ -1,34 +1,7 @@
-# The Meesho panel's order tabs (Fulfilment → Orders): reading them, and
-# bringing the app's own orders table up to date from them.
+# The Meesho panel's order tabs (Fulfilment → Orders): reading them. Bringing
+# the app's orders table up to date from them is the orders middleware's job
+# (Django: meesho_app/sync_middleware/orders.py).
 module PanelOrders
-  # Panel tab → the status the Orders CSV records for it.
-  STATUS = {
-    "hold" => "HOLD",
-    "pending" => "PENDING",
-    "ready-to-ship" => "READY_TO_SHIP",
-    "shipped" => "SHIPPED",
-    "cancelled" => "CANCELLED",
-  }.freeze
-
-  # How far along an order is. The panel's tabs only ever move an order
-  # forward; a status from an Orders CSV that is further on (DELIVERED, RTO…,
-  # RETURN…) is newer news than a panel tab still listing it, and is kept.
-  STAGE = { "HOLD" => 1, "PENDING" => 1, "READY_TO_SHIP" => 2, "SHIPPED" => 3 }.freeze
-  # Anything not listed above (DELIVERED, RTO_COMPLETE, RETURN…) is past shipping.
-  AFTER_SHIPPING = 4
-
-  def self.stage(status)
-    STAGE.fetch(status.to_s, status.present? ? AFTER_SHIPPING : 0)
-  end
-
-  # Whether the panel's status should replace the order's current one.
-  def self.moves_on?(current, panel)
-    # Listed live on the panel again: whatever cancelled it was wrong.
-    return true if current.blank? || current == "CANCELLED"
-    return stage(current) < AFTER_SHIPPING if panel == "CANCELLED"
-    stage(panel) >= stage(current)
-  end
-
   # Each order is kept with just these — no customer details.
   FIELDS = {
     "sub_order_num" => "sub_order_num", "order_num" => "order_num", "created_iso" => "created_iso",
@@ -100,58 +73,4 @@ module PanelOrders
     FIELDS.each_with_object({ "tab" => tab }) { |(from, to), out| out[to] = raw[from] if raw.key?(from) }
   end
 
-  def order_date(row)
-    Time.iso8601(row["created_iso"].to_s.sub(/([+-]\d\d)(\d\d)\z/, '\1:\2')).in_time_zone("Asia/Kolkata").to_date
-  rescue ArgumentError
-    nil
-  end
-
-  # Bring the orders table up to date from what the panel shows now, as an
-  # Orders CSV upload would: an order already in the table gets its details
-  # (SKU, size, quantity, product, packet ID) refreshed and — if its status
-  # moved on (see moves_on?) — a row for the new status; one that isn't there
-  # yet is added. Nothing is ever deleted. Returns { added:, status_changed:, updated: }.
-  def mirror!(business_id, rows)
-    stats = { added: 0, status_changed: 0, updated: 0 }
-    by_sub = rows.select { |r| r["sub_order_num"].present? }.index_by { |r| r["sub_order_num"] }
-    return stats if by_sub.empty?
-    existing = Order.where(business_id: business_id, sub_order_no: by_sub.keys).to_a.group_by(&:sub_order_no)
-    now = Time.current
-    Order.transaction do
-      by_sub.each do |sub, row|
-        status = STATUS[row["tab"]] or next
-        details = { sku: row["sku"].presence, size: row["variation"].presence, quantity: row["quantity"].presence,
-                    product_name: row["product_name"].presence, packet_id: row["packet_id"].presence }.compact
-        have = existing[sub] || []
-        if have.empty?
-          Order.create!(business_id: business_id, sub_order_no: sub, reason_for_credit_entry: status,
-                        order_date: order_date(row), order_source: "Meesho panel sync", **details,
-                        created_at: now, updated_at: now)
-          stats[:added] += 1
-          next
-        end
-        stale = have.reject { |o| details.all? { |k, v| o[k].to_s == v.to_s } }
-        stale.each { |o| o.update!(details) }
-        stats[:updated] += 1 if stale.any?
-        # The order's current status is its latest row — the same rule as
-        # Django's Order.latest_per_order (order_date, then created_at, then id).
-        latest = have.max_by { |o| [o.order_date || Date.new(1970), o.created_at || Time.at(0), o.id] }
-        next if latest.reason_for_credit_entry == status
-        next unless moves_on?(latest.reason_for_credit_entry, status)
-        day = latest.order_date || order_date(row)
-        if (back = have.find { |o| o.reason_for_credit_entry == status && o.order_date == day })
-          # Back to a status it had before on that date (the row is unique per
-          # status and date): that row becomes the latest again.
-          back.update_columns(created_at: now, updated_at: now)
-        else
-          Order.create!(business_id: business_id, sub_order_no: sub, reason_for_credit_entry: status,
-                        order_date: day, order_source: latest.order_source,
-                        catalog_id: latest.catalog_id, customer_state: latest.customer_state, **details,
-                        created_at: now, updated_at: now)
-        end
-        stats[:status_changed] += 1
-      end
-    end
-    stats
-  end
 end

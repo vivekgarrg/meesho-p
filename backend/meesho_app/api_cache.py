@@ -131,6 +131,39 @@ def note_change(business_id):
         bump(business_id)
 
 
+class deferred_bumps:
+    """
+    Collect every business a block of writes touches and invalidate each once
+    at the end — for imports that save thousands of rows (the Meesho sync's
+    middleware), where a bump per row would be thousands of cache writes.
+    Inside a request, the request's own end-of-request flush still applies.
+    `also` adds businesses written without model signals (bulk writes).
+    """
+
+    def __init__(self, *also):
+        self.also = {b for b in also if b}
+
+    def add(self, business_id):
+        if business_id:
+            self.also.add(business_id)
+
+    def __enter__(self):
+        self.outer = getattr(_state, "pending", None)
+        if self.outer is None:
+            _state.pending = set()
+        return self
+
+    def __exit__(self, *exc):
+        if self.outer is not None:
+            self.outer.update(self.also)
+            return False
+        touched = _state.pending | self.also
+        _state.pending = None
+        for business_id in touched:
+            bump(business_id)
+        return False
+
+
 def _on_model_change(sender, instance, **kwargs):
     note_change(getattr(instance, "business_id", None))
 

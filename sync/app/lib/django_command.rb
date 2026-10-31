@@ -17,9 +17,26 @@ module DjangoCommand
     JSON.parse(out.lines.reverse.find { |l| l.strip.start_with?("{") } || "{}")
   end
 
+  # The Python that runs the Django app: MEESHO_DJANGO_PYTHON, else the first
+  # candidate that can import Django — the app's virtualenv on the server; on a
+  # development machine, whichever python3 has Django installed (the worker's
+  # PATH may not find the same one a terminal does). Found once per process.
+  CANDIDATES = [".venv/bin/python", "venv/bin/python"].map { |p| File.join(BACKEND, p) } +
+               %w[python3 /Library/Frameworks/Python.framework/Versions/Current/bin/python3
+                  /opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/python3]
+
   def python
-    ENV["MEESHO_DJANGO_PYTHON"].presence ||
-      [File.join(BACKEND, ".venv/bin/python"), File.join(BACKEND, "venv/bin/python")].find { |p| File.executable?(p) } || "python3"
+    return ENV["MEESHO_DJANGO_PYTHON"] if ENV["MEESHO_DJANGO_PYTHON"].present?
+    @python ||= CANDIDATES.find { |p| has_django?(p) } ||
+                raise(Failed, "no Python with Django found — set MEESHO_DJANGO_PYTHON to the app's python")
+  end
+
+  def has_django?(python)
+    return false if python.include?("/") && !File.executable?(python)
+    _out, _err, st = Open3.capture3(python, "-c", "import django", chdir: BACKEND)
+    st.success?
+  rescue SystemCallError
+    false
   end
 
   # Django must write to the very database this worker uses — not whatever its
