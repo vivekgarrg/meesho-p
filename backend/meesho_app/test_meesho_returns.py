@@ -91,3 +91,52 @@ class ReturnsSyncTests(TestCase):
         self.assertEqual((o["courier"], o["otp"], o["shipments"], o["business_name"]), ("Delhivery", "7610", 4, "Cosmify"))
         self.assertEqual(len(o["awbs"]), 2)
         self.assertEqual((d["returns"]["out_for_delivery"], d["returns"]["in_transit"], d["returns"]["lost"]), (1, 0, 1))
+
+
+class ReturnsListAndScheduleTests(TestCase):
+    def setUp(self):
+        self.biz = Business.objects.create(name="Cosmify")
+        self.admin = User.objects.create_user(username="a", password="pw", role=User.ROLE_SUPER_ADMIN)
+        self.worker = User.objects.create_user(username="w", password="pw", role=User.ROLE_BUSINESS_USER)
+        for u in (self.admin, self.worker):
+            Membership.objects.create(user=u, business=self.biz)
+        MeeshoAccount.objects.create(business=self.biz, phone_number="9000000001", password_enc="x", status="ACTIVE",
+                                     supplier_id="1", supplier_identifier="x", sync_interval_minutes=5)
+        mk = lambda n, stage, **kw: ReturnDelivery.objects.create(business=self.biz, suborder_no=f"{n}_1", awb_number=f"AWB{n}",
+                                                                   stage=stage, sku=f"sku-{n}", courier_partner="Valmo", **kw)
+        mk(1, "IN_TRANSIT", transit_status="In Transit")
+        mk(2, "IN_TRANSIT", transit_status="Out for delivery", delivery_attempts=2)
+        mk(3, "DELIVERED", delivered_date="2026-10-30", claim_status="REQUIRED")
+        mk(4, "LOST", meesho_note="Settlement to be credited by 02 Nov 2026")
+        mk(5, "DISPOSED")
+
+    def client_for(self, user):
+        c = APIClient()
+        c.force_authenticate(user)
+        return c
+
+    def test_every_return_by_status(self):
+        url = f"/api/business/{self.biz.id}/meesho-orders/returns/list/"
+        c = self.client_for(self.worker)
+        got = {st: [r["suborder_no"] for r in c.get(url, {"stage": st}).data["returns"]]
+               for st in ("in_transit", "out_for_delivery", "delivered", "lost", "disposed")}
+        self.assertEqual(got, {"in_transit": ["1_1"], "out_for_delivery": ["2_1"], "delivered": ["3_1"], "lost": ["4_1"], "disposed": ["5_1"]})
+        d = c.get(url, {"stage": "delivered"}).data["returns"][0]
+        self.assertEqual((d["claim_status"], d["claim_label"], d["courier"]), ("REQUIRED", "Claim required", "Valmo"))
+        self.assertEqual(c.get(url, {"stage": "lost"}).data["returns"][0]["note"], "Settlement to be credited by 02 Nov 2026")
+        self.assertEqual(c.get(url, {"stage": "in_transit", "q": "nothing"}).data["total"], 0)
+        self.assertEqual(c.get(url, {"stage": "nope"}).status_code, 400)
+
+    def test_the_sync_schedule(self):
+        from .models import MeeshoSyncSetting
+        url = f"/api/business/{self.biz.id}/meesho-orders/sync-settings/"
+        d = self.client_for(self.worker).get(url).data
+        self.assertEqual((d["orders_every"], d["returns_every"], d["returns_window"]), (5, 10, "last_2_week"))
+        self.assertEqual(self.client_for(self.worker).patch(url, {"returns_every": 30}, format="json").status_code, 403)
+        a = self.client_for(self.admin)
+        d = a.patch(url, {"orders_every": 10, "returns_every": 0, "payments_paid_days": 45, "returns_window": "last_1_month"}, format="json").data
+        self.assertEqual((d["orders_every"], d["returns_every"], d["payments_paid_days"], d["returns_window"]), (10, 0, 45, "last_1_month"))
+        self.assertEqual(MeeshoAccount.objects.get().sync_interval_minutes, 10)      # every account's orders interval
+        for bad in ({"orders_every": 0}, {"inventory_sku_reads": 5000}, {"payments_upcoming_days": "x"}, {"returns_window": "forever"}):
+            self.assertEqual(a.patch(url, bad, format="json").status_code, 400, bad)
+        self.assertEqual(MeeshoSyncSetting.objects.count(), 1)

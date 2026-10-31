@@ -51,10 +51,16 @@ class MeeshoScheduleJob
     queue_every(now, MeeshoSyncRun::KIND_PAYMENTS, MeeshoPaymentsJob)
   end
 
+  # Minutes between reads of each kind, from the Sync schedule (0 = paused).
+  EVERY = { MeeshoSyncRun::KIND_INVENTORY => :inventory_every, MeeshoSyncRun::KIND_PAYMENTS => :payments_every,
+            MeeshoSyncRun::KIND_RETURNS => :returns_every }.freeze
+
   def queue_every(now, kind, job)
+    every = MeeshoSyncSetting.value(EVERY.fetch(kind), job::INTERVAL).to_i
+    return if every <= 0
     MeeshoAccount.where(sync_enabled: true, status: MeeshoAccount::STATUS_ACTIVE)
                  .where.not(supplier_id: "").where.not(supplier_identifier: "").find_each do |account|
-      recent = account.runs.where(kind: kind).where("queued_at > ?", now - job::INTERVAL.minutes).exists?
+      recent = account.runs.where(kind: kind).where("queued_at > ?", now - every.minutes).exists?
       next if recent
       run = account.runs.create!(kind: kind, trigger: MeeshoSyncRun::TRIGGER_SCHEDULE, status: "QUEUED", queued_at: now)
       job.perform_async(account.id, run.id, MeeshoSyncRun::TRIGGER_SCHEDULE)

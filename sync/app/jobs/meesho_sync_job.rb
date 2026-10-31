@@ -88,8 +88,9 @@ class MeeshoSyncJob
   # An endpoint pulled less often (`every:` minutes) whose snapshot is recent enough.
   def fresh?(account, ep)
     return false unless ep[:every]
+    every = ep[:orders_tab] == "shipped" ? MeeshoSyncSetting.value(:shipped_every, ep[:every]) : ep[:every]
     at = MeeshoSyncSnapshot.where(account_id: account.id, endpoint: ep[:key]).pick(:fetched_at)
-    at.present? && at > ep[:every].minutes.ago
+    at.present? && at > every.to_i.minutes.ago
   end
 
   # Every page of one endpoint. Meesho says on the first page how many orders

@@ -48,7 +48,10 @@ class MeeshoReturnsJob
       save(account, "delivery_otps", otps)
       read = {}
       partial = {}
+      window = MeeshoSyncSetting.value(:returns_window, "last_2_week")
       STATUSES.each do |st, extra|
+        # Delivered and lost: as far back as the Sync schedule says.
+        extra = extra.transform_values { |f| f.is_a?(Hash) && f.key?("value") ? f.merge("value" => window) : f }
         rows, problem = relogin(account) { returns(account, st, extra) }
         partial[st] = problem if problem
         # A status Meesho wouldn't hand over at all keeps its last read.

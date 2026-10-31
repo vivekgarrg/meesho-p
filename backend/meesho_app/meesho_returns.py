@@ -179,3 +179,63 @@ def returns_refresh(request, business_id):
     except SyncNotConfigured as exc:
         return Response({"error": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
     return Response({"queued": queued}, status=status.HTTP_202_ACCEPTED)
+
+
+# Meesho → Returns & OTPs → the returns table, one status at a time.
+LIST_STAGES = {
+    "in_transit": lambda qs: qs.filter(stage=ReturnDelivery.STAGE_IN_TRANSIT).exclude(transit_status="Out for delivery"),
+    "out_for_delivery": lambda qs: qs.filter(stage=ReturnDelivery.STAGE_IN_TRANSIT, transit_status="Out for delivery"),
+    "delivered": lambda qs: qs.filter(stage=ReturnDelivery.STAGE_DELIVERED),
+    "lost": lambda qs: qs.filter(stage=ReturnDelivery.STAGE_LOST),
+    "disposed": lambda qs: qs.filter(stage=ReturnDelivery.STAGE_DISPOSED),
+}
+LIST_ORDER = {
+    "in_transit": ("expected_delivery_date", "-return_created_date"),
+    "out_for_delivery": ("-delivery_attempts", "-return_created_date"),
+    "delivered": ("-delivered_date", "-id"),
+    "lost": ("-closed_at", "-id"),
+    "disposed": ("-closed_at", "-id"),
+}
+LIST_PAGE = 50
+
+
+@api_view(["GET"])
+def returns_list(request, business_id):
+    """
+    Every return in one status, for every business on this desk:
+    ?stage=in_transit|out_for_delivery|delivered|lost|disposed, ?q= (sub-order,
+    order, AWB, SKU, product, courier), ?business=, ?page=.
+    """
+    from django.db.models import Q
+    from .meesho_sync import _desk_accounts
+    business = _views().get_authorized_business(request, business_id)
+    desk, _accounts = _desk_accounts(request, business)
+    stage = request.GET.get("stage") or "in_transit"
+    if stage not in LIST_STAGES:
+        return Response({"error": "Unknown status."}, status=status.HTTP_400_BAD_REQUEST)
+    ids = [b.pk for b in desk]
+    if request.GET.get("business", "").isdigit() and int(request.GET["business"]) in ids:
+        ids = [int(request.GET["business"])]
+    qs = LIST_STAGES[stage](ReturnDelivery.objects.filter(business_id__in=ids)).select_related("business")
+    q = (request.GET.get("q") or "").strip()
+    if q:
+        qs = qs.filter(Q(suborder_no__icontains=q) | Q(order_no__icontains=q) | Q(awb_number__icontains=q) | Q(sku__icontains=q)
+                       | Q(product_name__icontains=q) | Q(courier_partner__icontains=q))
+    try:
+        page = max(1, int(request.GET.get("page") or 1))
+    except ValueError:
+        page = 1
+    total = qs.count()
+    rows = qs.order_by(*LIST_ORDER[stage])[(page - 1) * LIST_PAGE: page * LIST_PAGE]
+    return Response({"stage": stage, "total": total, "page": page, "page_size": LIST_PAGE, "returns": [{
+        "id": r.pk, "business_name": r.business.name, "suborder_no": r.suborder_no, "order_no": r.order_no,
+        "awb": r.awb_number, "sku": r.sku, "product": r.product_name, "variation": r.variation, "qty": r.qty,
+        "type": r.type_of_return, "sub_type": r.sub_type, "courier": r.courier_partner, "tracking_link": r.tracking_link,
+        "meesho_status": r.meesho_status or r.transit_status, "attempts": r.delivery_attempts or r.delivery_attempt or None,
+        "dispatch_date": r.dispatch_date, "created": r.return_created_date, "expected": r.expected_delivery_date,
+        "delivered": r.delivered_date, "closed_at": r.closed_at, "note": r.meesho_note,
+        "reason": r.return_reason, "detailed_reason": r.detailed_return_reason, "price_type": r.return_price_type,
+        "proof_of_delivery": r.proof_of_delivery, "otp_verified_at": r.otp_verified_at,
+        "claim_status": r.claim_status, "claim_label": r.get_claim_status_display(),
+        "synced_at": r.synced_at,
+    } for r in rows]})

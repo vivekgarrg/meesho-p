@@ -64,7 +64,9 @@ class MeeshoPaymentsJob
   private
 
   def pull(account)
-    summary = relogin(account) { MeeshoPayments.summary(@client, account, paid_days: PAID_DAYS, upcoming_days: UPCOMING_DAYS) }
+    @paid_days = MeeshoSyncSetting.value(:payments_paid_days, PAID_DAYS).to_i
+    @upcoming_days = MeeshoSyncSetting.value(:payments_upcoming_days, UPCOMING_DAYS).to_i
+    summary = relogin(account) { MeeshoPayments.summary(@client, account, paid_days: @paid_days, upcoming_days: @upcoming_days) }
     MeeshoSyncSnapshot.find_or_initialize_by(account_id: account.id, endpoint: "payments_summary")
                       .update!(http_status: 200, payload: summary, fetched_at: Time.current)
 
@@ -73,7 +75,7 @@ class MeeshoPaymentsJob
     # Downloads go to a folder of their own in the system's temp space, gone
     # afterwards whatever happens.
     Dir.mktmpdir("meesho-payments") do |dir|
-      files["completed"] = completed(account, today - PAID_DAYS, today, dir)
+      files["completed"] = completed(account, today - @paid_days, today, dir)
       files["outstanding"] = outstanding(account, today, dir)
     end
     { "files" => files }
@@ -96,7 +98,7 @@ class MeeshoPaymentsJob
     paths = []
     days = []
     stopped = nil
-    (0..UPCOMING_DAYS).each do |i|
+    (0..@upcoming_days).each do |i|
       day = today + i
       begin
         paths << fetch_file(account, "outstanding", day, day, dir)

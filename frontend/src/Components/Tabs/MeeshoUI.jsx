@@ -57,16 +57,18 @@ export function Panel({ title, subtitle, action, children, pad = true, style }) 
 }
 
 /** A KPI tile: the number, what it is, what to do about it. Clickable when it leads somewhere. */
-export function Kpi({ label, value, sub, tone = "neutral", onClick, icon }) {
+export function Kpi({ label, value, sub, tone = "neutral", onClick, icon, active = false }) {
   const t = TONE[tone] || TONE.neutral;
   const [hover, setHover] = useState(false);
   const Tag = onClick ? "button" : "div";
   return (
-    <Tag onClick={onClick} onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
+    <Tag onClick={onClick} aria-pressed={onClick ? active : undefined} onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
       style={{
         ...S.card, padding: "14px 16px", textAlign: "left", fontFamily: "inherit", minWidth: 0,
         display: "flex", flexDirection: "column", gap: 6, cursor: onClick ? "pointer" : "default",
-        border: `1px solid ${hover && onClick ? t.accent : C.gray200}`, boxShadow: hover && onClick ? "0 4px 14px rgba(15,23,42,.08)" : undefined,
+        border: `${active ? 2 : 1}px solid ${active || (hover && onClick) ? t.accent : C.gray200}`,
+        boxShadow: active ? `0 0 0 3px ${t.soft}` : hover && onClick ? "0 4px 14px rgba(15,23,42,.08)" : undefined,
+        background: active ? t.soft : C.white,
         transition: "border-color .15s, box-shadow .15s", position: "relative", overflow: "hidden",
       }}>
       <span style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 4, background: t.accent }} />

@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { Link } from "react-router-dom";
 import { API, C, S, btn, useIsMobile } from "../../App";
 import { CircularProgress } from "@mui/material";
-import { Panel, Kpi, StatusDot, num, ago } from "./MeeshoUI";
+import { Panel, Kpi, StatusDot, num, ago, dayLabel } from "./MeeshoUI";
 
 /*
  * Meesho → Returns & OTPs. The delivery OTP each courier needs to hand returns
@@ -64,6 +64,133 @@ function OtpCard({ o, now, highlight, showBiz }) {
   );
 }
 
+
+const STAGES = [
+  { key: "in_transit", label: "In transit", icon: "🚚", tone: () => "info", sub: "On their way back" },
+  { key: "out_for_delivery", label: "Out for delivery", icon: "📍", tone: (n) => (n ? "warn" : "neutral"), sub: "Expect them today — have the OTP ready" },
+  { key: "delivered", label: "Delivered", icon: "✅", tone: () => "good", sub: "Back with you — check and claim" },
+  { key: "lost", label: "Lost", icon: "❓", tone: (n) => (n ? "bad" : "neutral"), sub: "Meesho settles these" },
+  { key: "disposed", label: "Disposed", icon: "🗑", tone: () => "neutral", sub: "Not coming back" },
+];
+// The date that matters in each status, as a column.
+const KEY_DATE = {
+  in_transit: ["Expected back", (x) => x.expected], out_for_delivery: ["Expected back", (x) => x.expected],
+  delivered: ["Delivered", (x) => x.delivered], lost: ["Lost on", (x) => x.closed_at], disposed: ["Disposed on", (x) => x.closed_at],
+};
+const CLAIM_TONE = { NOT_REQUIRED: "neutral", UNREVIEWED: "warn", REQUIRED: "bad", RAISED: "info", APPROVED: "good", REJECTED: "bad" };
+
+function ReturnsTable({ stage, accounts, multi }) {
+  const isMobile = useIsMobile();
+  const [q, setQ] = useState("");
+  const [biz, setBiz] = useState("all");
+  const [page, setPage] = useState(1);
+  const [data, setData] = useState(null);
+  const [open, setOpen] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => { setPage(1); setOpen(null); }, [stage, q, biz]);
+  useEffect(() => {
+    let stop = false;
+    const t = setTimeout(async () => {
+      setLoading(true);
+      const p = new URLSearchParams({ stage, page: String(page) });
+      if (q.trim()) p.set("q", q.trim());
+      if (biz !== "all") p.set("business", biz);
+      const r = await fetch(`${API}/meesho-orders/returns/list/?${p}`).catch(() => null);
+      if (!stop && r?.ok) setData(await r.json());
+      if (!stop) setLoading(false);
+    }, q ? 250 : 0);
+    return () => { stop = true; clearTimeout(t); };
+  }, [stage, q, biz, page]);
+
+  const label = STAGES.find((s) => s.key === stage).label;
+  const [dateLabel, dateOf] = KEY_DATE[stage];
+  const pages = data ? Math.max(1, Math.ceil(data.total / data.page_size)) : 1;
+  const cols = ["Return", ...(multi && biz === "all" ? ["Business"] : []), "Product", "Courier", "Status", dateLabel, "Claim", ""];
+
+  return (
+    <Panel title={`${label} returns`} subtitle={data ? `${num(data.total)} return${data.total === 1 ? "" : "s"}${q ? ` matching “${q}”` : ""}` : "Loading…"} pad={false}
+      action={
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {multi && (
+            <select value={biz} onChange={(e) => setBiz(e.target.value)} style={{ ...S.inp, width: "auto", padding: "6px 10px" }}>
+              <option value="all">All businesses</option>
+              {accounts.map((a) => <option key={a.business_id} value={String(a.business_id)}>{a.business_name}</option>)}
+            </select>
+          )}
+          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search sub-order, AWB, SKU, courier…" aria-label="Search returns"
+            style={{ ...S.inp, width: isMobile ? "100%" : 240 }} />
+        </div>
+      }>
+      <div style={{ overflowX: "auto", opacity: loading ? 0.6 : 1, transition: "opacity .15s" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+          <thead><tr>{cols.map((h) => <th key={h} style={S.th}>{h}</th>)}</tr></thead>
+          <tbody>
+            {data && data.returns.length === 0 && (
+              <tr><td colSpan={cols.length} style={{ ...S.td, textAlign: "center", color: C.gray400, padding: 28 }}>
+                {q ? "Nothing matches that search." : `No ${label.toLowerCase()} returns.`}
+              </td></tr>
+            )}
+            {data?.returns.map((x) => {
+              const isOpen = open === x.id;
+              return (
+                <React.Fragment key={x.id}>
+                  <tr onClick={() => setOpen(isOpen ? null : x.id)} style={{ cursor: "pointer", background: isOpen ? C.gray50 : undefined }}>
+                    <td style={{ ...S.td, whiteSpace: "nowrap" }}>
+                      <div style={{ fontFamily: "monospace", fontWeight: 800 }}>{x.suborder_no}</div>
+                      <div style={{ fontSize: 11.5, color: C.gray500 }}>{x.type || "—"}{x.awb ? <> · <span style={{ fontFamily: "monospace" }}>{x.awb}</span></> : null}</div>
+                    </td>
+                    {multi && biz === "all" && <td style={S.td}>{x.business_name}</td>}
+                    <td style={{ ...S.td, maxWidth: 280 }}>
+                      <div style={{ fontFamily: "monospace", fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{x.sku || "—"}</div>
+                      <div style={{ fontSize: 11.5, color: C.gray500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{x.product}</div>
+                    </td>
+                    <td style={{ ...S.td, whiteSpace: "nowrap" }}>{x.courier || "—"}</td>
+                    <td style={{ ...S.td, whiteSpace: "nowrap" }}>
+                      {x.meesho_status || "—"}{x.attempts ? <div style={{ fontSize: 11.5, color: C.gray500 }}>{typeof x.attempts === "number" ? `${x.attempts} attempt${x.attempts === 1 ? "" : "s"}` : x.attempts}</div> : null}
+                    </td>
+                    <td style={{ ...S.td, whiteSpace: "nowrap" }}>{dayLabel(dateOf(x))}</td>
+                    <td style={{ ...S.td, whiteSpace: "nowrap" }}><StatusDot tone={CLAIM_TONE[x.claim_status] || "neutral"}>{x.claim_label}</StatusDot></td>
+                    <td style={{ ...S.td, color: C.gray400 }}>{isOpen ? "▾" : "▸"}</td>
+                  </tr>
+                  {isOpen && (
+                    <tr><td colSpan={cols.length} style={{ ...S.td, background: C.gray50, padding: "12px 16px" }}>
+                      <div style={{ display: "grid", gap: "8px 24px", gridTemplateColumns: isMobile ? "1fr" : "repeat(3, minmax(0, 1fr))", fontSize: 12.5 }}>
+                        {[
+                          ["Order", x.order_no], ["Variation · qty", `${x.variation || "—"} · ${x.qty}`], ["Return type", `${x.type || "—"}${x.sub_type ? ` (${x.sub_type})` : ""}`],
+                          ["Dispatched", dayLabel(x.dispatch_date)], ["Return created", dayLabel(x.created)], ["Expected back", dayLabel(x.expected)],
+                          ["Delivered back", dayLabel(x.delivered)], ["Lost / disposed", x.closed_at ? dayLabel(x.closed_at) : "—"], ["Price type", x.price_type || "—"],
+                          ["Reason", x.reason || "—"], ["Customer said", x.detailed_reason || "—"], ["Meesho note", x.note || "—"],
+                        ].map(([k, val]) => (
+                          <div key={k}><div style={{ fontSize: 11, fontWeight: 700, color: C.gray500, textTransform: "uppercase", letterSpacing: "0.04em" }}>{k}</div>
+                            <div style={{ color: C.gray800 }}>{val || "—"}</div></div>
+                        ))}
+                      </div>
+                      <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+                        {x.tracking_link && <a href={x.tracking_link} target="_blank" rel="noreferrer" style={{ ...btn("ghost", "sm"), textDecoration: "none" }}>Track with {x.courier || "courier"} ↗</a>}
+                        {x.proof_of_delivery && /^https?:/.test(x.proof_of_delivery) && <a href={x.proof_of_delivery} target="_blank" rel="noreferrer" style={{ ...btn("ghost", "sm"), textDecoration: "none" }}>Proof of delivery ↗</a>}
+                        <Link to="/returns" style={{ ...btn("ghost", "sm"), textDecoration: "none" }}>Claim in Returns &amp; Claims</Link>
+                        {x.synced_at && <span style={{ fontSize: 11.5, color: C.gray400, alignSelf: "center" }}>read from Meesho {ago(x.synced_at)}</span>}
+                      </div>
+                    </td></tr>
+                  )}
+                </React.Fragment>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      {data && data.total > data.page_size && (
+        <div style={{ padding: 10, display: "flex", gap: 8, justifyContent: "center", alignItems: "center", fontSize: 12.5 }}>
+          <button disabled={page <= 1} onClick={() => setPage(page - 1)} style={btn("ghost", "sm")}>‹ Previous</button>
+          Page {page} of {pages}
+          <button disabled={page >= pages} onClick={() => setPage(page + 1)} style={btn("ghost", "sm")}>Next ›</button>
+        </div>
+      )}
+    </Panel>
+  );
+}
+
 export function MeeshoReturnsTab() {
   const isMobile = useIsMobile();
   const [data, setData] = useState(null);
@@ -72,6 +199,7 @@ export function MeeshoReturnsTab() {
   const [now, setNow] = useState(() => new Date());
   const [note, setNote] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [stage, setStage] = useState("in_transit");
 
   const load = useCallback(async () => {
     const r = await fetch(`${API}/meesho-orders/returns/`).catch(() => null);
@@ -141,13 +269,14 @@ export function MeeshoReturnsTab() {
         )}
       </Panel>
 
-      <div style={{ display: "grid", gap: 12, gridTemplateColumns: isMobile ? "repeat(2, minmax(0, 1fr))" : "repeat(5, minmax(0, 1fr))" }}>
-        <Kpi icon="🚚" label="In transit" value={num(r.in_transit)} tone="info" sub="On their way back" />
-        <Kpi icon="📍" label="Out for delivery" value={num(r.out_for_delivery)} tone={r.out_for_delivery ? "warn" : "neutral"} sub="Expect them today — have the OTP ready" />
-        <Kpi icon="✅" label="Delivered" value={num(r.delivered)} tone="good" sub="Back with you — check and claim" />
-        <Kpi icon="❓" label="Lost" value={num(r.lost)} tone={r.lost ? "bad" : "neutral"} sub="Meesho settles these" />
-        <Kpi icon="🗑" label="Disposed" value={num(r.disposed)} tone="neutral" sub="Not coming back" />
+      <div role="tablist" aria-label="Returns by status" style={{ display: "grid", gap: 12, gridTemplateColumns: isMobile ? "repeat(2, minmax(0, 1fr))" : "repeat(5, minmax(0, 1fr))" }}>
+        {STAGES.map((st) => (
+          <Kpi key={st.key} icon={st.icon} label={st.label} value={num(r[st.key])} tone={st.tone(r[st.key])} sub={st.sub}
+            active={stage === st.key} onClick={() => setStage(st.key)} />
+        ))}
       </div>
+
+      <ReturnsTable stage={stage} accounts={data.accounts} multi={multi} />
 
       <Panel title="Last read from Meesho" pad={false}
         action={<Link to="/returns" style={{ ...btn("ghost", "sm"), textDecoration: "none" }}>Open Returns &amp; Claims</Link>}>

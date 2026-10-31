@@ -26,7 +26,7 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
 from .models import (MeeshoAccount, MeeshoAutoSetting, MeeshoCatalog, MeeshoLabelFile, MeeshoListing, MeeshoSyncRun,
-                     MeeshoSyncSnapshot)
+                     MeeshoSyncSetting, MeeshoSyncSnapshot)
 
 QUEUE_MANUAL = "critical"     # Refresh / login — ahead of the scheduled pulls
 LOGIN_JOB = "MeeshoLoginJob"
@@ -1393,3 +1393,69 @@ def meesho_account_login(request, business_id, account_business_id):
         return Response({"error": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
     return Response({"business_id": a.business_id, "status": a.status, "status_message": a.status_message},
                     status=status.HTTP_202_ACCEPTED)
+
+
+# ── Sync schedule: how often, and how much, each kind of data is read ─────────
+
+# field → (lowest, highest, 0 allowed = "off"). Kept modest: every read is
+# requests to Meesho, and it answers bursts with "too many requests".
+SYNC_LIMITS = {
+    "orders_every": (1, 60, False),
+    "shipped_every": (5, 240, False),
+    "inventory_every": (15, 1440, True),
+    "inventory_sku_reads": (50, 1000, False),
+    "payments_every": (30, 1440, True),
+    "payments_paid_days": (1, 90, False),
+    "payments_upcoming_days": (1, 14, False),
+    "returns_every": (5, 240, True),
+}
+
+
+def _sync_settings_json(s, accounts):
+    last = {}
+    for kind in (MeeshoSyncRun.KIND_SYNC, KIND_INVENTORY, KIND_PAYMENTS, KIND_RETURNS):
+        r = MeeshoSyncRun.objects.filter(account__in=accounts, kind=kind, status=MeeshoSyncRun.STATUS_OK).order_by("-finished_at").first()
+        last[kind.lower()] = r.finished_at if r else None
+    return {
+        **{f: getattr(s, f) for f in SYNC_LIMITS}, "returns_window": s.returns_window,
+        "limits": {f: {"min": lo, "max": hi, "off": off} for f, (lo, hi, off) in SYNC_LIMITS.items()},
+        "returns_windows": MeeshoSyncSetting.RETURN_WINDOWS, "last_read": last,
+        "updated_at": s.updated_at, "updated_by": s.updated_by.username if s.updated_by else None,
+    }
+
+
+@api_view(["GET", "PATCH"])
+def meesho_sync_schedule(request, business_id):
+    """
+    How often each kind of Meesho data is read and how much (MeeshoSyncSetting).
+    Admins change it: any of the fields, each checked against SYNC_LIMITS.
+    Orders' interval is written to every account (sync_interval_minutes).
+    """
+    v = _views()
+    business = v.get_authorized_business(request, business_id)
+    _desk, accounts = _desk_accounts(request, business)
+    s = MeeshoSyncSetting.get()
+    if request.method == "PATCH":
+        if not v._is_admin(request.user):
+            return Response({"error": "Only an admin can change the sync schedule."}, status=status.HTTP_403_FORBIDDEN)
+        d = request.data if isinstance(request.data, dict) else {}
+        for f, (lo, hi, off) in SYNC_LIMITS.items():
+            if f not in d:
+                continue
+            try:
+                n = int(d[f])
+            except (TypeError, ValueError):
+                return Response({"error": f"{f.replace('_', ' ')} must be a number."}, status=status.HTTP_400_BAD_REQUEST)
+            if not ((off and n == 0) or lo <= n <= hi):
+                return Response({"error": f"{f.replace('_', ' ')} must be between {lo} and {hi}{' (or 0 for off)' if off else ''}."},
+                                status=status.HTTP_400_BAD_REQUEST)
+            setattr(s, f, n)
+        if "returns_window" in d:
+            if d["returns_window"] not in MeeshoSyncSetting.RETURN_WINDOWS:
+                return Response({"error": "Pick how far back to read returns from the list."}, status=status.HTTP_400_BAD_REQUEST)
+            s.returns_window = d["returns_window"]
+        s.updated_by = request.user
+        s.save()
+        if "orders_every" in d:
+            MeeshoAccount.objects.update(sync_interval_minutes=s.orders_every)
+    return Response(_sync_settings_json(s, accounts))

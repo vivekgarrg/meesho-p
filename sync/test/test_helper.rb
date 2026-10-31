@@ -94,6 +94,13 @@ ActiveRecord::Schema.define do
     t.datetime :products_fetched_at
     t.index %i[account_id catalog_id], unique: true
   end
+  create_table :meesho_sync_settings do |t|
+    %i[orders_every shipped_every inventory_every inventory_sku_reads payments_every payments_paid_days
+       payments_upcoming_days returns_every].each { |c| t.integer c, null: false }
+    t.string :returns_window, null: false
+    t.integer :updated_by_id
+    t.datetime :updated_at, null: false
+  end
   create_table :meesho_auto_settings do |t|
     t.boolean :enabled, null: false, default: false
     t.integer :accept_every_minutes, null: false, default: 30
@@ -175,6 +182,7 @@ class ActiveSupport::TestCase
     MeeshoSyncSnapshot.delete_all
     MeeshoListing.delete_all
     MeeshoAutoSetting.delete_all
+    MeeshoSyncSetting.delete_all
     MeeshoStockRow.delete_all
     MeeshoCatalog.delete_all
     MeeshoSyncRun.delete_all

@@ -3346,6 +3346,37 @@ class MeeshoAutoSetting(models.Model):
         return cls.objects.order_by("pk").first() or cls.objects.create(label_times=["17:00"])
 
 
+class MeeshoSyncSetting(models.Model):
+    """
+    How often each kind of Meesho data is read, and how much of it — set on
+    Meesho → Settings → Sync schedule (one row). The sync worker reads it every
+    minute (MeeshoScheduleJob and each job); an interval of 0 pauses that read.
+    Orders' own interval is each account's sync_interval_minutes, which saving
+    here sets for every account.
+    """
+
+    RETURN_WINDOWS = ["last_2_week", "last_1_month"]
+
+    orders_every = models.PositiveIntegerField(default=5)
+    shipped_every = models.PositiveIntegerField(default=15)
+    inventory_every = models.PositiveIntegerField(default=30)
+    inventory_sku_reads = models.PositiveIntegerField(default=300)    # catalogs whose SKUs are read per run
+    payments_every = models.PositiveIntegerField(default=120)
+    payments_paid_days = models.PositiveIntegerField(default=30)
+    payments_upcoming_days = models.PositiveIntegerField(default=7)
+    returns_every = models.PositiveIntegerField(default=10)
+    returns_window = models.CharField(max_length=20, default="last_2_week")   # delivered / lost returns read for
+    updated_by = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "meesho_sync_settings"
+
+    @classmethod
+    def get(cls):
+        return cls.objects.order_by("pk").first() or cls.objects.create()
+
+
 class MeeshoLabelFile(models.Model):
     """
     A labels PDF ready to print: every business's labels from one Generate

@@ -8,6 +8,7 @@ import { MeeshoSyncTab } from "./MeeshoSyncTab";
 import { MeeshoPaymentsTab } from "./MeeshoPaymentsTab";
 import { MeeshoLinkingTab } from "./MeeshoLinkingTab";
 import { MeeshoReturnsTab } from "./MeeshoReturnsTab";
+import { SyncScheduleCard } from "./MeeshoSchedule";
 import { AutomationCard, LatestLabels } from "./MeeshoAutomation";
 import { MeeshoOverview } from "./MeeshoOverview";
 import { SessionAlerts, ReconnectDialog, AccountsHealth } from "./MeeshoAccounts";
@@ -180,6 +181,7 @@ export function MeeshoHubTab() {
         {tab === "settings" && (
           <div style={{ display: "flex", flexDirection: "column", gap: 16, maxWidth: 1100 }}>
             <AutomationCard />
+            <SyncScheduleCard isAdmin={overview.is_admin} />
             <Panel title="Meesho accounts" pad={false}
               subtitle="One Meesho supplier account per business. When a session expires, log in again here — the sync picks up straight after.">
               <AccountsHealth businesses={businesses} isAdmin={overview.is_admin} onReconnect={setReconnect} />

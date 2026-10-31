@@ -75,6 +75,7 @@ class MeeshoInventoryJob
                       .update!(http_status: 200, payload: counts, fetched_at: now)
 
     @fetched = 0
+    @calls_allowed = MeeshoSyncSetting.value(:inventory_sku_reads, PRODUCT_CALLS).to_i
     stored = 0
     left = 0
     failed = 0
@@ -85,7 +86,7 @@ class MeeshoInventoryJob
     due.each do |e|
       tabs = e[:tabs] & SELLABLE
       calls = tabs.count { |t| !e[:carried].key?(t) }
-      if @fetched + calls > PRODUCT_CALLS
+      if @fetched + calls > @calls_allowed
         left += 1
         next
       end
