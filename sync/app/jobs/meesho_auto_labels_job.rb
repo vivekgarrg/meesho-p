@@ -1,22 +1,20 @@
-# The daily Meesho run (config/schedule.yml), for every connected account:
+# The Meesho automation, as set on Meesho Orders → Accounts & sync
+# (MeeshoAutoSetting; MeeshoScheduleJob queues it), for every connected account:
 #
-#   every 30 min  "accept": accept every Pending order.
-#   5 PM IST      "labels": accept again, then have
-#                 Meesho make the labels of every Ready-to-ship order whose
-#                 label isn't downloaded yet. They share one batch, so they're on
-#                 Meesho Orders → Ready to ship as one "Download merged labels"
-#                 (one PDF, sorted by parent SKU).
-#
-# The 5 PM run does that slot's accepting itself, so the half-hourly accept
-# skips 5:00 — two accept requests at once would collide on Meesho.
+#   "accept": accept every Pending order — every N minutes.
+#   "labels": accept, then have Meesho make the labels of every Ready-to-ship
+#             order whose label isn't downloaded yet — at each label time. They
+#             share one batch; Django (meesho_save_labels) merges them into one
+#             PDF sorted by parent SKU and keeps it for Meesho Orders' "Latest
+#             labels" (Print / Download), since Meesho's own link expires.
 #
 # The same steps an admin takes on Meesho Orders (Accept, then Generate
-# labels), with the same jobs, run one after another. Off unless
-# MEESHO_AUTO_LABELS=true — so a development copy of the worker, logged in to
-# the same Meesho accounts, never accepts orders or makes labels.
+# labels), with the same jobs, run one after another — and one run at a time
+# (a labels run that finds an accept still going waits a minute).
 #
-# Sending the PDF to Telegram/email (Django: meesho_send_labels) is built but
-# not called for now.
+# The automation starts switched off: a development copy of the worker, logged
+# in to the same Meesho accounts but with its own database, does nothing until
+# someone switches it on there.
 class MeeshoAutoLabelsJob
   include Sidekiq::Job
   sidekiq_options queue: "critical", retry: false      # never accept or send twice by itself
@@ -24,38 +22,57 @@ class MeeshoAutoLabelsJob
   CHUNK = 500                                          # orders per accept / label request
   NOT_DOWNLOADED = [false, "Not Downloaded"].freeze
 
-  LABELS_AT = 17                                       # 5 PM IST — config/schedule.yml's meesho_auto_labels
-
-  # Whether now is the 5 PM labels run's slot (it accepts as well).
-  def self.labels_slot?(now = Time.current)
-    t = now.in_time_zone("Asia/Kolkata")
-    t.hour == LABELS_AT && t.min < 15
-  end
+  STEPS = %w[accept labels].freeze
+  LOCK_KEY = "meesho_auto:lock".freeze
+  LOCK_TTL = 45 * 60
 
   def self.enabled?
-    ENV["MEESHO_AUTO_LABELS"].to_s.strip.downcase.in?(%w[1 true yes on])
+    MeeshoAutoSetting.current&.enabled || false
   end
 
-  STEPS = %w[accept labels].freeze
-
   # step: "accept" (accept only) or "labels" (accept, then make the labels).
+  # force: run even with the automation off (by hand, from a console).
   # Returns one line per account saying what happened.
   def perform(step = "labels", force = false)
-    return unless force || self.class.enabled?
     raise ArgumentError, "unknown step #{step.inspect}" unless STEPS.include?(step)
-    return [] if step == "accept" && !force && self.class.labels_slot?
-    batch = "auto-#{Time.current.in_time_zone('Asia/Kolkata').strftime('%Y%m%d-%H%M')}-#{SecureRandom.hex(3)}"
-    summary = accounts.map do |account|
-      "#{account_name(account)}: #{run_account(account, batch, labels: step == 'labels')}"
-    rescue StandardError => e
-      Sidekiq.logger.error("MeeshoAutoLabelsJob #{account.id}: #{e.class}: #{e.message}")
-      "#{account_name(account)}: stopped — #{e.message.truncate(200)}"
+    return unless force || self.class.enabled?
+    unless lock
+      # One run at a time: labels wait for the accept to finish; an accept just skips.
+      self.class.perform_in(60, step, force) if step == "labels"
+      return
     end
-    Sidekiq.logger.info("MeeshoAutoLabelsJob #{step} #{batch}: #{summary.join(' | ')}")
-    summary
+    begin
+      batch = "auto-#{Time.current.in_time_zone('Asia/Kolkata').strftime('%Y%m%d-%H%M')}-#{SecureRandom.hex(3)}"
+      summary = accounts.map do |account|
+        "#{account_name(account)}: #{run_account(account, batch, labels: step == 'labels')}"
+      rescue StandardError => e
+        Sidekiq.logger.error("MeeshoAutoLabelsJob #{account.id}: #{e.class}: #{e.message}")
+        "#{account_name(account)}: stopped — #{e.message.truncate(200)}"
+      end
+      keep(batch, summary) if step == "labels"
+      Sidekiq.logger.info("MeeshoAutoLabelsJob #{step} #{batch}: #{summary.join(' | ')}")
+      summary
+    ensure
+      unlock
+    end
   end
 
   private
+
+  # Merge, sort and keep the run's labels for "Latest labels" (Django).
+  def keep(batch, summary)
+    DjangoCommand.run("meesho_save_labels", "--batch", batch, "--summary", summary.join("\n"))
+  rescue DjangoCommand::Failed => e
+    Sidekiq.logger.error("MeeshoAutoLabelsJob #{batch}: keeping the labels PDF failed: #{e.message}")
+  end
+
+  def lock
+    Sidekiq.redis { |r| r.call("SET", LOCK_KEY, jid.to_s, "NX", "EX", LOCK_TTL) } == "OK"
+  end
+
+  def unlock
+    Sidekiq.redis { |r| r.call("DEL", LOCK_KEY) }
+  end
 
   def accounts
     MeeshoAccount.where(status: MeeshoAccount::STATUS_ACTIVE).where.not(supplier_id: "").where.not(supplier_identifier: "").to_a
@@ -88,7 +105,7 @@ class MeeshoAutoLabelsJob
     todo.each_slice(CHUNK) do |chunk|
       run = account.runs.create!(kind: "LABELS", trigger: MeeshoSyncRun::TRIGGER_SCHEDULE, status: "QUEUED",
                                  records: chunk.sum { |g| g["sub_order_ids"].size }, result: { "batch" => batch },
-                                 message: "Generating labels (5 PM run)…")
+                                 message: "Generating labels (automatic run)…")
       MeeshoLabelJob.new.perform(account.id, run.id, chunk)
       run.reload
       labelled += run.records if run.status == "OK"

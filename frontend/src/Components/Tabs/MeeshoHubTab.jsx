@@ -6,6 +6,7 @@ import { MeeshoOrdersTab } from "./MeeshoOrdersTab";
 import { MeeshoLiveInventoryTab } from "./MeeshoLiveInventoryTab";
 import { MeeshoSyncTab } from "./MeeshoSyncTab";
 import { MeeshoPaymentsTab } from "./MeeshoPaymentsTab";
+import { AutomationCard, LatestLabels } from "./MeeshoAutomation";
 
 /*
  * Meesho — one place for everything the Meesho panel sync does: Orders,
@@ -179,6 +180,8 @@ export function MeeshoHubTab() {
         </div>
       )}
 
+      <LatestLabels />
+
       <div role="tablist" style={{ display: "flex", gap: 4, borderBottom: `2px solid ${C.gray200}`, overflowX: "auto" }}>
         {TABS.map((t) => {
           const on = tab === t.key;
@@ -205,6 +208,7 @@ export function MeeshoHubTab() {
                 Settings for the business on screen. Switch business at the top of the app to manage another one's Meesho account.
               </div>
             )}
+            <div style={{ marginBottom: 16 }}><AutomationCard /></div>
             <MeeshoSyncTab embedded />
           </>
         )}

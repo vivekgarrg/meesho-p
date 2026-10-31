@@ -3301,6 +3301,61 @@ class MeeshoSyncSnapshot(models.Model):
         unique_together = [("account", "endpoint")]
 
 
+class MeeshoAutoSetting(models.Model):
+    """
+    The Meesho automation, set on Meesho Orders → Accounts & sync (one row):
+    accept every pending order every `accept_every_minutes`, and make the
+    labels of every ready-to-ship order not downloaded yet at each of
+    `label_times` (IST, "HH:MM"). The sync worker's every-minute scheduler
+    reads it (MeeshoScheduleJob) and keeps last_*_at.
+    """
+
+    ACCEPT_CHOICES = [0, 15, 30, 60, 120, 240]
+
+    enabled = models.BooleanField(default=False)
+    accept_every_minutes = models.PositiveIntegerField(default=30)     # 0 = never accept by itself
+    label_times = models.JSONField(default=list, blank=True)           # ["17:00", …], IST
+    last_accept_at = models.DateTimeField(null=True, blank=True)
+    last_labels_at = models.DateTimeField(null=True, blank=True)
+    updated_by = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "meesho_auto_settings"
+
+    @classmethod
+    def get(cls):
+        return cls.objects.order_by("pk").first() or cls.objects.create(label_times=["17:00"])
+
+
+class MeeshoLabelFile(models.Model):
+    """
+    A labels PDF ready to print: every business's labels from one Generate
+    (or one automatic labels run), merged and sorted by parent SKU. Kept here
+    because Meesho's own links expire within the hour.
+    """
+
+    TRIGGER_AUTO = "AUTO"
+    TRIGGER_MANUAL = "MANUAL"
+
+    batch = models.CharField(max_length=64, unique=True)
+    trigger = models.CharField(max_length=10, default=TRIGGER_MANUAL)
+    business_ids = models.JSONField(default=list)
+    business_names = models.JSONField(default=list)
+    labels = models.PositiveIntegerField(default=0)
+    pages = models.PositiveIntegerField(default=0)
+    sorted = models.BooleanField(default=True)
+    summary = models.TextField(blank=True)
+    pdf = models.BinaryField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    KEEP = 30                     # the newest files kept; older ones are dropped
+
+    class Meta:
+        db_table = "meesho_label_files"
+        ordering = ["-created_at"]
+
+
 class MeeshoOutstandingPayment(models.Model):
     """
     An order payment Meesho has scheduled but not paid yet — the panel's

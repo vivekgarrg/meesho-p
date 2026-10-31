@@ -465,6 +465,11 @@ class CombinedBusinessesTests(TestCase):
         pages = PdfReader(__import__("io").BytesIO(base64.b64decode(r.data["sorted_pdf_b64"]))).pages
         self.assertEqual(len(pages), 2)                                 # both businesses, one file
         self.assertEqual(r.data["businesses"], ["Cosmify", "Rudam"])
+        # Kept, ready to print again once Meesho's links have expired.
+        from .models import MeeshoLabelFile
+        kept = MeeshoLabelFile.objects.get(batch=batch)
+        self.assertEqual((kept.trigger, kept.labels, kept.business_names), ("MANUAL", 2, ["Cosmify", "Rudam"]))
+        self.assertEqual(len(PdfReader(__import__("io").BytesIO(bytes(kept.pdf))).pages), 2)
 
     def test_refresh_pulls_every_combined_account(self):
         r = self.cl.post(self.base + "/refresh/")
@@ -748,38 +753,78 @@ class AutoLabelsSendTests(TestCase):
         self.acct = MeeshoAccount.objects.create(business=self.biz, phone_number="9000000001", password_enc="v1:x",
                                                  status="ACTIVE", supplier_id="3564327", supplier_identifier="lffy4")
 
-    def send(self, batch="auto-1", summary="Cosmify: 2 of 2 pending accepted"):
+    def save(self, batch="auto-1", summary="Cosmify: 2 of 2 pending accepted", send=False):
         from io import StringIO
         from django.core.management import call_command
         out = StringIO()
-        with mock.patch("meesho_app.notify.send", return_value={"telegram": "sent"}) as send:
-            call_command("meesho_send_labels", batch=batch, summary=summary, stdout=out)
-        return json.loads(out.getvalue()), send
+        with mock.patch("meesho_app.notify.send", return_value={"telegram": "sent"}) as notify_send:
+            call_command("meesho_save_labels", batch=batch, summary=summary, send=send, stdout=out)
+        return json.loads(out.getvalue()), notify_send
 
-    def test_no_new_labels_still_says_so(self):
-        out, send = self.send()
+    def test_no_new_labels_keeps_nothing_and_sends_nothing(self):
+        from .models import MeeshoLabelFile
+        out, notify_send = self.save()
         self.assertEqual(out["labels"], 0)
-        subject, text = send.call_args[0][:2]
-        self.assertIn("Meesho labels", subject)
-        self.assertIn("No new labels", text)
-        self.assertIn("2 of 2 pending accepted", text)
+        self.assertFalse(MeeshoLabelFile.objects.exists())
+        notify_send.assert_not_called()
 
-    def test_labels_are_merged_sorted_saved_and_sent_as_one_pdf(self):
-        from .models import LabelOrder
+    def test_labels_are_merged_sorted_saved_and_kept_ready_to_print(self):
+        from .models import LabelOrder, MeeshoLabelFile
         from .test_label_engine import make_labels_pdf
         MeeshoSyncRun.objects.create(account=self.acct, kind="LABELS", status="OK", records=2,
                                      result={"batch": "auto-1", "label_url": "https://storage.googleapis.com/a.pdf", "success": 2})
         MeeshoSyncRun.objects.create(account=self.acct, kind="LABELS", status="OK", result={"batch": "other", "label_url": "x"})
         pdf = make_labels_pdf([("lota-b", "2_1", "X"), ("lota-a", "1_1", "Y")])
         with mock.patch.object(meesho_sync, "_fetch_label_pdf", return_value=pdf) as fetch:
-            out, send = self.send()
+            out, notify_send = self.save()
         fetch.assert_called_once_with("https://storage.googleapis.com/a.pdf")          # only this run's batch
-        self.assertEqual(out["labels"], 2)
-        kwargs = send.call_args.kwargs
-        self.assertTrue(kwargs["data"].startswith(b"%PDF"))
-        self.assertTrue(kwargs["filename"].startswith("meesho-labels-"))
-        self.assertIn("sorted by parent SKU", send.call_args[0][1])
+        f = MeeshoLabelFile.objects.get()
+        self.assertEqual((out["file_id"], f.trigger, f.labels, f.sorted, f.business_names), (f.pk, "AUTO", 2, True, ["Cosmify"]))
+        self.assertTrue(bytes(f.pdf).startswith(b"%PDF"))
+        self.assertIn("2 of 2 pending accepted", f.summary)
         self.assertTrue(LabelOrder.objects.exists())                                # saved for Order Scan, as an upload would
+        notify_send.assert_not_called()                                              # sending is off unless asked
+        with mock.patch.object(meesho_sync, "_fetch_label_pdf", return_value=pdf):
+            _, notify_send = self.save(send=True)
+        self.assertTrue(notify_send.call_args.kwargs["data"].startswith(b"%PDF"))
+        self.assertEqual(MeeshoLabelFile.objects.count(), 1)                         # same batch: kept once
+
+    def test_the_automation_setting(self):
+        c = APIClient()
+        c.force_authenticate(self.admin)
+        Membership.objects.create(user=self.admin, business=self.biz)
+        url = f"/api/business/{self.biz.id}/meesho-orders/automation/"
+        d = c.get(url).data
+        self.assertEqual((d["enabled"], d["accept_every_minutes"], d["label_times"]), (False, 30, ["17:00"]))   # starts off
+        d = c.patch(url, {"enabled": True, "accept_every_minutes": 60, "label_times": ["9:05", "17:00", "17:00"]}, format="json").data
+        self.assertEqual((d["enabled"], d["accept_every_minutes"], d["label_times"]), (True, 60, ["09:05", "17:00"]))
+        self.assertIsNotNone(d["next_labels_at"])
+        self.assertEqual(c.patch(url, {"label_times": ["25:00"]}, format="json").status_code, 400)
+        self.assertEqual(c.patch(url, {"accept_every_minutes": 7}, format="json").status_code, 400)
+        worker = User.objects.create_user(username="w", password="pw", role=User.ROLE_BUSINESS_USER)
+        Membership.objects.create(user=worker, business=self.biz)
+        w = APIClient()
+        w.force_authenticate(worker)
+        self.assertEqual(w.get(url).status_code, 200)
+        self.assertEqual(w.patch(url, {"enabled": False}, format="json").status_code, 403)
+
+    def test_kept_labels_are_listed_and_served_to_print(self):
+        from .models import MeeshoLabelFile
+        Membership.objects.create(user=self.admin, business=self.biz)
+        other = Business.objects.create(name="Elsewhere")
+        mine = MeeshoLabelFile.objects.create(batch="b1", trigger="AUTO", business_ids=[self.biz.pk], business_names=["Cosmify"],
+                                              labels=3, pdf=b"%PDF-1.4 mine")
+        MeeshoLabelFile.objects.create(batch="b2", business_ids=[other.pk], business_names=["Elsewhere"], pdf=b"%PDF theirs")
+        c = APIClient()
+        c.force_authenticate(self.admin)
+        base = f"/api/business/{self.biz.id}/meesho-orders/label-files"
+        files = c.get(base + "/").data["files"]
+        self.assertEqual([f["id"] for f in files], [mine.pk])                       # only this desk's businesses
+        r = c.get(f"{base}/{mine.pk}/pdf/")
+        self.assertEqual((r["Content-Type"], r.content), ("application/pdf", b"%PDF-1.4 mine"))
+        self.assertTrue(r["Content-Disposition"].startswith("inline"))
+        self.assertTrue(c.get(f"{base}/{mine.pk}/pdf/?download=1")["Content-Disposition"].startswith("attachment"))
+        self.assertEqual(c.get(f"{base}/{mine.pk + 1}/pdf/").status_code, 404)        # not this desk's
 
     def test_telegram_and_email_go_out_where_set_up(self):
         from django.core import mail

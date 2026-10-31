@@ -94,6 +94,15 @@ ActiveRecord::Schema.define do
     t.datetime :products_fetched_at
     t.index %i[account_id catalog_id], unique: true
   end
+  create_table :meesho_auto_settings do |t|
+    t.boolean :enabled, null: false, default: false
+    t.integer :accept_every_minutes, null: false, default: 30
+    t.text :label_times                     # JSON
+    t.datetime :last_accept_at
+    t.datetime :last_labels_at
+    t.integer :updated_by_id
+    t.datetime :updated_at, null: false
+  end
   create_table :meesho_inventory do |t|
     t.integer :serial_no, null: false
     t.string :catalog_name, null: false
@@ -141,6 +150,11 @@ end
     def unlock(_account) = nil
   end
 end
+MeeshoAutoLabelsJob.class_eval do
+  private
+  def lock = true
+  def unlock = nil
+end
 MeeshoSyncJob.class_eval do
   private
   def lock(_account) = true
@@ -156,6 +170,7 @@ class ActiveSupport::TestCase
     Business.delete_all
     MeeshoSyncSnapshot.delete_all
     MeeshoListing.delete_all
+    MeeshoAutoSetting.delete_all
     MeeshoStockRow.delete_all
     MeeshoCatalog.delete_all
     MeeshoSyncRun.delete_all

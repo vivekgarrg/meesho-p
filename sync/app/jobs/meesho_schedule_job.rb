@@ -1,6 +1,7 @@
 # Runs every minute (config/schedule.yml): queues a pull for each account whose
 # interval (5 minutes by default) has passed since its last one, and an
-# inventory pull every half hour, and payments every two hours.
+# inventory pull every half hour, payments every two hours, and the
+# automation set on Meesho Orders (accept every N minutes, labels at set times).
 class MeeshoScheduleJob
   include Sidekiq::Job
   sidekiq_options queue: "default", retry: false
@@ -18,9 +19,25 @@ class MeeshoScheduleJob
     end
     queue_inventory(now)
     queue_payments(now)
+    queue_automation(now)
   end
 
   private
+
+  # The automation set on Meesho Orders (MeeshoAutoSetting): a labels run at
+  # each label time (it accepts first, so that slot needs no accept of its
+  # own), otherwise an accept every N minutes.
+  def queue_automation(now)
+    setting = MeeshoAutoSetting.current
+    return unless setting&.enabled
+    if setting.due_label_slot(now)
+      setting.update!(last_labels_at: now, last_accept_at: now)
+      MeeshoAutoLabelsJob.perform_async("labels")
+    elsif setting.accept_due?(now)
+      setting.update!(last_accept_at: now)
+      MeeshoAutoLabelsJob.perform_async("accept")
+    end
+  end
 
   # The Inventory page, every MeeshoInventoryJob::INTERVAL minutes.
   def queue_inventory(now)

@@ -25,7 +25,8 @@ from rest_framework import status
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
-from .models import MeeshoAccount, MeeshoCatalog, MeeshoListing, MeeshoSyncRun, MeeshoSyncSnapshot
+from .models import (MeeshoAccount, MeeshoAutoSetting, MeeshoCatalog, MeeshoLabelFile, MeeshoListing, MeeshoSyncRun,
+                     MeeshoSyncSnapshot)
 
 QUEUE_MANUAL = "critical"     # Refresh / login — ahead of the scheduled pulls
 LOGIN_JOB = "MeeshoLoginJob"
@@ -789,10 +790,12 @@ def _merge_pdfs(blobs):
     return buf.getvalue()
 
 
-def _sorted_labels_response(request, business, runs, file_name):
+def _sorted_labels_response(request, business, runs, file_name, batch):
     """Download each run's labels, merge them, and sort the lot by parent SKU
     exactly as the Labels tab sorts an upload (also saving them to the labels
-    table, as an upload does — so Order Scan has them)."""
+    table, as an upload does — so Order Scan has them). The sorted PDF is kept
+    (MeeshoLabelFile), ready to print again after Meesho's link has expired."""
+    import base64
     try:
         pdf = _merge_pdfs([_fetch_label_pdf(r.result["label_url"]) for r in runs])
     except Exception as exc:
@@ -804,7 +807,24 @@ def _sorted_labels_response(request, business, runs, file_name):
         response.data["sorted_pdf_b64"] = response.data.pop("cropped_pdf_b64", None)
         response.data["file_name"] = file_name
         response.data["businesses"] = sorted({r.account.business.name for r in runs})
+        if response.data["sorted_pdf_b64"]:
+            _save_label_file(batch, MeeshoLabelFile.TRIGGER_MANUAL, runs, base64.b64decode(response.data["sorted_pdf_b64"]),
+                             sorted_ok=True, pages=response.data.get("total_pages") or 0)
     return response
+
+
+def _save_label_file(batch, trigger, runs, pdf, sorted_ok, pages=0, summary=""):
+    """Keep a labels PDF ready to print (the newest MeeshoLabelFile.KEEP of them)."""
+    labels = sum(int((r.result or {}).get("success") or r.records or 0) for r in runs)
+    f, _ = MeeshoLabelFile.objects.update_or_create(batch=batch, defaults={
+        "trigger": trigger, "labels": labels, "pages": pages or 0, "sorted": sorted_ok, "summary": summary, "pdf": pdf,
+        "business_ids": sorted({r.account.business_id for r in runs}),
+        "business_names": sorted({r.account.business.name for r in runs}),
+    })
+    stale = list(MeeshoLabelFile.objects.order_by("-created_at").values_list("pk", flat=True)[MeeshoLabelFile.KEEP:])
+    if stale:
+        MeeshoLabelFile.objects.filter(pk__in=stale).delete()
+    return f
 
 
 @api_view(["POST"])
@@ -817,7 +837,7 @@ def meesho_orders_labels_batch_pdf(request, business_id, batch):
     if not runs:
         return Response({"error": "Those labels aren't ready."}, status=status.HTTP_404_NOT_FOUND)
     first = min(r.queued_at for r in runs)
-    return _sorted_labels_response(request, business, runs, f"meesho-labels-{timezone.localtime(first):%Y-%m-%d-%H%M}.pdf")
+    return _sorted_labels_response(request, business, runs, f"meesho-labels-{timezone.localtime(first):%Y-%m-%d-%H%M}.pdf", batch)
 
 
 @api_view(["POST"])
@@ -828,7 +848,8 @@ def meesho_orders_labels_pdf(request, business_id, run_id):
     run = MeeshoSyncRun.objects.filter(pk=run_id, kind=KIND_LABELS, account__in=accounts).select_related("account__business").first()
     if not run or not (run.result or {}).get("label_url"):
         return Response({"error": "Those labels aren't ready."}, status=status.HTTP_404_NOT_FOUND)
-    return _sorted_labels_response(request, business, [run], f"meesho-labels-{timezone.localtime(run.queued_at):%Y-%m-%d-%H%M}.pdf")
+    return _sorted_labels_response(request, business, [run], f"meesho-labels-{timezone.localtime(run.queued_at):%Y-%m-%d-%H%M}.pdf",
+                                   (run.result or {}).get("batch") or f"run-{run.pk}")
 
 
 # ── Meesho Inventory (live) ───────────────────────────────────────────────────
@@ -1105,3 +1126,111 @@ def meesho_payments_refresh(request, business_id):
     except SyncNotConfigured as exc:
         return Response({"error": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
     return Response({"queued": queued}, status=status.HTTP_202_ACCEPTED)
+
+
+# ── Automation and ready-to-print labels ──────────────────────────────────────
+
+_TIME = __import__("re").compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
+
+
+def _next_times(setting, now=None):
+    """When the worker will next accept and next make labels (IST), as it decides them."""
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+    ist = ZoneInfo("Asia/Kolkata")
+    now = (now or timezone.now()).astimezone(ist)
+    nxt_accept = None
+    if setting.enabled and setting.accept_every_minutes:
+        last = setting.last_accept_at.astimezone(ist) if setting.last_accept_at else None
+        nxt_accept = max(now, last + dt.timedelta(minutes=setting.accept_every_minutes)) if last else now
+    nxt_labels = None
+    if setting.enabled:
+        slots = []
+        for t in setting.label_times or []:
+            h, m = (int(x) for x in t.split(":"))
+            at = now.replace(hour=h, minute=m, second=0, microsecond=0)
+            slots.append(at if at > now else at + dt.timedelta(days=1))
+        nxt_labels = min(slots) if slots else None
+    return nxt_accept, nxt_labels
+
+
+def _automation_json(setting):
+    nxt_accept, nxt_labels = _next_times(setting)
+    return {
+        "enabled": setting.enabled, "accept_every_minutes": setting.accept_every_minutes,
+        "label_times": setting.label_times or [], "accept_choices": MeeshoAutoSetting.ACCEPT_CHOICES,
+        "last_accept_at": setting.last_accept_at, "last_labels_at": setting.last_labels_at,
+        "next_accept_at": nxt_accept, "next_labels_at": nxt_labels,
+        "updated_at": setting.updated_at, "updated_by": setting.updated_by.username if setting.updated_by else None,
+    }
+
+
+@api_view(["GET", "PATCH"])
+def meesho_automation(request, business_id):
+    """
+    The Meesho automation (one setting for every connected account): whether it
+    runs, how often pending orders are accepted, and when labels are made.
+    Admins change it: {enabled?, accept_every_minutes?, label_times?: ["17:00", …]}.
+    """
+    v = _views()
+    v.get_authorized_business(request, business_id)
+    setting = MeeshoAutoSetting.get()
+    if request.method == "PATCH":
+        if not v._is_admin(request.user):
+            return Response({"error": "Only an admin can change the automation."}, status=status.HTTP_403_FORBIDDEN)
+        d = request.data if isinstance(request.data, dict) else {}
+        if "enabled" in d:
+            setting.enabled = bool(d["enabled"])
+        if "accept_every_minutes" in d:
+            try:
+                every = int(d["accept_every_minutes"])
+            except (TypeError, ValueError):
+                every = -1
+            if every not in MeeshoAutoSetting.ACCEPT_CHOICES:
+                return Response({"error": "Pick how often to accept from the list."}, status=status.HTTP_400_BAD_REQUEST)
+            setting.accept_every_minutes = every
+        if "label_times" in d:
+            times = []
+            for t in d["label_times"] or []:
+                m = _TIME.match(str(t).strip())
+                if not m:
+                    return Response({"error": f"“{t}” isn't a time — use HH:MM, e.g. 17:00."}, status=status.HTTP_400_BAD_REQUEST)
+                times.append(f"{int(m.group(1)):02d}:{m.group(2)}")
+            if len(set(times)) > 8:
+                return Response({"error": "At most 8 label times a day."}, status=status.HTTP_400_BAD_REQUEST)
+            setting.label_times = sorted(set(times))
+        setting.updated_by = request.user
+        setting.save()
+    return Response(_automation_json(setting))
+
+
+def _label_files_for(accounts):
+    biz = {a.business_id for a in accounts}
+    return [f for f in MeeshoLabelFile.objects.defer("pdf")[:MeeshoLabelFile.KEEP] if biz & set(f.business_ids or [])]
+
+
+@api_view(["GET"])
+def meesho_label_files(request, business_id):
+    """The newest labels PDFs (automatic and generated), ready to print — for the businesses on this desk."""
+    business = _views().get_authorized_business(request, business_id)
+    _desk, accounts = _desk_accounts(request, business)
+    return Response({"files": [{
+        "id": f.pk, "created_at": f.created_at, "trigger": f.trigger, "labels": f.labels, "pages": f.pages,
+        "sorted": f.sorted, "businesses": f.business_names, "summary": f.summary,
+        "file_name": f"meesho-labels-{timezone.localtime(f.created_at):%Y-%m-%d-%H%M}.pdf",
+    } for f in _label_files_for(accounts)[:10]]})
+
+
+@api_view(["GET"])
+def meesho_label_file_pdf(request, business_id, file_id):
+    """One kept labels PDF — inline to print, or ?download=1 to save."""
+    from django.http import HttpResponse
+    business = _views().get_authorized_business(request, business_id)
+    _desk, accounts = _desk_accounts(request, business)
+    f = MeeshoLabelFile.objects.filter(pk=file_id).first()
+    if not f or not ({a.business_id for a in accounts} & set(f.business_ids or [])):
+        return Response({"error": "No such labels file."}, status=status.HTTP_404_NOT_FOUND)
+    name = f"meesho-labels-{timezone.localtime(f.created_at):%Y-%m-%d-%H%M}.pdf"
+    resp = HttpResponse(bytes(f.pdf), content_type="application/pdf")
+    resp["Content-Disposition"] = f'{"attachment" if request.GET.get("download") else "inline"}; filename="{name}"'
+    return resp
