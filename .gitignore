@@ -71,6 +71,7 @@ backend/frontend_build/
 
 # Written by deploy/hostinger/update.sh; per-machine, never committed.
 .deployed_sha
+.deploy_attempt
 
 # API response cache (meesho_app/api_cache.py)
 .api_cache/

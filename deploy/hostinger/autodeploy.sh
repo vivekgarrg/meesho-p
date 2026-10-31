@@ -54,18 +54,34 @@ trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
 
 git fetch --quiet origin main
 
-LOCAL="$(git rev-parse HEAD)"
+# What is actually serving: update.sh stamps .deployed_sha only once every
+# step succeeded. HEAD is no guide — update.sh moves it to origin/main before
+# building, so a deploy that failed half-way left HEAD current and was never
+# tried again, the old code serving on in silence.
+LOCAL="$(cat .deployed_sha 2>/dev/null || git rev-parse HEAD)"
 REMOTE="$(git rev-parse origin/main)"
 
 if [ "$LOCAL" = "$REMOTE" ]; then
   exit 0            # nothing new; stay silent so the log only shows real work
 fi
 
+# A deploy of this commit that failed is tried again every 15 minutes, not on
+# every tick (a full build every 2 minutes would only bury the log).
+ATTEMPT=".deploy_attempt"
+if [ "$(cut -d' ' -f1 "$ATTEMPT" 2>/dev/null)" = "$REMOTE" ] \
+   && [ -n "$(find "$ATTEMPT" -mmin -15 2>/dev/null)" ]; then
+  exit 0
+fi
+echo "$REMOTE $(stamp)" > "$ATTEMPT"
+
 echo "=================================================================="
 echo "$(stamp) deploying ${LOCAL:0:7} -> ${REMOTE:0:7}"
 git --no-pager log --oneline "$LOCAL..$REMOTE" | sed 's/^/    /'
 echo "=================================================================="
 
-bash deploy/hostinger/update.sh
+if ! bash deploy/hostinger/update.sh; then
+  echo "$(stamp) deploy of ${REMOTE:0:7} FAILED — still serving ${LOCAL:0:7}; trying again in 15 minutes"
+  exit 1
+fi
 
 echo "$(stamp) deployed ${REMOTE:0:7}"
