@@ -18,6 +18,8 @@ class MeeshoReturnsJob
   MAX_PAGES = 60
   LOCK_TTL = 15 * 60
   GAP = 1.5                      # seconds between page requests — Meesho answers 429 to bursts
+  RATE_WAIT = 20                 # seconds to wait when it does,
+  RATE_RETRIES = 2               # and how often before leaving that status for the next read
   LABELS = { "intransit" => "in transit", "ofd_reverse" => "out for delivery", "completed_delivered" => "delivered",
              "completed_lost" => "lost", "reverse_disposed" => "disposed" }.freeze
   # Meesho's status filter → extra filters the panel sends with it (delivered
@@ -100,22 +102,38 @@ class MeeshoReturnsJob
   # read so far otherwise — nothing is ever deleted on a partial read.
   def returns(account, status, extra)
     rows = []
-    cursor = nil
+    cursor = filter_cursor = nil
     MAX_PAGES.times do |page|
       sleep GAP if page.positive?
-      body = { screenType: "returns", size: PAGE_SIZE, page_pointer: nil, cursor: cursor, filter_cursor: nil,
-               filters: { "shipment_status" => status }.merge(extra),
-               supplier_details: { identifier: account.supplier_identifier, id: account.supplier_id.to_i },
-               identifier: account.supplier_identifier, child_supplier_identifier: nil, child_supplier_id: nil }
+      who = { supplier_details: { identifier: account.supplier_identifier, id: account.supplier_id.to_i },
+              identifier: account.supplier_identifier, child_supplier_identifier: nil, child_supplier_id: nil }
+      body = if page.zero?
+        { screenType: "returns", size: PAGE_SIZE, page_pointer: nil, cursor: nil, filter_cursor: nil,
+          filters: { "shipment_status" => status }.merge(extra) }.merge(who)
+      else
+        # The next page, as the panel asks for it: the page we're on and the
+        # one wanted, with both cursors the last page handed back — and no
+        # filters (they travel inside filter_cursor).
+        { screenType: "returns", size: PAGE_SIZE, page_pointer: page, cursor: cursor, filter_cursor: filter_cursor,
+          targetPage: page + 1 }.merge(who)
+      end
+      waits = 0
       begin
         res = @client.post("#{BASE}fetchReturnClaims", body: body, headers: headers(account, "returnTracking-#{status}")).body
       rescue MeeshoClient::RequestError => e
+        # "Too many requests": Meesho wants a pause, not a give-up.
+        if e.message.include?("HTTP 429") && waits < RATE_RETRIES
+          waits += 1
+          sleep RATE_WAIT
+          retry
+        end
         return [page.zero? ? nil : dedupe(rows), e.message.truncate(120)]
       end
       data = Array(res.is_a?(Hash) ? res["data"] : nil).select { |r| r.is_a?(Hash) }
       rows.concat(data)
       total = res.is_a?(Hash) ? res["total_pages"].to_i : 0
       nxt = res.is_a?(Hash) ? res["cursor"].presence : nil
+      filter_cursor = (res["filter_cursor"].presence if res.is_a?(Hash)) || filter_cursor
       break if data.empty? || nxt.nil? || nxt == cursor || (total.positive? && page + 1 >= total)
       cursor = nxt
     end
