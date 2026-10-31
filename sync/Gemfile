@@ -1,0 +1,14 @@
+source "https://rubygems.org"
+
+# The Meesho sync worker: Sidekiq jobs on a cron schedule, writing into the
+# same MySQL database the Django app uses (Django owns the schema).
+gem "rails", "~> 8.1.4"
+gem "trilogy", "~> 2.7"            # MySQL, no libmysqlclient needed
+gem "sidekiq", "~> 8.0"
+gem "sidekiq-cron", "~> 2.3"
+gem "tzinfo-data", platforms: %i[ windows jruby ]
+
+group :test do
+  gem "sqlite3", ">= 2.1"           # tests run on an in-memory database
+  gem "webmock", "~> 3.25"          # tests never reach the real Meesho
+end

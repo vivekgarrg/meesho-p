@@ -1,0 +1,25 @@
+# systemd service for the Meesho sync worker (Rails + Sidekiq, in sync/).
+# Copy to: /etc/systemd/system/meesho-sidekiq.service
+# Then:  sudo systemctl daemon-reload && sudo systemctl enable --now meesho-sidekiq
+# Needs Redis running (sudo apt install redis-server) and Ruby >= 3.2 + Bundler —
+# see sync/README.md. Reads the same .env as the Django app (DB_*, REDIS_URL,
+# MEESHO_SYNC_KEY).
+
+[Unit]
+Description=Meesho sync worker (Sidekiq)
+After=network.target redis-server.service
+
+[Service]
+User=deploy
+Group=www-data
+WorkingDirectory=/home/deploy/meesho-p/sync
+EnvironmentFile=/home/deploy/meesho-p/deploy/hostinger/.env
+Environment=RAILS_ENV=production
+Environment=BUNDLE_PATH=vendor/bundle
+Environment=BUNDLE_WITHOUT=test
+ExecStart=/usr/bin/env bundle exec sidekiq -C config/sidekiq.yml
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

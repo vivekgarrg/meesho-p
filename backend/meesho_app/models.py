@@ -376,15 +376,17 @@ class Order(models.Model):
     @classmethod
     def latest_per_order(cls, base_qs=None):
         """
-        Return one row per sub_order_no — the most recent entry by order_date
-        then created_at. Pass a filtered queryset as base_qs to pre-filter
-        (e.g. by date range) before deduplication.
+        Return one row per (business, sub_order_no) — its current status: the
+        most recent entry by order_date, then created_at, then id. The latest
+        row is chosen across all of the order's rows, so pre-filtering base_qs
+        (by date, status…) keeps an order only when its *current* row matches —
+        an order that has moved on from Ready to Ship never shows as one.
         """
         from django.db.models import OuterRef, Subquery
         qs = base_qs if base_qs is not None else cls.objects.all()
         latest_id = (
-            cls.objects.filter(sub_order_no=OuterRef("sub_order_no"))
-            .order_by("-order_date", "-created_at")
+            cls.objects.filter(business_id=OuterRef("business_id"), sub_order_no=OuterRef("sub_order_no"))
+            .order_by("-order_date", "-created_at", "-id")
             .values("id")[:1]
         )
         return qs.filter(id=Subquery(latest_id))
@@ -3192,3 +3194,108 @@ class OrderScanSetting(models.Model):
 
     def __str__(self):
         return f"Order scan for {self.user_id}: {self.business_ids or 'all'}"
+
+
+# ── Meesho API sync ───────────────────────────────────────────────────────────
+# The tables below are written by BOTH apps: Django (the login page, the
+# Refresh button) and the Rails/Sidekiq worker in sync/ (which logs in to the
+# Meesho supplier panel, keeps the session and pulls data on a schedule).
+# Django owns the schema — Rails maps onto these tables and never migrates.
+# Secrets are AES-256-GCM encrypted with MEESHO_SYNC_KEY (see meesho_sync.py and
+# sync/app/lib/secret_box.rb, which must agree on the format).
+
+class MeeshoAccount(models.Model):
+    """One business's Meesho supplier-panel login and its session."""
+
+    STATUS_NEW        = "NEW"          # saved, first login queued
+    STATUS_LOGGING_IN = "LOGGING_IN"
+    STATUS_ACTIVE     = "ACTIVE"       # session cookies held, sync running
+    STATUS_FAILED     = "FAILED"       # last login was refused — see status_message
+    STATUS_DISABLED   = "DISABLED"     # disconnected by an admin
+    STATUS_CHOICES = [(s, s.replace("_", " ").title()) for s in
+                      (STATUS_NEW, STATUS_LOGGING_IN, STATUS_ACTIVE, STATUS_FAILED, STATUS_DISABLED)]
+
+    business = models.OneToOneField("accounts.Business", on_delete=models.CASCADE, related_name="meesho_account")
+    phone_number = models.CharField(max_length=20)
+    password_enc = models.TextField(help_text="AES-GCM encrypted — never shown, never logged")
+    # What the panel's login form sends alongside the password. device_id is
+    # the phone number unless set; the other two identify the browser session.
+    device_id  = models.CharField(max_length=64, blank=True)
+    instance   = models.CharField(max_length=128, blank=True)
+    browser_id = models.CharField(max_length=128, blank=True)
+
+    cookies_enc = models.TextField(blank=True, help_text="Encrypted JSON of the session cookies")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_NEW)
+    status_message = models.TextField(blank=True)
+    supplier_id = models.CharField(max_length=64, blank=True)
+    supplier_name = models.CharField(max_length=255, blank=True)
+    # The supplier's short code in panel URLs (/fulfillment/<code>/orders) — the
+    # data APIs send it as the "identifier" header. Read from the login when it
+    # comes back there; an admin can set it by hand otherwise.
+    supplier_identifier = models.CharField(max_length=64, blank=True)
+    last_login_at = models.DateTimeField(null=True, blank=True)
+
+    sync_enabled = models.BooleanField(default=True)
+    sync_interval_minutes = models.PositiveIntegerField(default=5)
+    last_sync_at = models.DateTimeField(null=True, blank=True)
+    # When the sync worker last changed the orders table. The worker writes
+    # behind Django's back (no model signals), so the API response cache keys
+    # on this to drop answers computed before the change (api_cache).
+    orders_changed_at = models.DateTimeField(null=True, blank=True)
+    last_sync_status = models.CharField(max_length=20, blank=True)
+    last_sync_message = models.TextField(blank=True)
+
+    created_by = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "meesho_sync_accounts"
+
+    def __str__(self):
+        return f"Meesho {self.phone_number[-4:].rjust(10, '•')} for {self.business_id}"
+
+
+class MeeshoSyncRun(models.Model):
+    """One login or data pull — the history shown on the sync page."""
+
+    KIND_LOGIN = "LOGIN"
+    KIND_SYNC  = "SYNC"
+    TRIGGER_SCHEDULE = "SCHEDULE"
+    TRIGGER_MANUAL   = "MANUAL"
+    STATUS_QUEUED  = "QUEUED"
+    STATUS_RUNNING = "RUNNING"
+    STATUS_OK      = "OK"
+    STATUS_FAILED  = "FAILED"
+
+    account = models.ForeignKey(MeeshoAccount, on_delete=models.CASCADE, related_name="runs")
+    kind = models.CharField(max_length=10)
+    trigger = models.CharField(max_length=10, default=TRIGGER_SCHEDULE)
+    status = models.CharField(max_length=10, default=STATUS_QUEUED)
+    message = models.TextField(blank=True)
+    records = models.PositiveIntegerField(default=0)
+    # What a run produced, when it is more than a message — e.g. a label run's
+    # {"label_url", "success", "total"} from Meesho.
+    result = models.JSONField(null=True, blank=True)
+    queued_at = models.DateTimeField(auto_now_add=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "meesho_sync_runs"
+        ordering = ["-queued_at"]
+        indexes = [models.Index(fields=["account", "queued_at"], name="meesho_run_acct_idx")]
+
+
+class MeeshoSyncSnapshot(models.Model):
+    """The latest response from one Meesho endpoint, kept as returned."""
+
+    account = models.ForeignKey(MeeshoAccount, on_delete=models.CASCADE, related_name="snapshots")
+    endpoint = models.CharField(max_length=64)
+    http_status = models.PositiveIntegerField(default=0)
+    payload = models.JSONField(null=True, blank=True)
+    fetched_at = models.DateTimeField()
+
+    class Meta:
+        db_table = "meesho_sync_snapshots"
+        unique_together = [("account", "endpoint")]

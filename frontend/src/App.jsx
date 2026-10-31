@@ -45,6 +45,9 @@ import { MeeshoInventoryTab } from './Components/Tabs/MeeshoInventoryTab';
 import { MeeshoPricingTab } from './Components/Tabs/MeeshoPricingTab';
 import { ReturnScanTab } from './Components/Tabs/ReturnScanTab';
 import { OrderScanTab } from './Components/Tabs/OrderScanTab';
+import { ReturnDeskTab } from './Components/Tabs/ReturnDeskTab';
+import { MeeshoSyncTab } from './Components/Tabs/MeeshoSyncTab';
+import { MeeshoOrdersTab } from './Components/Tabs/MeeshoOrdersTab';
 import { ScanLookupTab } from './Components/Tabs/ScanLookupTab';
 import { ExtensionTab } from './Components/Tabs/ExtensionTab';
 import { BulkListingTab } from './Components/Tabs/BulkListingTab';
@@ -1215,7 +1218,7 @@ function AppShell() {
             business switches so it's never remounted, only its context value
             changes. Every tab reads the active range from useDateFilter(). */}
         {/* Order Scan is a live packing desk (its own noon-to-noon day), not a report — a period filter means nothing there. */}
-        {loc.pathname !== '/order-scan' && loc.pathname !== '/scan-lookup' && <GlobalDateFilterBar />}
+        {!['/order-scan', '/return-scan', '/scan-lookup', '/meesho-sync', '/meesho-orders'].includes(loc.pathname) && <GlobalDateFilterBar />}
         {/* key by active business + settlement mode so switching either remounts
             the routed view, forcing every tab (dashboard included) to refetch
             fresh data against the newly-set business-scoped API base / the
@@ -1238,6 +1241,9 @@ function AppShell() {
                 <Route path="/combined-dashboard" element={<CombinedDashboardTab />} />
                 <Route path="/orders" element={<OrdersTab />} />
                 <Route path="/order-scan" element={<OrderScanTab />} />
+                <Route path="/return-scan" element={<ReturnDeskTab />} />
+                <Route path="/meesho-sync" element={<MeeshoSyncTab />} />
+                <Route path="/meesho-orders" element={<MeeshoOrdersTab />} />
                 <Route path="/scan-lookup" element={<ScanLookupTab />} />
                 <Route path="/unsettled" element={<UnsettledOrdersTab />} />
                 <Route path="/payments" element={<PaymentsTab />} />

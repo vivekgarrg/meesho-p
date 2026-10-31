@@ -74,3 +74,6 @@ backend/frontend_build/
 
 # API response cache (meesho_app/api_cache.py)
 .api_cache/
+
+# Redis snapshot from a local redis-server
+dump.rdb

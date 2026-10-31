@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Start the Meesho sync worker (Sidekiq) — locally or on the server.
+# Settings come from the environment, else backend/.env (see config/application.rb).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+# Homebrew's Ruby on a Mac, when it's installed (the system Ruby is too old).
+[ -d /opt/homebrew/opt/ruby/bin ] && export PATH="/opt/homebrew/opt/ruby/bin:$PATH"
+exec bundle exec sidekiq -C config/sidekiq.yml "$@"

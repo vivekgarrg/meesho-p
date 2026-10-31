@@ -80,12 +80,16 @@ function buildColumns(dupeCounts) {
   },
   {
     field: "reason_for_credit_entry", headerName: "Status", width: 128,
-    renderCell: ({ value }) => {
+    // The order's current status; earlier ones (Pending → Ready to ship → …) on hover.
+    renderCell: ({ value, row }) => {
       const s = STATUS[value] || {};
-      return (
-        <Chip label={`${s.icon || ""} ${s.label || value || "—"}`} size="small"
+      const chip = (
+        <Chip label={`${s.icon || ""} ${s.label || value || "—"}${row.history?.length ? " ↺" : ""}`} size="small"
           sx={{ bgcolor: s.bg || C.gray100, color: s.color || C.gray600, fontWeight: 700, fontSize: 11, border: `1px solid ${s.border || C.gray200}` }} />
       );
+      return row.history?.length
+        ? <Tooltip title={row.history.map((h) => STATUS[h]?.label || h).join(" → ")} placement="top"><span>{chip}</span></Tooltip>
+        : chip;
     },
   },
   {

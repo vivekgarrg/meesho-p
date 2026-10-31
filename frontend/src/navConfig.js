@@ -13,6 +13,7 @@ export const NAV_GROUPS = [
     label: 'Analytics',
     color: '#A78BFA',
     items: [
+      { path: '/meesho-orders', label: 'Meesho Orders', icon: '📦' },
       { path: '/', label: 'Overview', icon: '◈', end: true },
       { path: '/combined-dashboard', label: 'Combined Dashboard', icon: '🧩' },
       { path: '/sku-analysis', label: 'SKU Analysis', icon: '↗' },
@@ -41,6 +42,7 @@ export const NAV_GROUPS = [
       // "Labels" below) covers the same job and is the one the sidebar shows.
       { path: '/bulk-labels', label: 'Labels', icon: '⊟' },
       { path: '/returns', label: 'Returns & Claims', icon: '⟲' },
+      { path: '/return-scan', label: 'Return Scan', icon: '⇲' },
       { path: '/claims', label: 'Claim Sheet', icon: '₹' },
       { path: '/tasks', label: 'Team Tasks', icon: '☑' },
       { path: '/employees', label: 'Employees', icon: '🧑‍💼' },
@@ -68,6 +70,7 @@ export const NAV_GROUPS = [
     color: '#FBBF24',
     items: [
       { path: '/upload', label: 'Upload Data', icon: '⇧' },
+      { path: '/meesho-sync', label: 'Meesho Sync', icon: '⟳' },
       { path: '/product-photos', label: 'AI Photos', icon: '✦' },
       { path: '/quadrant-cropper', label: 'Quadrant Cropper', icon: '✂️' },
       { path: '/extension', label: 'Browser Extension', icon: '⧉' },

@@ -4,6 +4,7 @@ from . import flipkart_views
 from . import api_cache
 from . import upload_cleanup
 from . import return_desk
+from . import meesho_sync
 from . import bulk_listing_views
 from . import listing_images_views
 from . import insights
@@ -176,6 +177,17 @@ urlpatterns = [
     path("returns/lookup/",             views.return_delivery_lookup,   name="return_delivery_lookup"),
     path("returns/<int:pk>/",           views.return_delivery_detail,   name="return_delivery_detail"),
     # Order scanning — log outgoing parcels at the desk and track their status
+    path("meesho-orders/",          meesho_sync.meesho_orders_dashboard, name="meesho_orders_dashboard"),
+    path("meesho-orders/accept/",   meesho_sync.meesho_orders_accept,   name="meesho_orders_accept"),
+    path("meesho-orders/labels/",   meesho_sync.meesho_orders_labels,   name="meesho_orders_labels"),
+    path("meesho-orders/labels/<int:run_id>/pdf/", meesho_sync.meesho_orders_labels_pdf, name="meesho_orders_labels_pdf"),
+    path("meesho-orders/labels/batch/<str:batch>/pdf/", meesho_sync.meesho_orders_labels_batch_pdf, name="meesho_orders_labels_batch_pdf"),
+    path("meesho-orders/refresh/",  meesho_sync.meesho_orders_refresh,  name="meesho_orders_refresh"),
+    path("meesho-sync/",            meesho_sync.meesho_sync_status,     name="meesho_sync_status"),
+    path("meesho-sync/connect/",    meesho_sync.meesho_sync_connect,    name="meesho_sync_connect"),
+    path("meesho-sync/refresh/",    meesho_sync.meesho_sync_refresh,    name="meesho_sync_refresh"),
+    path("meesho-sync/settings/",   meesho_sync.meesho_sync_settings,   name="meesho_sync_settings"),
+    path("meesho-sync/disconnect/", meesho_sync.meesho_sync_disconnect, name="meesho_sync_disconnect"),
     path("return-scan/queue/",      return_desk.return_scan_queue,    name="return_scan_queue"),
     path("return-scan/",            return_desk.return_scan_record,   name="return_scan_record"),
     path("return-scan/<int:pk>/",   return_desk.return_scan_delete,   name="return_scan_delete"),

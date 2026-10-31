@@ -21,3 +21,5 @@ requests>=2.31
 Pillow>=10.0
 # S3-compatible object storage (Cloudflare R2) for listing images.
 boto3>=1.34
+redis>=5,<7
+cryptography>=42

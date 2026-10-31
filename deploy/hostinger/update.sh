@@ -162,4 +162,21 @@ git -C "$REPO_ROOT" rev-parse HEAD > "$REPO_ROOT/.deployed_sha"
 echo "==> Restarting gunicorn service"
 sudo systemctl restart meesho
 
+echo "==> Meesho sync worker (Rails + Sidekiq)"
+# Optional, and never allowed to fail the deploy: until Ruby/Bundler and the
+# meesho-sidekiq service are set up on the box (sync/README.md), this skips.
+if [ -d "$REPO_ROOT/sync" ] && command -v bundle >/dev/null 2>&1; then
+    if ( cd "$REPO_ROOT/sync" && BUNDLE_PATH=vendor/bundle BUNDLE_WITHOUT=test bundle install --quiet ); then
+        if systemctl list-unit-files meesho-sidekiq.service 2>/dev/null | grep -q meesho-sidekiq; then
+            sudo systemctl restart meesho-sidekiq || echo "  could not restart meesho-sidekiq"
+        else
+            echo "  gems installed; meesho-sidekiq service not installed yet (see sync/README.md)"
+        fi
+    else
+        echo "  bundle install failed — the sync worker keeps running its previous version"
+    fi
+else
+    echo "  skipped — Ruby/Bundler not on this server yet (see sync/README.md)"
+fi
+
 echo "==> Done. $(sudo systemctl is-active meesho) at $(cat "$REPO_ROOT/.deployed_sha")"

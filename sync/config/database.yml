@@ -1,0 +1,23 @@
+# The worker reads and writes the Django app's database — the same DB_* values
+# from deploy/hostinger/.env. Django owns the schema: never run migrations here.
+default: &default
+  adapter: trilogy
+  encoding: utf8mb4
+  max_connections: <%= ENV.fetch("RAILS_MAX_THREADS") { 5 } %>
+  # Same fallbacks as the Django settings (meesho_project/settings.py), so both
+  # apps always open the same database.
+  host: <%= ENV.fetch("DB_HOST") { "localhost" } == "localhost" ? "127.0.0.1" : ENV["DB_HOST"] %>
+  port: <%= ENV.fetch("DB_PORT") { 3306 } %>
+  username: <%= ENV.fetch("DB_USER") { "root" } %>
+  password: <%= ENV.fetch("DB_PASSWORD") { "root" } %>
+  database: <%= ENV.fetch("DB_NAME") { "meesho_profit" } %>
+
+development:
+  <<: *default
+
+production:
+  <<: *default
+
+test:
+  adapter: sqlite3
+  database: ":memory:"

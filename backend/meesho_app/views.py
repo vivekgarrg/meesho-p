@@ -5799,7 +5799,12 @@ def upload_orders_csv(request, business_id):
 
 @api_view(["GET"])
 def full_orders_list(request, business_id):
-    """Paginated list of Order rows with date/status/sku/state/search/month filters."""
+    """
+    Paginated list of orders — one row per sub-order, at its current status
+    (Order.latest_per_order) — with date/status/sku/state/search/month filters.
+    Each row carries the statuses it went through ("history") when there was
+    more than one, oldest first.
+    """
     business = get_authorized_business(request, business_id)
     page      = int(request.GET.get("page", 1))
     page_size = int(request.GET.get("page_size", 50))
@@ -5822,7 +5827,7 @@ def full_orders_list(request, business_id):
         except (ValueError, IndexError):
             pass
 
-    qs = Order.objects.filter(business=business)
+    qs = Order.latest_per_order(base_qs=Order.objects.filter(business=business))
     if status_filter:
         qs = qs.filter(reason_for_credit_entry__iexact=status_filter)
     if sku_filter:
@@ -5842,12 +5847,22 @@ def full_orders_list(request, business_id):
 
     total = qs.count()
     start = (page - 1) * page_size
-    items = qs[start: start + page_size]
+    items = list(qs.order_by("-order_date", "-id")[start: start + page_size])
+    history = {}
+    for sub, st in (Order.objects.filter(business=business, sub_order_no__in=[o.sub_order_no for o in items])
+                    .order_by("order_date", "created_at", "id").values_list("sub_order_no", "reason_for_credit_entry")):
+        h = history.setdefault(sub, [])
+        if not h or h[-1] != st:
+            h.append(st)
+    results = OrderSerializer(items, many=True).data
+    for r in results:
+        h = history.get(r["sub_order_no"], [])
+        r["history"] = h if len(h) > 1 else []
     return Response({
         "total": total,
         "page": page,
         "page_size": page_size,
-        "results": OrderSerializer(items, many=True).data,
+        "results": results,
     })
 
 

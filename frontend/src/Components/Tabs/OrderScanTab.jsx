@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { API, C, S, btn, Tag, useIsMobile } from "../../App";
 import { BarcodeScanner } from "../shared/BarcodeScanner";
-import { PlatformToggle, useLabelPlatform } from "../PlatformToggle";
 import { CourierSummary } from "./CourierSummary";
 import QrCodeScannerIcon from "@mui/icons-material/QrCodeScanner";
 import RefreshIcon from "@mui/icons-material/Refresh";
@@ -51,7 +50,7 @@ function packingDayISO() {
   const p = (n) => String(n).padStart(2, "0");
   return `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}`;
 }
-const fmtDay = (iso) => (iso ? new Date(`${iso}T00:00:00`).toLocaleDateString("en-IN", { day: "2-digit", month: "short" }) : "");
+export const fmtDay = (iso) => (iso ? new Date(`${iso}T00:00:00`).toLocaleDateString("en-IN", { day: "2-digit", month: "short" }) : "");
 function dayLabel(iso, current) {
   if (!iso) return "";
   if (iso === current) return `Today · ${fmtDay(iso)} (from 12 pm)`;
@@ -61,9 +60,9 @@ function dayLabel(iso, current) {
   return iso === prevIso ? `Previous day · ${fmtDay(iso)}` : fmtDay(iso);
 }
 
-const fmtTime = (iso) => (iso ? new Date(iso).toLocaleString("en-IN", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }) : "—");
+export const fmtTime = (iso) => (iso ? new Date(iso).toLocaleString("en-IN", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }) : "—");
 
-function Photo({ url, size = 48, radius = 8 }) {
+export function Photo({ url, size = 48, radius = 8 }) {
   const [broken, setBroken] = useState(false);
   useEffect(() => setBroken(false), [url]);
   const box = {
@@ -103,7 +102,7 @@ function useScanDesk(platform) {
   const setMode = (m) => { setModeState(m); try { localStorage.setItem("scan_mode", m); } catch { /* ignore */ } };
 
   const load = useCallback(async () => {
-    const p = new URLSearchParams({ platform });
+    const p = new URLSearchParams();
     if (picked) p.set("date", picked);
     try {
       const res = await fetch(`${API}/order-scan/queue/?${p}`);
@@ -144,7 +143,7 @@ function useScanDesk(platform) {
         // Following today: let the server's own noon cut-off decide the day, so a
         // device clock a minute off around 12 pm can't misfile a scan. A day
         // picked by hand is sent as-is.
-        body: JSON.stringify({ code, status: mode, platform, day: picked || undefined }),
+        body: JSON.stringify({ code, status: mode, day: picked || undefined }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -183,13 +182,13 @@ function useScanDesk(platform) {
         lines.push("The panel still lists it as ready to ship.");
       }
       if (data.earlier_day) {
-        lines.push(`From ${fmtDay(data.earlier_day.day)}'s list — not on today's. Add it to today's list below.`);
+        lines.push(`From ${fmtDay(data.earlier_day.day)}'s list — not on today's.`);
         if (kind === "ok") { kind = "warn"; title = `${title} · earlier day's order`; }
         setAsks((a) => (a.some((x) => x.order_id === data.earlier_day.order_id && x.business_id === data.earlier_day.business_id)
           ? a : [...a, { ...data.earlier_day, sku: row.sku, qty: row.qty, courier: row.courier_name }]));
       }
       if (data.cross_business) lines.push(`Filed under ${data.business_name}`);
-      if (row.platform && row.platform !== platform) lines.push(`${row.platform === "flipkart" ? "Flipkart" : "Meesho"} parcel`);
+      if (row.platform === "flipkart") lines.push("Flipkart parcel");
 
       const out = { kind, title, lines, code: row.sub_order_no, image_url: item?.image_url };
       if (my === seq.current) setLatest(out);
@@ -223,6 +222,18 @@ function useScanDesk(platform) {
     return data;
   };
   const dismissAsks = () => setAsks([]);
+  /** No to "add to today's batch?": the scan counts on the order's own day instead. */
+  const keepEarlier = async (items) => {
+    const res = await fetch(`${API}/order-scan/shift/`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ keep: true, items: items.map((i) => ({ business_id: i.business_id, order_id: i.order_id })) }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) return { error: data.error || "Could not keep those orders on their day." };
+    setAsks((a) => a.filter((x) => !items.some((i) => i.order_id === x.order_id && i.business_id === x.business_id)));
+    await load();
+    return data;
+  };
 
   /** Admin: file a scan nothing recognised under a courier, so it counts there. */
   const assignCourier = async (scanId, courier) => {
@@ -262,19 +273,19 @@ function useScanDesk(platform) {
   const currentDay = queue?.current_day || packingDayISO();
   const backToToday = () => setPicked("");
   const startToday = () => setPicked(currentDay);
-  return { date, setDate, following, currentDay, backToToday, startToday, queue, loading, mode, setMode, latest, busy, error, setError, record, reload: load, setStatusByHand, shiftOrders, assignCourier, asks, addEarlier, dismissAsks };
+  return { date, setDate, following, currentDay, backToToday, startToday, queue, loading, mode, setMode, latest, busy, error, setError, record, reload: load, setStatusByHand, shiftOrders, assignCourier, asks, addEarlier, dismissAsks, keepEarlier };
 }
 
 // ── Pieces ────────────────────────────────────────────────────────────────────
 
-const KIND_STYLE = {
+export const KIND_STYLE = {
   ok:   { bg: C.greenLight, border: C.greenBorder, fg: C.green, mark: "✓" },
   warn: { bg: C.amberLight, border: C.amberBorder, fg: "#92400E", mark: "!" },
   err:  { bg: C.redLight,   border: C.redBorder,   fg: C.red,   mark: "✕" },
 };
 
 /** One fixed-size panel for the last scan — it changes in place, so nothing jumps. */
-function LatestPanel({ latest, busy, minHeight = 130 }) {
+export function LatestPanel({ latest, busy, minHeight = 130, idle }) {
   const k = latest ? KIND_STYLE[latest.kind] : null;
   return (
     <div role="status" aria-live="polite" style={{
@@ -296,13 +307,37 @@ function LatestPanel({ latest, busy, minHeight = 130 }) {
           </div>
         </>
       ) : (
-        <div style={{ fontSize: 14, color: C.gray500, fontWeight: 600 }}>Scan a parcel — what it is and whether it's good to go shows here.</div>
+        <div style={{ fontSize: 14, color: C.gray500, fontWeight: 600 }}>{idle || "Scan a parcel — what it is and whether it's good to go shows here."}</div>
       )}
     </div>
   );
 }
 
-function ItemRow({ item, compact, showBusiness, admin, selecting, selected, onToggle, onSetStatus, onMoveBack }) {
+/** Admin: move one order to any packing day — forwards or back. */
+function MoveDay({ maxDay, onMove }) {
+  const [open, setOpen] = useState(false);
+  const [day, setDay] = useState("");
+  const [busy, setBusy] = useState(false);
+  if (!open) {
+    return (
+      <button onClick={(e) => { e.stopPropagation(); setOpen(true); }} className="os-btn"
+        style={{ border: "none", background: "none", padding: "2px 0", fontSize: 11.5, fontWeight: 800, color: C.gray500, cursor: "pointer", textDecoration: "underline" }}>
+        📅 Move
+      </button>
+    );
+  }
+  return (
+    <span onClick={(e) => e.stopPropagation()} style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
+      <input type="date" value={day} max={maxDay} onChange={(e) => setDay(e.target.value)} aria-label="Move to day" className="os-in"
+        style={{ ...S.inp, padding: "3px 6px", fontSize: 12, width: 132 }} />
+      <button disabled={!day || busy} className="os-btn" onClick={async () => { setBusy(true); await onMove(day); setBusy(false); setOpen(false); }}
+        style={{ ...btn("primary", "sm"), padding: "4px 8px", opacity: !day || busy ? 0.5 : 1 }}>{busy ? "…" : "Move"}</button>
+      <button onClick={() => setOpen(false)} className="os-btn" style={{ ...btn("ghost", "sm"), padding: "4px 8px" }}>✕</button>
+    </span>
+  );
+}
+
+function ItemRow({ item, compact, showBusiness, admin, selecting, selected, onToggle, onSetStatus, onMoveBack, onMoveTo, maxDay }) {
   const bucket = bucketOf(item);
   // The badge says where the order is now, not just the last thing scanned.
   const st = bucket === "shipped" ? { label: "Shipped", tag: "green" }
@@ -325,6 +360,9 @@ function ItemRow({ item, compact, showBusiness, admin, selecting, selected, onTo
         <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
           <span style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 14.5, color: C.gray900, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.sku || "—"}</span>
           <span style={{ fontFamily: "monospace", fontWeight: 900, fontSize: 12.5, color: C.orange, background: C.orangeLight, borderRadius: 6, padding: "1px 6px", flexShrink: 0 }}>×{item.qty}</span>
+          {item.platform === "flipkart" && (
+            <span style={{ fontSize: 10.5, fontWeight: 900, color: "#1D4ED8", background: "#EFF6FF", border: "1px solid #BFDBFE", borderRadius: 6, padding: "0 5px", flexShrink: 0 }}>Flipkart</span>
+          )}
         </div>
         <div style={{ fontSize: 12.5, color: C.gray600, marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {item.courier && <span style={{ fontWeight: 800, color: courierTone(item.courier).fg, background: courierTone(item.courier).bg,
@@ -350,6 +388,7 @@ function ItemRow({ item, compact, showBusiness, admin, selecting, selected, onTo
             {Object.entries(STATE_META).map(([k, m]) => <option key={k} value={k}>{m.label}</option>)}
           </select>
         ) : <Tag variant={st.tag}>{st.label}</Tag>}
+        {admin && !selecting && onMoveTo && <MoveDay maxDay={maxDay} onMove={onMoveTo} />}
         {(item.state !== "PENDING" || cancelled) && item.ship_status !== "UNKNOWN" && bucket !== "shipped" && bucket !== "returned" && !cancelled && item.state !== "DISPATCHED" && (
           <span style={{ fontSize: 10.5, fontWeight: 700, color: ship.color }}>{ship.label}</span>
         )}
@@ -448,7 +487,7 @@ const FILTERS = [
 // On a phone only these show their orders; the rest show per-courier counts.
 const PHONE_LIST_TABS = ["pending", "issues"];
 
-const cleanCourier = (c) => (c || "").split(/\s+/).filter(Boolean).join(" ") || "No courier on label";
+export const cleanCourier = (c) => (c || "").split(/\s+/).filter(Boolean).join(" ") || "No courier on label";
 
 /**
  * Brand colour per courier, so a card is recognised before it is read:
@@ -456,7 +495,7 @@ const cleanCourier = (c) => (c || "").split(/\s+/).filter(Boolean).join(" ") || 
  * Shadowfax green (#008771) — the last two from their published brand palettes.
  * Anything else stays neutral.
  */
-function courierTone(name) {
+export function courierTone(name) {
   const n = (name || "").toLowerCase();
   if (n.includes("valmo")) return { fg: "#1D4ED8", bg: "#EFF6FF", border: "#93C5FD", solid: "#2563EB" };
   if (n.includes("ekart")) return { fg: "#0369A1", bg: "#F0F9FF", border: "#7DD3FC", solid: "#0EA5E9" };
@@ -475,19 +514,31 @@ function courierTone(name) {
  * on screen until the new day starts. `left` is what is still to pack.
  * Cancelled orders are not in it.
  */
+/**
+ * Whether an order counts as packed for the day: scanned at the desk (and not
+ * put on hold), or the marketplace shows it went out. A parcel cancelled after
+ * it was packed STILL counts — 100 packed stays 100 when 3 are cancelled later;
+ * those 3 are flagged to take out of the bag instead of vanishing from the count.
+ */
+const wentOut = (i) => (i.scan_id && !["ON_HOLD", "ISSUE", "CANCELLED"].includes(i.state))
+  || i.ship_status === "SHIPPED" || i.ship_status === "RETURNED";
+
 function courierStats(items, offList = []) {
   const by = new Map();
   for (const i of items) {
     const b = bucketOf(i);
-    if (b === "cancelled" || b === "returned") continue;
+    const out = wentOut(i);
+    if (!out && b !== "pending") continue;          // cancelled before packing, or on hold
     const name = cleanCourier(i.courier);
     const key = name.toLowerCase();
-    if (!by.has(key)) by.set(key, { courier: name, packed: 0, shipped: 0, left: 0, total: 0 });
+    if (!by.has(key)) by.set(key, { courier: name, packed: 0, shipped: 0, left: 0, total: 0, cancelled: 0 });
     const c = by.get(key);
-    if (b === "packed") c.packed += 1;
-    else if (b === "shipped") c.shipped += 1;
-    else if (b === "pending") c.left += 1;
-    c.total = c.packed + c.shipped;
+    if (out) {
+      c.total += 1;
+      if (b === "shipped" || b === "returned") c.shipped += 1;
+      else if (b === "cancelled") c.cancelled += 1;
+      else c.packed += 1;
+    } else c.left += 1;
   }
   // Parcels scanned that day that aren't on its labels (labels not uploaded
   // yet, or a code the system didn't know) are still packed — count them under
@@ -495,10 +546,10 @@ function courierStats(items, offList = []) {
   for (const o of offList) {
     const name = cleanCourier(o.courier);
     const key = name.toLowerCase();
-    if (!by.has(key)) by.set(key, { courier: name, packed: 0, shipped: 0, left: 0, total: 0 });
+    if (!by.has(key)) by.set(key, { courier: name, packed: 0, shipped: 0, left: 0, total: 0, cancelled: 0 });
     const c = by.get(key);
     c.packed += o.scanned;
-    c.total = c.packed + c.shipped;
+    c.total += o.scanned;
   }
   return [...by.values()].filter((c) => c.total || c.left)
     .sort((a, b) => b.total - a.total || b.left - a.left || a.courier.localeCompare(b.courier));
@@ -567,7 +618,7 @@ function DayNotice({ desk, compact }) {
  * choose which ones are counted together; that choice is saved to their
  * account on the server, so it holds on every device.
  */
-function useDeskBusinesses() {
+export function useDeskBusinesses() {
   const [info, setInfo] = useState(null);
   const load = useCallback(() => {
     fetch(`${API}/order-scan/settings/`).then((r) => (r.ok ? r.json() : null)).then(setInfo).catch(() => {});
@@ -585,7 +636,7 @@ function useDeskBusinesses() {
   return { info, save, reload: load };
 }
 
-function DeskBusinesses({ desk, onChanged, compact }) {
+export function DeskBusinesses({ desk, onChanged, compact }) {
   const { info, save } = desk;
   const [open, setOpen] = useState(false);
   const [picked, setPicked] = useState(new Set());
@@ -675,6 +726,9 @@ function CourierTiles({ couriers, active, onPick, compact }) {
               <span style={{ fontSize: 12.5, fontWeight: 700, color: C.gray600 }}>packed</span>
             </span>
             {detail && <span style={{ fontSize: 12, fontWeight: 600, color: C.gray600 }}>{detail}</span>}
+            {c.cancelled > 0 && (
+              <span style={{ fontSize: 12, fontWeight: 800, color: C.red }}>⚠ {c.cancelled} cancelled after packing — take out</span>
+            )}
             <span style={{ fontSize: 12.5, fontWeight: 800, color: done ? "#15803D" : C.red }}>
               {done ? "✓ none left to pack" : `${c.left} left to pack`}
             </span>
@@ -934,33 +988,47 @@ function ShiftPanel({ desk, onClose }) {
  * Scanned parcels that belong to an earlier day's list. They are only added to
  * today's list when someone says so — scanning one never moves it by itself.
  */
-function EarlierAskBanner({ desk, compact }) {
-  const { asks, addEarlier, dismissAsks, date } = desk;
+function EarlierAskDialog({ desk }) {
+  const { asks, addEarlier, keepEarlier, date } = desk;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   if (!asks.length) return null;
-  const days = [...new Set(asks.map((a) => fmtDay(a.day)))].join(", ");
-  const add = async () => {
+  const today = date === desk.currentDay ? "today's" : `${fmtDay(date)}'s`;
+  const run = async (fn) => {
     setBusy(true); setError(null);
-    const d = await addEarlier(asks);
+    const d = await fn(asks);
     setBusy(false);
     if (d.error) setError(d.error);
   };
   return (
-    <div role="alert" style={{ background: "#EFF6FF", border: "2px solid #60A5FA", borderRadius: 12, padding: compact ? "10px 12px" : "12px 14px", display: "flex", flexDirection: "column", gap: 8 }}>
-      <div style={{ fontSize: compact ? 13.5 : 14.5, fontWeight: 800, color: "#1E3A8A", lineHeight: 1.4 }}>
-        {asks.length} scanned parcel{asks.length === 1 ? " is" : "s are"} from an earlier day ({days}).
-        <span style={{ fontWeight: 600 }}> Add {asks.length === 1 ? "it" : "them"} to {date === desk.currentDay ? "today's" : `${fmtDay(date)}'s`} list?</span>
-      </div>
-      <div style={{ fontSize: 12.5, color: "#1E3A8A", fontFamily: "monospace", wordBreak: "break-all" }}>
-        {asks.slice(0, 3).map((a) => a.sku || a.order_id).join(" · ")}{asks.length > 3 ? ` · +${asks.length - 3} more` : ""}
-      </div>
-      {error && <div style={{ fontSize: 12.5, color: C.red, fontWeight: 700 }}>{error}</div>}
-      <div style={{ display: "flex", gap: 8 }}>
-        <button onClick={add} disabled={busy} className="os-btn" style={{ ...btn("primary", "md"), minHeight: 44, flex: 1, opacity: busy ? 0.6 : 1 }}>
-          {busy ? "Adding…" : `Add ${asks.length} to today's list`}
+    <div role="dialog" aria-modal="true" aria-label="Order from an earlier day"
+      style={{ position: "fixed", inset: 0, zIndex: 3400, background: "rgba(15,23,42,.55)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div style={{ ...S.card, width: "100%", maxWidth: 440, padding: 20, display: "flex", flexDirection: "column", gap: 12, borderTop: "5px solid #2563EB" }}>
+        <div style={{ fontSize: 18, fontWeight: 900, color: "#1E3A8A", lineHeight: 1.3 }}>
+          {asks.length === 1 ? "This order is" : `${asks.length} orders are`} from an earlier day
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 220, overflowY: "auto" }}>
+          {asks.map((a) => (
+            <div key={`${a.business_id}-${a.order_id}`} style={{ display: "flex", justifyContent: "space-between", gap: 8, padding: "8px 10px", borderRadius: 10, background: "#EFF6FF" }}>
+              <span style={{ minWidth: 0 }}>
+                <span style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 13.5 }}>{a.sku || a.order_id}{a.qty ? ` ×${a.qty}` : ""}</span>
+                <span style={{ display: "block", fontSize: 12, color: C.gray600 }}>{[a.courier, a.order_id].filter(Boolean).join(" · ")}</span>
+              </span>
+              <span style={{ fontSize: 12.5, fontWeight: 800, color: "#1E3A8A", whiteSpace: "nowrap" }}>{fmtDay(a.day)}</span>
+            </div>
+          ))}
+        </div>
+        <div style={{ fontSize: 13.5, color: C.gray700, lineHeight: 1.5 }}>
+          Add {asks.length === 1 ? "it" : "them"} to {today} scanning batch? Then {asks.length === 1 ? "it counts" : "they count"} in {today} courier totals.
+          Otherwise {asks.length === 1 ? "it stays" : "they stay"} on {asks.length === 1 ? "its" : "their"} own day.
+        </div>
+        {error && <div style={{ fontSize: 12.5, color: C.red, fontWeight: 700 }}>{error}</div>}
+        <button onClick={() => run(addEarlier)} disabled={busy} className="os-btn" style={{ ...btn("primary", "lg"), minHeight: 50, opacity: busy ? 0.6 : 1 }}>
+          {busy ? "Saving…" : `Yes — add to ${today} batch`}
         </button>
-        <button onClick={dismissAsks} disabled={busy} className="os-btn" style={{ ...btn("ghost", "md"), minHeight: 44 }}>Not now</button>
+        <button onClick={() => run(keepEarlier)} disabled={busy} className="os-btn" style={{ ...btn("ghost", "md"), minHeight: 46 }}>
+          No — keep on {[...new Set(asks.map((a) => fmtDay(a.day)))].join(", ")}
+        </button>
       </div>
     </div>
   );
@@ -1070,7 +1138,7 @@ function AlertBanner({ alerts, onOpen, compact }) {
 const TAB_TONE = { pending: C.orange, packed: C.green, shipped: "#15803D", returned: "#7C3AED", cancelled: C.red, issues: "#B45309", all: C.gray700 };
 
 /** Focus rings and reduced motion for the whole desk — keyboard and switch users can see where they are. */
-const DESK_CSS = `
+export const DESK_CSS = `
   .os-btn:focus-visible, .os-in:focus-visible { outline: 3px solid #2563EB; outline-offset: 2px; }
   @media (prefers-reduced-motion: reduce) { .os-desk * { transition: none !important; } }
 `;
@@ -1079,13 +1147,13 @@ const DESK_CSS = `
  * The status tabs. The big number IS the tab: one control that both reports the
  * count and switches the list, instead of a row of tiles repeating a row of tabs.
  */
-function StatTabs({ tabs, tab, onPick, counts, compact }) {
+export function StatTabs({ tabs, tab, onPick, counts, compact, tones = TAB_TONE }) {
   return (
     <div role="tablist" aria-label="Orders by status"
       style={{ display: "grid", gridTemplateColumns: `repeat(${tabs.length}, minmax(0, 1fr))`, gap: compact ? 6 : 8 }}>
       {tabs.map((f) => {
         const on = tab === f.key;
-        const tone = TAB_TONE[f.key] || C.gray700;
+        const tone = tones[f.key] || C.gray700;
         return (
           <button key={f.key} role="tab" aria-selected={on} className="os-btn" onClick={() => onPick(f.key)}
             style={{ cursor: "pointer", fontFamily: "inherit", minHeight: compact ? 64 : 74, padding: "8px 4px", borderRadius: 14,
@@ -1101,9 +1169,9 @@ function StatTabs({ tabs, tab, onPick, counts, compact }) {
 }
 
 /** One line of progress: how much of the day has gone out, and what is left to pack. */
-function DayProgress({ counts, pieces }) {
-  const total = counts.pending + counts.packed + counts.shipped + counts.issues;
-  const done = counts.packed + counts.shipped;
+function DayProgress({ items, counts, pieces }) {
+  const done = items.filter(wentOut).length;
+  const total = done + counts.pending + counts.issues;
   const pct = total ? Math.min(100, (done / total) * 100) : 0;
   const left = counts.pending;
   return (
@@ -1135,7 +1203,7 @@ function ModeSwitch({ mode, setMode, onChanged, showHelp }) {
           const on = mode === m.key;
           return (
             <button key={m.key} role="radio" aria-checked={on} className="os-btn" onClick={() => { setMode(m.key); onChanged?.(); }}
-              style={{ flex: 1, minHeight: 44, border: "none", borderRadius: 9, padding: "8px 12px", fontSize: 14, fontWeight: 800, fontFamily: "inherit",
+              style={{ flex: 1, minHeight: 44, border: "none", borderRadius: 9, padding: "8px 6px", fontSize: 14, fontWeight: 800, fontFamily: "inherit", whiteSpace: "nowrap",
                 cursor: "pointer", background: on ? C.white : "transparent", color: on ? C.orange : C.gray600,
                 boxShadow: on ? "0 1px 3px rgba(0,0,0,.15)" : "none" }}>
               {m.key === "PACKED" ? "📦 Pack" : "🚚 Dispatch"}
@@ -1152,7 +1220,35 @@ function Notice({ children }) { return <div style={{ display: "flex", flexDirect
 
 // ── Phone: full screen, stable ────────────────────────────────────────────────
 
-function MobilePack({ desk, platform, setPlatform, businesses, onScopeChanged, scopeTick, multi }) {
+/**
+ * The phone's notices as one row of small chips — each opens what it is about —
+ * instead of a stack of banners pushing the work down the screen.
+ */
+function NoticeChips({ desk, alerts, onAlerts, onUnsent, onUnrec, onMovedBack }) {
+  const unsent = desk.queue?.is_admin ? desk.queue?.earlier_unsent?.count || 0 : 0;
+  const unrec = desk.queue?.unrecognised?.length || 0;
+  const moved = desk.queue?.is_admin ? (desk.queue?.items || []).filter((i) => i.shifted_from).length : 0;
+  const chips = [
+    alerts?.total ? { key: "a", text: `⚠ ${alerts.total} not sent`, tone: C.red, bg: C.redLight, onClick: onAlerts } : null,
+    unsent ? { key: "u", text: `↻ ${unsent} earlier unsent`, tone: "#92400E", bg: "#FFFBEB", onClick: onUnsent } : null,
+    unrec ? { key: "r", text: `✕ ${unrec} not recognised`, tone: C.red, bg: C.white, onClick: onUnrec } : null,
+    moved ? { key: "m", text: `↻ ${moved} moved in · undo`, tone: "#92400E", bg: "#FFFBEB", onClick: onMovedBack } : null,
+  ].filter(Boolean);
+  if (!chips.length) return null;
+  return (
+    <div style={{ display: "flex", gap: 8, overflowX: "auto", paddingBottom: 2 }}>
+      {chips.map((c) => (
+        <button key={c.key} onClick={c.onClick} className="os-btn"
+          style={{ flexShrink: 0, minHeight: 36, padding: "6px 12px", borderRadius: 999, border: `1.5px solid ${c.tone}`, background: c.bg,
+            color: c.tone, fontSize: 12.5, fontWeight: 800, fontFamily: "inherit", cursor: "pointer", whiteSpace: "nowrap" }}>
+          {c.text}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function MobilePack({ desk, platform, businesses, onScopeChanged, scopeTick, multi }) {
   const { queue, loading, mode, setMode, latest, busy, date, setDate, record } = desk;
   const [camera, setCamera] = useState(false);
   const [showSummary, setShowSummary] = useState(false);
@@ -1171,7 +1267,8 @@ function MobilePack({ desk, platform, setPlatform, businesses, onScopeChanged, s
   const allCounts = useMemo(() => summaryCounts(items), [items]);
   const shown = inCourier.filter(FILTERS.find((f) => f.key === tab).test);
   const sel = useAdminSelect(desk, shown);
-  const progress = { done: sum?.packed ?? 0, total: (sum?.assigned ?? 0) - (sum?.cancelled ?? 0), label: `${MODES.find((m) => m.key === mode).label}` };
+  const progress = { done: items.filter(wentOut).length, total: items.filter((i) => wentOut(i) || bucketOf(i) === "pending").length,
+    label: MODES.find((m) => m.key === mode).label };
   const listTab = PHONE_LIST_TABS.includes(tab);
   const tabs = FILTERS.filter((f) => f.key !== "all"
     && (f.key !== "issues" || allCounts.issues > 0 || tab === "issues")
@@ -1183,6 +1280,12 @@ function MobilePack({ desk, platform, setPlatform, businesses, onScopeChanged, s
     cancelled: { label: "Cancelled", color: C.red, hint: "Don't hand these over — keep them aside." },
   };
   const submitTyped = () => { if (typed.trim()) { record(typed); setTyped(""); } };
+  const movedIn = items.filter((i) => i.shifted_from);
+  const moveBackAll = async () => {
+    if (!window.confirm(`Send ${movedIn.length} order${movedIn.length === 1 ? "" : "s"} back to the day they came from?`)) return;
+    await desk.shiftOrders(movedIn, { undo: true });
+    reloadAlerts();
+  };
 
   // Lock the page behind the fixed screen so it can't scroll under it.
   useEffect(() => {
@@ -1209,29 +1312,25 @@ function MobilePack({ desk, platform, setPlatform, businesses, onScopeChanged, s
           onClose={() => setCamera(false)}
         />
       )}
+      <EarlierAskDialog desk={desk} />
 
-      {/* Header — title and day on one line, the rest in one scrollable row */}
-      <div style={{ padding: "8px 12px", display: "flex", flexDirection: "column", gap: 8, background: C.white, borderBottom: `1px solid ${C.gray200}`, flexShrink: 0 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          {/* This desk covers the app's top bar, so it carries the menu itself —
-              every other tab is one tap away, even when opened directly. */}
-          <button onClick={() => window.dispatchEvent(new Event("app:open-menu"))} aria-label="Menu — other tabs" className="os-btn"
-            style={{ background: "none", border: "none", width: 44, height: 44, cursor: "pointer", lineHeight: 0, color: C.gray700, flexShrink: 0 }}>
-            <MenuIcon />
-          </button>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 18, fontWeight: 800, color: C.gray900, whiteSpace: "nowrap" }}>Pack orders</div>
-            <select value={date} onChange={(e) => setDate(e.target.value)} aria-label="Packing day" className="os-in"
-              style={{ border: "none", background: "none", fontSize: 13, color: C.gray600, fontWeight: 700, padding: 0, fontFamily: "inherit", maxWidth: "100%" }}>
-              {[...new Set([date, ...(queue?.dates || [])])].filter(Boolean).sort().reverse().map((d) => <option key={d} value={d}>{dayLabel(d, desk.currentDay)}</option>)}
-            </select>
-          </div>
-          <PlatformToggle platform={platform} onChange={setPlatform} />
+      {/* Header — one row: menu, the day, the hand-over summary */}
+      <div style={{ padding: "6px 10px", display: "flex", alignItems: "center", gap: 6, background: C.white, borderBottom: `1px solid ${C.gray200}`, flexShrink: 0 }}>
+        {/* This desk covers the app's top bar, so it carries the menu itself. */}
+        <button onClick={() => window.dispatchEvent(new Event("app:open-menu"))} aria-label="Menu — other tabs" className="os-btn"
+          style={{ background: "none", border: "none", width: 44, height: 44, cursor: "pointer", lineHeight: 0, color: C.gray700, flexShrink: 0 }}>
+          <MenuIcon />
+        </button>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 17, fontWeight: 900, color: C.gray900, whiteSpace: "nowrap" }}>Pack orders</div>
+          <select value={date} onChange={(e) => setDate(e.target.value)} aria-label="Packing day" className="os-in"
+            style={{ border: "none", background: "none", fontSize: 12.5, color: C.gray600, fontWeight: 700, padding: 0, fontFamily: "inherit", maxWidth: "100%" }}>
+            {[...new Set([date, ...(queue?.dates || [])])].filter(Boolean).sort().reverse().map((d) => <option key={d} value={d}>{dayLabel(d, desk.currentDay)}</option>)}
+          </select>
         </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center", overflowX: "auto" }}>
-          <DeskBusinesses desk={businesses} onChanged={onScopeChanged} compact />
-          <button onClick={() => setShowSummary(true)} className="os-btn" style={{ ...btn("ghost", "sm"), minHeight: 40, whiteSpace: "nowrap", flexShrink: 0 }}>🖨 Courier summary</button>
-        </div>
+        <DeskBusinesses desk={businesses} onChanged={onScopeChanged} compact />
+        <button onClick={() => setShowSummary(true)} aria-label="Courier summary and print" className="os-btn"
+          style={{ ...btn("ghost", "sm"), minHeight: 40, minWidth: 44, flexShrink: 0, fontSize: 18, padding: "4px 8px" }}>🖨</button>
       </div>
       {showSummary && (
         <div style={{ position: "fixed", inset: 0, zIndex: 3200, background: C.white, overflowY: "auto",
@@ -1241,32 +1340,33 @@ function MobilePack({ desk, platform, setPlatform, businesses, onScopeChanged, s
         </div>
       )}
 
-      {/* Everything between the header and the scan bar scrolls as one. */}
+      {/* The last scan — fixed under the header, so it never jumps while scanning */}
+      <div style={{ padding: "8px 10px", background: C.white, borderBottom: `1px solid ${C.gray200}`, flexShrink: 0 }}>
+        <LatestPanel latest={latest} busy={busy} minHeight={76} idle="Scan a parcel — the result shows here." />
+      </div>
+
+      {/* Everything else scrolls as one */}
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
-        <div style={{ padding: "12px 12px 10px", display: "flex", flexDirection: "column", gap: 12 }}>
+        <div style={{ padding: "10px", display: "flex", flexDirection: "column", gap: 10 }}>
           {loading && !queue ? (
             <div style={{ display: "flex", justifyContent: "center", padding: 24 }}><CircularProgress style={{ color: C.orange }} /></div>
           ) : (
             <>
               <DayNotice desk={desk} compact />
+              <NoticeChips desk={desk} alerts={alerts} onAlerts={() => setShowAlerts(true)} onUnsent={() => setShowShift(true)}
+                onUnrec={() => setShowUnrec(true)} onMovedBack={moveBackAll} />
               <CourierSection desk={desk} items={items} sum={sum} active={courier} onPick={setCourier} compact />
               <div style={{ background: C.white, border: `1px solid ${C.gray200}`, borderRadius: 16, padding: 12, display: "flex", flexDirection: "column", gap: 12 }}>
-                <DayProgress counts={allCounts} pieces={sum ? { packed: sum.pieces_packed ?? 0, total: sum.pieces ?? 0 } : null} />
+                <DayProgress items={items} counts={allCounts} pieces={sum ? { packed: sum.pieces_packed ?? 0, total: sum.pieces ?? 0 } : null} />
                 <StatTabs tabs={tabs} tab={tab} onPick={setTab} counts={counts} compact />
                 {courier && (
                   <button onClick={() => setCourier(null)} className="os-btn" style={{ ...btn("ghostOrange", "sm"), alignSelf: "flex-start", minHeight: 36 }}>
                     🚚 {courier} · show all couriers ✕
                   </button>
                 )}
-                <UnrecognisedChip desk={desk} onOpen={() => setShowUnrec(true)} />
               </div>
-              <EarlierAskBanner desk={desk} compact />
-              <MovedInBar desk={desk} compact onDone={reloadAlerts} />
               {showUnrec && <UnrecognisedPanel desk={desk} onClose={() => setShowUnrec(false)} />}
-              <AlertBanner alerts={alerts} onOpen={() => setShowAlerts(true)} compact />
-              <UnsentBanner desk={desk} onOpen={() => setShowShift(true)} compact />
               {showShift && <ShiftPanel desk={desk} onClose={(moved) => { setShowShift(false); if (moved) reloadAlerts(); }} />}
-              <LatestPanel latest={latest} busy={busy} minHeight={110} />
             </>
           )}
         </div>
@@ -1277,35 +1377,32 @@ function MobilePack({ desk, platform, setPlatform, businesses, onScopeChanged, s
           </div>
         )}
 
-        {sel.admin && listTab && <div style={{ padding: "0 12px 8px" }}><AdminBar sel={sel} shownCount={shown.length} compact /></div>}
-        {!listTab ? (
-          <div style={{ background: C.white, borderTop: `1px solid ${C.gray200}` }}>
+        {sel.admin && listTab && <div style={{ padding: "0 10px 8px" }}><AdminBar sel={sel} shownCount={shown.length} compact /></div>}
+        <div style={{ background: C.white, borderTop: `1px solid ${C.gray200}` }}>
+          {!listTab ? (
             <BucketCounts items={shown} {...(TAB_INFO[tab] || TAB_INFO.packed)} />
-          </div>
-        ) : (
-          <div style={{ background: C.white, borderTop: `1px solid ${C.gray200}` }}>
-            {shown.length === 0 ? (
-              <div style={{ textAlign: "center", padding: 36, color: C.gray500, fontSize: 14 }}>
-                {!items.length ? "No orders assigned for this day — upload the labels first." : tab === "pending" ? "Everything is packed. 🎉" : "Nothing here."}
-              </div>
-            ) : shown.map((i) => <ItemRow key={`${i.business_id}-${i.order_id}`} item={i} compact showBusiness={multi}
-                  admin={sel.admin} selecting={sel.selecting} selected={sel.isPicked(i)} onToggle={() => sel.toggle(i)} onSetStatus={(st) => sel.applyOne(i, st)}
-                  onMoveBack={async () => { await desk.shiftOrders([i], { undo: true }); reloadAlerts(); }} />)}
-          </div>
-        )}
+          ) : shown.length === 0 ? (
+            <div style={{ textAlign: "center", padding: 36, color: C.gray500, fontSize: 14 }}>
+              {!items.length ? "No orders assigned for this day — upload the labels first." : tab === "pending" ? "Everything is packed. 🎉" : "Nothing here."}
+            </div>
+          ) : shown.map((i) => <ItemRow key={`${i.business_id}-${i.order_id}`} item={i} compact showBusiness={multi}
+                admin={sel.admin} selecting={sel.selecting} selected={sel.isPicked(i)} onToggle={() => sel.toggle(i)} onSetStatus={(st) => sel.applyOne(i, st)}
+                onMoveBack={async () => { await desk.shiftOrders([i], { undo: true }); reloadAlerts(); }}
+                maxDay={desk.currentDay} onMoveTo={async (d) => { await desk.shiftOrders([i], { toDay: d }); reloadAlerts(); }} />)}
+        </div>
       </div>
 
       {/* Bottom bar — in thumb reach: the big action, then the mode and a typed fallback */}
-      <div style={{ flexShrink: 0, padding: "10px 12px calc(10px + env(safe-area-inset-bottom))", borderTop: `1px solid ${C.gray200}`, background: C.white, display: "flex", flexDirection: "column", gap: 8 }}>
+      <div style={{ flexShrink: 0, padding: "8px 10px calc(8px + env(safe-area-inset-bottom))", borderTop: `1px solid ${C.gray200}`, background: C.white, display: "flex", flexDirection: "column", gap: 8 }}>
         <button onClick={() => setCamera(true)} className="os-btn"
-          style={{ ...btn("primary", "lg"), minHeight: 58, padding: "14px 20px", fontSize: 18, borderRadius: 14, width: "100%" }}>
+          style={{ ...btn("primary", "lg"), minHeight: 56, padding: "12px 20px", fontSize: 18, borderRadius: 14, width: "100%" }}>
           <QrCodeScannerIcon style={{ fontSize: 26, verticalAlign: "-7px" }} />&nbsp;Scan parcel
         </button>
         <div style={{ display: "flex", gap: 8, alignItems: "stretch" }}>
-          <div style={{ width: 168, flexShrink: 0 }}><ModeSwitch mode={mode} setMode={setMode} /></div>
+          <div style={{ width: 196, flexShrink: 0 }}><ModeSwitch mode={mode} setMode={setMode} /></div>
           <input value={typed} onChange={(e) => setTyped(e.target.value)} placeholder="Type AWB / order no" aria-label="Type an AWB or order number"
             onKeyDown={(e) => { if (e.key === "Enter") submitTyped(); }} enterKeyHint="go"
-            autoComplete="off" className="os-in" style={{ ...S.inp, flex: 1, fontFamily: "monospace", minWidth: 0, minHeight: 52, fontSize: 15 }} />
+            autoComplete="off" className="os-in" style={{ ...S.inp, flex: 1, fontFamily: "monospace", minWidth: 0, minHeight: 48, fontSize: 15 }} />
         </div>
       </div>
     </div>
@@ -1482,11 +1579,10 @@ function DesktopPack({ desk, platform, setPlatform, businesses, onScopeChanged, 
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
         <div>
           <h1 style={{ fontSize: 22, fontWeight: 800, color: C.gray900, margin: 0 }}>Order scan</h1>
-          <p style={{ fontSize: 13, color: C.gray500, marginTop: 3 }}>Scan each parcel to tick it off the day's list and keep the record.</p>
+          <p style={{ fontSize: 13, color: C.gray500, marginTop: 3 }}>Meesho and Flipkart together — scan each parcel to tick it off the day's list.</p>
         </div>
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
           <DeskBusinesses desk={businesses} onChanged={onScopeChanged} />
-          <PlatformToggle platform={platform} onChange={setPlatform} />
           <select value={date} onChange={(e) => setDate(e.target.value)} aria-label="Packing day" className="os-in" style={{ ...S.inp, width: "auto", fontWeight: 700 }}>
             {[...new Set([date, ...(queue?.dates || [])])].filter(Boolean).sort().reverse().map((d) => <option key={d} value={d}>{dayLabel(d, desk.currentDay)}</option>)}
           </select>
@@ -1507,7 +1603,7 @@ function DesktopPack({ desk, platform, setPlatform, businesses, onScopeChanged, 
         <>
           <Notice>
             <DayNotice desk={desk} />
-            <EarlierAskBanner desk={desk} />
+            <EarlierAskDialog desk={desk} />
             <MovedInBar desk={desk} onDone={reloadAlerts} />
             <AlertBanner alerts={alerts} onOpen={() => { setShowAlerts((v) => !v); reloadAlerts(); }} />
             <UnsentBanner desk={desk} onOpen={() => setShowShift(true)} />
@@ -1521,7 +1617,7 @@ function DesktopPack({ desk, platform, setPlatform, businesses, onScopeChanged, 
             <div style={{ display: "flex", flexDirection: "column", gap: 16, minWidth: 0 }}>
               <div style={{ ...S.card, padding: 16, display: "flex", flexDirection: "column", gap: 14 }}>
                 <CourierSection desk={desk} items={items} sum={sum} active={courier} onPick={(c) => { setCourier(c); setTab(c ? "packed" : tab); refocus(); }} />
-                <DayProgress counts={allCounts} pieces={sum ? { packed: sum.pieces_packed ?? 0, total: sum.pieces ?? 0 } : null} />
+                <DayProgress items={items} counts={allCounts} pieces={sum ? { packed: sum.pieces_packed ?? 0, total: sum.pieces ?? 0 } : null} />
               </div>
 
               <div style={{ ...S.card, padding: 0, overflow: "hidden" }}>
@@ -1546,7 +1642,8 @@ function DesktopPack({ desk, platform, setPlatform, businesses, onScopeChanged, 
                   </div>
                 ) : shown.map((i) => <ItemRow key={`${i.business_id}-${i.order_id}`} item={i} showBusiness={multi}
                       admin={sel.admin} selecting={sel.selecting} selected={sel.isPicked(i)} onToggle={() => sel.toggle(i)} onSetStatus={(st) => sel.applyOne(i, st)}
-                  onMoveBack={async () => { await desk.shiftOrders([i], { undo: true }); reloadAlerts(); }} />)}
+                  onMoveBack={async () => { await desk.shiftOrders([i], { undo: true }); reloadAlerts(); }}
+                  maxDay={desk.currentDay} onMoveTo={async (d) => { await desk.shiftOrders([i], { toDay: d }); reloadAlerts(); }} />)}
               </div>
             </div>
 
@@ -1583,7 +1680,10 @@ function DesktopPack({ desk, platform, setPlatform, businesses, onScopeChanged, 
 // ── Tab ───────────────────────────────────────────────────────────────────────
 export function OrderScanTab() {
   const isMobile = useIsMobile();
-  const [platform, setPlatform] = useLabelPlatform();
+  // Meesho and Flipkart are one desk: every count is by courier, whichever
+  // marketplace the parcel is from.
+  const platform = "";
+  const setPlatform = () => {};
   const desk = useScanDesk(platform);
   const businesses = useDeskBusinesses();
   // Bumped when the combined businesses change, so everything re-reads.

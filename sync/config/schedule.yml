@@ -1,0 +1,6 @@
+# sidekiq-cron: loaded by config/initializers/sidekiq.rb.
+meesho_schedule:
+  cron: "* * * * *"
+  class: "MeeshoScheduleJob"
+  queue: "default"
+  description: "Queue a Meesho pull for every account whose interval has passed (5 min by default)"

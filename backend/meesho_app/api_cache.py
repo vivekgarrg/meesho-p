@@ -21,6 +21,8 @@ How it stays correct (the part that matters more than the speed):
     and re-runs the same business-access check the views use before serving
     anything, and the user id is in the key. A user who can't see a business can
     never be handed its cached data.
+  · The Meesho sync worker (Rails) writes orders without going through Django,
+    so keys also carry when it last changed anything (_worker_stamp).
   · Keys also carry the X-Settlement-Mode header and today's date (profit and
     payroll are date-relative), and entries expire after API_CACHE_TTL anyway.
   · Only successful JSON GETs are stored. Files, polls and anything time-of-day
@@ -62,6 +64,9 @@ _NEVER_CACHE_PREFIXES = (
     # the day changes at noon; and it changes with every scan anyway.
     "order-scan/",
     "return-scan/",           # the returns desk — same reasons
+    "meesho-sync/",           # live job status, written by the Sidekiq worker
+    "meesho-orders/",         # the Meesho panel's orders — also written by the worker,
+                              # which never bumps this cache's versions
 )
 # All-time figures that only change when data does: no date in the key and a long
 # expiry, so they are recomputed only after an upload or edit (a version bump).
@@ -167,6 +172,23 @@ def _long_ttl(sub):
     return next((ttl for prefix, ttl in _LONG_LIVED.items() if sub.startswith(prefix)), None)
 
 
+def _worker_stamp():
+    """
+    When the Meesho sync worker last changed the orders table. It writes
+    straight to the database — no model signals, so no version bump — so this
+    stamp is part of every key: an answer computed before the worker's change
+    can't be served after it. Across all accounts, since combined screens read
+    several businesses through one business's URL.
+    """
+    try:
+        from django.db.models import Max
+        from .models import MeeshoAccount
+        t = MeeshoAccount.objects.aggregate(t=Max("orders_changed_at"))["t"]
+        return str(int(t.timestamp())) if t else "0"
+    except Exception:  # noqa: BLE001 — no table yet, or no database: no stamp
+        return "0"
+
+
 def _cache_key(request, business_id, user, dated=True):
     # The long-lived all-time answers ignore query params, so they share one entry.
     qs = "&".join(sorted(request.META.get("QUERY_STRING", "").split("&"))) if dated else ""
@@ -177,7 +199,7 @@ def _cache_key(request, business_id, user, dated=True):
     ])
     digest = hashlib.sha1(raw.encode()).hexdigest()
     today = time.strftime("%Y%m%d") if dated else "any"
-    return f"api:{business_id}:{global_version()}:{business_version(business_id)}:{today}:{digest}"
+    return f"api:{business_id}:{global_version()}:{business_version(business_id)}:{_worker_stamp()}:{today}:{digest}"
 
 
 def _cacheable(response):
