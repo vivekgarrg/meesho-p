@@ -4,7 +4,7 @@ from . import flipkart_views
 from . import api_cache
 from . import upload_cleanup
 from . import return_desk
-from . import meesho_linking, meesho_sync
+from . import meesho_linking, meesho_returns, meesho_sync
 from . import bulk_listing_views
 from . import listing_images_views
 from . import insights
@@ -183,6 +183,8 @@ urlpatterns = [
     path("meesho-orders/labels/<int:run_id>/pdf/", meesho_sync.meesho_orders_labels_pdf, name="meesho_orders_labels_pdf"),
     path("meesho-orders/labels/batch/<str:batch>/pdf/", meesho_sync.meesho_orders_labels_batch_pdf, name="meesho_orders_labels_batch_pdf"),
     path("meesho-orders/overview/", meesho_sync.meesho_overview,        name="meesho_overview"),
+    path("meesho-orders/returns/",          meesho_returns.returns_dashboard, name="meesho_returns_dashboard"),
+    path("meesho-orders/returns/refresh/",  meesho_returns.returns_refresh,   name="meesho_returns_refresh"),
     path("meesho-orders/summary/",  meesho_sync.meesho_summary,         name="meesho_summary"),
     path("meesho-orders/accounts/<int:account_business_id>/login/", meesho_sync.meesho_account_login, name="meesho_account_login"),
     path("meesho-orders/linking/",                      meesho_linking.linking,          name="meesho_linking"),

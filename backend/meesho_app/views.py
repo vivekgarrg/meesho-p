@@ -11955,14 +11955,39 @@ def return_deliveries_upload(request, business_id):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
+    counts = upsert_return_rows(business, (row for _, row in df.iterrows()), sheet_kind)
+    return Response({"success": True, **counts, "kind": sheet_kind}, status=status.HTTP_201_CREATED)
+
+
+# Which stage each kind of report puts a return in. A return delivered back to
+# us stays delivered; lost/disposed only take over from in transit.
+_RETURN_STAGE_OF = {
+    "in_transit": ReturnDelivery.STAGE_IN_TRANSIT,
+    "delivered":  ReturnDelivery.STAGE_DELIVERED,
+    "lost":       ReturnDelivery.STAGE_LOST,
+    "disposed":   ReturnDelivery.STAGE_DISPOSED,
+}
+
+
+def upsert_return_rows(business, rows, kind, now=None):
+    """
+    Write Meesho returns into ReturnDelivery — the rows of a returns export
+    (return_deliveries_upload) or the Meesho sync's returns, already put in the
+    export's shape (meesho_returns.normalize). `kind`: in_transit | delivered |
+    lost | disposed. Keyed on (suborder_no, awb_number). Claim fields are never
+    written, so neither can overwrite claim work; a delivered return never goes
+    back to in transit, and a lost/disposed one only takes over from in transit.
+    Returns the counts.
+    """
+    in_transit = kind == "in_transit"
     created = updated = skipped = 0
     no_delivered_date = 0
     already_delivered = 0
     seen_keys = set()
-    now = timezone.now()
+    now = now or timezone.now()
 
     with transaction.atomic():
-        for _, row in df.iterrows():
+        for row in rows:
             suborder = _return_text(row.get("suborder_no"))
             if not suborder:
                 skipped += 1
@@ -11971,13 +11996,12 @@ def return_deliveries_upload(request, business_id):
             awb = _return_text(row.get("awb_number"))
             key = (suborder, awb)
             if key in seen_keys:
-                # Same return listed twice inside one file — keep the first.
                 skipped += 1
                 continue
             seen_keys.add(key)
 
             delivered = safe_date(row.get("delivered_date"))
-            if delivered is None and not in_transit:
+            if delivered is None and kind == "delivered":
                 no_delivered_date += 1
 
             qty = safe_int(row.get("qty"))
@@ -12000,26 +12024,43 @@ def return_deliveries_upload(request, business_id):
                 "return_reason":          _return_text(row.get("return_reason")),
                 "detailed_return_reason": _return_text(row.get("detailed_return_reason")),
             }
+            # Read by the Meesho sync only — an export doesn't have these.
+            if row.get("synced") is True:
+                defaults.update({
+                    "meesho_status":     _return_text(row.get("meesho_status"))[:60],
+                    "delivery_attempts": safe_int(row.get("delivery_attempts")),
+                    "meesho_note":       _return_text(row.get("meesho_note"))[:200],
+                    "synced_at":         now,
+                })
+            existing = ReturnDelivery.objects.filter(business=business, suborder_no=suborder,
+                                                     awb_number=awb).only("stage", "claim_status").first()
             if in_transit:
-                existing = ReturnDelivery.objects.filter(business=business, suborder_no=suborder,
-                                                         awb_number=awb).only("stage").first()
                 defaults.update({
                     "transit_status":         _return_text(row.get("transit_status"))[:60],
                     "expected_delivery_date": safe_date(row.get("expected_delivery_date")),
                     "delivery_attempt":       _return_text(row.get("delivery_attempt"))[:30],
                     "transit_updated_at":     now,
                 })
-                if existing and existing.stage == ReturnDelivery.STAGE_DELIVERED:
-                    already_delivered += 1     # already back with us: keep it delivered
+                if existing and existing.stage != ReturnDelivery.STAGE_IN_TRANSIT:
+                    already_delivered += 1     # already back with us (or closed): keep it so
                 else:
                     defaults["stage"] = ReturnDelivery.STAGE_IN_TRANSIT
-            else:
+            elif kind == "delivered":
                 defaults.update({
                     "delivered_date":    delivered,
                     "proof_of_delivery": _return_text(row.get("proof_of_delivery")),
                     "otp_verified_at":   safe_datetime(row.get("otp_verified_at")),
                     "stage":             ReturnDelivery.STAGE_DELIVERED,
                 })
+            else:                              # lost | disposed: it isn't coming back
+                defaults["closed_at"] = safe_datetime(row.get("closed_at"))
+                if existing and existing.stage == ReturnDelivery.STAGE_DELIVERED:
+                    already_delivered += 1
+                else:
+                    defaults["stage"] = _RETURN_STAGE_OF[kind]
+                    # Nothing came back to claim on: keep it out of the claim workload.
+                    if not existing or existing.claim_status == ReturnDelivery.CLAIM_UNREVIEWED:
+                        defaults["claim_status"] = ReturnDelivery.CLAIM_NOT_REQUIRED
 
             _, was_created = ReturnDelivery.objects.update_or_create(
                 business=business, suborder_no=suborder, awb_number=awb,
@@ -12029,21 +12070,8 @@ def return_deliveries_upload(request, business_id):
                 created += 1
             else:
                 updated += 1
-
-    return Response(
-        {
-            "success": True,
-            "created": created,
-            "updated": updated,
-            "skipped": skipped,
-            "without_delivered_date": no_delivered_date,
-            "kind": sheet_kind,
-            # In-transit sheet only: returns it lists that the delivered export
-            # already had — left as delivered.
-            "already_delivered": already_delivered,
-        },
-        status=status.HTTP_201_CREATED,
-    )
+    return {"created": created, "updated": updated, "skipped": skipped,
+            "without_delivered_date": no_delivered_date, "already_delivered": already_delivered}
 
 
 def _return_claim_stats(business):
@@ -12198,7 +12226,7 @@ def return_deliveries_list(request, business_id):
         qs = qs.filter(claim_status=claim_status)
 
     stage = request.GET.get("stage", "").strip().upper()
-    if stage in (ReturnDelivery.STAGE_IN_TRANSIT, ReturnDelivery.STAGE_DELIVERED):
+    if stage in (ReturnDelivery.STAGE_IN_TRANSIT, ReturnDelivery.STAGE_DELIVERED) + ReturnDelivery.CLOSED_STAGES:
         qs = qs.filter(stage=stage)
 
     return_type = request.GET.get("type", "").strip().lower()

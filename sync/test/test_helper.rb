@@ -147,7 +147,7 @@ end
 DjangoCommand.define_singleton_method(:run) { |*_args, **_opts| {} }
 
 # No Redis in tests: the per-account lock always succeeds.
-[MeeshoSyncJob, MeeshoInventoryJob, MeeshoPaymentsJob].each do |job|
+[MeeshoSyncJob, MeeshoInventoryJob, MeeshoPaymentsJob, MeeshoReturnsJob].each do |job|
   job.class_eval do
     private
     def lock(_account) = true

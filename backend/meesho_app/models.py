@@ -1293,10 +1293,17 @@ class ReturnDelivery(models.Model):
     # be looked up and checked. A delivered row never goes back to in transit.
     STAGE_IN_TRANSIT = "IN_TRANSIT"
     STAGE_DELIVERED  = "DELIVERED"
+    # Never coming back: Meesho marked it lost (it pays a settlement instead)
+    # or disposed of it. Read from the Meesho sync, not from the CSV exports.
+    STAGE_LOST       = "LOST"
+    STAGE_DISPOSED   = "DISPOSED"
     STAGE_CHOICES = [
         (STAGE_IN_TRANSIT, "In transit"),
         (STAGE_DELIVERED,  "Delivered"),
+        (STAGE_LOST,       "Lost"),
+        (STAGE_DISPOSED,   "Disposed"),
     ]
+    CLOSED_STAGES = (STAGE_LOST, STAGE_DISPOSED)
     stage                  = models.CharField(max_length=20, choices=STAGE_CHOICES,
                                               default=STAGE_DELIVERED, db_index=True)
     transit_status         = models.CharField(max_length=60, blank=True,
@@ -1305,6 +1312,17 @@ class ReturnDelivery(models.Model):
     delivery_attempt       = models.CharField(max_length=30, blank=True)
     transit_updated_at     = models.DateTimeField(null=True, blank=True,
                                                   help_text="When an in-transit sheet last reported on it")
+    # From the Meesho sync (meesho_returns): Meesho's own words for where it
+    # is ("In Transit", "To Be Reattempted"…), how often delivery was tried,
+    # and when it was lost / disposed.
+    meesho_status          = models.CharField(max_length=60, blank=True)
+    delivery_attempts      = models.PositiveSmallIntegerField(null=True, blank=True)
+    closed_at              = models.DateTimeField(null=True, blank=True,
+                                                  help_text="When Meesho marked it lost or disposed")
+    meesho_note            = models.CharField(max_length=200, blank=True,
+                                              help_text="e.g. a lost return's settlement status")
+    synced_at              = models.DateTimeField(null=True, blank=True,
+                                                  help_text="When the Meesho sync last read it")
 
     # ── Claim tracking (entered in the app, never from the sheet) ──────────
     claim_status    = models.CharField(max_length=20, choices=CLAIM_STATUS_CHOICES,

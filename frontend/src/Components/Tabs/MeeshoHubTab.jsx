@@ -7,6 +7,7 @@ import { MeeshoLiveInventoryTab } from "./MeeshoLiveInventoryTab";
 import { MeeshoSyncTab } from "./MeeshoSyncTab";
 import { MeeshoPaymentsTab } from "./MeeshoPaymentsTab";
 import { MeeshoLinkingTab } from "./MeeshoLinkingTab";
+import { MeeshoReturnsTab } from "./MeeshoReturnsTab";
 import { AutomationCard, LatestLabels } from "./MeeshoAutomation";
 import { MeeshoOverview } from "./MeeshoOverview";
 import { SessionAlerts, ReconnectDialog, AccountsHealth } from "./MeeshoAccounts";
@@ -18,6 +19,7 @@ import { Panel, ago } from "./MeeshoUI";
  *   Overview       what needs doing now, orders, money, stock, accounts
  *   Orders         accept, ready to ship, labels
  *   Order linking  AWB ↔ packet at the packing desk
+ *   Returns & OTPs couriers' delivery OTPs; returns by status
  *   Inventory      every SKU by parent; pause
  *   Payments       paid, upcoming, outstanding
  *   Settings       automation, Meesho accounts and their sessions
@@ -30,6 +32,7 @@ const TABS = [
   { key: "overview", label: "Overview", icon: "◧" },
   { key: "orders", label: "Orders", icon: "📦" },
   { key: "linking", label: "Order linking", icon: "🔗" },
+  { key: "returns", label: "Returns & OTPs", icon: "↩" },
   { key: "inventory", label: "Inventory", icon: "▤" },
   { key: "payments", label: "Payments", icon: "₹" },
   { key: "settings", label: "Settings", icon: "⚙" },
@@ -171,6 +174,7 @@ export function MeeshoHubTab() {
           </div>
         )}
         {tab === "linking" && <MeeshoLinkingTab />}
+        {tab === "returns" && <MeeshoReturnsTab />}
         {tab === "inventory" && <MeeshoLiveInventoryTab embedded />}
         {tab === "payments" && <MeeshoPaymentsTab />}
         {tab === "settings" && (

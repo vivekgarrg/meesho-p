@@ -1,6 +1,7 @@
 # Runs every minute (config/schedule.yml): queues a pull for each account whose
 # interval (5 minutes by default) has passed since its last one, and an
-# inventory pull every half hour, payments every two hours, and the
+# inventory pull every half hour, payments every two hours, returns and OTPs
+# every ten minutes, and the
 # automation set on Meesho Orders (accept every N minutes, labels at set times).
 class MeeshoScheduleJob
   include Sidekiq::Job
@@ -19,6 +20,7 @@ class MeeshoScheduleJob
     end
     queue_inventory(now)
     queue_payments(now)
+    queue_every(now, MeeshoSyncRun::KIND_RETURNS, MeeshoReturnsJob)
     queue_automation(now)
   end
 

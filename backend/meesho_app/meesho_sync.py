@@ -35,6 +35,8 @@ INVENTORY_JOB = "MeeshoInventoryJob"
 KIND_INVENTORY = "INVENTORY"
 PAYMENTS_JOB = "MeeshoPaymentsJob"
 KIND_PAYMENTS = "PAYMENTS"
+RETURNS_JOB = "MeeshoReturnsJob"
+KIND_RETURNS = "RETURNS"
 
 
 class SyncNotConfigured(Exception):
@@ -109,7 +111,8 @@ def _queue_run(account, kind, trigger):
     if recent:
         return recent, False
     run = MeeshoSyncRun.objects.create(account=account, kind=kind, trigger=trigger)
-    job = {MeeshoSyncRun.KIND_LOGIN: LOGIN_JOB, KIND_INVENTORY: INVENTORY_JOB, KIND_PAYMENTS: PAYMENTS_JOB}.get(kind, SYNC_JOB)
+    job = {MeeshoSyncRun.KIND_LOGIN: LOGIN_JOB, KIND_INVENTORY: INVENTORY_JOB, KIND_PAYMENTS: PAYMENTS_JOB,
+           KIND_RETURNS: RETURNS_JOB}.get(kind, SYNC_JOB)
     try:
         enqueue(job, [account.pk, run.pk])
     except Exception as exc:
