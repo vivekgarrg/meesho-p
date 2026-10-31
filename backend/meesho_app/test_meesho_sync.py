@@ -908,3 +908,69 @@ class AutoLabelsSendTests(TestCase):
         self.assertEqual(len(mail.outbox), 1)
         with mock.patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "", "LABELS_EMAIL_TO": ""}):
             self.assertEqual(notify.send("s", "t"), {})                            # nothing set up: nothing sent
+
+
+@mock.patch.dict(os.environ, {"MEESHO_SYNC_KEY": KEY})
+@mock.patch.object(meesho_sync, "_worker_alive", lambda: True)
+class MeeshoDashboardTests(TestCase):
+    def setUp(self):
+        from django.utils import timezone
+        self.biz = Business.objects.create(name="Cosmify")
+        self.admin = User.objects.create_user(username="a", password="pw", role=User.ROLE_SUPER_ADMIN)
+        self.worker = User.objects.create_user(username="w", password="pw", role=User.ROLE_BUSINESS_USER)
+        for u in (self.admin, self.worker):
+            Membership.objects.create(user=u, business=self.biz)
+        self.acct = MeeshoAccount.objects.create(business=self.biz, phone_number="9000000001", password_enc=meesho_sync.encrypt("old"),
+                                                 status="FAILED", status_message="Login refused (HTTP 401)",
+                                                 supplier_id="1", supplier_identifier="x")
+        now = timezone.now()
+        today = timezone.localdate().isoformat()
+        snap = lambda ep, payload: self.acct.snapshots.create(endpoint=ep, http_status=200, fetched_at=now, payload=payload)
+        snap("orders_pending", [{"sub_order_num": "1_1", "sla_status": "breached"}, {"sub_order_num": "2_1", "dispatch_by": today}])
+        snap("orders_ready_to_ship", [{"sub_order_num": "3_1", "label": "Not Downloaded", "sla_status": "breaching_soon"},
+                                      {"sub_order_num": "4_1", "label": "Downloaded"}])
+        snap("orders_shipped", [{"sub_order_num": "5_1"}])
+        snap("payments_summary", {"previous_total": {"netAmount": 1000.5}, "upcoming_total": {"netAmount": 300},
+                                  "upcoming": {"daywisePayments": [{"date": "2026-11-03", "netAmount": 200}, {"date": "2026-11-02", "netAmount": 100}]},
+                                  "previous": {"daywisePayments": [{"date": "2026-10-30", "netAmount": 50}]}})
+        snap("inventory_counts", {"active": 10, "paused": 2, "activation_pending": 1, "blocked": 3})
+
+    def client_for(self, user):
+        c = APIClient()
+        c.force_authenticate(user)
+        return c
+
+    def test_the_overview_numbers(self):
+        d = self.client_for(self.worker).get(f"/api/business/{self.biz.id}/meesho-orders/summary/").data
+        o = d["orders"]
+        self.assertEqual((o["tabs"]["pending"]["count"], o["tabs"]["ready_to_ship"]["count"], o["tabs"]["shipped"]["count"], o["open"]), (2, 2, 1, 4))
+        self.assertEqual((o["breached"], o["breaching_soon"], o["due_today"], o["labels_pending"]), (1, 1, 1, 1))
+        m = d["money"]
+        self.assertEqual((m["paid_30d"], m["upcoming_7d"], m["next_payout"]), (1000.5, 300, {"date": "2026-11-02", "net": 100.0}))
+        self.assertEqual(m["last_payout"]["net"], 50.0)
+        self.assertEqual((d["stock"]["active"], d["stock"]["blocked"]), (10, 3))
+        self.assertFalse(d["automation"]["enabled"])
+
+    def test_a_broken_session_is_flagged_and_reconnected_with_a_password(self):
+        base = f"/api/business/{self.biz.id}/meesho-orders"
+        (b,) = self.client_for(self.worker).get(base + "/overview/").data["businesses"]
+        self.assertEqual((b["needs_login"], b["has_password"], b["phone"]), (True, True, "••••••0001"))
+        url = f"{base}/accounts/{self.biz.id}/login/"
+        self.assertEqual(self.client_for(self.worker).post(url, {"password": "x"}, format="json").status_code, 403)
+        with mock.patch.object(meesho_sync, "enqueue", return_value="jid") as enq:
+            r = self.client_for(self.admin).post(url, {"password": "n3w!", "phone_number": "90000 00002"}, format="json")
+        self.assertEqual(r.status_code, 202, r.data)
+        self.acct.refresh_from_db()
+        self.assertEqual((self.acct.status, self.acct.phone_number, meesho_sync.decrypt(self.acct.password_enc)), ("NEW", "9000000002", "n3w!"))
+        self.assertEqual(enq.call_args[0][0], "MeeshoLoginJob")
+        mine = [b for b in self.client_for(self.admin).get(base + "/overview/").data["businesses"] if b["business_id"] == self.biz.id]
+        self.assertTrue(mine[0]["logging_in"])
+
+    def test_reconnect_with_a_pasted_browser_session(self):
+        url = f"/api/business/{self.biz.id}/meesho-orders/accounts/{self.biz.id}/login/"
+        with mock.patch.object(meesho_sync, "enqueue", return_value="jid") as enq:
+            r = self.client_for(self.admin).post(url, {"session": "connect.sid=fresh; s_id=1"}, format="json")
+        self.assertEqual((r.status_code, r.data["status"]), (202, "ACTIVE"))
+        self.assertEqual(json.loads(meesho_sync.decrypt(MeeshoAccount.objects.get().cookies_enc))["connect.sid"], "fresh")
+        self.assertEqual(enq.call_args[0][0], "MeeshoSyncJob")
+        self.assertEqual(self.client_for(self.admin).post(url, {"session": "bm_sz=only"}, format="json").status_code, 400)

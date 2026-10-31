@@ -120,12 +120,12 @@ def _meesho_submit(account, awb, packet, scan):
     """
     from . import meesho_sync
     if not account.cookies_enc:
-        raise LinkRefused("This business has no Meesho session — log in (or paste a session) on Accounts & sync.",
+        raise LinkRefused("This business has no Meesho session — log in (or paste a session) under Meesho → Settings.",
                           "no_session", status.HTTP_409_CONFLICT)
     try:
         cookies = json.loads(meesho_sync.decrypt(account.cookies_enc))
     except Exception as exc:                                       # noqa: BLE001
-        raise LinkRefused(f"The saved Meesho session can't be read ({exc.__class__.__name__}) — log in again on Accounts & sync.",
+        raise LinkRefused(f"The saved Meesho session can't be read ({exc.__class__.__name__}) — log in again under Meesho → Settings.",
                           "no_session", status.HTTP_409_CONFLICT)
     now = int(time.time() * 1000)
     body = {
@@ -158,7 +158,7 @@ def _meesho_submit(account, awb, packet, scan):
         answer = {}
     if res.status_code in (401, 403):
         why = "Meesho's bot protection blocked the server" if "<html" in res.text[:500].lower() else "the Meesho session has expired"
-        raise LinkRefused(f"Not linked — {why}. Log in again (or paste a session) on Accounts & sync.", "meesho_session",
+        raise LinkRefused(f"Not linked — {why}. Log in again (or paste a session) under Meesho → Settings.", "meesho_session",
                           status.HTTP_409_CONFLICT, meesho_http=res.status_code)
     if res.status_code >= 400 or not isinstance(answer, dict):
         msg = (answer.get("message") or answer.get("error")) if isinstance(answer, dict) else None
@@ -217,7 +217,7 @@ def _link(request, business, awb, packet, override=False, scan=None):
     # (or already had it — then this only brings our side in line).
     account = MeeshoAccount.objects.filter(business=owner).first()
     if not account or account.status != MeeshoAccount.STATUS_ACTIVE:
-        raise LinkRefused(f"{owner.name}'s Meesho account isn't connected — connect it on Accounts & sync.", "no_account",
+        raise LinkRefused(f"{owner.name}'s Meesho account isn't connected — connect it under Meesho → Settings.", "no_account",
                           status.HTTP_409_CONFLICT)
     meesho_code, request_id = _meesho_submit(account, awb, packet, scan or {})
     if meesho_code.startswith("ERR") and meesho_code != ALREADY_LINKED:

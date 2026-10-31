@@ -278,7 +278,7 @@ export function MeeshoLiveInventoryTab({ embedded = false }) {
 
       {!data.connected && (
         <div style={{ ...S.card, padding: 18, fontSize: 13.5, color: C.gray600 }}>
-          No Meesho account is connected here yet. <Link to="/meesho-orders?tab=sync" style={{ color: C.orange, fontWeight: 800 }}>Connect one under Accounts &amp; sync</Link>.
+          No Meesho account is connected here yet. <Link to="/meesho-orders?tab=settings" style={{ color: C.orange, fontWeight: 800 }}>Connect one under Settings</Link>.
         </div>
       )}
       {error && <div style={{ background: C.redLight, border: `1.5px solid ${C.redBorder}`, borderRadius: 12, padding: "10px 14px", color: C.red, fontWeight: 700, fontSize: 13 }}>{error}</div>}

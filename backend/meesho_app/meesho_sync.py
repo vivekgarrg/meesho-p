@@ -309,20 +309,12 @@ def _parse_pasted_session(text):
     return cookies, headers
 
 
-@api_view(["POST"])
-def meesho_sync_session(request, business_id):
+def _use_pasted_session(a, d):
     """
-    Admin: use a session from their own browser instead of logging in from the
-    server — for when Meesho's bot protection refuses the server's login.
-    Body: {session: <cURL / cookie header / JSON export>, phone_number?}.
-    The cookies are encrypted before they are stored and never sent back.
-    A saved password is kept; with none, an expired session waits for a new paste.
+    Put a session pasted from the admin's browser on account `a` (saved) —
+    {session: <cURL / cookie header / JSON export>, phone_number?}. Returns an
+    error Response, or None when it's in place.
     """
-    v = _views()
-    business = v.get_authorized_business(request, business_id)
-    if not v._is_admin(request.user):
-        return Response({"error": "Only an admin can connect a Meesho account."}, status=status.HTTP_403_FORBIDDEN)
-    d = request.data if isinstance(request.data, dict) else {}
     cookies, headers = _parse_pasted_session(str(d.get("session") or ""))
     if SESSION_COOKIE not in cookies:
         return Response({"error": f"No {SESSION_COOKIE} cookie found. Log in to supplier.meesho.com in Chrome, then copy a "
@@ -332,8 +324,6 @@ def meesho_sync_session(request, business_id):
         cookies_enc = encrypt(json.dumps(cookies))
     except SyncNotConfigured as exc:
         return Response({"error": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
-
-    a = MeeshoAccount.objects.filter(business=business).first() or MeeshoAccount(business=business, created_by=request.user)
     phone = "".join(ch for ch in str(d.get("phone_number") or "") if ch.isdigit())
     if phone:
         a.phone_number = phone
@@ -353,6 +343,27 @@ def meesho_sync_session(request, business_id):
     a.status, a.status_message = MeeshoAccount.STATUS_ACTIVE, "Using the session pasted from the browser."
     a.last_login_at, a.sync_enabled = timezone.now(), True
     a.save()
+    return None
+
+
+@api_view(["POST"])
+def meesho_sync_session(request, business_id):
+    """
+    Admin: use a session from their own browser instead of logging in from the
+    server — for when Meesho's bot protection refuses the server's login.
+    Body: {session: <cURL / cookie header / JSON export>, phone_number?}.
+    The cookies are encrypted before they are stored and never sent back.
+    A saved password is kept; with none, an expired session waits for a new paste.
+    """
+    v = _views()
+    business = v.get_authorized_business(request, business_id)
+    if not v._is_admin(request.user):
+        return Response({"error": "Only an admin can connect a Meesho account."}, status=status.HTTP_403_FORBIDDEN)
+    d = request.data if isinstance(request.data, dict) else {}
+    a = MeeshoAccount.objects.filter(business=business).first() or MeeshoAccount(business=business, created_by=request.user)
+    err = _use_pasted_session(a, d)
+    if err:
+        return err
     try:
         _queue_run(a, MeeshoSyncRun.KIND_SYNC, MeeshoSyncRun.TRIGGER_MANUAL)
     except SyncNotConfigured as exc:
@@ -594,7 +605,8 @@ def meesho_overview(request, business_id):
     for b in desk:
         a = by_biz.get(b.pk)
         if not a:
-            out.append({"business_id": b.pk, "business_name": b.name, "connected": False, "status": None})
+            out.append({"business_id": b.pk, "business_name": b.name, "connected": False, "status": None,
+                        "needs_login": False, "logging_in": False, "busy": False})
             continue
         inv = a.runs.filter(kind=KIND_INVENTORY).first()
         inv_ok = a.runs.filter(kind=KIND_INVENTORY, status=MeeshoSyncRun.STATUS_OK).first()
@@ -602,6 +614,10 @@ def meesho_overview(request, business_id):
         out.append({
             "business_id": b.pk, "business_name": b.name, "connected": a.status == MeeshoAccount.STATUS_ACTIVE,
             "status": a.status, "status_message": a.status_message, "supplier_name": a.supplier_name,
+            "phone": _mask(a.phone_number), "has_password": bool(a.password_enc),
+            # The session is gone and the worker couldn't log in again by itself.
+            "needs_login": a.status == MeeshoAccount.STATUS_FAILED,
+            "logging_in": a.status in (MeeshoAccount.STATUS_NEW, MeeshoAccount.STATUS_LOGGING_IN),
             "orders": {"at": a.last_sync_at, "status": a.last_sync_status, "message": a.last_sync_message,
                        "table_changed_at": a.orders_changed_at},
             "inventory": {"at": inv_ok.finished_at if inv_ok else None, "status": inv.status if inv else None,
@@ -1234,3 +1250,143 @@ def meesho_label_file_pdf(request, business_id, file_id):
     resp = HttpResponse(bytes(f.pdf), content_type="application/pdf")
     resp["Content-Disposition"] = f'{"attachment" if request.GET.get("download") else "inline"}; filename="{name}"'
     return resp
+
+
+# ── Dashboard: the Meesho page's Overview ─────────────────────────────────────
+
+_OPEN_TABS = ("hold", "pending", "ready_to_ship")
+
+
+@api_view(["GET"])
+def meesho_summary(request, business_id):
+    """
+    The numbers on the Meesho page's Overview, for every business on this desk:
+    the order pipeline (and what needs doing — to accept, labels, SLA), money
+    (paid, upcoming, outstanding), stock, today's packing (links), the latest
+    labels and the automation. Read from what the sync worker last pulled —
+    light, no order rows.
+    """
+    from django.db.models import Sum
+    from .models import MeeshoOutstandingPayment, MeeshoPacketLink
+    v = _views()
+    business = v.get_authorized_business(request, business_id)
+    desk, accounts = _desk_accounts(request, business)
+    names = {a.pk: a.business.name for a in accounts}
+    today = timezone.localdate().isoformat()
+
+    tabs = {key: {"count": 0, "by_business": {}} for key, _ in ORDER_TABS}
+    attention = {"breached": 0, "breaching_soon": 0, "due_today": 0, "labels_pending": 0}
+    fetched = []
+    for s in MeeshoSyncSnapshot.objects.filter(account__in=accounts, endpoint__startswith="orders_"):
+        key = s.endpoint[len("orders_"):]
+        if key not in tabs:
+            continue
+        rows = s.payload if isinstance(s.payload, list) else []
+        tabs[key]["count"] += len(rows)
+        tabs[key]["by_business"][names[s.account_id]] = len(rows)
+        fetched.append(s.fetched_at)
+        if key in _OPEN_TABS:
+            for r in rows:
+                sla = str(r.get("sla_status") or "")
+                attention["breached"] += "breach" in sla and "soon" not in sla
+                attention["breaching_soon"] += sla == "breaching_soon"
+                attention["due_today"] += r.get("dispatch_by") == today
+                attention["labels_pending"] += key == "ready_to_ship" and r.get("label") in (False, "Not Downloaded")
+
+    money = {"paid_30d": 0.0, "upcoming_7d": 0.0, "next_payout": None, "last_payout": None, "upcoming": []}
+    for s in MeeshoSyncSnapshot.objects.filter(account__in=accounts, endpoint="payments_summary"):
+        p = s.payload if isinstance(s.payload, dict) else {}
+        money["paid_30d"] += _money((p.get("previous_total") or {}).get("netAmount")) or 0
+        money["upcoming_7d"] += _money((p.get("upcoming_total") or {}).get("netAmount")) or 0
+        for d in _payout_days(p.get("upcoming")):
+            money["upcoming"].append({**d, "business_name": names[s.account_id]})
+        for d in _payout_days(p.get("previous"))[:1]:
+            if not money["last_payout"] or d["date"] > money["last_payout"]["date"]:
+                money["last_payout"] = d
+    by_day = {}
+    for d in money["upcoming"]:
+        by_day[d["date"]] = by_day.get(d["date"], 0) + (d["net"] or 0)
+    money["upcoming"] = [{"date": k, "net": by_day[k]} for k in sorted(by_day)]
+    money["next_payout"] = money["upcoming"][0] if money["upcoming"] else None
+    biz_ids = [a.business_id for a in accounts]
+    out_qs = MeeshoOutstandingPayment.objects.filter(business_id__in=biz_ids)
+    money["outstanding_orders"] = out_qs.count()
+    money["outstanding_total"] = _money(out_qs.aggregate(t=Sum("final_settlement_amount"))["t"]) or 0
+
+    stock = {"active": 0, "paused": 0, "activation_pending": 0, "blocked": 0}
+    for s in MeeshoSyncSnapshot.objects.filter(account__in=accounts, endpoint="inventory_counts"):
+        for k in stock:
+            stock[k] += int((s.payload or {}).get(k) or 0) if isinstance(s.payload, dict) else 0
+    live = MeeshoListing.objects.filter(account__in=accounts, archived=False)
+    stock["out_of_stock"] = live.filter(inventory=0).count()
+    stock["low_stock"] = live.filter(inventory__gt=0, inventory__lt=10).count()
+    stock["skus_live"] = live.count()
+
+    day = v._current_business_date()
+    links = MeeshoPacketLink.objects.filter(business_id__in=biz_ids, pack_day=day)
+    from .models import MeeshoLinkLog
+    from django.db.models import Q
+    packing = {"linked_today": links.count(), "pack_day": day,
+               "open_problems": MeeshoLinkLog.objects.filter(Q(business_id__in=biz_ids) | Q(business__isnull=True),
+                                                             ok=False, resolved=False).count()}
+    setting = MeeshoAutoSetting.get()
+    nxt_accept, nxt_labels = _next_times(setting)
+    return Response({
+        "orders": {"tabs": tabs, **attention, "updated_at": max(fetched) if fetched else None,
+                   "open": sum(tabs[k]["count"] for k in _OPEN_TABS)},
+        "money": money, "stock": stock, "packing": packing,
+        "automation": {"enabled": setting.enabled, "accept_every_minutes": setting.accept_every_minutes,
+                       "label_times": setting.label_times or [], "next_accept_at": nxt_accept, "next_labels_at": nxt_labels},
+    })
+
+
+@api_view(["POST"])
+def meesho_account_login(request, business_id, account_business_id):
+    """
+    Reconnect a business's Meesho account whose session broke: log in again
+    with the saved login, or with the password (and phone) given here — the
+    worker's MeeshoLoginJob. Body: {password?, phone_number?} — or {session} to
+    use a session pasted from the browser instead. Admins only.
+    """
+    v = _views()
+    business = v.get_authorized_business(request, business_id)
+    if not v._is_admin(request.user):
+        return Response({"error": "Only an admin can log a Meesho account in."}, status=status.HTTP_403_FORBIDDEN)
+    desk, accounts = _desk_accounts(request, business)
+    a = next((x for x in accounts if x.business_id == account_business_id), None)
+    if not a:
+        return Response({"error": "That business has no Meesho account here — connect it under Settings."},
+                        status=status.HTTP_404_NOT_FOUND)
+    d = request.data if isinstance(request.data, dict) else {}
+    if str(d.get("session") or "").strip():
+        # A session pasted from the browser, for when Meesho blocks the server's login.
+        err = _use_pasted_session(a, d)
+        if err:
+            return err
+        try:
+            _queue_run(a, MeeshoSyncRun.KIND_SYNC, MeeshoSyncRun.TRIGGER_MANUAL)
+        except SyncNotConfigured as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        return Response({"business_id": a.business_id, "status": a.status, "status_message": a.status_message},
+                        status=status.HTTP_202_ACCEPTED)
+    password = str(d.get("password") or "")
+    phone = "".join(ch for ch in str(d.get("phone_number") or "") if ch.isdigit())
+    try:
+        if password:
+            a.password_enc = encrypt(password)
+        if phone:
+            if len(phone) < 10:
+                return Response({"error": "Enter the 10-digit Meesho login phone number."}, status=status.HTTP_400_BAD_REQUEST)
+            a.phone_number = phone
+    except SyncNotConfigured as exc:
+        return Response({"error": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+    if not a.password_enc:
+        return Response({"error": "Enter the Meesho password — none is saved for this account."}, status=status.HTTP_400_BAD_REQUEST)
+    a.status, a.status_message = MeeshoAccount.STATUS_NEW, "Logging in…"
+    a.save(update_fields=["password_enc", "phone_number", "status", "status_message", "updated_at"])
+    try:
+        _queue_run(a, MeeshoSyncRun.KIND_LOGIN, MeeshoSyncRun.TRIGGER_MANUAL)
+    except SyncNotConfigured as exc:
+        return Response({"error": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+    return Response({"business_id": a.business_id, "status": a.status, "status_message": a.status_message},
+                    status=status.HTTP_202_ACCEPTED)

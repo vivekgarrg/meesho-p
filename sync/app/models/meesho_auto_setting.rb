@@ -1,4 +1,4 @@
-# The Meesho automation set on Meesho Orders → Accounts & sync (one row). The
+# The Meesho automation set on Meesho → Settings (one row). The
 # table belongs to Django (meesho_app.models.MeeshoAutoSetting) — keep the two
 # in step. Read every minute by MeeshoScheduleJob.
 class MeeshoAutoSetting < ApplicationRecord

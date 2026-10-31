@@ -1,4 +1,4 @@
-# The Meesho automation, as set on Meesho Orders → Accounts & sync
+# The Meesho automation, as set on Meesho → Settings
 # (MeeshoAutoSetting; MeeshoScheduleJob queues it), for every connected account:
 #
 #   "accept": accept every Pending order — every N minutes.

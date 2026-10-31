@@ -412,7 +412,7 @@ export function MeeshoOrdersTab({ embedded = false }) {
           </p>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          {!embedded && <Link to="/meesho-orders?tab=sync" style={{ ...btn("ghost", "md"), textDecoration: "none" }}>Sync settings</Link>}
+          {!embedded && <Link to="/meesho-orders?tab=settings" style={{ ...btn("ghost", "md"), textDecoration: "none" }}>Sync settings</Link>}
           {data.connected && (
             <button onClick={refresh} disabled={syncing} style={{ ...btn("primary", "md"), minWidth: 140, opacity: syncing ? 0.7 : 1 }}>
               {syncing ? <><CircularProgress size={14} style={{ color: "#fff", marginRight: 6, verticalAlign: "-2px" }} />Syncing…</> : "↻ Refresh"}
@@ -424,7 +424,7 @@ export function MeeshoOrdersTab({ embedded = false }) {
       {!data.connected && (
         <div style={{ ...S.card, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", borderTop: `4px solid ${C.orange}` }}>
           <span style={{ flex: 1, fontSize: 14, fontWeight: 700, color: C.gray700 }}>No Meesho account connected yet.</span>
-          <Link to="/meesho-orders?tab=sync" style={{ ...btn("primary", "md"), textDecoration: "none" }}>Connect Meesho</Link>
+          <Link to="/meesho-orders?tab=settings" style={{ ...btn("primary", "md"), textDecoration: "none" }}>Connect Meesho</Link>
         </div>
       )}
       {data.connected && (!data.queue || !data.worker) && (
@@ -434,7 +434,7 @@ export function MeeshoOrdersTab({ embedded = false }) {
       )}
       {failedAccounts.map((x) => (
         <div key={x.business_id} style={{ background: C.redLight, border: `1.5px solid ${C.redBorder}`, borderRadius: 12, padding: "10px 14px", color: C.red, fontSize: 13, fontWeight: 700 }}>
-          {multi ? `${x.business_name}: last` : "Last"} sync failed: {x.last_sync_message || x.status_message} <Link to="/meesho-orders?tab=sync" style={{ color: C.red }}>Fix it under Accounts &amp; sync →</Link>
+          {multi ? `${x.business_name}: last` : "Last"} sync failed: {x.last_sync_message || x.status_message} <Link to="/meesho-orders?tab=settings" style={{ color: C.red }}>Fix it under Settings →</Link>
         </div>
       ))}
       {error && <div style={{ color: C.red, fontWeight: 700, fontSize: 13 }}>{error}</div>}

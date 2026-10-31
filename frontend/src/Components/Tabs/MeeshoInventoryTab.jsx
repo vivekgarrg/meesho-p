@@ -194,7 +194,7 @@ export function MeeshoInventoryTab() {
       )}
       {sync && !sync.connected && (
         <div style={{ fontSize: 13, color: C.gray500 }}>
-          Connect this business's Meesho account on <a href="/meesho-orders?tab=sync" style={{ color: C.orange, fontWeight: 700 }}>Meesho Orders → Accounts &amp; sync</a> and this list keeps itself up to date — no more sheet uploads.
+          Connect this business's Meesho account on <a href="/meesho-orders?tab=settings" style={{ color: C.orange, fontWeight: 700 }}>Meesho → Settings</a> and this list keeps itself up to date — no more sheet uploads.
         </div>
       )}
 

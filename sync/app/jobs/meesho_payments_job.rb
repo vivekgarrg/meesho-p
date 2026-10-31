@@ -38,7 +38,7 @@ class MeeshoPaymentsJob
     run.start!
     begin
       if account.supplier_id.blank? || account.supplier_identifier.blank?
-        raise MeeshoClient::RequestError, "the supplier's ID and code aren't known — set them on Accounts & sync"
+        raise MeeshoClient::RequestError, "the supplier's ID and code aren't known — set them under Meesho → Settings"
       end
       @client = account.cookies.present? ? MeeshoClient.new(account) : MeeshoLoginJob.login!(account)
       result = pull(account)

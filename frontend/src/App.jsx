@@ -1242,7 +1242,7 @@ function AppShell() {
                 <Route path="/order-scan" element={<OrderScanTab />} />
                 <Route path="/return-scan" element={<ReturnDeskTab />} />
                 {/* Sync and Inventory are tabs of Meesho Orders now; old links land on the right tab. */}
-                <Route path="/meesho-sync" element={<Navigate to="/meesho-orders?tab=sync" replace />} />
+                <Route path="/meesho-sync" element={<Navigate to="/meesho-orders?tab=settings" replace />} />
                 <Route path="/meesho-orders" element={<MeeshoHubTab />} />
                 <Route path="/meesho-live-inventory" element={<Navigate to="/meesho-orders?tab=inventory" replace />} />
                 <Route path="/scan-lookup" element={<ScanLookupTab />} />

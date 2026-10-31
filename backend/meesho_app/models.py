@@ -3303,7 +3303,7 @@ class MeeshoSyncSnapshot(models.Model):
 
 class MeeshoAutoSetting(models.Model):
     """
-    The Meesho automation, set on Meesho Orders → Accounts & sync (one row):
+    The Meesho automation, set on Meesho → Settings (one row):
     accept every pending order every `accept_every_minutes`, and make the
     labels of every ready-to-ship order not downloaded yet at each of
     `label_times` (IST, "HH:MM"). The sync worker's every-minute scheduler

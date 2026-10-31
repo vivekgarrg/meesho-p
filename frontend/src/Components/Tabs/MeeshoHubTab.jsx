@@ -1,221 +1,197 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { useSearchParams } from "react-router-dom";
-import { API, C, S, btn, Tag, useIsMobile } from "../../App";
+import { API, C, btn, useIsMobile } from "../../App";
 import { CircularProgress } from "@mui/material";
 import { MeeshoOrdersTab } from "./MeeshoOrdersTab";
 import { MeeshoLiveInventoryTab } from "./MeeshoLiveInventoryTab";
 import { MeeshoSyncTab } from "./MeeshoSyncTab";
 import { MeeshoPaymentsTab } from "./MeeshoPaymentsTab";
-import { AutomationCard, LatestLabels } from "./MeeshoAutomation";
 import { MeeshoLinkingTab } from "./MeeshoLinkingTab";
+import { AutomationCard, LatestLabels } from "./MeeshoAutomation";
+import { MeeshoOverview } from "./MeeshoOverview";
+import { SessionAlerts, ReconnectDialog, AccountsHealth } from "./MeeshoAccounts";
+import { Panel, ago } from "./MeeshoUI";
 
 /*
- * Meesho — one place for everything the Meesho panel sync does: Orders,
- * Inventory, Payments and the account/sync settings, as tabs (?tab= keeps the choice in
- * the address). The header shows, per business on this desk, whether its
- * account is connected, when its orders and inventory were last read, and when
- * the app's own tables (orders, Meesho Stock) were last brought up to date
- * from them — the Sidekiq worker does all of that in the background.
+ * Meesho — everything the Meesho panel sync does, as one dashboard:
+ *
+ *   Overview       what needs doing now, orders, money, stock, accounts
+ *   Orders         accept, ready to ship, labels
+ *   Order linking  AWB ↔ packet at the packing desk
+ *   Inventory      every SKU by parent; pause
+ *   Payments       paid, upcoming, outstanding
+ *   Settings       automation, Meesho accounts and their sessions
+ *
+ * ?tab= keeps the place. A broken session shows on every tab, with Reconnect
+ * (password, or a session pasted from the browser).
  */
 
 const TABS = [
+  { key: "overview", label: "Overview", icon: "◧" },
   { key: "orders", label: "Orders", icon: "📦" },
   { key: "linking", label: "Order linking", icon: "🔗" },
   { key: "inventory", label: "Inventory", icon: "▤" },
   { key: "payments", label: "Payments", icon: "₹" },
-  { key: "sync", label: "Accounts & sync", icon: "⟳" },
+  { key: "settings", label: "Settings", icon: "⚙" },
 ];
-const BUSY = ["QUEUED", "RUNNING"];
+// Older links (?tab=sync) land on Settings.
+const ALIASES = { sync: "settings" };
 
-const ago = (iso) => {
-  if (!iso) return "never";
-  const s = Math.max(0, Math.round((Date.now() - new Date(iso)) / 1000));
-  if (s < 60) return "just now";
-  if (s < 3600) return `${Math.round(s / 60)} min ago`;
-  if (s < 86400) return `${Math.round(s / 3600)} h ago`;
-  return new Date(iso).toLocaleString("en-IN", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
-};
-
-const STATE = {
-  ACTIVE: { label: "Connected", tag: "green" },
-  NEW: { label: "Logging in…", tag: "blue" },
-  LOGGING_IN: { label: "Logging in…", tag: "blue" },
-  FAILED: { label: "Needs attention", tag: "red" },
-  DISABLED: { label: "Disconnected", tag: "gray" },
-};
-
-function Line({ label, at, status, detail, busy }) {
-  const failed = status === "FAILED";
+function Badge({ n, tone }) {
+  if (!n) return null;
+  const bg = tone === "bad" ? C.red : tone === "brand" ? C.orange : C.gray500;
   return (
-    <div style={{ display: "flex", gap: 8, alignItems: "baseline", fontSize: 12.5, minWidth: 0 }}>
-      <span style={{ width: 8, height: 8, borderRadius: 4, flexShrink: 0, alignSelf: "center",
-        background: busy || BUSY.includes(status) ? C.blue : failed ? C.red : at ? C.green : C.gray300 }} />
-      <span style={{ color: C.gray500, width: 104, flexShrink: 0 }}>{label}</span>
-      <span style={{ fontWeight: 700, color: failed ? C.red : C.gray800, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
-        title={detail || undefined}>
-        {BUSY.includes(status) ? "reading now…" : ago(at)}{detail ? <span style={{ fontWeight: 500, color: failed ? C.red : C.gray500 }}> · {detail}</span> : null}
-      </span>
-    </div>
-  );
-}
-
-function BusinessCard({ b, current, onFix }) {
-  const st = b.status ? STATE[b.status] || STATE.NEW : { label: "Not connected", tag: "gray" };
-  const failedMsg = b.status === "FAILED" ? b.status_message
-    : b.orders?.status === "FAILED" ? b.orders.message
-      : b.inventory?.status === "FAILED" ? b.inventory.message
-        : b.payments?.status === "FAILED" ? b.payments.message : "";
-  return (
-    <div style={{ ...S.card, padding: "12px 14px", display: "flex", flexDirection: "column", gap: 7, minWidth: 0,
-      borderTop: `4px solid ${failedMsg ? C.red : b.connected ? C.green : C.gray300}` }}>
-      <div style={{ display: "flex", gap: 8, alignItems: "center", justifyContent: "space-between" }}>
-        <span style={{ fontWeight: 800, fontSize: 14.5, color: C.gray900, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-          {b.business_name}{current && <span style={{ fontWeight: 600, fontSize: 11.5, color: C.gray400 }}> · on screen</span>}
-        </span>
-        <span style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
-          {b.busy && <CircularProgress size={12} style={{ color: C.blue }} />}
-          <Tag variant={st.tag}>{st.label}</Tag>
-        </span>
-      </div>
-      {b.status ? (
-        <>
-          <Line label="Orders pulled" at={b.orders.at} status={b.orders.status} busy={b.busy} />
-          <Line label="Inventory read" at={b.inventory.at} status={b.inventory.status} />
-          <Line label="Orders table" at={b.orders.table_changed_at} detail="updated from Meesho" />
-          <Line label="Meesho Stock" at={b.inventory.stock_changed_at} detail={`${b.inventory.stock_rows} SKUs`} />
-          <Line label="Payments" at={b.payments?.at} status={b.payments?.status} detail="imported to Payments" />
-          {failedMsg && (
-            <div style={{ fontSize: 12, color: C.red, display: "flex", gap: 8, alignItems: "flex-start" }}>
-              <span style={{ flex: 1, minWidth: 0 }}>{String(failedMsg).slice(0, 180)}</span>
-              {current && <button onClick={onFix} style={{ ...btn("ghost", "sm"), color: C.red, whiteSpace: "nowrap" }}>Fix</button>}
-            </div>
-          )}
-        </>
-      ) : (
-        <div style={{ fontSize: 12.5, color: C.gray500 }}>
-          {current ? <>No Meesho account yet. <button onClick={onFix} style={{ border: "none", background: "none", color: C.orange, fontWeight: 800, cursor: "pointer", padding: 0 }}>Connect it →</button></>
-            : "No Meesho account yet — switch to this business to connect it."}
-        </div>
-      )}
-    </div>
+    <span style={{ minWidth: 18, height: 18, padding: "0 5px", borderRadius: 9, background: bg, color: "#fff", fontSize: 11, fontWeight: 800,
+      display: "inline-flex", alignItems: "center", justifyContent: "center", fontVariantNumeric: "tabular-nums" }}>{n > 999 ? "999+" : n}</span>
   );
 }
 
 export function MeeshoHubTab() {
   const isMobile = useIsMobile();
   const [params, setParams] = useSearchParams();
-  const tab = TABS.some((t) => t.key === params.get("tab")) ? params.get("tab") : "orders";
-  const setTab = (key) => setParams(key === "orders" ? {} : { tab: key }, { replace: true });
-  const [data, setData] = useState(null);
+  const asked = ALIASES[params.get("tab")] || params.get("tab");
+  const tab = TABS.some((t) => t.key === asked) ? asked : "overview";
+  const go = useCallback((key) => {
+    setParams(key === "overview" ? {} : { tab: key }, { replace: true });
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }, [setParams]);
+
+  const [overview, setOverview] = useState(null);
+  const [summary, setSummary] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
   const [note, setNote] = useState(null);
+  const [reconnect, setReconnect] = useState(null);
 
   const load = useCallback(async () => {
-    try {
-      const res = await fetch(`${API}/meesho-orders/overview/`);
-      if (res.ok) setData(await res.json());
-    } catch { /* keep the last state */ }
+    const [ov, su] = await Promise.all([
+      fetch(`${API}/meesho-orders/overview/`).catch(() => null),
+      fetch(`${API}/meesho-orders/summary/`).catch(() => null),
+    ]);
+    if (ov?.ok) setOverview(await ov.json());
+    if (su?.ok) setSummary(await su.json());
   }, []);
-  const anyBusy = data?.businesses.some((b) => b.busy);
+  const busy = overview?.businesses.some((b) => b.busy || b.logging_in);
   useEffect(() => {
     load();
-    const t = setInterval(load, anyBusy ? 5000 : 60000);
+    const t = setInterval(load, busy ? 5000 : 60000);
     return () => clearInterval(t);
-  }, [load, anyBusy]);
+  }, [load, busy]);
 
-  // Orders and inventory for every connected business, in one go.
   const refreshAll = async () => {
     setRefreshing(true); setNote(null);
     try {
-      const [o, i] = await Promise.all([
-        fetch(`${API}/meesho-orders/refresh/`, { method: "POST" }),
-        fetch(`${API}/meesho-live-inventory/refresh/`, { method: "POST" }),
-      ]);
-      if (!o.ok && !i.ok) {
-        const d = await o.json().catch(() => ({}));
-        setNote({ error: true, text: d.error || "Couldn't start a refresh." });
-      } else {
-        setNote({ error: false, text: "Pulling orders and inventory from Meesho — the tables update as each finishes." });
-      }
+      const rs = await Promise.all(["meesho-orders/refresh/", "meesho-live-inventory/refresh/", "meesho-orders/payments/refresh/"]
+        .map((p) => fetch(`${API}/${p}`, { method: "POST" }).catch(() => null)));
+      setNote(rs.some((r) => r?.ok) ? { ok: true, text: "Reading orders, stock and payments from Meesho — the numbers update as each finishes." }
+        : { ok: false, text: "Couldn't start a refresh — is a Meesho account connected?" });
       load();
-    } catch {
-      setNote({ error: true, text: "Network error." });
-    } finally {
-      setRefreshing(false);
-    }
+    } finally { setRefreshing(false); }
   };
 
-  const businesses = data?.businesses || [];
+  const businesses = overview?.businesses || [];
   const connected = businesses.filter((b) => b.connected).length;
-  const needsAttention = businesses.some((b) => b.status === "FAILED" || b.orders?.status === "FAILED" || b.inventory?.status === "FAILED" || b.payments?.status === "FAILED");
+  const broken = businesses.filter((b) => b.needs_login).length;
+  const failing = businesses.filter((b) => b.orders?.status === "FAILED" || b.inventory?.status === "FAILED" || b.payments?.status === "FAILED").length;
+  const latest = businesses.map((b) => b.orders?.at).filter(Boolean).sort().pop();
+  const health = !overview ? null
+    : (!overview.queue || !overview.worker) ? { tone: "bad", text: !overview.queue ? "Job queue unreachable" : "Sync worker stopped" }
+      : broken ? { tone: "bad", text: `${broken} session${broken === 1 ? "" : "s"} expired` }
+        : failing ? { tone: "warn", text: `${failing} business${failing === 1 ? "" : "es"} with sync errors` }
+          : connected ? { tone: "good", text: `In sync · ${ago(latest)}` } : { tone: "neutral", text: "Not connected" };
+  const healthColor = { bad: C.red, warn: "#B45309", good: "#15803D", neutral: C.gray500 }[health?.tone || "neutral"];
+
+  const badge = {
+    orders: summary && <Badge n={summary.orders.tabs.pending.count} tone="brand" />,
+    linking: summary && <Badge n={summary.packing.open_problems} tone="bad" />,
+    inventory: summary && <Badge n={summary.stock.out_of_stock} />,
+    settings: (broken || failing) ? <span title="Needs attention" style={{ width: 8, height: 8, borderRadius: 4, background: C.red }} /> : null,
+  };
+
+  if (!overview) return <div style={{ display: "flex", justifyContent: "center", padding: 80 }}><CircularProgress style={{ color: C.orange }} /></div>;
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 16, maxWidth: 1440 }}>
+      {/* ── Header ───────────────────────────────────────────────────────── */}
+      <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
         <div style={{ minWidth: 0 }}>
-          <h1 style={{ fontSize: 24, fontWeight: 900, color: C.gray900, margin: 0, letterSpacing: "-0.01em" }}>Meesho</h1>
-          <p style={{ fontSize: 13, color: C.gray500, marginTop: 3, maxWidth: 720 }}>
-            Orders, inventory and the account sync in one place. The sync worker reads the Meesho panel in the background and keeps
-            the app's orders and Meesho Stock tables up to date — {data ? `${connected} of ${businesses.length} business${businesses.length === 1 ? "" : "es"} connected` : "loading…"}.
+          <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+            <h1 style={{ fontSize: 24, fontWeight: 900, color: C.gray900, margin: 0, letterSpacing: "-0.02em" }}>Meesho</h1>
+            {health && (
+              <span role="status" style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "4px 10px", borderRadius: 999,
+                background: C.white, border: `1px solid ${C.gray200}`, fontSize: 12.5, fontWeight: 700, color: healthColor }}>
+                <span aria-hidden style={{ width: 8, height: 8, borderRadius: 4, background: healthColor }} />{health.text}
+              </span>
+            )}
+          </div>
+          <p style={{ fontSize: 13, color: C.gray500, margin: "4px 0 0" }}>
+            Orders, packing, stock and payments for {connected} of {businesses.length} business{businesses.length === 1 ? "" : "es"}
+            {businesses.length > 1 ? ` (${businesses.map((b) => b.business_name).join(", ")})` : ""} — kept in step with Meesho in the background.
           </p>
         </div>
         <button onClick={refreshAll} disabled={refreshing || !connected}
           style={{ ...btn("primary", "md"), minWidth: 170, opacity: refreshing || !connected ? 0.6 : 1 }}>
           {refreshing ? <><CircularProgress size={14} style={{ color: "#fff", marginRight: 6, verticalAlign: "-2px" }} />Starting…</> : "↻ Refresh everything"}
         </button>
-      </div>
+      </header>
 
-      {data && (!data.queue || !data.worker) && (
-        <div style={{ background: C.amberLight, border: `1.5px solid ${C.amberBorder}`, borderRadius: 12, padding: "10px 14px", color: "#92400E", fontSize: 13, fontWeight: 700 }}>
-          ⚠ {!data.queue ? "The job queue (Redis) can't be reached" : "The sync worker (Sidekiq) isn't running"} — nothing is read from Meesho, and the tables don't update, until it is.
+      <SessionAlerts businesses={businesses} isAdmin={overview.is_admin} onReconnect={setReconnect} />
+      {(!overview.queue || !overview.worker) && (
+        <div role="alert" style={{ background: C.amberLight, border: `1.5px solid ${C.amberBorder}`, borderRadius: 12, padding: "10px 14px", color: "#92400E", fontSize: 13, fontWeight: 700 }}>
+          ⚠ {!overview.queue ? "The job queue (Redis) can't be reached" : "The sync worker (Sidekiq) isn't running"} — nothing is read from Meesho, and nothing updates, until it is.
         </div>
       )}
-      {note && (
-        <div style={{ fontSize: 13, fontWeight: 700, color: note.error ? C.red : C.gray600 }}>{note.text}</div>
-      )}
+      {note && <div role="status" style={{ fontSize: 13, fontWeight: 700, color: note.ok ? C.gray600 : C.red }}>{note.text}</div>}
 
-      {businesses.length > 0 && (
-        <div style={{ display: "grid", gap: 10, gridTemplateColumns: isMobile ? "minmax(0, 1fr)" : "repeat(auto-fill, minmax(300px, 1fr))" }}>
-          {businesses.map((b) => (
-            <BusinessCard key={b.business_id} b={b} current={b.business_id === data.current_business_id} onFix={() => setTab("sync")} />
-          ))}
-        </div>
-      )}
-
-      <LatestLabels />
-
-      <div role="tablist" style={{ display: "flex", gap: 4, borderBottom: `2px solid ${C.gray200}`, overflowX: "auto" }}>
+      {/* ── Tabs ─────────────────────────────────────────────────────────── */}
+      <nav role="tablist" aria-label="Meesho" style={{ display: "flex", gap: 4, padding: 4, background: C.gray100, borderRadius: 12, overflowX: "auto",
+        position: "sticky", top: 0, zIndex: 20 }}>
         {TABS.map((t) => {
           const on = tab === t.key;
           return (
-            <button key={t.key} role="tab" aria-selected={on} onClick={() => setTab(t.key)}
-              style={{ border: "none", background: "none", cursor: "pointer", fontFamily: "inherit", padding: "10px 16px", marginBottom: -2,
-                borderBottom: `3px solid ${on ? C.orange : "transparent"}`, color: on ? C.gray900 : C.gray500,
-                fontWeight: on ? 800 : 700, fontSize: 14.5, display: "flex", gap: 7, alignItems: "center", whiteSpace: "nowrap" }}>
-              <span aria-hidden>{t.icon}</span>{t.label}
-              {t.key === "sync" && needsAttention && <span title="Needs attention" style={{ width: 8, height: 8, borderRadius: 4, background: C.red }} />}
+            <button key={t.key} role="tab" aria-selected={on} onClick={() => go(t.key)}
+              style={{ border: "none", cursor: "pointer", fontFamily: "inherit", padding: isMobile ? "8px 12px" : "9px 16px", borderRadius: 9,
+                background: on ? C.white : "transparent", boxShadow: on ? "0 1px 3px rgba(15,23,42,.12)" : "none",
+                color: on ? C.gray900 : C.gray600, fontWeight: on ? 800 : 700, fontSize: 13.5, display: "flex", gap: 7, alignItems: "center",
+                whiteSpace: "nowrap", flex: isMobile ? "0 0 auto" : 1, justifyContent: "center", transition: "background .15s" }}>
+              <span aria-hidden style={{ opacity: on ? 1 : 0.7 }}>{t.icon}</span>{t.label}{badge[t.key]}
             </button>
           );
         })}
-      </div>
+      </nav>
 
-      <div role="tabpanel">
-        {tab === "orders" && <MeeshoOrdersTab embedded />}
+      {/* ── Content ──────────────────────────────────────────────────────── */}
+      <div role="tabpanel" aria-label={TABS.find((t) => t.key === tab).label}>
+        {tab === "overview" && (summary
+          ? <MeeshoOverview summary={summary} overview={overview} go={go} onReconnect={setReconnect} />
+          : <div style={{ display: "flex", justifyContent: "center", padding: 60 }}><CircularProgress style={{ color: C.orange }} /></div>)}
+        {tab === "orders" && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            <LatestLabels />
+            <MeeshoOrdersTab embedded />
+          </div>
+        )}
         {tab === "linking" && <MeeshoLinkingTab />}
         {tab === "inventory" && <MeeshoLiveInventoryTab embedded />}
         {tab === "payments" && <MeeshoPaymentsTab />}
-        {tab === "sync" && (
-          <>
-            {businesses.length > 1 && (
-              <div style={{ fontSize: 12.5, color: C.gray500, marginBottom: 10 }}>
-                Settings for the business on screen. Switch business at the top of the app to manage another one's Meesho account.
-              </div>
-            )}
-            <div style={{ marginBottom: 16 }}><AutomationCard /></div>
-            <MeeshoSyncTab embedded />
-          </>
+        {tab === "settings" && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 16, maxWidth: 1100 }}>
+            <AutomationCard />
+            <Panel title="Meesho accounts" pad={false}
+              subtitle="One Meesho supplier account per business. When a session expires, log in again here — the sync picks up straight after.">
+              <AccountsHealth businesses={businesses} isAdmin={overview.is_admin} onReconnect={setReconnect} />
+            </Panel>
+            <Panel title="This business's connection"
+              subtitle={`The account of the business on screen — supplier details, schedule and recent runs.${businesses.length > 1 ? " Switch business at the top of the app to manage another." : ""}`}>
+              <MeeshoSyncTab embedded />
+            </Panel>
+          </div>
         )}
       </div>
+
+      {reconnect && (
+        <ReconnectDialog business={reconnect} onClose={() => { setReconnect(null); load(); }}
+          onDone={() => { setNote({ ok: true, text: `${reconnect.business_name} is connected again — reading its data now.` }); setReconnect(null); load(); }} />
+      )}
     </div>
   );
 }

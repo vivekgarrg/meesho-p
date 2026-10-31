@@ -136,7 +136,7 @@ async function fetchPdf(file, download) {
   return URL.createObjectURL(await res.blob());
 }
 
-export function LatestLabels() {
+export function LatestLabels({ emptyHint = false }) {
   const [files, setFiles] = useState(null);
   const [busy, setBusy] = useState(null);
   const [error, setError] = useState(null);
@@ -180,7 +180,15 @@ export function LatestLabels() {
     finally { setBusy(null); }
   };
 
-  if (!files || files.length === 0) return null;
+  if (!files || files.length === 0) {
+    if (!emptyHint || !files) return null;
+    return (
+      <div style={{ ...S.card, padding: "14px 16px", display: "flex", flexDirection: "column", gap: 6, height: "100%", boxSizing: "border-box" }}>
+        <span style={{ fontSize: 14, fontWeight: 800, color: C.gray900 }}>Latest labels</span>
+        <span style={{ fontSize: 12.5, color: C.gray500 }}>No labels yet. Generate them on Orders → Ready to ship, or set label times under Settings — they'll be here, sorted and ready to print.</span>
+      </div>
+    );
+  }
   const [latest, ...older] = files;
   const Row = ({ f, big }) => (
     <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", padding: big ? 0 : "8px 0", borderTop: big ? "none" : `1px solid ${C.gray100}` }}>
@@ -202,7 +210,7 @@ export function LatestLabels() {
   );
 
   return (
-    <div style={{ ...S.card, padding: "14px 16px", display: "flex", flexDirection: "column", gap: 8, borderLeft: `5px solid ${C.orange}` }}>
+    <div style={{ ...S.card, padding: "14px 16px", display: "flex", flexDirection: "column", gap: 8, borderLeft: `5px solid ${C.orange}`, height: "100%", boxSizing: "border-box" }}>
       <span style={{ fontSize: 12, fontWeight: 800, color: C.orange, textTransform: "uppercase", letterSpacing: "0.05em" }}>Latest labels</span>
       <Row f={latest} big />
       {error && <span style={{ fontSize: 12.5, color: C.red, fontWeight: 700 }}>{error}</span>}

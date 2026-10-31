@@ -111,7 +111,7 @@ export function MeeshoPaymentsTab() {
 
   if (!data) return <div style={{ display: "flex", justifyContent: "center", padding: 60 }}><CircularProgress style={{ color: C.orange }} /></div>;
   if (!data.connected) {
-    return <div style={{ ...S.card, padding: 18, fontSize: 13.5, color: C.gray600 }}>No Meesho account is connected here yet. <Link to="/meesho-orders?tab=sync" style={{ color: C.orange, fontWeight: 800 }}>Connect one under Accounts &amp; sync</Link>.</div>;
+    return <div style={{ ...S.card, padding: 18, fontSize: 13.5, color: C.gray600 }}>No Meesho account is connected here yet. <Link to="/meesho-orders?tab=settings" style={{ color: C.orange, fontWeight: 800 }}>Connect one under Settings</Link>.</div>;
   }
 
   const paid = accounts.flatMap((a) => a.paid.map((p) => ({ ...p, business_name: a.business_name })));
