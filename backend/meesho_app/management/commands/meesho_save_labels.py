@@ -1,5 +1,6 @@
 """
-The last step of an automatic labels run (sync worker: MeeshoAutoLabelsJob).
+The last step of a labels run — automatic (sync worker: MeeshoAutoLabelsJob)
+or a Generate on Meesho Orders (MeeshoLabelJob, --trigger MANUAL).
 
 Takes every business's labels Meesho made in one run (MeeshoSyncRun LABELS
 with result.batch == --batch), merges them into one PDF sorted by parent SKU —
@@ -31,8 +32,10 @@ class Command(BaseCommand):
         parser.add_argument("--batch", required=True)
         parser.add_argument("--summary", default="")
         parser.add_argument("--send", action="store_true", help="Also send the PDF to Telegram/email.")
+        parser.add_argument("--trigger", choices=[MeeshoLabelFile.TRIGGER_AUTO, MeeshoLabelFile.TRIGGER_MANUAL],
+                            default=MeeshoLabelFile.TRIGGER_AUTO)
 
-    def handle(self, *args, batch, summary, send, **opts):
+    def handle(self, *args, batch, summary, send, trigger, **opts):
         when = timezone.localtime().strftime("%-I:%M %p, %-d %b")
         runs = [r for r in MeeshoSyncRun.objects.filter(kind=meesho_sync.KIND_LABELS, result__batch=batch)
                 .select_related("account__business").order_by("queued_at") if (r.result or {}).get("label_url")]
@@ -71,7 +74,7 @@ class Command(BaseCommand):
         if pdf is None:
             pdf, note = merged, note or "Not sorted by parent SKU this time."
 
-        f = meesho_sync._save_label_file(batch, MeeshoLabelFile.TRIGGER_AUTO, runs, pdf, sorted_ok=not note,
+        f = meesho_sync._save_label_file(batch, trigger, runs, pdf, sorted_ok=not note,
                                          pages=pages, summary="\n".join(x for x in (note, summary) if x))
         out.update(file_id=f.pk, pages=pages, sorted=not note)
         if send:

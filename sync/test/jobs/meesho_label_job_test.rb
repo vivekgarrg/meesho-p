@@ -104,4 +104,23 @@ class MeeshoLabelJobTest < ActiveSupport::TestCase
     MeeshoLabelJob.new.perform(account.id, label_run.id, GROUPS)
     assert_not_requested(:post, DOWNLOADED_URL)
   end
+
+  test "a Generate is merged, sorted and kept once its last business's labels are made" do
+    calls = []
+    original = DjangoCommand.method(:run)
+    DjangoCommand.define_singleton_method(:run) { |*a, **| calls << a; {} }
+    other = make_account(status: "ACTIVE", business_id: 2, supplier_id: "1", supplier_identifier: "x")
+    mine = account.runs.create!(kind: "LABELS", trigger: "MANUAL", status: "OK", result: { "batch" => "b9", "label_url" => "u" })
+    theirs = other.runs.create!(kind: "LABELS", trigger: "MANUAL", status: "RUNNING", result: { "batch" => "b9" })
+    MeeshoLabelJob.new.send(:keep, mine)
+    assert_empty calls                                                              # the other business isn't done yet
+    theirs.update!(status: "OK", result: { "batch" => "b9", "label_url" => "v" })
+    MeeshoLabelJob.new.send(:keep, theirs)
+    assert_equal [["meesho_save_labels", "--batch", "b9", "--trigger", "MANUAL"]], calls
+    auto = account.runs.create!(kind: "LABELS", trigger: "SCHEDULE", status: "OK", result: { "batch" => "auto-1", "label_url" => "u" })
+    MeeshoLabelJob.new.send(:keep, auto)
+    assert_equal 1, calls.size                                                      # automatic runs keep theirs themselves
+  ensure
+    DjangoCommand.define_singleton_method(:run, original)
+  end
 end

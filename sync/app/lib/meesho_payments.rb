@@ -71,9 +71,10 @@ module MeeshoPayments
     path
   end
 
-  # Run Django's importer on a downloaded file; returns its counts.
-  def import(business_id, path, kind)
-    DjangoCommand.run("import_meesho_payments", "--business", business_id, "--file", path, "--kind", kind)
+  # Run Django's importer on downloaded files (one import); returns its counts.
+  def import(business_id, paths, kind)
+    DjangoCommand.run("import_meesho_payments", "--business", business_id, "--kind", kind,
+                      *Array(paths).flat_map { |p| ["--file", p] })
   rescue DjangoCommand::Failed => e
     raise ImportError, "importing the #{kind} payments failed: #{e.message}"
   end

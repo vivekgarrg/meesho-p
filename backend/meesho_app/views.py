@@ -196,6 +196,18 @@ def upload_excel(request, business_id):
     return Response({"success": True, "results": results}, status=status.HTTP_201_CREATED)
 
 
+def _ist_today():
+    from zoneinfo import ZoneInfo
+    import datetime as _dt
+    return _dt.datetime.now(ZoneInfo("Asia/Kolkata")).date()
+
+
+def _paid_txn(value):
+    """Whether a sheet's transaction id is a real bank transfer (not blank/nan)."""
+    v = safe_str(value)
+    return bool(v) and v.lower() not in ("nan", "none", "-")
+
+
 # Meesho's "Order Payments" sheet, column by column (completed and outstanding
 # files alike).
 ORDER_PAYMENT_COLUMNS = [
@@ -236,11 +248,18 @@ def import_payment_workbook(business, xl):
         df = df[df["sub_order_no"].notna()]
         df = df[~df["sub_order_no"].astype(str).str.match(r"^[A-Z\s\(\)\+\-\*\/]+$")]
 
-        created = updated = 0
+        created = updated = unpaid = 0
+        today = _ist_today()
         with transaction.atomic():
             for _, row in df.iterrows():
                 pk = safe_str(row["sub_order_no"])
                 if not pk:
+                    continue
+                # A row with no bank transfer and a payment date still to come
+                # is outstanding (Meesho's outstanding-payments sheet), not paid:
+                # in OrderPayment it would mark the order settled.
+                if not _paid_txn(row.get("transaction_id")) and (safe_date(row.get("payment_date")) or today) > today:
+                    unpaid += 1
                     continue
                 defaults = {
                     "order_date": safe_datetime(row.get("order_date")),
@@ -303,6 +322,8 @@ def import_payment_workbook(business, xl):
                 else:
                     updated += 1
         results["order_payments"] = {"created": created, "updated": updated}
+        if unpaid:
+            results["order_payments"]["skipped_unpaid"] = unpaid
 
     # ── 2. Ads Cost ─────────────────────────────────────────────────────────
     if "Ads Cost" in xl.sheet_names:

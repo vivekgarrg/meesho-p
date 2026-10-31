@@ -715,11 +715,55 @@ class MeeshoPaymentsTests(TestCase):
         from .models import MeeshoOutstandingPayment, OrderPayment
         first = self.file("o1.xlsx", [{"sub_order_no": "1_1", "payment_date": "2026-11-02", "final_settlement_amount": 100, "live_order_status": "Shipped"},
                                       {"sub_order_no": "2_1", "payment_date": "2026-11-03", "final_settlement_amount": -40, "live_order_status": "RTO"}])
-        self.assertEqual(self.run_command("outstanding", first), {"outstanding": {"rows": 2, "replaced": 0}})
+        self.assertEqual(self.run_command("outstanding", first), {"outstanding": {"rows": 2, "replaced": 0, "files": 1}})
         second = self.file("o2.xlsx", [{"sub_order_no": "3_1", "payment_date": "2026-11-04", "final_settlement_amount": 70}])
         self.run_command("outstanding", second)
         self.assertEqual(list(MeeshoOutstandingPayment.objects.values_list("sub_order_no", flat=True)), ["3_1"])
         self.assertFalse(OrderPayment.objects.exists())          # not paid yet: never counted as settled
+
+    def test_the_payments_upload_skips_rows_not_paid_yet(self):
+        from .models import OrderPayment
+        from .views import _ist_today
+        import datetime as dt
+        future = (_ist_today() + dt.timedelta(days=3)).isoformat()
+        path = self.file("mixed.xlsx", [
+            {"sub_order_no": "1_1", "transaction_id": "AXIS1", "payment_date": "2026-10-08", "final_settlement_amount": 10},
+            {"sub_order_no": "2_1", "payment_date": future, "final_settlement_amount": 20},           # outstanding: not paid
+            {"sub_order_no": "3_1", "transaction_id": "AXIS2", "payment_date": future, "final_settlement_amount": 30},  # paid ahead
+        ])
+        counts = self.run_command("completed", path)["order_payments"]
+        self.assertEqual(counts, {"created": 2, "updated": 0, "skipped_unpaid": 1})
+        self.assertEqual(sorted(OrderPayment.objects.values_list("sub_order_no", flat=True)), ["1_1", "3_1"])
+
+    def test_outstanding_days_are_imported_together_once_each(self):
+        from io import StringIO
+        from django.core.management import call_command
+        from .models import MeeshoOutstandingPayment
+        day1 = self.file("d1.xlsx", [{"sub_order_no": "1_1", "payment_date": "2026-11-02", "final_settlement_amount": 100}])
+        day2 = self.file("d2.xlsx", [{"sub_order_no": "1_1", "payment_date": "2026-11-02", "final_settlement_amount": 100},
+                                     {"sub_order_no": "2_1", "payment_date": "2026-11-03", "final_settlement_amount": 50}])
+        out = StringIO()
+        call_command("import_meesho_payments", "--business", str(self.biz.pk), "--kind", "outstanding",
+                     "--file", day1, "--file", day2, stdout=out)                 # as the worker runs it
+        self.assertEqual(json.loads(out.getvalue())["outstanding"], {"rows": 2, "replaced": 0, "files": 2})
+        self.assertEqual(sorted(MeeshoOutstandingPayment.objects.values_list("sub_order_no", flat=True)), ["1_1", "2_1"])
+
+    def test_unpaid_rows_already_in_the_table_can_be_removed(self):
+        from io import StringIO
+        from django.core.management import call_command
+        from .models import OrderPayment
+        from .views import _ist_today
+        import datetime as dt
+        future = _ist_today() + dt.timedelta(days=4)
+        OrderPayment.objects.create(business=self.biz, sub_order_no="9_1", payment_date=future, live_order_status="Shipped")
+        OrderPayment.objects.create(business=self.biz, sub_order_no="8_1", payment_date=future, transaction_id="AXIS9")
+        OrderPayment.objects.create(business=self.biz, sub_order_no="7_1", payment_date=dt.date(2026, 10, 1))
+        out = StringIO()
+        call_command("remove_unpaid_order_payments", stdout=out)
+        self.assertIn("1 rows would be removed", out.getvalue())
+        self.assertEqual(OrderPayment.objects.count(), 3)                         # a dry run by default
+        call_command("remove_unpaid_order_payments", apply=True, stdout=StringIO())
+        self.assertEqual(sorted(OrderPayment.objects.values_list("sub_order_no", flat=True)), ["7_1", "8_1"])
 
     def test_the_payments_tab_shows_summaries_and_outstanding(self):
         from django.utils import timezone
@@ -788,6 +832,11 @@ class AutoLabelsSendTests(TestCase):
             _, notify_send = self.save(send=True)
         self.assertTrue(notify_send.call_args.kwargs["data"].startswith(b"%PDF"))
         self.assertEqual(MeeshoLabelFile.objects.count(), 1)                         # same batch: kept once
+        from io import StringIO
+        from django.core.management import call_command
+        with mock.patch.object(meesho_sync, "_fetch_label_pdf", return_value=pdf):
+            call_command("meesho_save_labels", batch="auto-1", trigger="MANUAL", stdout=StringIO())
+        self.assertEqual(MeeshoLabelFile.objects.get().trigger, "MANUAL")           # a Generate from Meesho Orders
 
     def test_the_automation_setting(self):
         c = APIClient()

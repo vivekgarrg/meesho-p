@@ -21,8 +21,8 @@ class MeeshoPaymentsJobTest < ActiveSupport::TestCase
     @imports = []
     imports = @imports
     @original_import = MeeshoPayments.method(:import)
-    MeeshoPayments.define_singleton_method(:import) do |business_id, path, kind|
-      imports << [business_id, File.binread(path), kind]
+    MeeshoPayments.define_singleton_method(:import) do |business_id, paths, kind|
+      imports << [business_id, paths.map { |p| File.binread(p) }, kind]
       kind == "completed" ? { "order_payments" => { "created" => 5, "updated" => 2 }, "ads_cost" => { "created" => 1, "updated" => 0 } }
                           : { "outstanding" => { "rows" => 9, "replaced" => 3 } }
     end
@@ -54,14 +54,15 @@ class MeeshoPaymentsJobTest < ActiveSupport::TestCase
     run_job
     run = account.runs.last
     assert_equal ["PAYMENTS", "OK"], [run.kind, run.status], run.message
-    assert_match(/Payments table \(.+\): 5 new, 2 updated order payments; 1 new ads costs\. Outstanding \(next 7 days\): 9 orders\./, run.message)
-    assert_equal [[account.business_id, "PK-zip-bytes", "completed"], [account.business_id, "PK-zip-bytes", "outstanding"]], @imports
-    assert_empty Dir.glob(File.join(MeeshoPaymentsJob::DIR, "*"))                        # downloads cleaned up
+    assert_match(/Payments table \(.+\): 5 new, 2 updated order payments; 1 new ads costs\. Outstanding \(.+\): 9 orders\./, run.message)
+    # Outstanding: one file a day, today and the next 7, imported together.
+    assert_equal [[account.business_id, ["PK-zip-bytes"], "completed"], [account.business_id, ["PK-zip-bytes"] * 8, "outstanding"]], @imports
+    assert_empty Dir.glob(File.join(Dir.tmpdir, "meesho-payments*"))                     # downloads cleaned up
     snap = MeeshoSyncSnapshot.find_by(account_id: account.id, endpoint: "payments_summary").payload
     assert_equal 836640.97, snap.dig("previous_total", "netAmount")
     # The last 30 days, completed; the next 7, outstanding ("PENDING" to Meesho), as IST days.
     completed = nil
-    assert_requested(:post, "#{BASE}v2/payments-excel/create", times: 2) do |r|
+    assert_requested(:post, "#{BASE}v2/payments-excel/create", times: 9) do |r|
       d = JSON.parse(r.body)["data"][0]
       completed = d if d["payment_status"] == "COMPLETED"
       d["file_type"] == "SP_ORDER_ADS_REFERRAL_PAYMENT_FILE" && d["start_date"].end_with?("T18:30:00.000Z") && r.headers["Identifier"] == "lffy4"
@@ -79,10 +80,42 @@ class MeeshoPaymentsJobTest < ActiveSupport::TestCase
       .to_return(json({ message: "nope" }, status: 400))
     run_job
     run = account.runs.last
-    assert_equal "FAILED", run.status
+    assert_equal "OK", run.status, run.message                                      # no outstanding file: nothing outstanding to read
     assert_match(/5 new, 2 updated order payments/, run.message)                   # completed went through on the retry
-    assert_match(/Outstanding: Meesho answered \(HTTP 400\)/, run.message)
+    assert_match(/Outstanding: no outstanding file from .+ \(Meesho answered \(HTTP 400\)/, run.message)
     assert_equal ["completed"], @imports.map(&:last)
+  end
+
+  test "outstanding goes day by day and stops at the first day Meesho has no file for" do
+    ist = ActiveSupport::TimeZone["Asia/Kolkata"]
+    day = ->(r) { Time.iso8601(JSON.parse(r.body)["data"][0]["start_date"]).in_time_zone(ist).to_date }
+    today = ist.today
+    stub_request(:post, "#{BASE}v2/payments-excel/create")
+      .with { |r| JSON.parse(r.body)["data"][0]["payment_status"] == "PENDING" && day.(r) >= today + 2 }
+      .to_return(json({ message: "Failed to create payment excel request(s)" }, status: 500))
+    run_job
+    run = account.runs.last
+    assert_equal "OK", run.status, run.message
+    assert_equal ["PK-zip-bytes"] * 2, @imports.last[1]                                   # today and tomorrow
+    assert_match(/Outstanding \(.+\): 9 orders — no file from #{(today + 2).strftime('%-d %b')}\./, run.message)
+    assert_requested(:post, "#{BASE}v2/payments-excel/create", times: 1 + 2 + 3) # completed, 2 days, the refused day ×3 tries
+  end
+
+  test "no outstanding file at all keeps the last ones" do
+    stub_request(:post, "#{BASE}v2/payments-excel/create").with { |r| JSON.parse(r.body)["data"][0]["payment_status"] == "PENDING" }
+      .to_return(json({ message: "nope" }, status: 400))
+    run_job
+    assert_equal ["completed"], @imports.map(&:last)
+    assert_match(/Outstanding: no outstanding file from .+ — the last ones are kept\./, account.runs.last.message)
+  end
+
+  test "a folder or file the worker may not touch is named, not just EACCES" do
+    original = MeeshoPayments.method(:download)
+    MeeshoPayments.define_singleton_method(:download) { |*| raise Errno::EACCES, "/home/deploy/x" }
+    run_job
+    assert_match(/Server error: Permission denied .*\/home\/deploy\/x/, account.runs.last.message)
+  ensure
+    MeeshoPayments.define_singleton_method(:download, original)
   end
 
   test "a file link anywhere but Meesho's storage is refused" do

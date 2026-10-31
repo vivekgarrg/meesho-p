@@ -29,28 +29,52 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument("--business", type=int, required=True)
-        parser.add_argument("--file", required=True)
+        parser.add_argument("--file", action="append", required=True,
+                            help="Repeat for several files (outstanding: one per day, imported together).")
         parser.add_argument("--kind", choices=["completed", "outstanding"], required=True)
 
     def handle(self, *args, business, file, kind, **opts):
         biz = Business.objects.filter(pk=business).first()
         if not biz:
             raise CommandError(f"No business {business}.")
-        with open(file, "rb") as fh:
-            try:
-                source, _ = views._workbook_from_upload(fh)
-                xl = pd.ExcelFile(source)
-            except Exception as exc:
-                raise CommandError(f"Could not read the payment file: {exc}")
-            if kind == "completed":
-                results = views.import_payment_workbook(biz, xl)
-            else:
-                results = {"outstanding": import_outstanding(biz, xl)}
+        paths = [file] if isinstance(file, str) else list(file)    # call_command passes one file as a string
+        books = [_open(path) for path in paths]
+        if kind == "completed":
+            results = {}
+            for xl in books:
+                for sheet, counts in views.import_payment_workbook(biz, xl).items():
+                    into = results.setdefault(sheet, {})
+                    for k, v in counts.items():
+                        into[k] = into.get(k, 0) + v
+        else:
+            results = {"outstanding": import_outstanding(biz, books)}
         self.stdout.write(json.dumps(results, default=str))
 
 
-def import_outstanding(business, xl):
-    """Replace the business's outstanding payments with this file's Order Payments rows."""
+def _open(path):
+    import io
+    with open(path, "rb") as fh:
+        data = io.BytesIO(fh.read())          # read whole: the file is closed before pandas reads it
+    try:
+        source, _ = views._workbook_from_upload(data)
+        return pd.ExcelFile(source)
+    except Exception as exc:
+        raise CommandError(f"Could not read the payment file: {exc}")
+
+
+def import_outstanding(business, books):
+    """Replace the business's outstanding payments with these files' Order Payments rows (one per day)."""
+    rows = []
+    seen = set()
+    for xl in books:
+        rows += _outstanding_rows(business, xl, seen)
+    with transaction.atomic():
+        removed, _ = MeeshoOutstandingPayment.objects.filter(business=business).delete()
+        MeeshoOutstandingPayment.objects.bulk_create(rows, batch_size=500)
+    return {"rows": len(rows), "replaced": removed, "files": len(books)}
+
+
+def _outstanding_rows(business, xl, seen):
     rows = []
     if "Order Payments" in xl.sheet_names:
         df = pd.read_excel(xl, sheet_name="Order Payments", header=None, skiprows=2)
@@ -60,8 +84,10 @@ def import_outstanding(business, xl):
         now = timezone.now()
         for _, r in df.iterrows():
             sub = views.safe_str(r["sub_order_no"])
-            if not sub:
+            key = (sub, views.safe_date(r.get("payment_date")), views.safe_str(r.get("live_order_status")))
+            if not sub or key in seen:           # days overlapping: each payment once
                 continue
+            seen.add(key)
             details = {k: (None if pd.isna(v) else (v.isoformat() if hasattr(v, "isoformat") else v))
                        for k, v in r.items()}
             rows.append(MeeshoOutstandingPayment(
@@ -79,7 +105,4 @@ def import_outstanding(business, xl):
                 details=json.loads(json.dumps(details, default=str)),
                 imported_at=now,
             ))
-    with transaction.atomic():
-        removed, _ = MeeshoOutstandingPayment.objects.filter(business=business).delete()
-        MeeshoOutstandingPayment.objects.bulk_create(rows, batch_size=500)
-    return {"rows": len(rows), "replaced": removed}
+    return rows

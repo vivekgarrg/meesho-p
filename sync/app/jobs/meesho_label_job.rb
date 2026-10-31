@@ -3,7 +3,8 @@
 # then follow the panel's label history until Meesho has made the PDF and
 # hands back its link. The link is kept on the run; Django downloads it and
 # sorts the pages by parent SKU, as the Labels tab does.
-# Queued by Django (Meesho Orders → Ready to ship → Generate labels).
+# Queued by Django (Meesho Orders → Ready to ship → Generate labels). When the
+# last business's labels are made, they're merged, sorted and kept (keep).
 class MeeshoLabelJob
   include Sidekiq::Job
   sidekiq_options queue: "critical", retry: false
@@ -45,6 +46,21 @@ class MeeshoLabelJob
       # Their label status has changed: pull the tabs again.
       MeeshoSyncJob.perform_async(account.id, nil, MeeshoSyncRun::TRIGGER_MANUAL) if account
     end
+    keep(run)
+  end
+
+  # A Generate from Meesho Orders: once every business's labels in it are made,
+  # Django merges, sorts and keeps them — into the labels table (Order Scan's
+  # list for the day, the packed count) and "Latest labels" — without waiting
+  # for someone to press Download. Automatic runs keep theirs themselves.
+  def keep(run)
+    batch = (run.reload.result || {})["batch"]
+    return unless run.trigger == MeeshoSyncRun::TRIGGER_MANUAL && batch.present? && run.result["label_url"].present?
+    siblings = MeeshoSyncRun.where(kind: run.kind).where("queued_at > ?", 1.day.ago).select { |r| (r.result || {})["batch"] == batch }
+    return if siblings.any? { |r| %w[QUEUED RUNNING].include?(r.status) }   # the last one to finish does it
+    DjangoCommand.run("meesho_save_labels", "--batch", batch, "--trigger", "MANUAL")
+  rescue DjangoCommand::Failed => e
+    Sidekiq.logger.error("MeeshoLabelJob: keeping labels #{batch}: #{e.message}")
   end
 
   def self.body(account, groups)

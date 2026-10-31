@@ -142,6 +142,10 @@ ActiveRecord::Schema.define do
   end
 end
 
+# No Django in tests: its commands are never started from here (tests that
+# look at what was asked of Django swap in their own recorder).
+DjangoCommand.define_singleton_method(:run) { |*_args, **_opts| {} }
+
 # No Redis in tests: the per-account lock always succeeds.
 [MeeshoSyncJob, MeeshoInventoryJob, MeeshoPaymentsJob].each do |job|
   job.class_eval do
