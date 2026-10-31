@@ -128,13 +128,13 @@ export function MeeshoLinkingTab() {
   const [data, setData] = useState(null);
   const [awb, setAwb] = useState("");
   const [packet, setPacket] = useState("");
-  const [input, setInput] = useState("");
   const [result, setResult] = useState(null);
   const [sending, setSending] = useState(false);
   const [q, setQ] = useState("");
   const [logKey, setLogKey] = useState(0);
   const [courierBusy, setCourierBusy] = useState(false);
-  const inputRef = useRef(null);
+  const awbRef = useRef(null);
+  const packetRef = useRef(null);
 
   const load = useCallback(async () => {
     const p = new URLSearchParams();
@@ -143,7 +143,12 @@ export function MeeshoLinkingTab() {
     if (r.ok) setData(r.data);
   }, [q]);
   useEffect(() => { load(); }, [load]);
-  useEffect(() => { inputRef.current?.focus(); }, []);
+  useEffect(() => { awbRef.current?.focus(); }, []);
+
+  // Put the cursor in a field, its text selected — a fresh scan replaces it.
+  const focusField = (ref) => setTimeout(() => { ref.current?.focus(); ref.current?.select(); }, 50);   // after the fields are enabled again
+  // Which field a refusal is about, so the right one can be rescanned.
+  const AWB_ERRORS = ["unknown_awb", "two_packets", "scan_failed"];
 
   const link = async (a, p, override = false) => {
     setSending(true);
@@ -152,24 +157,37 @@ export function MeeshoLinkingTab() {
     if (r.ok) {
       setResult({ ok: true, ...r.data });
       setAwb(""); setPacket("");
+      focusField(awbRef);                                   // next parcel
     } else {
       setResult({ ok: false, awb: a, packet: p, ...r.data });
+      focusField(r.data.code === "missing" ? (a ? packetRef : awbRef) : AWB_ERRORS.includes(r.data.code) ? awbRef : packetRef);
     }
     load(); setLogKey((k) => k + 1);
-    inputRef.current?.focus();
   };
 
-  // A scanner types the code and presses Enter.
-  const scan = (e) => {
+  // A scanner types the code and presses Enter: AWB → on to the packet; packet → link.
+  const onAwbEnter = (e) => {
     e.preventDefault();
-    const code = clean(input);
-    setInput("");
+    const code = clean(awb);
     if (!code) return;
-    let a = awb, p = packet;
-    if (isPacket(code)) p = code; else a = code;
-    setAwb(a); setPacket(p);
-    if (a && p) link(a, p);
+    if (isPacket(code)) {                                   // the packet QR scanned first: put it where it belongs
+      setPacket(code); setAwb("");
+      focusField(awbRef);
+      return;
+    }
+    setAwb(code);
+    if (clean(packet)) link(code, clean(packet));
+    else focusField(packetRef);
   };
+  const onPacketEnter = (e) => {
+    e.preventDefault();
+    const code = clean(packet);
+    if (!code) return;
+    setPacket(code);
+    if (!clean(awb)) { focusField(awbRef); return; }
+    link(clean(awb), code);
+  };
+  const clearAll = () => { setAwb(""); setPacket(""); setResult(null); focusField(awbRef); };
 
   const unlink = async (l) => {
     if (!window.confirm(`Unlink AWB ${l.awb} from packet ${l.packet_id}? (It stays packed in Order Scan.)`)) return;
@@ -200,21 +218,28 @@ export function MeeshoLinkingTab() {
       </p>
 
       <div style={{ ...S.card, padding: 16, display: "flex", flexDirection: "column", gap: 12, borderTop: `4px solid ${C.orange}` }}>
-        <form onSubmit={scan} style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-          <input ref={inputRef} value={input} onChange={(e) => setInput(e.target.value)} autoFocus disabled={sending}
-            placeholder={!awb && !packet ? "Scan the AWB or the packet QR…" : awb ? "Now scan the packet QR (KP…)" : "Now scan the AWB on the label"}
-            style={{ ...S.inp, flex: 1, minWidth: 240, fontSize: 18, fontFamily: "monospace", padding: "12px 14px" }} />
-          <button type="submit" disabled={sending} style={{ ...btn("primary", "md"), minWidth: 100 }}>{sending ? "Linking…" : "Enter"}</button>
-        </form>
-        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", fontSize: 13 }}>
-          <span style={{ padding: "6px 12px", borderRadius: 10, border: `1.5px dashed ${awb ? C.green : C.gray300}`, fontFamily: "monospace", fontWeight: 800 }}>
-            AWB: {awb || "—"}
-          </span>
-          <span style={{ fontSize: 16, color: C.gray400 }}>↔</span>
-          <span style={{ padding: "6px 12px", borderRadius: 10, border: `1.5px dashed ${packet ? C.green : C.gray300}`, fontFamily: "monospace", fontWeight: 800 }}>
-            Packet: {packet || "—"}
-          </span>
-          {(awb || packet) && <button onClick={() => { setAwb(""); setPacket(""); inputRef.current?.focus(); }} style={btn("ghost", "sm")}>Clear</button>}
+        <div style={{ display: "grid", gap: 10, gridTemplateColumns: isMobile ? "minmax(0, 1fr)" : "minmax(0, 1fr) minmax(0, 1fr) auto", alignItems: "end" }}>
+          <form onSubmit={onAwbEnter} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <label htmlFor="link-awb" style={{ fontSize: 12.5, fontWeight: 800, color: C.gray600 }}>1 · AWB (on the label)</label>
+            <input id="link-awb" ref={awbRef} value={awb} onChange={(e) => setAwb(e.target.value)} autoFocus disabled={sending}
+              autoComplete="off" placeholder="Scan the AWB…"
+              style={{ ...S.inp, fontSize: 18, fontFamily: "monospace", padding: "12px 14px",
+                borderColor: r && !r.ok && (AWB_ERRORS.includes(r.code) || (r.code === "missing" && !awb)) ? C.red : undefined }} />
+          </form>
+          <form onSubmit={onPacketEnter} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <label htmlFor="link-packet" style={{ fontSize: 12.5, fontWeight: 800, color: C.gray600 }}>2 · Packet ID (KP… QR)</label>
+            <input id="link-packet" ref={packetRef} value={packet} onChange={(e) => setPacket(e.target.value)} disabled={sending}
+              autoComplete="off" placeholder="Scan the packet QR…"
+              style={{ ...S.inp, fontSize: 18, fontFamily: "monospace", padding: "12px 14px",
+                borderColor: r && !r.ok && !AWB_ERRORS.includes(r.code) && !(r.code === "missing" && !awb) ? C.red : undefined }} />
+          </form>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={() => (clean(awb) && clean(packet) ? link(clean(awb), clean(packet)) : focusField(clean(awb) ? packetRef : awbRef))}
+              disabled={sending} style={{ ...btn("primary", "md"), minWidth: 110, padding: "12px 16px" }}>
+              {sending ? "Linking…" : "Link"}
+            </button>
+            {(awb || packet || r) && <button onClick={clearAll} style={{ ...btn("ghost", "md"), padding: "12px 14px" }}>Clear</button>}
+          </div>
         </div>
         {r && (r.ok ? (
           <div role="status" style={{ background: C.greenLight, border: `1.5px solid ${C.greenBorder}`, borderRadius: 12, padding: "10px 14px", color: "#166534", fontSize: 13.5 }}>
