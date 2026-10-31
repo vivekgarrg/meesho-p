@@ -135,6 +135,9 @@ export function MeeshoLinkingTab() {
   const [courierBusy, setCourierBusy] = useState(false);
   const awbRef = useRef(null);
   const packetRef = useRef(null);
+  // When each code started arriving: a scanner types a whole code in a blink,
+  // a person doesn't — Meesho is told which ("SCAN" / "MANUAL"), as its panel does.
+  const typed = useRef({ awb: null, packet: null, awbAt: null });
 
   const load = useCallback(async () => {
     const p = new URLSearchParams();
@@ -149,15 +152,28 @@ export function MeeshoLinkingTab() {
   const focusField = (ref) => setTimeout(() => { ref.current?.focus(); ref.current?.select(); }, 50);   // after the fields are enabled again
   // Which field a refusal is about, so the right one can be rescanned.
   const AWB_ERRORS = ["unknown_awb", "two_packets", "scan_failed"];
+  const method = (startedAt) => (startedAt && Date.now() - startedAt < 600 ? "SCAN" : "MANUAL");
+  const onType = (field, setter) => (e) => {
+    if (!e.target.value) typed.current[field] = null;
+    else if (!typed.current[field]) typed.current[field] = Date.now();
+    setter(e.target.value);
+  };
 
   const link = async (a, p, override = false) => {
     setSending(true);
-    const r = await call("", "POST", { awb: a, packet_id: p, override });
+    const t = typed.current;
+    const r = await call("", "POST", {
+      awb: a, packet_id: p, override,
+      awb_method: t.awbMethod || "MANUAL", awb_ts: t.awbAt || Date.now(),
+      packet_method: method(t.packet), packet_ts: Date.now(),
+    });
     setSending(false);
-    if (r.ok) {
-      setResult({ ok: true, ...r.data });
+    if (r.ok || r.data.code === "already_linked") {
+      // Linked — or Meesho already had it ("scan the next order"): either way, on to the next parcel.
+      setResult({ ok: r.ok, already: !r.ok, ...r.data });
       setAwb(""); setPacket("");
-      focusField(awbRef);                                   // next parcel
+      typed.current = { awb: null, packet: null, awbAt: null };
+      focusField(awbRef);
     } else {
       setResult({ ok: false, awb: a, packet: p, ...r.data });
       focusField(r.data.code === "missing" ? (a ? packetRef : awbRef) : AWB_ERRORS.includes(r.data.code) ? awbRef : packetRef);
@@ -176,6 +192,8 @@ export function MeeshoLinkingTab() {
       return;
     }
     setAwb(code);
+    typed.current.awbMethod = method(typed.current.awb);
+    typed.current.awbAt = Date.now();
     if (clean(packet)) link(code, clean(packet));
     else focusField(packetRef);
   };
@@ -213,22 +231,22 @@ export function MeeshoLinkingTab() {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       <p style={{ fontSize: 13, color: C.gray500, margin: 0, maxWidth: 780 }}>
-        Scan the AWB on the label and the packet QR (“KP…”), in either order. Each link is checked against the packet Meesho has for that AWB,
-        stored, and the parcel is marked <b>packed</b> in Order Scan. Everything is logged below.
+        Scan the AWB on the label, then the packet QR (“KP…”). Each pair is linked <b>on Meesho</b> (as its Scan now page does), then stored here
+        and the parcel marked <b>packed</b> in Order Scan. Everything is logged below.
       </p>
 
       <div style={{ ...S.card, padding: 16, display: "flex", flexDirection: "column", gap: 12, borderTop: `4px solid ${C.orange}` }}>
         <div style={{ display: "grid", gap: 10, gridTemplateColumns: isMobile ? "minmax(0, 1fr)" : "minmax(0, 1fr) minmax(0, 1fr) auto", alignItems: "end" }}>
           <form onSubmit={onAwbEnter} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             <label htmlFor="link-awb" style={{ fontSize: 12.5, fontWeight: 800, color: C.gray600 }}>1 · AWB (on the label)</label>
-            <input id="link-awb" ref={awbRef} value={awb} onChange={(e) => setAwb(e.target.value)} autoFocus disabled={sending}
+            <input id="link-awb" ref={awbRef} value={awb} onChange={onType("awb", setAwb)} autoFocus disabled={sending}
               autoComplete="off" placeholder="Scan the AWB…"
               style={{ ...S.inp, fontSize: 18, fontFamily: "monospace", padding: "12px 14px",
                 borderColor: r && !r.ok && (AWB_ERRORS.includes(r.code) || (r.code === "missing" && !awb)) ? C.red : undefined }} />
           </form>
           <form onSubmit={onPacketEnter} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             <label htmlFor="link-packet" style={{ fontSize: 12.5, fontWeight: 800, color: C.gray600 }}>2 · Packet ID (KP… QR)</label>
-            <input id="link-packet" ref={packetRef} value={packet} onChange={(e) => setPacket(e.target.value)} disabled={sending}
+            <input id="link-packet" ref={packetRef} value={packet} onChange={onType("packet", setPacket)} disabled={sending}
               autoComplete="off" placeholder="Scan the packet QR…"
               style={{ ...S.inp, fontSize: 18, fontFamily: "monospace", padding: "12px 14px",
                 borderColor: r && !r.ok && !AWB_ERRORS.includes(r.code) && !(r.code === "missing" && !awb) ? C.red : undefined }} />
@@ -241,9 +259,16 @@ export function MeeshoLinkingTab() {
             {(awb || packet || r) && <button onClick={clearAll} style={{ ...btn("ghost", "md"), padding: "12px 14px" }}>Clear</button>}
           </div>
         </div>
-        {r && (r.ok ? (
+        {r && r.already ? (
+          <div role="alert" style={{ background: C.amberLight, border: `1.5px solid ${C.amberBorder}`, borderRadius: 12, padding: "12px 14px", color: "#92400E", fontSize: 14 }}>
+            <b>⚠ AWB and packet already linked</b>
+            <div style={{ marginTop: 3 }}>The AWB <b style={{ fontFamily: "monospace" }}>{r.link.awb}</b> is already scanned and linked to packet{" "}
+              <b style={{ fontFamily: "monospace" }}>{r.link.packet_id}</b> on Meesho. <b>Please scan the next order.</b></div>
+            <div style={{ fontSize: 12.5, marginTop: 3 }}>{r.link.business_name}{r.link.sub_order_no ? ` · ${r.link.sub_order_no}` : ""} — kept as packed here too.</div>
+          </div>
+        ) : r && (r.ok ? (
           <div role="status" style={{ background: C.greenLight, border: `1.5px solid ${C.greenBorder}`, borderRadius: 12, padding: "10px 14px", color: "#166534", fontSize: 13.5 }}>
-            <b>✓ Linked and packed</b> — AWB <b style={{ fontFamily: "monospace" }}>{r.link.awb}</b> ↔ <b style={{ fontFamily: "monospace" }}>{r.link.packet_id}</b>
+            <b>✓ Linked on Meesho and packed</b> — AWB <b style={{ fontFamily: "monospace" }}>{r.link.awb}</b> ↔ <b style={{ fontFamily: "monospace" }}>{r.link.packet_id}</b>
             {" · "}{r.link.business_name}{r.link.sub_order_no ? ` · ${r.link.sub_order_no}` : ""}{r.link.sku ? ` · ${r.link.sku}` : ""}
             {" · "}{r.link.courier || (r.link.carrier_id ? `courier #${r.link.carrier_id}` : "courier not known")}
             {" "}<Tag variant={CHECK[r.link.check]?.tag}>{CHECK[r.link.check]?.label}</Tag>
@@ -276,7 +301,7 @@ export function MeeshoLinkingTab() {
         </div>
         <div style={{ overflowX: "auto", maxHeight: 460, overflowY: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
-            <thead><tr>{["Time", "AWB", "Packet", "Business", "Sub-order / SKU", "Courier", "Check", "Order Scan", ""].map((h) => <th key={h} style={S.th}>{h}</th>)}</tr></thead>
+            <thead><tr>{["Time", "AWB", "Packet", "Business", "Sub-order / SKU", "Courier", "Meesho", "Order Scan", ""].map((h) => <th key={h} style={S.th}>{h}</th>)}</tr></thead>
             <tbody>
               {data.links.length === 0 && <tr><td colSpan={9} style={{ ...S.td, textAlign: "center", color: C.gray400, padding: 20 }}>Nothing linked yet today.</td></tr>}
               {data.links.map((l) => (
@@ -287,7 +312,11 @@ export function MeeshoLinkingTab() {
                   <td style={S.td}>{l.business_name}</td>
                   <td style={S.td}><span style={{ fontFamily: "monospace" }}>{l.sub_order_no || "—"}</span><div style={{ fontSize: 11.5, color: C.gray500 }}>{l.sku}</div></td>
                   <td style={S.td}>{l.courier || (l.carrier_id ? `#${l.carrier_id}` : "—")}</td>
-                  <td style={S.td}><Tag variant={CHECK[l.check]?.tag}>{CHECK[l.check]?.label}</Tag></td>
+                  <td style={S.td}>
+                    {l.meesho_status === "LINKED" ? <Tag variant="green">Linked</Tag>
+                      : l.meesho_status ? <Tag variant="amber">Already linked</Tag> : <Tag variant="gray">Not sent</Tag>}
+                    {l.check === "OVERRIDDEN" && <> <Tag variant="amber">Linked anyway</Tag></>}
+                  </td>
                   <td style={S.td}>{l.scan_status ? <Tag variant={l.scan_status === "PACKED" ? "green" : "blue"}>{l.scan_status.toLowerCase()}</Tag> : "—"}</td>
                   <td style={S.td}><button onClick={() => unlink(l)} title="Unlink" style={{ border: "none", background: "none", color: C.gray400, cursor: "pointer", fontSize: 16 }}>×</button></td>
                 </tr>

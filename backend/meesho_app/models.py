@@ -3395,6 +3395,10 @@ class MeeshoPacketLink(models.Model):
     carrier_id = models.IntegerField(null=True, blank=True)
     courier_name = models.CharField(max_length=100, blank=True)
     meesho_check = models.CharField(max_length=12, default=CHECK_UNKNOWN)
+    # Meesho's answer to the link (scan-now/submit): "LINKED", or its status
+    # code — e.g. ERR_ALREADY_LINKED_AWB_AND_PACKET_ID when it was already done.
+    meesho_status = models.CharField(max_length=60, blank=True)
+    meesho_request_id = models.CharField(max_length=64, blank=True)
     scanned_order = models.ForeignKey("ScannedOrder", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
     pack_day = models.DateField(null=True, blank=True, db_index=True)
     linked_by = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
