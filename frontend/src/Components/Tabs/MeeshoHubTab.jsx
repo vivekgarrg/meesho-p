@@ -7,6 +7,7 @@ import { MeeshoLiveInventoryTab } from "./MeeshoLiveInventoryTab";
 import { MeeshoSyncTab } from "./MeeshoSyncTab";
 import { MeeshoPaymentsTab } from "./MeeshoPaymentsTab";
 import { AutomationCard, LatestLabels } from "./MeeshoAutomation";
+import { MeeshoLinkingTab } from "./MeeshoLinkingTab";
 
 /*
  * Meesho — one place for everything the Meesho panel sync does: Orders,
@@ -19,6 +20,7 @@ import { AutomationCard, LatestLabels } from "./MeeshoAutomation";
 
 const TABS = [
   { key: "orders", label: "Orders", icon: "📦" },
+  { key: "linking", label: "Order linking", icon: "🔗" },
   { key: "inventory", label: "Inventory", icon: "▤" },
   { key: "payments", label: "Payments", icon: "₹" },
   { key: "sync", label: "Accounts & sync", icon: "⟳" },
@@ -199,6 +201,7 @@ export function MeeshoHubTab() {
 
       <div role="tabpanel">
         {tab === "orders" && <MeeshoOrdersTab embedded />}
+        {tab === "linking" && <MeeshoLinkingTab />}
         {tab === "inventory" && <MeeshoLiveInventoryTab embedded />}
         {tab === "payments" && <MeeshoPaymentsTab />}
         {tab === "sync" && (

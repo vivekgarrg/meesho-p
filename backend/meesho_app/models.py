@@ -3356,6 +3356,87 @@ class MeeshoLabelFile(models.Model):
         ordering = ["-created_at"]
 
 
+class MeeshoCourier(models.Model):
+    """
+    A Meesho courier partner, by Meesho's carrier id — the id the panel's orders
+    carry (carrier_id). Its name is learned by matching shipments' AWBs to the
+    courier printed on their labels (LabelOrder.courier_name); Meesho's own
+    courier details go in `details` once they're read from the panel.
+    """
+
+    carrier_id = models.IntegerField(unique=True)
+    name = models.CharField(max_length=100, blank=True)
+    source = models.CharField(max_length=20, blank=True)       # "labels" | "meesho" | "manual"
+    shipments_seen = models.PositiveIntegerField(default=0)
+    details = models.JSONField(default=dict, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "meesho_couriers"
+        ordering = ["carrier_id"]
+
+
+class MeeshoPacketLink(models.Model):
+    """
+    A shipment's AWB linked to its packet (the packet QR, "KP…") at the desk on
+    Meesho Orders → Order linking. Linking records the parcel as PACKED in
+    Order Scan. Checked against what Meesho says the AWB's packet is.
+    """
+
+    CHECK_MATCH = "MATCH"            # Meesho has this packet for this AWB
+    CHECK_UNKNOWN = "UNKNOWN"        # Meesho's data doesn't know the AWB's packet (yet)
+    CHECK_OVERRIDDEN = "OVERRIDDEN"  # Meesho says another packet; linked anyway on purpose
+
+    business = models.ForeignKey("accounts.Business", on_delete=models.CASCADE, related_name="packet_links")
+    awb_number = models.CharField(max_length=100)
+    packet_id = models.CharField(max_length=100, db_index=True)
+    sub_order_no = models.CharField(max_length=100, blank=True, db_index=True)
+    sku = models.CharField(max_length=255, blank=True)
+    carrier_id = models.IntegerField(null=True, blank=True)
+    courier_name = models.CharField(max_length=100, blank=True)
+    meesho_check = models.CharField(max_length=12, default=CHECK_UNKNOWN)
+    scanned_order = models.ForeignKey("ScannedOrder", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    pack_day = models.DateField(null=True, blank=True, db_index=True)
+    linked_by = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    linked_at = models.DateTimeField()
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "meesho_packet_links"
+        ordering = ["-linked_at"]
+        unique_together = [("business", "awb_number")]
+
+
+class MeeshoLinkLog(models.Model):
+    """
+    Every Order linking attempt, worked or not — who, what was scanned, what
+    happened, and why it failed — so a mistake can be found and put right
+    (retried from the log with the values corrected).
+    """
+
+    ACTION_LINK = "LINK"
+    ACTION_RELINK = "RELINK"
+    ACTION_UNLINK = "UNLINK"
+    ACTION_RETRY = "RETRY"
+    ACTION_COURIERS = "COURIERS"
+
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    user = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    business = models.ForeignKey("accounts.Business", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    action = models.CharField(max_length=10)
+    awb_number = models.CharField(max_length=100, blank=True, db_index=True)
+    packet_id = models.CharField(max_length=100, blank=True)
+    ok = models.BooleanField(default=False, db_index=True)
+    error = models.TextField(blank=True)
+    details = models.JSONField(default=dict, blank=True)
+    link = models.ForeignKey(MeeshoPacketLink, on_delete=models.SET_NULL, null=True, blank=True, related_name="logs")
+    resolved = models.BooleanField(default=False)      # a failed attempt put right later
+
+    class Meta:
+        db_table = "meesho_link_logs"
+        ordering = ["-created_at"]
+
+
 class MeeshoOutstandingPayment(models.Model):
     """
     An order payment Meesho has scheduled but not paid yet — the panel's

@@ -94,6 +94,8 @@ API_OWNERSHIP = {
     # Meesho Orders holds the Sync and Inventory pages as tabs.
     "meesho-sync/":          ["/meesho-orders"],
     "meesho-orders/":        ["/meesho-orders"],
+    # Order linking marks parcels packed, so the scanning desk may use it too.
+    "meesho-orders/linking/": ["/meesho-orders", "/order-scan"],
     "meesho-live-inventory/": ["/meesho-orders"],
     # Meesho Stock's "Sync now" queues the same inventory pull.
     "meesho-live-inventory/refresh/": ["/meesho-orders", "/meesho-inventory"],

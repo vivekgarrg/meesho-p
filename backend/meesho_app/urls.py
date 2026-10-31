@@ -4,7 +4,7 @@ from . import flipkart_views
 from . import api_cache
 from . import upload_cleanup
 from . import return_desk
-from . import meesho_sync
+from . import meesho_linking, meesho_sync
 from . import bulk_listing_views
 from . import listing_images_views
 from . import insights
@@ -183,6 +183,12 @@ urlpatterns = [
     path("meesho-orders/labels/<int:run_id>/pdf/", meesho_sync.meesho_orders_labels_pdf, name="meesho_orders_labels_pdf"),
     path("meesho-orders/labels/batch/<str:batch>/pdf/", meesho_sync.meesho_orders_labels_batch_pdf, name="meesho_orders_labels_batch_pdf"),
     path("meesho-orders/overview/", meesho_sync.meesho_overview,        name="meesho_overview"),
+    path("meesho-orders/linking/",                      meesho_linking.linking,          name="meesho_linking"),
+    path("meesho-orders/linking/<int:link_id>/",        meesho_linking.link_detail,      name="meesho_link_detail"),
+    path("meesho-orders/linking/logs/",                 meesho_linking.link_logs,        name="meesho_link_logs"),
+    path("meesho-orders/linking/logs/<int:log_id>/",    meesho_linking.link_log_detail,  name="meesho_link_log_detail"),
+    path("meesho-orders/linking/couriers/refresh/",     meesho_linking.couriers_refresh, name="meesho_couriers_refresh"),
+    path("meesho-orders/linking/couriers/<int:carrier_id>/", meesho_linking.courier_detail, name="meesho_courier_detail"),
     path("meesho-orders/automation/",       meesho_sync.meesho_automation,       name="meesho_automation"),
     path("meesho-orders/label-files/",      meesho_sync.meesho_label_files,      name="meesho_label_files"),
     path("meesho-orders/label-files/<int:file_id>/pdf/", meesho_sync.meesho_label_file_pdf, name="meesho_label_file_pdf"),

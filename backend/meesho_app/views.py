@@ -13683,122 +13683,7 @@ def scanned_orders_list(request, business_id):
 
     if request.method == "POST":
         payload = request.data if isinstance(request.data, dict) else {}
-        code = _order_scan_code(payload.get("code") or payload.get("q"))
-        if not code:
-            return Response({"error": "Nothing scanned."}, status=status.HTTP_400_BAD_REQUEST)
-        if len(code) > 200:
-            return Response({"error": "That code is too long to be a barcode."},
-                            status=status.HTTP_400_BAD_REQUEST)
-
-        new_status = str(payload.get("status") or ScannedOrder.STATUS_SCANNED).strip().upper()
-        if new_status not in _SCAN_STATUSES:
-            return Response(
-                {"error": f"Invalid status. Expected one of: {', '.join(sorted(_SCAN_STATUSES))}"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        # Pooled: a code belonging to a sibling business resolves and is filed
-        # against that business, not the one in the dropdown.
-        # The packing day this scan counts toward: the day the desk has open —
-        # today's (noon to noon) unless someone picked an earlier day to scan
-        # its orders on purpose. Never a day that hasn't started.
-        current_day = _current_business_date()
-        scan_day = current_day
-        if payload.get("day"):
-            scan_day = _parse_day(str(payload["day"]))
-            if scan_day is None:
-                return Response({"error": "day must be YYYY-MM-DD."}, status=status.HTTP_400_BAD_REQUEST)
-            if scan_day > current_day:
-                return Response({"error": "That packing day hasn't started yet — scans count from 12 pm."},
-                                status=status.HTTP_400_BAD_REQUEST)
-
-        scan_platform = str(payload.get("platform") or "").strip().lower() or None
-        owner, snapshot = _resolve_scan_code_pooled(request, business, code, scan_platform)
-        cross_business = owner.pk != business.pk
-        now = timezone.now()
-
-        # Past 12 pm, until the new day has work, the desk still shows the
-        # previous day's list: a leftover parcel from that list counts toward
-        # it, not as the first scan of the new day.
-        if not payload.get("day") and snapshot["matched_from"] != ScannedOrder.MATCH_NONE:
-            shown, carried = _following_day(request, [b.pk for b in _scan_desk_scope(request, business)])
-            if carried:
-                on_list = DQ(order_id=snapshot["sub_order_no"])
-                if snapshot.get("awb_number"):
-                    on_list |= DQ(awb_number=snapshot["awb_number"])
-                if _labels_on_day(LabelOrder.objects.filter(business=owner), shown).filter(on_list).exists():
-                    scan_day = shown
-
-        existing = ScannedOrder.objects.filter(
-            business=owner, sub_order_no=snapshot["sub_order_no"]
-        ).first()
-
-        if existing:
-            # Already logged. Bump the scan, and only move the status when the
-            # caller actually asked for one — a plain re-scan must not quietly
-            # reset a parcel that was already marked dispatched.
-            existing.scan_count += 1
-            existing.last_scanned_at = now
-            existing.scanned_code = code
-            existing.scanned_by = request.user
-            existing.scan_day = scan_day
-            fields = ["scan_count", "last_scanned_at", "scanned_code", "scanned_by", "scan_day", "updated_at"]
-
-            if payload.get("status") and new_status != existing.status:
-                existing.status = new_status
-                existing.status_updated_at = now
-                fields += ["status", "status_updated_at"]
-            if "notes" in payload:
-                existing.notes = str(payload["notes"] or "").strip()
-                fields.append("notes")
-
-            existing.save(update_fields=fields)
-            row = _attach_meesho_status(business, [existing])[0]
-            # Re-check on every scan: the sheet that answers this may have been
-            # uploaded since the parcel was first seen. Resolved against the
-            # owning business, which for a pooled scan is not the selected one.
-            _refresh_ship_status(owner, row, row.meesho_status,
-                                 scope=accessible_businesses(request, include=owner))
-            return Response({
-                "earlier_day": _earlier_day_of(owner, snapshot, scan_day),
-                "already_scanned": True,
-                "scan_count": row.scan_count,
-                "matched_from": row.matched_from,
-                "ship_status": row.ship_status,
-                "cross_business": cross_business,
-                "business_id": owner.pk,
-                "business_name": owner.name,
-                "row": ScannedOrderSerializer(row).data,
-                "stats": _scanned_order_stats(desk),
-            })
-
-        row = ScannedOrder.objects.create(
-            business=owner,
-            scanned_code=code,
-            status=new_status,
-            status_updated_at=now if new_status != ScannedOrder.STATUS_SCANNED else None,
-            notes=str(payload.get("notes") or "").strip(),
-            last_scanned_at=now,
-            scanned_by=request.user,
-            scan_day=scan_day,
-            **snapshot,
-        )
-        row = _attach_meesho_status(business, [row])[0]
-        _refresh_ship_status(owner, row, row.meesho_status,
-                             scope=accessible_businesses(request, include=owner))
-        return Response({
-            "earlier_day": _earlier_day_of(owner, snapshot, scan_day),
-            "already_scanned": False,
-            "scan_count": 1,
-            "matched_from": row.matched_from,
-            "ship_status": row.ship_status,
-            "cross_business": cross_business,
-            "business_id": owner.pk,
-            "business_name": owner.name,
-            "row": ScannedOrderSerializer(row).data,
-            "stats": _scanned_order_stats(desk),
-        }, status=status.HTTP_201_CREATED)
-
+        return _record_scan(request, business, desk, payload)
     # The record covers every business the desk combines (see _scan_desk_scope).
     qs = ScannedOrder.objects.filter(business__in=desk).select_related("scanned_by", "business")
 
@@ -13947,6 +13832,128 @@ def _earlier_unsent(request, desk_ids, day, names):
     return {"count": len(out), "by_day": [{"day": d, "count": n} for d, n in sorted(by_day.items(), reverse=True)],
             "items": out[:500]}
 
+
+
+def _record_scan(request, business, desk, payload):
+    """
+    Record one scan at the desk — Order Scan's POST, and Meesho Orders' Order
+    linking (which records the linked parcel as PACKED). See scanned_orders_list.
+    """
+    code = _order_scan_code(payload.get("code") or payload.get("q"))
+    if not code:
+        return Response({"error": "Nothing scanned."}, status=status.HTTP_400_BAD_REQUEST)
+    if len(code) > 200:
+        return Response({"error": "That code is too long to be a barcode."},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    new_status = str(payload.get("status") or ScannedOrder.STATUS_SCANNED).strip().upper()
+    if new_status not in _SCAN_STATUSES:
+        return Response(
+            {"error": f"Invalid status. Expected one of: {', '.join(sorted(_SCAN_STATUSES))}"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # Pooled: a code belonging to a sibling business resolves and is filed
+    # against that business, not the one in the dropdown.
+    # The packing day this scan counts toward: the day the desk has open —
+    # today's (noon to noon) unless someone picked an earlier day to scan
+    # its orders on purpose. Never a day that hasn't started.
+    current_day = _current_business_date()
+    scan_day = current_day
+    if payload.get("day"):
+        scan_day = _parse_day(str(payload["day"]))
+        if scan_day is None:
+            return Response({"error": "day must be YYYY-MM-DD."}, status=status.HTTP_400_BAD_REQUEST)
+        if scan_day > current_day:
+            return Response({"error": "That packing day hasn't started yet — scans count from 12 pm."},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+    scan_platform = str(payload.get("platform") or "").strip().lower() or None
+    owner, snapshot = _resolve_scan_code_pooled(request, business, code, scan_platform)
+    cross_business = owner.pk != business.pk
+    now = timezone.now()
+
+    # Past 12 pm, until the new day has work, the desk still shows the
+    # previous day's list: a leftover parcel from that list counts toward
+    # it, not as the first scan of the new day.
+    if not payload.get("day") and snapshot["matched_from"] != ScannedOrder.MATCH_NONE:
+        shown, carried = _following_day(request, [b.pk for b in _scan_desk_scope(request, business)])
+        if carried:
+            on_list = DQ(order_id=snapshot["sub_order_no"])
+            if snapshot.get("awb_number"):
+                on_list |= DQ(awb_number=snapshot["awb_number"])
+            if _labels_on_day(LabelOrder.objects.filter(business=owner), shown).filter(on_list).exists():
+                scan_day = shown
+
+    existing = ScannedOrder.objects.filter(
+        business=owner, sub_order_no=snapshot["sub_order_no"]
+    ).first()
+
+    if existing:
+        # Already logged. Bump the scan, and only move the status when the
+        # caller actually asked for one — a plain re-scan must not quietly
+        # reset a parcel that was already marked dispatched.
+        existing.scan_count += 1
+        existing.last_scanned_at = now
+        existing.scanned_code = code
+        existing.scanned_by = request.user
+        existing.scan_day = scan_day
+        fields = ["scan_count", "last_scanned_at", "scanned_code", "scanned_by", "scan_day", "updated_at"]
+
+        if payload.get("status") and new_status != existing.status:
+            existing.status = new_status
+            existing.status_updated_at = now
+            fields += ["status", "status_updated_at"]
+        if "notes" in payload:
+            existing.notes = str(payload["notes"] or "").strip()
+            fields.append("notes")
+
+        existing.save(update_fields=fields)
+        row = _attach_meesho_status(business, [existing])[0]
+        # Re-check on every scan: the sheet that answers this may have been
+        # uploaded since the parcel was first seen. Resolved against the
+        # owning business, which for a pooled scan is not the selected one.
+        _refresh_ship_status(owner, row, row.meesho_status,
+                             scope=accessible_businesses(request, include=owner))
+        return Response({
+            "earlier_day": _earlier_day_of(owner, snapshot, scan_day),
+            "already_scanned": True,
+            "scan_count": row.scan_count,
+            "matched_from": row.matched_from,
+            "ship_status": row.ship_status,
+            "cross_business": cross_business,
+            "business_id": owner.pk,
+            "business_name": owner.name,
+            "row": ScannedOrderSerializer(row).data,
+            "stats": _scanned_order_stats(desk),
+        })
+
+    row = ScannedOrder.objects.create(
+        business=owner,
+        scanned_code=code,
+        status=new_status,
+        status_updated_at=now if new_status != ScannedOrder.STATUS_SCANNED else None,
+        notes=str(payload.get("notes") or "").strip(),
+        last_scanned_at=now,
+        scanned_by=request.user,
+        scan_day=scan_day,
+        **snapshot,
+    )
+    row = _attach_meesho_status(business, [row])[0]
+    _refresh_ship_status(owner, row, row.meesho_status,
+                         scope=accessible_businesses(request, include=owner))
+    return Response({
+        "earlier_day": _earlier_day_of(owner, snapshot, scan_day),
+        "already_scanned": False,
+        "scan_count": 1,
+        "matched_from": row.matched_from,
+        "ship_status": row.ship_status,
+        "cross_business": cross_business,
+        "business_id": owner.pk,
+        "business_name": owner.name,
+        "row": ScannedOrderSerializer(row).data,
+        "stats": _scanned_order_stats(desk),
+    }, status=status.HTTP_201_CREATED)
 
 @api_view(["GET"])
 def scan_queue(request, business_id):
