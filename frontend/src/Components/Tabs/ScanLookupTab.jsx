@@ -117,10 +117,101 @@ function BillOfMaterials({ components, pricing }) {
   );
 }
 
+
+/*
+ * No parent SKU here: look the SKU up on Meesho, in every business at once
+ * (their saved sessions), and show where it is listed — photo, name, catalog,
+ * price, stock and status. Read-only.
+ */
+const MEESHO_STATE = {
+  found: { label: "Listed", tag: "green" },
+  similar: { label: "Similar only", tag: "amber" },
+  none: { label: "Not listed", tag: "gray" },
+  no_session: { label: "Needs login", tag: "red" },
+  error: { label: "Couldn't check", tag: "red" },
+};
+
+function MeeshoMatches({ sku, onPhoto }) {
+  const [state, setState] = useState({ kind: "loading" });
+  useEffect(() => {
+    let stop = false;
+    setState({ kind: "loading" });
+    (async () => {
+      try {
+        const res = await fetch(`${API}/order-scan/meesho-search/?${new URLSearchParams({ sku })}`);
+        const data = await res.json().catch(() => ({}));
+        if (stop) return;
+        if (!res.ok) { setState({ kind: "error", message: data.error || "Couldn't search Meesho." }); return; }
+        setState({ kind: "done", data });
+        const hit = data.results?.flatMap((r) => r.products || []).find((p) => p.exact && p.image_url);
+        if (hit) onPhoto?.(hit.image_url);
+      } catch {
+        if (!stop) setState({ kind: "error", message: "Network error — couldn't search Meesho." });
+      }
+    })();
+    return () => { stop = true; };
+  }, [sku, onPhoto]);
+
+  const found = state.data?.found_in || [];
+  return (
+    <Card title="On Meesho"
+      right={state.kind === "done" && (
+        <span style={{ fontSize: 12.5, fontWeight: 700, color: found.length ? "#15803D" : C.gray500 }}>
+          {found.length ? `Listed in ${found.join(", ")}` : "Not found as this SKU"}
+        </span>
+      )} pad={0}>
+      {state.kind === "loading" && (
+        <div style={{ display: "flex", gap: 10, alignItems: "center", padding: 16, color: C.gray600, fontWeight: 700, fontSize: 13.5 }}>
+          <CircularProgress size={18} style={{ color: C.orange }} /> No parent here — searching Meesho in every business for {sku}…
+        </div>
+      )}
+      {state.kind === "error" && <div style={{ padding: 16, color: C.red, fontWeight: 700, fontSize: 13.5 }}>✕ {state.message}</div>}
+      {state.kind === "done" && state.data.results.length === 0 && (
+        <div style={{ padding: 16, color: C.gray600, fontSize: 13.5 }}>{state.data.message || "No business has a Meesho account connected."}</div>
+      )}
+      {state.kind === "done" && state.data.results.map((r, idx) => {
+        const st = MEESHO_STATE[r.state] || MEESHO_STATE.error;
+        return (
+          <div key={r.business_id} style={{ padding: "12px 16px", borderTop: idx ? `1px solid ${C.gray100}` : "none" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: r.products.length ? 10 : 0 }}>
+              <span style={{ fontSize: 14, fontWeight: 800, color: C.gray900 }}>{r.business_name}</span>
+              <Tag variant={st.tag}>{st.label}</Tag>
+            </div>
+            {r.message && <div style={{ fontSize: 12.5, color: C.gray600 }}>{r.message}</div>}
+            {r.products.map((p) => (
+              <div key={`${p.catalog_id}-${p.product_id}`} style={{ display: "flex", gap: 12, alignItems: "flex-start", padding: "8px 0",
+                opacity: p.exact ? 1 : 0.75 }}>
+                <Picture url={p.image_url} size={64} />
+                <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 3 }}>
+                  <div style={{ fontSize: 13.5, fontWeight: 800, color: C.gray900, lineHeight: 1.3 }}>{p.name || "—"}</div>
+                  <div style={{ fontFamily: "monospace", fontSize: 12.5, fontWeight: 700, color: C.gray700, wordBreak: "break-all" }}>
+                    {p.sku}{p.variation ? ` · ${p.variation}` : ""}{!p.exact && <span style={{ color: "#B45309", fontFamily: "inherit" }}> · similar, not this SKU</span>}
+                  </div>
+                  <div style={{ fontSize: 12.5, color: C.gray600 }}>
+                    Catalog <b style={{ fontFamily: "monospace" }}>{p.catalog_id}</b>{p.catalog_name ? ` · ${p.catalog_name}` : ""}{p.category ? ` · ${p.category}` : ""}
+                  </div>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 2 }}>
+                    {p.price != null && <Tag variant="blue">{rupees(p.price)}</Tag>}
+                    {p.stock != null && <Tag variant={p.stock > 0 ? "green" : "red"}>Stock {Number(p.stock).toLocaleString("en-IN")}</Tag>}
+                    {p.status && <Tag variant={p.status === "Active" ? "green" : "gray"}>{p.status}{p.archived_at ? ` · ${p.archived_at}` : ""}</Tag>}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        );
+      })}
+    </Card>
+  );
+}
+
 function Result({ data, onSku }) {
   const [zoom, setZoom] = useState(null);
   const { order, parent, components, photos, siblings, pricing } = data;
-  const hero = parent?.image_url || photos[0]?.url || null;
+  // No parent here: Meesho's photo of the SKU, once the search below finds it.
+  const [meeshoPhoto, setMeeshoPhoto] = useState(null);
+  useEffect(() => setMeeshoPhoto(null), [data.sku]);
+  const hero = parent?.image_url || photos[0]?.url || meeshoPhoto || null;
   const gallery = [...new Set([hero, ...photos.map((p) => p.url)].filter(Boolean))].map((url) => ({ url }));
   const ship = SHIP[order.ship_status] || null;
   const move = useCallback((d) => setZoom((z) => (z == null ? z : (z + d + gallery.length) % gallery.length)), [gallery.length]);
@@ -152,6 +243,8 @@ function Result({ data, onSku }) {
           </div>
         </div>
       </section>
+
+      {!parent && data.sku && <MeeshoMatches sku={data.sku} onPhoto={setMeeshoPhoto} />}
 
       {/* Details — one column on a phone, two when there is room */}
       <div style={{ display: "grid", gap: 14, gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 360px), 1fr))", alignItems: "start" }}>

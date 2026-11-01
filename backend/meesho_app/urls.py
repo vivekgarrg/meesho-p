@@ -4,7 +4,7 @@ from . import flipkart_views
 from . import api_cache
 from . import upload_cleanup
 from . import return_desk
-from . import meesho_linking, meesho_returns, meesho_sync
+from . import meesho_linking, meesho_returns, meesho_search, meesho_sync
 from . import bulk_listing_views
 from . import listing_images_views
 from . import insights
@@ -216,6 +216,7 @@ urlpatterns = [
     path("order-scan/",              views.scanned_orders_list,        name="scanned_orders_list"),
     path("order-scan/queue/",        views.scan_queue,                 name="scan_queue"),
     path("order-scan/lookup/",       views.scan_lookup,                name="scan_lookup"),
+    path("order-scan/meesho-search/", meesho_search.meesho_sku_search, name="meesho_sku_search"),
     path("order-scan/bulk-status/",  views.scanned_orders_bulk_status, name="scanned_orders_bulk_status"),
     path("order-scan/refresh-ship/", views.scanned_orders_refresh_ship, name="scanned_orders_refresh_ship"),
     path("order-scan/alerts/",       views.scan_alerts,                name="scan_alerts"),

@@ -135,6 +135,7 @@ API_OWNERSHIP = {
     "return-scan/":          ["/return-scan", "/returns"],
     # The lookup tab scans a code and reads the listing behind it.
     "order-scan/lookup/":    ["/scan-lookup", "/order-scan"],
+    "order-scan/meesho-search/": ["/scan-lookup", "/order-scan"],
     # The Overview dashboard shows the "orders not sent" alert too.
     "order-scan/alerts/":    ["/order-scan", "/"],
     # Overview carries a "salary due" reminder, so it needs this one sub-path —
