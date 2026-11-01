@@ -1130,3 +1130,56 @@ class WhatsAppLabelsTests(TestCase):
         with mock.patch.dict(os.environ, self.ENV):
             d = c.patch(url, {"send_labels": True}, format="json").data
         self.assertEqual((d["send_labels"], d["send_channels"]), (True, ["whatsapp"]))
+
+
+@mock.patch.dict(os.environ, {"MEESHO_SYNC_KEY": KEY})
+class RedoAndSendLabelsTests(TestCase):
+    """A label batch where a business failed (Meesho busy): redo it, merge, send — and send any kept PDF."""
+
+    def setUp(self):
+        from django.utils import timezone
+        self.biz = Business.objects.create(name="Rudam")
+        self.admin = User.objects.create_user(username="a", password="pw", role=User.ROLE_SUPER_ADMIN)
+        Membership.objects.create(user=self.admin, business=self.biz)
+        self.acct = MeeshoAccount.objects.create(business=self.biz, phone_number="9000000001", password_enc="v1:x", status="ACTIVE",
+                                                 supplier_id="1", supplier_identifier="x")
+        now = timezone.now()
+        self.failed = MeeshoSyncRun.objects.create(account=self.acct, kind="LABELS", status="FAILED", queued_at=now,
+                                                   result={"batch": "auto-5pm"}, message="Labels not generated — HTTP 423")
+        self.c = APIClient()
+        self.c.force_authenticate(self.admin)
+        self.base = f"/api/business/{self.biz.id}/meesho-orders"
+
+    def test_redo_queues_the_worker_and_needs_a_channel_to_send(self):
+        with mock.patch.object(meesho_sync, "enqueue", return_value="jid") as enq, \
+                mock.patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "t", "TELEGRAM_CHAT_ID": "-5352270954", "WHATSAPP_TOKEN": "", "LABELS_EMAIL_TO": ""}):
+            r = self.c.post(f"{self.base}/labels/batch/auto-5pm/redo/", {"send": True}, format="json")
+        self.assertEqual(r.status_code, 202, r.data)
+        enq.assert_called_once_with("MeeshoRedoLabelsJob", ["auto-5pm", True])
+        with mock.patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "", "WHATSAPP_TOKEN": "", "LABELS_EMAIL_TO": ""}):
+            self.assertEqual(self.c.post(f"{self.base}/labels/batch/auto-5pm/redo/", {"send": True}, format="json").status_code, 400)
+        self.assertEqual(self.c.post(f"{self.base}/labels/batch/nope/redo/", {}, format="json").status_code, 404)
+
+    def test_a_failed_attempt_made_again_no_longer_shows(self):
+        self.assertEqual(len(meesho_sync._label_batches([self.acct])[0]["runs"]), 1)
+        self.failed.result = {**self.failed.result, "superseded": True}
+        self.failed.save()
+        self.assertEqual(meesho_sync._label_batches([self.acct]), [])
+
+    def test_a_kept_pdf_is_sent_now(self):
+        from .models import MeeshoLabelFile
+        f = MeeshoLabelFile.objects.create(batch="auto-5pm", trigger="AUTO", business_ids=[self.biz.pk], business_names=["Rudam"],
+                                           labels=12, sorted=True, pdf=b"%PDF-1.4 x")
+        with mock.patch("meesho_app.notify.channels", return_value=["telegram"]), \
+                mock.patch("meesho_app.notify.send", return_value={"telegram": "sent"}) as send:
+            r = self.c.post(f"{self.base}/label-files/{f.pk}/send/")
+        self.assertEqual((r.status_code, r.data["sent"]), (200, {"telegram": "sent"}))
+        self.assertEqual(send.call_args.kwargs["data"], b"%PDF-1.4 x")
+        self.assertIn("12 labels from Rudam, sorted by parent SKU", send.call_args.args[1])
+
+    def test_the_command_queues_the_latest_batch(self):
+        from io import StringIO
+        from django.core.management import call_command
+        with mock.patch.object(meesho_sync, "enqueue", return_value="jid") as enq:
+            call_command("meesho_redo_labels", latest=True, stdout=StringIO())
+        enq.assert_called_once_with("MeeshoRedoLabelsJob", ["auto-5pm", False])

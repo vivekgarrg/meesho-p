@@ -160,8 +160,10 @@ function AcceptStatus({ runs, showBiz }) {
  * generating it waits; once done, every business's labels download as one
  * PDF, sorted by parent SKU.
  */
-function LabelStatus({ batch, onDownload, downloading, showBiz }) {
-  if (!batch || Date.now() - new Date(batch.queued_at) > 3 * 60 * 60 * 1000) return null;
+function LabelStatus({ batch, onDownload, downloading, showBiz, onRedo, redoing, channels = [] }) {
+  // Shown for 3 hours — or a day while a business's labels in it failed, so it can still be retried.
+  const age = batch ? Date.now() - new Date(batch.queued_at) : Infinity;
+  if (!batch || age > (batch.runs.some((r) => !r.ready) ? 24 : 3) * 60 * 60 * 1000) return null;
   const { runs } = batch;
   const busy = batch.busy;
   const canDownload = !busy && batch.ready > 0;
@@ -186,6 +188,13 @@ function LabelStatus({ batch, onDownload, downloading, showBiz }) {
           </span>
         ))}
       </span>
+      {/* A business whose labels failed (Meesho busy…): make them again, merge the batch, send it. */}
+      {!busy && onRedo && runs.some((r) => !r.ready) && (
+        <button onClick={() => onRedo(batch, channels.length > 0)} disabled={redoing} style={{ ...btn("primary", "md"), opacity: redoing ? 0.6 : 1 }}>
+          {redoing ? "Queued — making them again…"
+            : `↻ Retry ${[...new Set(runs.filter((r) => !r.ready).map((r) => r.business_name))].join(", ")} — merge${channels.length ? " & send" : ""}`}
+        </button>
+      )}
       {canDownload && (
         <button onClick={() => onDownload(batch)} disabled={downloading} style={{ ...btn("primary", "md"), opacity: downloading ? 0.6 : 1 }}>
           {downloading ? <><CircularProgress size={13} style={{ color: "#fff", marginRight: 6, verticalAlign: "-2px" }} />Merging & sorting…</>
@@ -360,6 +369,7 @@ export function MeeshoOrdersTab({ status = "pending" }) {
   const [bizFilter, setBizFilter] = useState("all");
   const [downloading, setDownloading] = useState(false);
   const [linking, setLinking] = useState(null);
+  const [redoing, setRedoing] = useState(null);
   const [shown, setShown] = useState(PAGE);
   const [showHold, setShowHold] = useState(false);
   useEffect(() => { setShown(PAGE); }, [q, labelFilter, slaFilter, linkFilter, bizFilter]);
@@ -407,6 +417,19 @@ export function MeeshoOrdersTab({ status = "pending" }) {
       document.body.appendChild(link); link.click(); link.remove();
       setTimeout(() => URL.revokeObjectURL(url), 10000);
     } finally { setDownloading(false); }
+  };
+
+  // Label again the businesses that failed in a batch, then merge, sort, keep (and send).
+  const redoLabels = async (batch, send) => {
+    setRedoing(batch.batch); setError(null);
+    try {
+      const res = await fetch(`${API}/meesho-orders/labels/batch/${encodeURIComponent(batch.batch)}/redo/`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ send }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) { setError(d.error || "Couldn't start it."); setRedoing(null); return; }
+      setTimeout(() => { setRedoing(null); load(); }, 15000);
+    } catch { setError("Network error."); setRedoing(null); }
   };
 
   const tabOf = (k) => data?.tabs.find((t) => t.key === k);
@@ -528,7 +551,8 @@ export function MeeshoOrdersTab({ status = "pending" }) {
       </div>
 
       {status === "pending" && <AcceptStatus runs={lastAccepts} showBiz={multi} />}
-      {status === "ready_to_ship" && <LabelStatus batch={lastLabels} onDownload={downloadLabels} downloading={downloading} showBiz={multi} />}
+      {status === "ready_to_ship" && <LabelStatus batch={lastLabels} onDownload={downloadLabels} downloading={downloading} showBiz={multi}
+        onRedo={data.is_admin ? redoLabels : null} redoing={redoing === lastLabels?.batch} channels={data.send_channels || []} />}
       {status === "pending" && showHold && hold.length > 0 && (
         <div style={{ ...S.card, padding: 0, overflow: "hidden", borderTop: `4px solid ${TONE.hold}` }}>
           <div style={{ padding: "10px 14px", fontWeight: 800, color: TONE.hold }}>On hold · {hold.length}</div>

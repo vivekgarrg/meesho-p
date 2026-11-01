@@ -16,6 +16,10 @@ class MeeshoLabelJob
   DOWNLOADED_PATH = "/api/fulfillment/orders/updateGroupDownloadBackendFlag".freeze
   POLL_SECONDS = 10
   POLL_TIMES = 30                                      # up to five minutes
+  # Meesho answers HTTP 423 "SUPPLIER_REQUEST_LOCK_BUSY" while another request
+  # of the supplier's is still going — the accept a labels run starts with,
+  # usually. Wait and ask again rather than give up on the business.
+  LOCK_WAITS = [30, 60, 120, 180].freeze               # seconds; about six minutes in all
 
   def perform(account_id, run_id, groups)
     account = MeeshoAccount.find_by(id: account_id)
@@ -30,7 +34,7 @@ class MeeshoLabelJob
         client = MeeshoLoginJob.login!(account)
         ids(history(client, account))
       end
-      res = client.post(PATH, body: self.class.body(account, groups), headers: self.class.headers(account))
+      res = request_labels(client, account, groups)
       outcome = follow(client, account, before, MeeshoAcceptJob.request_id(res.body))
       account.cookies = client.cookies
       account.save!
@@ -80,7 +84,23 @@ class MeeshoLabelJob
     Rails.env.test?
   end
 
+  def self.lock_busy?(error)
+    error.message.include?("HTTP 423") || error.message.include?("LOCK_BUSY")
+  end
+
   private
+
+  def request_labels(client, account, groups)
+    waits = LOCK_WAITS.dup
+    begin
+      client.post(PATH, body: self.class.body(account, groups), headers: self.class.headers(account))
+    rescue MeeshoClient::RequestError => e
+      raise unless self.class.lock_busy?(e) && (wait = waits.shift)
+      Sidekiq.logger.info("MeeshoLabelJob #{account.id}: Meesho is busy with another request — asking again in #{wait}s")
+      sleep(wait) unless self.class.no_wait?
+      retry
+    end
+  end
 
   def history(client, account)
     client.post(HISTORY_PATH, body: { supplier_id: account.supplier_id.to_i, identifier: account.supplier_identifier,

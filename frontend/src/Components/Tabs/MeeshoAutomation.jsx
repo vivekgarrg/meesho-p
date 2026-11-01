@@ -168,13 +168,19 @@ async function fetchPdf(file, download) {
 
 export function LatestLabels({ emptyHint = false }) {
   const [files, setFiles] = useState(null);
+  const [meta, setMeta] = useState({ channels: [], admin: false });
+  const [sent, setSent] = useState(null);
   const [busy, setBusy] = useState(null);
   const [error, setError] = useState(null);
   const [showAll, setShowAll] = useState(false);
 
   const load = useCallback(async () => {
     const res = await fetch(`${API}/meesho-orders/label-files/`).catch(() => null);
-    if (res?.ok) setFiles((await res.json()).files);
+    if (res?.ok) {
+      const d = await res.json();
+      setFiles(d.files);
+      setMeta({ channels: d.send_channels || [], admin: !!d.is_admin });
+    }
   }, []);
   useEffect(() => {
     load();
@@ -210,6 +216,20 @@ export function LatestLabels({ emptyHint = false }) {
     finally { setBusy(null); }
   };
 
+  // Send a kept PDF now — to the Telegram group (and any other channel set up).
+  const send = async (f) => {
+    setBusy(`s${f.id}`); setError(null); setSent(null);
+    try {
+      const res = await fetch(`${API}/meesho-orders/label-files/${f.id}/send/`, { method: "POST" });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) { setError(d.error || Object.values(d.sent || {}).join("; ") || "Couldn't send it."); return; }
+      setSent(`Sent ${f.labels} labels — ${Object.entries(d.sent).map(([k, v]) => `${k}: ${v}`).join(", ")}`);
+    } catch { setError("Network error."); }
+    finally { setBusy(null); }
+  };
+  const canSend = meta.admin && meta.channels.length > 0;
+  const sendLabel = meta.channels.includes("telegram") ? "Telegram" : meta.channels.map((c) => c[0].toUpperCase() + c.slice(1)).join(" / ");
+
   if (!files || files.length === 0) {
     if (!emptyHint || !files) return null;
     return (
@@ -236,6 +256,11 @@ export function LatestLabels({ emptyHint = false }) {
       <button onClick={() => download(f)} disabled={!!busy} style={btn("ghost", big ? "md" : "sm")}>
         {busy === `d${f.id}` ? <CircularProgress size={13} style={{ color: C.orange }} /> : "⬇ Download"}
       </button>
+      {canSend && (
+        <button onClick={() => send(f)} disabled={!!busy} title={`Send this PDF to ${sendLabel} now`} style={btn("ghost", big ? "md" : "sm")}>
+          {busy === `s${f.id}` ? <CircularProgress size={13} style={{ color: C.orange }} /> : `📨 Send to ${sendLabel}`}
+        </button>
+      )}
     </div>
   );
 
@@ -244,6 +269,7 @@ export function LatestLabels({ emptyHint = false }) {
       <span style={{ fontSize: 12, fontWeight: 800, color: C.orange, textTransform: "uppercase", letterSpacing: "0.05em" }}>Latest labels</span>
       <Row f={latest} big />
       {error && <span style={{ fontSize: 12.5, color: C.red, fontWeight: 700 }}>{error}</span>}
+      {sent && <span style={{ fontSize: 12.5, color: "#15803D", fontWeight: 700 }}>✓ {sent}</span>}
       {older.length > 0 && (
         <>
           <button onClick={() => setShowAll((v) => !v)} style={{ ...btn("ghost", "sm"), alignSelf: "flex-start" }}>

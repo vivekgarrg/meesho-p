@@ -492,6 +492,8 @@ def _label_batches(accounts):
     runs = MeeshoSyncRun.objects.filter(account__in=accounts, kind=KIND_LABELS).select_related("account__business")[:30]
     batches = {}
     for r in runs:
+        if (r.result or {}).get("superseded"):
+            continue                          # a failed attempt since made again (MeeshoRedoLabelsJob)
         key = (r.result or {}).get("batch") or f"run-{r.pk}"
         b = batches.setdefault(key, {"batch": key, "queued_at": r.queued_at, "runs": []})
         b["queued_at"] = max(b["queued_at"], r.queued_at)
@@ -594,6 +596,7 @@ def meesho_orders_dashboard(request, business_id):
         "today": today,
         "accepts": accepts,
         "label_batches": _label_batches(accounts),
+        "send_channels": notify.channels(),
     })
 
 
@@ -1255,11 +1258,58 @@ def meesho_label_files(request, business_id):
     """The newest labels PDFs (automatic and generated), ready to print — for the businesses on this desk."""
     business = _views().get_authorized_business(request, business_id)
     _desk, accounts = _desk_accounts(request, business)
-    return Response({"files": [{
+    return Response({"send_channels": notify.channels(), "is_admin": _views()._is_admin(request.user), "files": [{
         "id": f.pk, "created_at": f.created_at, "trigger": f.trigger, "labels": f.labels, "pages": f.pages,
         "sorted": f.sorted, "businesses": f.business_names, "summary": f.summary,
         "file_name": f"meesho-labels-{timezone.localtime(f.created_at):%Y-%m-%d-%H%M}.pdf",
     } for f in _label_files_for(accounts)[:10]]})
+
+
+@api_view(["POST"])
+def meesho_label_file_send(request, business_id, file_id):
+    """Admin: send one kept labels PDF now, on the channels set up (Telegram / email / WhatsApp)."""
+    business = _views().get_authorized_business(request, business_id)
+    if not _views()._is_admin(request.user):
+        return Response({"error": "Only an admin can send labels."}, status=status.HTTP_403_FORBIDDEN)
+    _desk, accounts = _desk_accounts(request, business)
+    f = MeeshoLabelFile.objects.filter(pk=file_id).first()
+    if not f or not ({a.business_id for a in accounts} & set(f.business_ids or [])):
+        return Response({"error": "No such labels file."}, status=status.HTTP_404_NOT_FOUND)
+    if not notify.channels():
+        return Response({"error": "No channel is set up — add the Telegram (or email / WhatsApp) settings to the server's .env."},
+                        status=status.HTTP_400_BAD_REQUEST)
+    when = timezone.localtime(f.created_at)
+    caption = (f"{f.labels} label{'' if f.labels == 1 else 's'} from {', '.join(f.business_names or [])}"
+               f"{', sorted by parent SKU' if f.sorted else ''}.")
+    sent = notify.send(f"Meesho labels — {when:%-I:%M %p, %-d %b}", caption,
+                       filename=f"meesho-labels-{when:%Y-%m-%d-%H%M}.pdf", data=bytes(f.pdf))
+    failed = {k: v for k, v in sent.items() if v != "sent"}
+    return Response({"sent": sent}, status=status.HTTP_502_BAD_GATEWAY if failed and len(failed) == len(sent) else status.HTTP_200_OK)
+
+
+@api_view(["POST"])
+def meesho_orders_labels_batch_redo(request, business_id, batch):
+    """
+    Admin: make a label batch whole again — the businesses whose labels failed
+    are labelled again, then the batch is merged, sorted, kept and, with
+    {send: true}, sent (MeeshoRedoLabelsJob).
+    """
+    business = _views().get_authorized_business(request, business_id)
+    if not _views()._is_admin(request.user):
+        return Response({"error": "Only an admin can redo labels."}, status=status.HTTP_403_FORBIDDEN)
+    _desk, accounts = _desk_accounts(request, business)
+    if not MeeshoSyncRun.objects.filter(account__in=accounts, kind=KIND_LABELS, result__batch=batch).exists():
+        return Response({"error": "No such label batch."}, status=status.HTTP_404_NOT_FOUND)
+    d = request.data if isinstance(request.data, dict) else {}
+    send = bool(d.get("send"))
+    if send and not notify.channels():
+        return Response({"error": "No channel is set up to send on — add the Telegram settings to the server's .env."},
+                        status=status.HTTP_400_BAD_REQUEST)
+    try:
+        enqueue("MeeshoRedoLabelsJob", [batch, send])
+    except Exception as exc:                                        # noqa: BLE001
+        return Response({"error": f"The sync worker can't be reached ({exc.__class__.__name__})."}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+    return Response({"queued": True, "batch": batch, "send": send}, status=status.HTTP_202_ACCEPTED)
 
 
 @api_view(["GET"])

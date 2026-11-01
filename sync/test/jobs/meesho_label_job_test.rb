@@ -123,4 +123,24 @@ class MeeshoLabelJobTest < ActiveSupport::TestCase
   ensure
     DjangoCommand.define_singleton_method(:run, original)
   end
+
+  test "Meesho busy with another request (HTTP 423) is waited out, not a failure" do
+    busy = { status: 423, headers: { "Content-Type" => "application/json" },
+             body: { error: "SUPPLIER_REQUEST_LOCK_BUSY | A request is already in progress. Please wait for some time." }.to_json }
+    stub_request(:post, LABEL_URL).to_return(busy, busy, { status: 200, body: "{}" })
+    stub_request(:post, HISTORY_URL).to_return(history, history(entry("new", 100, url: PDF)))
+    MeeshoLabelJob.new.perform(account.id, label_run.id, GROUPS)
+    assert_equal "OK", label_run.reload.status, label_run.message
+    assert_requested(:post, LABEL_URL, times: 3)
+  end
+
+  test "still busy after every wait, it fails saying so" do
+    stub_request(:post, LABEL_URL).to_return(status: 423, headers: { "Content-Type" => "application/json" },
+                                             body: { error: "SUPPLIER_REQUEST_LOCK_BUSY | busy" }.to_json)
+    stub_request(:post, HISTORY_URL).to_return(history)
+    MeeshoLabelJob.new.perform(account.id, label_run.id, GROUPS)
+    assert_equal "FAILED", label_run.reload.status
+    assert_match(/HTTP 423/, label_run.message)
+    assert_requested(:post, LABEL_URL, times: 1 + MeeshoLabelJob::LOCK_WAITS.size)
+  end
 end

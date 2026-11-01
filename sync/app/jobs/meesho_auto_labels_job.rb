@@ -100,7 +100,7 @@ class MeeshoAutoLabelsJob
 
     pull(account) if pending.any?                        # the accepted ones now sit in Ready to ship
 
-    todo = groups(rows(account, "orders_ready_to_ship").select { |r| NOT_DOWNLOADED.include?(r["label"]) })
+    todo = self.class.label_todo(account)
     labelled = 0
     todo.each_slice(CHUNK) do |chunk|
       run = account.runs.create!(kind: "LABELS", trigger: MeeshoSyncRun::TRIGGER_SCHEDULE, status: "QUEUED",
@@ -119,15 +119,32 @@ class MeeshoAutoLabelsJob
   end
 
   def rows(account, endpoint)
+    self.class.rows(account, endpoint)
+  end
+
+  def groups(rows)
+    self.class.groups(rows)
+  end
+
+  def self.rows(account, endpoint)
     payload = MeeshoSyncSnapshot.find_by(account_id: account.id, endpoint: endpoint)&.payload
     Array(payload).select { |r| r.is_a?(Hash) && r["sub_order_id"].present? && r["grouping_key"].present? }
   end
 
   # Orders grouped as Meesho's requests take them: by grouping key.
-  def groups(rows)
+  def self.groups(rows)
     rows.group_by { |r| r["grouping_key"] }.map do |key, rs|
       { "grouping_key" => key, "sub_order_ids" => rs.map { |r| r["sub_order_id"] }.uniq,
         "shipment_type" => rs.first["shipment_type"].presence || "forward" }
     end
+  end
+
+  # Ready-to-ship orders whose labels aren't downloaded yet, as the last pull saw them.
+  def self.label_todo(account)
+    groups(rows(account, "orders_ready_to_ship").select { |r| NOT_DOWNLOADED.include?(r["label"]) })
+  end
+
+  def self.lock_key
+    LOCK_KEY
   end
 end
