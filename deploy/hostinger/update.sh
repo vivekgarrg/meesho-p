@@ -164,7 +164,11 @@ echo "==> Stamping the deployed commit"
 git -C "$REPO_ROOT" rev-parse HEAD > "$REPO_ROOT/.deployed_sha"
 
 echo "==> Restarting gunicorn service"
-sudo -n systemctl restart meesho || echo "  !!! COULD NOT RESTART meesho (gunicorn) — see deploy/hostinger/sudoers-meesho"
+if [ "${AUTODEPLOY_ROOT:-0}" = 1 ]; then
+    echo "  (autodeploy restarts it as root next)"
+else
+    sudo -n systemctl restart meesho || echo "  !!! COULD NOT RESTART meesho (gunicorn) — see deploy/hostinger/sudoers-meesho"
+fi
 
 echo "==> Meesho sync worker (Rails + Sidekiq)"
 # Optional, and never allowed to fail the deploy: until Ruby/Bundler and the
@@ -175,14 +179,16 @@ if [ -d "$REPO_ROOT/sync" ] && command -v bundle >/dev/null 2>&1; then
             # -n: never wait for a password (cron has no one to type it). If this
             # fails the worker keeps running OLD code — new jobs fail with
             # "uninitialized constant" — so say so loudly.
-            if sudo -n systemctl restart meesho-sidekiq; then
+            if [ "${AUTODEPLOY_ROOT:-0}" = 1 ]; then
+                echo "  (autodeploy restarts meesho-sidekiq as root next)"
+            elif sudo -n systemctl restart meesho-sidekiq; then
                 echo "  meesho-sidekiq restarted"
             else
                 echo "  !!! COULD NOT RESTART meesho-sidekiq — the worker still runs the previous code."
                 echo "  !!! Install deploy/hostinger/sudoers-meesho (see the file), or run as root: systemctl restart meesho-sidekiq"
             fi
             # The job-queue dashboard (/sidekiq/), when installed.
-            if systemctl list-unit-files meesho-sidekiq-web.service 2>/dev/null | grep -q meesho-sidekiq-web; then
+            if [ "${AUTODEPLOY_ROOT:-0}" != 1 ] && systemctl list-unit-files meesho-sidekiq-web.service 2>/dev/null | grep -q meesho-sidekiq-web; then
                 sudo -n systemctl restart meesho-sidekiq-web || echo "  !!! could not restart meesho-sidekiq-web (see sudoers-meesho)"
             fi
         else
