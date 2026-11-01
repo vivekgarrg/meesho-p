@@ -119,13 +119,14 @@ def check_payments(a):
             on_file = (OrderPayment.objects.filter(business=a.business, payment_date__gte=done["from"], payment_date__lte=done["to"])
                        .aggregate(t=Sum("final_settlement_amount"))["t"] or Decimal(0))
             snap = MeeshoSyncSnapshot.objects.filter(account=a, endpoint="payments_summary").first()
-            meesho = ((snap.payload or {}).get("previous_total") or {}).get("netAmount") if snap and isinstance(snap.payload, dict) else None
+            days = ((snap.payload or {}).get("previous") or {}).get("daywisePayments") or [] if snap and isinstance(snap.payload, dict) else []
+            # Meesho's order payouts over the same days, so the two compare.
+            in_window = [d for d in days if done["from"] <= str(d.get("date")) <= done["to"] and d.get("netOrderAmount") is not None]
+            meesho = sum((Decimal(str(d["netOrderAmount"])) for d in in_window), Decimal(0))
             c.notes.append(f"order payments on file {done['from']}…{done['to']}: ₹{on_file:,.2f}"
-                           + (f"; Meesho's paid total over its last payouts (orders less ads and recoveries): ₹{Decimal(str(meesho)):,.2f}"
-                              if meesho is not None else ""))
+                           + (f"; Meesho paid for orders on the same {len(in_window)} payout days: ₹{meesho:,.2f}" if in_window else ""))
             # Day by day: each payout Meesho shows in the window, against the
             # order payments on file for that date.
-            days = ((snap.payload or {}).get("previous") or {}).get("daywisePayments") or [] if snap and isinstance(snap.payload, dict) else []
             for day in days:
                 if not (done["from"] <= str(day.get("date")) <= done["to"]) or day.get("netOrderAmount") is None:
                     continue
