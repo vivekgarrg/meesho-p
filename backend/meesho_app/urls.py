@@ -70,6 +70,7 @@ urlpatterns = [
     path("parent-prices/<str:item_id>/children/", views.parent_price_children, name="parent_price_children"),
     path("parent-prices/<str:item_id>/suggestions/", views.parent_sku_suggestions, name="parent_sku_suggestions"),
     path("parent-prices/<str:item_id>/price-sheet/", views.parent_price_sheet, name="parent_price_sheet"),
+    path("parent-prices/<str:item_id>/price-ticket/", views.parent_price_ticket, name="parent_price_ticket"),
     path("master-items/", views.master_item_list, name="master_item_list"),
     path("master-items/<int:pk>/", views.master_item_detail, name="master_item_detail"),
     path("master-items/<int:pk>/price-history/", views.master_item_price_history_list, name="master_item_price_history_list"),
@@ -170,6 +171,8 @@ urlpatterns = [
     # Meesho Price Update
     path("meesho-price-update/",          views.meesho_price_update_list,     name="meesho_price_update_list"),
     path("meesho-price-update/download/", views.meesho_price_update_download, name="meesho_price_update_download"),
+    path("meesho-price-update/ticket/",   views.meesho_price_update_ticket,   name="meesho_price_update_ticket"),
+    path("meesho-price-tickets/",         views.meesho_price_tickets,         name="meesho_price_tickets"),
     # Return deliveries (returns received back) + 7-day claim tracking
     path("returns/",                    views.return_deliveries_list,   name="return_deliveries_list"),
     path("returns/analysis/",           views.return_analysis,          name="return_analysis"),

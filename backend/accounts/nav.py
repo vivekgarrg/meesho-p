@@ -186,6 +186,7 @@ API_OWNERSHIP = {
     "meesho-inventory/stock-sheet/": ["/sku-analysis", "/pricing", "/meesho-inventory"],
     "meesho-inventory/":     ["/meesho-inventory"],
     "meesho-price-update/":  ["/meesho-pricing", "/meesho-inventory"],
+    "meesho-price-tickets/": ["/meesho-pricing", "/pricing"],
 
     # Pricing is shared: the Labels and Inventory screens both create and link
     # parent SKUs, and SKU Analysis reads the same rows.

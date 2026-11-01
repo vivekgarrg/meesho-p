@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { C, S, btn } from '../../App';
 import { useBusiness } from '../../contexts/BusinessContext';
+import { PriceTicketDialog, PriceTicketLog } from './MeeshoPriceTicket';
 import DownloadIcon from '@mui/icons-material/Download';
 import SaveIcon from '@mui/icons-material/Save';
 import SearchIcon from '@mui/icons-material/Search';
@@ -203,6 +204,19 @@ export function MeeshoPricingTab() {
     }
   };
 
+  // Send to Meesho: the same sheet, uploaded and attached to a Support ticket.
+  const [ticketOpen, setTicketOpen] = useState(false);
+  const [ticketKey, setTicketKey] = useState(0);
+  const workspaceName = businesses.find((b) => b.id === workspaceBusinessId)?.name || 'this business';
+  const sendTicket = async (fields) => {
+    const res = await fetch(`${workspaceBase}/meesho-price-update/ticket/`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(fields),
+    });
+    const data = await res.json().catch(() => ({}));
+    setTicketKey((k) => k + 1);
+    return { ok: res.ok, data };
+  };
+
   const pageItems = items.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
   const totalPages = Math.max(1, Math.ceil(items.length / PAGE_SIZE));
 
@@ -267,8 +281,22 @@ export function MeeshoPricingTab() {
               </button>
             </span>
           </Tooltip>
+          <Tooltip title={pendingCount > 0 ? 'Save your changes first' : withMSP === 0 ? 'Set New MSP for at least one SKU first' : `Send the sheet to Meesho for ${workspaceName}`}>
+            <span>
+              <button onClick={() => setTicketOpen(true)} disabled={withMSP === 0 || pendingCount > 0}
+                style={{ ...btn('primary', 'md'), opacity: withMSP === 0 || pendingCount > 0 ? 0.5 : 1 }}>
+                📨 Send to Meesho ({withMSP})
+              </button>
+            </span>
+          </Tooltip>
         </div>
       </div>
+
+      {ticketOpen && workspaceBase && (
+        <PriceTicketDialog base={workspaceBase} what={`${workspaceName}'s Price Update sheet`} rows={withMSP}
+          lockBusiness={{ id: workspaceBusinessId, name: workspaceName }} send={sendTicket} onClose={() => setTicketOpen(false)} />
+      )}
+      {workspaceBase && <PriceTicketLog base={workspaceBase} refreshKey={ticketKey} />}
 
       <div
         style={{

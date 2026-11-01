@@ -18256,6 +18256,170 @@ def _append_msp_row(ws, inv, msp, wdrp=None, mrp=None):
     ])
 
 
+def _parent_msp_sheet(business, parent, rows, inventory_business):
+    """
+    The Meesho price sheet for chosen SKUs under one parent: (workbook, rows
+    written, skipped with why). The ids come from `inventory_business`'s own
+    synced Meesho inventory — the business the change is for.
+    """
+    # Only SKUs actually under this parent — the sheet is per parent, and a
+    # typo'd SKU silently repricing something else would be the worst outcome.
+    own = {
+        _sku_key(sku): sku for sku in
+        FinalPrice.objects.filter(business=business, parent=parent)
+        .values_list("sku_id", flat=True)
+    }
+
+    inventory = {}
+    for inv in MeeshoInventory.objects.filter(business=inventory_business).exclude(style_id=""):
+        inventory.setdefault(_sku_key(inv.style_id), []).append(inv)
+
+    wb, ws = _new_msp_workbook()
+    written, skipped = 0, []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        key = _sku_key(str(row.get("sku_id") or ""))
+        if key not in own:
+            skipped.append({"sku_id": row.get("sku_id"), "why": "not under this parent"})
+            continue
+        matches = inventory.get(key) or []
+        if not matches:
+            skipped.append({"sku_id": own[key], "why": f"not in {inventory_business.name}'s Meesho inventory"})
+            continue
+        msp = safe_decimal(row.get("msp"))
+        if msp is None:
+            skipped.append({"sku_id": own[key], "why": "no price given"})
+            continue
+        for inv in matches:
+            _append_msp_row(ws, inv, msp, safe_decimal(row.get("wdrp")), safe_decimal(row.get("mrp")))
+            written += 1
+    return wb, written, skipped
+
+
+def _ticket_fields(request):
+    """The ticket's description, reason, callback number and email from a request — or an error Response."""
+    from . import meesho_price_ticket as pt
+    d = request.data if isinstance(request.data, dict) else {}
+    out = {
+        "description": str(d.get("description") or "").strip() or "I want to change the price of these catalogs.",
+        "reason": str(d.get("reason") or "raw_material_cost_increase").strip(),
+        "callback_number": "".join(ch for ch in str(d.get("callback_number") or "") if ch.isdigit())[-10:],
+        "email": str(d.get("email") or "").strip(),
+    }
+    if out["reason"] not in pt.REASONS:
+        return None, Response({"error": "Pick the reason from the list."}, status=status.HTTP_400_BAD_REQUEST)
+    if len(out["callback_number"]) != 10:
+        return None, Response({"error": "Give a 10-digit callback number."}, status=status.HTTP_400_BAD_REQUEST)
+    if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", out["email"]):
+        return None, Response({"error": "Give the email Meesho should reply to."}, status=status.HTTP_400_BAD_REQUEST)
+    return out, None
+
+
+def _ticket_target(request, business, raw_id):
+    """The business the price change is for — one this person may use, with a connected Meesho account."""
+    from .models import MeeshoAccount
+    try:
+        target_id = int(raw_id)
+    except (TypeError, ValueError):
+        return None, None, Response({"error": "Choose the business this price change is for."}, status=status.HTTP_400_BAD_REQUEST)
+    target = next((b for b in accessible_businesses(request, include=business) if b.pk == target_id), None)
+    account = MeeshoAccount.objects.filter(business_id=target_id).select_related("business").first() if target else None
+    if not target or not account:
+        return None, None, Response({"error": "That business has no Meesho account here."}, status=status.HTTP_400_BAD_REQUEST)
+    return target, account, None
+
+
+def _send_price_ticket(request, account, wb, filename, written, skipped, what):
+    from io import BytesIO
+    from . import meesho_price_ticket as pt
+    fields, err = _ticket_fields(request)
+    if err:
+        return err
+    buf = BytesIO()
+    wb.save(buf)
+    run = pt.submit(account, filename, buf.getvalue(), user=request.user, rows=written, what=what, **fields)
+    body = {"run": pt.run_json(run), "rows": written, "skipped": skipped}
+    if run.status != "OK":
+        return Response({**body, "error": run.message}, status=status.HTTP_502_BAD_GATEWAY)
+    return Response(body, status=status.HTTP_201_CREATED)
+
+
+@api_view(["POST"])
+def parent_price_ticket(request, business_id, item_id):
+    """
+    Admin: send a parent's price change straight to Meesho — the same sheet
+    as Download price sheet, for the business chosen (its own catalog ids),
+    attached to a Support ticket. Body: {target_business, rows, description,
+    reason, callback_number, email}.
+    """
+    business = get_authorized_business(request, business_id)
+    if not _is_admin(request.user):
+        return Response({"error": "Only an admin can send price changes to Meesho."}, status=status.HTTP_403_FORBIDDEN)
+    try:
+        parent = ParentItemPrice.objects.get(business=business, item_id=item_id)
+    except ParentItemPrice.DoesNotExist:
+        return Response({"error": "Parent not found."}, status=status.HTTP_404_NOT_FOUND)
+    d = request.data if isinstance(request.data, dict) else {}
+    rows = d.get("rows")
+    if not isinstance(rows, list) or not rows:
+        return Response({"error": "Pick at least one SKU."}, status=status.HTTP_400_BAD_REQUEST)
+    target, account, err = _ticket_target(request, business, d.get("target_business"))
+    if err:
+        return err
+    wb, written, skipped = _parent_msp_sheet(business, parent, rows, target)
+    if not written:
+        return Response({"error": f"Nothing to send — none of these SKUs are in {target.name}'s Meesho inventory.",
+                         "skipped": skipped}, status=status.HTTP_400_BAD_REQUEST)
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", parent.item_id)[:60] or "parent"
+    return _send_price_ticket(request, account, wb, f"msp_{safe_name}.xlsx", written, skipped, f"parent {parent.item_id}")
+
+
+@api_view(["POST"])
+def meesho_price_update_ticket(request, business_id):
+    """
+    Admin: send this business's Price Update sheet (the rows with a new MSP)
+    straight to Meesho as a Support ticket. Body: {target_business (must be
+    this business — confirmed on screen), description, reason, callback_number, email}.
+    """
+    business = get_authorized_business(request, business_id)
+    if not _is_admin(request.user):
+        return Response({"error": "Only an admin can send price changes to Meesho."}, status=status.HTTP_403_FORBIDDEN)
+    d = request.data if isinstance(request.data, dict) else {}
+    if str(d.get("target_business")) != str(business.pk):
+        return Response({"error": f"Confirm the business: this sheet is {business.name}'s."}, status=status.HTTP_400_BAD_REQUEST)
+    target, account, err = _ticket_target(request, business, business.pk)
+    if err:
+        return err
+    wb, ws = _new_msp_workbook()
+    written = 0
+    for pu in (MeeshoPriceUpdate.objects.filter(business=business, new_msp__isnull=False)
+               .select_related("inventory").order_by("inventory__serial_no")):
+        _append_msp_row(ws, pu.inventory, pu.new_msp, pu.new_wdrp, pu.new_mrp)
+        written += 1
+    if not written:
+        return Response({"error": "No new prices set — enter a New MSP first."}, status=status.HTTP_400_BAD_REQUEST)
+    return _send_price_ticket(request, account, wb, "meesho_price_update.xlsx", written, [], "the Price Update sheet")
+
+
+@api_view(["GET"])
+def meesho_price_tickets(request, business_id):
+    """The businesses a price change can be sent for, the known reasons, and the recent tickets."""
+    from . import meesho_price_ticket as pt
+    from .models import MeeshoAccount, MeeshoSyncRun
+    business = get_authorized_business(request, business_id)
+    mine = [b.pk for b in accessible_businesses(request, include=business)]
+    accounts = list(MeeshoAccount.objects.filter(business_id__in=mine).select_related("business"))
+    return Response({
+        "is_admin": _is_admin(request.user),
+        "businesses": [{"id": a.business_id, "name": a.business.name, "connected": a.status == MeeshoAccount.STATUS_ACTIVE}
+                       for a in accounts],
+        "reasons": [{"key": k, "label": v} for k, v in pt.REASONS.items()],
+        "tickets": [pt.run_json(r) for r in MeeshoSyncRun.objects.filter(account__in=accounts, kind=pt.KIND)
+                    .select_related("account__business").order_by("-queued_at")[:20]],
+    })
+
+
 @api_view(["POST"])
 def parent_price_sheet(request, business_id, item_id):
     """
@@ -18285,39 +18449,7 @@ def parent_price_sheet(request, business_id, item_id):
     if not isinstance(rows, list) or not rows:
         return Response({"error": "Pick at least one SKU."}, status=status.HTTP_400_BAD_REQUEST)
 
-    # Only SKUs actually under this parent — the sheet is per parent, and a
-    # typo'd SKU silently repricing something else would be the worst outcome.
-    own = {
-        _sku_key(sku): sku for sku in
-        FinalPrice.objects.filter(business=business, parent=parent)
-        .values_list("sku_id", flat=True)
-    }
-
-    inventory = {}
-    for inv in MeeshoInventory.objects.filter(business=business).exclude(style_id=""):
-        inventory.setdefault(_sku_key(inv.style_id), []).append(inv)
-
-    wb, ws = _new_msp_workbook()
-    written, skipped = 0, []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        key = _sku_key(str(row.get("sku_id") or ""))
-        if key not in own:
-            skipped.append({"sku_id": row.get("sku_id"), "why": "not under this parent"})
-            continue
-        matches = inventory.get(key) or []
-        if not matches:
-            skipped.append({"sku_id": own[key], "why": "no Meesho catalog row — upload the inventory sheet"})
-            continue
-        msp = safe_decimal(row.get("msp"))
-        if msp is None:
-            skipped.append({"sku_id": own[key], "why": "no price given"})
-            continue
-        for inv in matches:
-            _append_msp_row(ws, inv, msp, safe_decimal(row.get("wdrp")), safe_decimal(row.get("mrp")))
-            written += 1
-
+    wb, written, skipped = _parent_msp_sheet(business, parent, rows, business)
     if not written:
         return Response(
             {"error": "Nothing to write.", "skipped": skipped},

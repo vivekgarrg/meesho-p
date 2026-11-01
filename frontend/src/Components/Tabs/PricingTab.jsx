@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import useSWR, { mutate as globalMutate } from "swr";
 import { API, btn, C, S, fmt, useIsMobile } from "../../App";
+import { PriceTicketDialog } from "./MeeshoPriceTicket";
 import { useBusiness } from "../../contexts/BusinessContext";
 import { useSearchParams } from "react-router-dom";
 import { AppBarChart } from "../Charts/AppBarChart";
@@ -540,6 +541,24 @@ function ParentCard({ parent, notify, onLink, dragging, unlinked = [], onOptOut,
    * Sent as a POST because the prices are per SKU; the response is the xlsx
    * itself, so it is read as a blob rather than JSON.
    */
+  // Send to Meesho: the same sheet, for the business chosen in the dialog.
+  const [ticketRows, setTicketRows] = useState(null);
+  const sheetRows = () => (children || [])
+    .filter((ch) => sheetPick[ch.sku_id] && ch.meesho?.length)
+    .map((ch) => ({ sku_id: ch.sku_id, msp: sheetPrice.msp, wdrp: sheetPrice.wdrp || undefined, mrp: sheetPrice.mrp || undefined }));
+  const openTicket = () => {
+    const rows = sheetRows();
+    if (!rows.length) { notify("err", "Tick at least one SKU that has a Meesho catalog row."); return; }
+    if (!String(sheetPrice.msp).trim()) { notify("err", "Enter the new selling price."); return; }
+    setTicketRows(rows);
+  };
+  const sendTicket = async (fields) => {
+    const res = await fetch(`${API}/parent-prices/${idPath}/price-ticket/`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...fields, rows: ticketRows }),
+    });
+    return { ok: res.ok, data: await res.json().catch(() => ({})) };
+  };
+
   const downloadSheet = async () => {
     const rows = (children || [])
       .filter((ch) => sheetPick[ch.sku_id] && ch.meesho?.length)
@@ -1120,6 +1139,11 @@ function ParentCard({ parent, notify, onLink, dragging, unlinked = [], onOptOut,
                     <button onClick={downloadSheet} disabled={sheetBusy} style={btn("primary", "sm")}>
                       {sheetBusy ? "Building…" : "⬇ Download price sheet"}
                     </button>
+                    <button onClick={openTicket} disabled={sheetBusy} style={btn("ghostOrange", "sm")}>📨 Send to Meesho…</button>
+                    {ticketRows && (
+                      <PriceTicketDialog base={API} what={`Parent ${parent.item_id}`} rows={ticketRows.length}
+                        send={sendTicket} onClose={() => setTicketRows(null)} />
+                    )}
                     <button onClick={() => setSheetPick({})} style={btn("ghost", "sm")}>Clear</button>
                     <span style={{ fontSize: 11, color: C.gray400 }}>
                       {Object.values(sheetPick).filter(Boolean).length} selected
