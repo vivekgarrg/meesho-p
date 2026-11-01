@@ -197,7 +197,8 @@ function ReturnsTable({ stage, accounts, multi }) {
   );
 }
 
-export function MeeshoReturnsTab() {
+// part: "otps" (couriers' delivery OTPs), "returns" (every return by status), or both.
+export function MeeshoReturnsTab({ part = "both" }) {
   const isMobile = useIsMobile();
   const [data, setData] = useState(null);
   const [q, setQ] = useState("");
@@ -239,8 +240,9 @@ export function MeeshoReturnsTab() {
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
         <p style={{ fontSize: 13, color: C.gray500, margin: 0, maxWidth: 760 }}>
-          The OTP each courier needs to hand returns back to you, for every business — and every return by status, kept in{" "}
-          <Link to="/returns" style={{ color: C.orange, fontWeight: 700 }}>Returns &amp; Claims</Link> by the sync every 10 minutes.
+          {part === "otps" ? "The OTP each courier needs to hand returns back to you, for every business — read from Meesho every 10 minutes."
+            : <>{part === "both" ? "The OTP each courier needs to hand returns back to you, for every business — and every" : "Every"} return by status, kept in{" "}
+              <Link to="/returns" style={{ color: C.orange, fontWeight: 700 }}>Returns &amp; Claims</Link> by the sync every 10 minutes.</>}
         </p>
         <button onClick={refresh} disabled={refreshing || reading} style={{ ...btn("primary", "md"), minWidth: 160, opacity: refreshing || reading ? 0.6 : 1 }}>
           {reading ? <><CircularProgress size={14} style={{ color: "#fff", marginRight: 6, verticalAlign: "-2px" }} />Reading…</> : "↻ Refresh now"}
@@ -248,7 +250,7 @@ export function MeeshoReturnsTab() {
       </div>
       {note && <div role="alert" style={{ fontSize: 13, fontWeight: 700, color: C.red }}>{note}</div>}
 
-      <Panel title="Delivery OTPs" subtitle="Give the courier the OTP for its returns. Search an AWB to find which OTP it needs."
+      {part !== "returns" && <Panel title="Delivery OTPs" subtitle="Give the courier the OTP for its returns. Search an AWB to find which OTP it needs."
         action={
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             {multi && (
@@ -273,8 +275,9 @@ export function MeeshoReturnsTab() {
             ))}
           </div>
         )}
-      </Panel>
+      </Panel>}
 
+      {part !== "otps" && <>
       <div role="tablist" aria-label="Returns by status" style={{ display: "grid", gap: 12, gridTemplateColumns: isMobile ? "repeat(2, minmax(0, 1fr))" : "repeat(5, minmax(0, 1fr))" }}>
         {STAGES.map((st) => (
           <Kpi key={st.key} icon={st.icon} label={st.label} value={num(r[st.key])} tone={st.tone(r[st.key])} sub={st.sub}
@@ -283,6 +286,7 @@ export function MeeshoReturnsTab() {
       </div>
 
       <ReturnsTable stage={stage} accounts={data.accounts} multi={multi} />
+      </>}
 
       <Panel title="Last read from Meesho" pad={false}
         action={<Link to="/returns" style={{ ...btn("ghost", "sm"), textDecoration: "none" }}>Open Returns &amp; Claims</Link>}>

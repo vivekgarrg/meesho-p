@@ -15,7 +15,9 @@ server-side check, a restricted user could still call the endpoint directly, so
 # group is only used to lay the admin screen out in the same shape as the sidebar.
 NAV_CATALOG = [
     # Orders, Inventory and the account/sync settings, as tabs of one page.
-    {"path": "/meesho-orders",     "label": "Meesho Orders",     "group": "Analytics"},
+    # Every page of the sidebar's Meesho group (orders, linking, returns, OTPs,
+    # inventory, payments, settings) goes by this one permission.
+    {"path": "/meesho-orders",     "label": "Meesho (every page in this group)", "group": "Meesho"},
     {"path": "/",                  "label": "Overview",          "group": "Analytics"},
     {"path": "/combined-dashboard", "label": "Combined Dashboard", "group": "Analytics"},
     {"path": "/sku-analysis",      "label": "SKU Analysis",      "group": "Analytics"},

@@ -1,6 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { C, S, btn, SectionHeader, Tag, useIsMobile } from "../../App";
-import { NAV_GROUPS, ALWAYS_VISIBLE_PATHS } from "../../navConfig";
+import { NAV_GROUPS, ALWAYS_VISIBLE_PATHS, ALL_PERMISSIONS } from "../../navConfig";
+
+// The rows an access rule can switch: one per permission — a group whose pages
+// share one (Meesho) shows a single row for all of them.
+const permissionRows = (group) => group.items.filter((i) => !i.access || i.accessLabel)
+  .map((i) => ({ ...i, path: i.access || i.path, label: i.accessLabel || i.label }));
 import { useAuth } from "../../contexts/AuthContext";
 import { useAccess } from "../../contexts/AccessContext";
 import {
@@ -581,7 +586,7 @@ const SCOPES = [
   { id: "user",     label: "Users",      hint: "Applies to one person, wherever they log in." },
 ];
 
-const ALL_NAV_PATHS = NAV_GROUPS.flatMap((g) => g.items).map((i) => i.path);
+const ALL_NAV_PATHS = ALL_PERMISSIONS;
 
 // Common starting points, so restricting someone to one job is a single click.
 const PRESETS = [
@@ -683,7 +688,7 @@ function AccessSection({ notify }) {
   const apply = (paths) => { setSelected(new Set(paths)); setDirty(true); };
 
   const toggleGroup = (group) => {
-    const paths = group.items.map((i) => i.path);
+    const paths = permissionRows(group).map((i) => i.path);
     const allOn = paths.every((p) => selected.has(p));
     setSelected((prev) => {
       const next = new Set(prev);
@@ -924,7 +929,8 @@ function AccessSection({ notify }) {
                 gap: 12,
               }}>
                 {NAV_GROUPS.map((group) => {
-                  const paths = group.items.map((i) => i.path);
+                  const rows = permissionRows(group);
+                  const paths = rows.map((i) => i.path);
                   const onCount = paths.filter((p) => selected.has(p)).length;
                   return (
                     <div key={group.label} style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: "11px 13px", minWidth: 0 }}>
@@ -941,7 +947,7 @@ function AccessSection({ notify }) {
                         </button>
                       </div>
                       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                        {group.items.map((item) => {
+                        {rows.map((item) => {
                           const locked = isLocked(item.path);
                           return (
                             <label

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from "react";
-import { useSearchParams } from "react-router-dom";
-import { API, C, btn, useIsMobile } from "../../App";
+import { useNavigate, useParams, useSearchParams, Navigate } from "react-router-dom";
+import { API, C, btn } from "../../App";
 import { CircularProgress } from "@mui/material";
 import { MeeshoOrdersTab } from "./MeeshoOrdersTab";
 import { MeeshoLiveInventoryTab } from "./MeeshoLiveInventoryTab";
@@ -15,7 +15,9 @@ import { SessionAlerts, ReconnectDialog, AccountsHealth } from "./MeeshoAccounts
 import { Panel, ago } from "./MeeshoUI";
 
 /*
- * Meesho — everything the Meesho panel sync does, as one dashboard:
+ * Meesho — everything the Meesho panel sync does. Each section is its own page
+ * in the sidebar's Meesho group (/meesho/<section>, navConfig.js), sharing this
+ * header (sync health, Refresh everything, expired sessions):
  *
  *   Overview       what needs doing now, orders, money, stock, accounts
  *   Pending        accept new orders (on hold listed too)
@@ -23,30 +25,44 @@ import { Panel, ago } from "./MeeshoUI";
  *   Shipped        with the courier; check every packet link
  *   Cancelled      what was cancelled and why
  *   Order linking  AWB ↔ packet at the packing desk
- *   Returns & OTPs couriers' delivery OTPs; returns by status
+ *   Returns        every return by status
+ *   OTPs           couriers' delivery OTPs
  *   Inventory      every SKU by parent; pause
  *   Payments       paid, upcoming, outstanding
  *   Settings       automation, Meesho accounts and their sessions
  *
- * ?tab= keeps the place. A broken session shows on every tab, with Reconnect
- * (password, or a session pasted from the browser).
+ * Old links (/meesho-orders?tab=…) land on the matching page. A broken
+ * session shows on every page, with Reconnect (password, or a pasted session).
  */
 
-const TABS = [
-  { key: "overview", label: "Overview", icon: "◧" },
-  { key: "pending", label: "Pending", icon: "✋" },
-  { key: "ready_to_ship", label: "Ready to ship", icon: "📦" },
-  { key: "shipped", label: "Shipped", icon: "🚚" },
-  { key: "cancelled", label: "Cancelled", icon: "✕" },
-  { key: "linking", label: "Order linking", icon: "🔗" },
-  { key: "returns", label: "Returns & OTPs", icon: "↩" },
-  { key: "inventory", label: "Inventory", icon: "▤" },
-  { key: "payments", label: "Payments", icon: "₹" },
-  { key: "settings", label: "Settings", icon: "⚙" },
+// The sections, their addresses and sidebar entries (navConfig.js lists the same).
+export const MEESHO_SECTIONS = [
+  { key: "overview", slug: "", label: "Overview", icon: "◧" },
+  { key: "pending", slug: "pending", label: "Pending orders", icon: "✋" },
+  { key: "ready_to_ship", slug: "ready-to-ship", label: "Ready to ship", icon: "📦" },
+  { key: "shipped", slug: "shipped", label: "Shipped", icon: "🚚" },
+  { key: "cancelled", slug: "cancelled", label: "Cancelled", icon: "✕" },
+  { key: "linking", slug: "linking", label: "Order linking", icon: "🔗" },
+  { key: "returns", slug: "returns", label: "Returns", icon: "↩" },
+  { key: "otps", slug: "otps", label: "Delivery OTPs", icon: "🔑" },
+  { key: "inventory", slug: "inventory", label: "Inventory", icon: "▤" },
+  { key: "payments", slug: "payments", label: "Payments", icon: "₹" },
+  { key: "settings", slug: "settings", label: "Settings", icon: "⚙" },
 ];
-// Older links: ?tab=sync lands on Settings, ?tab=orders on Pending.
+export const meeshoPath = (key) => {
+  const sec = MEESHO_SECTIONS.find((x) => x.key === key);
+  return sec?.slug ? `/meesho/${sec.slug}` : "/meesho";
+};
+// Old ?tab= values (and keys) → a section.
 const ALIASES = { sync: "settings", orders: "pending", rts: "ready_to_ship" };
 const ORDER_TABS = ["pending", "ready_to_ship", "shipped", "cancelled"];
+
+/** /meesho-orders?tab=… (the page before it was split) → the matching page. */
+export function MeeshoLegacyRedirect() {
+  const [params] = useSearchParams();
+  const asked = ALIASES[params.get("tab")] || params.get("tab");
+  return <Navigate to={meeshoPath(MEESHO_SECTIONS.some((x) => x.key === asked) ? asked : "overview")} replace />;
+}
 
 function Badge({ n, tone }) {
   if (!n) return null;
@@ -58,14 +74,14 @@ function Badge({ n, tone }) {
 }
 
 export function MeeshoHubTab() {
-  const isMobile = useIsMobile();
-  const [params, setParams] = useSearchParams();
-  const asked = ALIASES[params.get("tab")] || params.get("tab");
-  const tab = TABS.some((t) => t.key === asked) ? asked : "overview";
+  const navigate = useNavigate();
+  const { section } = useParams();
+  const current = MEESHO_SECTIONS.find((x) => x.slug === (section || "")) || MEESHO_SECTIONS[0];
+  const tab = current.key;
   const go = useCallback((key) => {
-    setParams(key === "overview" ? {} : { tab: key }, { replace: true });
+    navigate(meeshoPath(ALIASES[key] || key));
     window.scrollTo({ top: 0, behavior: "smooth" });
-  }, [setParams]);
+  }, [navigate]);
 
   const [overview, setOverview] = useState(null);
   const [summary, setSummary] = useState(null);
@@ -127,7 +143,10 @@ export function MeeshoHubTab() {
       <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
         <div style={{ minWidth: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-            <h1 style={{ fontSize: 24, fontWeight: 900, color: C.gray900, margin: 0, letterSpacing: "-0.02em" }}>Meesho</h1>
+            <h1 style={{ fontSize: 24, fontWeight: 900, color: C.gray900, margin: 0, letterSpacing: "-0.02em" }}>
+              {tab === "overview" ? "Meesho" : <><span style={{ color: C.gray400, fontWeight: 700 }}>Meesho · </span>{current.label}</>}
+              {badge[tab] && <span style={{ marginLeft: 10, verticalAlign: "middle" }}>{badge[tab]}</span>}
+            </h1>
             {health && (
               <span role="status" style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "4px 10px", borderRadius: 999,
                 background: C.white, border: `1px solid ${C.gray200}`, fontSize: 12.5, fontWeight: 700, color: healthColor }}>
@@ -154,25 +173,8 @@ export function MeeshoHubTab() {
       )}
       {note && <div role="status" style={{ fontSize: 13, fontWeight: 700, color: note.ok ? C.gray600 : C.red }}>{note.text}</div>}
 
-      {/* ── Tabs ─────────────────────────────────────────────────────────── */}
-      <nav role="tablist" aria-label="Meesho" style={{ display: "flex", gap: 4, padding: 4, background: C.gray100, borderRadius: 12, overflowX: "auto",
-        position: "sticky", top: 0, zIndex: 20 }}>
-        {TABS.map((t) => {
-          const on = tab === t.key;
-          return (
-            <button key={t.key} role="tab" aria-selected={on} onClick={() => go(t.key)}
-              style={{ border: "none", cursor: "pointer", fontFamily: "inherit", padding: isMobile ? "8px 12px" : "9px 16px", borderRadius: 9,
-                background: on ? C.white : "transparent", boxShadow: on ? "0 1px 3px rgba(15,23,42,.12)" : "none",
-                color: on ? C.gray900 : C.gray600, fontWeight: on ? 800 : 700, fontSize: 13.5, display: "flex", gap: 7, alignItems: "center",
-                whiteSpace: "nowrap", flex: isMobile ? "0 0 auto" : 1, justifyContent: "center", transition: "background .15s" }}>
-              <span aria-hidden style={{ opacity: on ? 1 : 0.7 }}>{t.icon}</span>{t.label}{badge[t.key]}
-            </button>
-          );
-        })}
-      </nav>
-
       {/* ── Content ──────────────────────────────────────────────────────── */}
-      <div role="tabpanel" aria-label={TABS.find((t) => t.key === tab).label}>
+      <div role="region" aria-label={current.label}>
         {tab === "overview" && (summary
           ? <MeeshoOverview summary={summary} overview={overview} go={go} onReconnect={setReconnect} />
           : <div style={{ display: "flex", justifyContent: "center", padding: 60 }}><CircularProgress style={{ color: C.orange }} /></div>)}
@@ -184,7 +186,8 @@ export function MeeshoHubTab() {
         )}
         {ORDER_TABS.includes(tab) && tab !== "ready_to_ship" && <MeeshoOrdersTab status={tab} key={tab} />}
         {tab === "linking" && <MeeshoLinkingTab />}
-        {tab === "returns" && <MeeshoReturnsTab />}
+        {tab === "returns" && <MeeshoReturnsTab part="returns" key="returns" />}
+        {tab === "otps" && <MeeshoReturnsTab part="otps" key="otps" />}
         {tab === "inventory" && <MeeshoLiveInventoryTab embedded />}
         {tab === "payments" && <MeeshoPaymentsTab />}
         {tab === "settings" && (

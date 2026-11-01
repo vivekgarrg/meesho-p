@@ -512,12 +512,12 @@ export function MeeshoOrdersTab({ status = "pending" }) {
       {!data.connected && (
         <div style={{ ...S.card, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", borderTop: `4px solid ${C.orange}` }}>
           <span style={{ flex: 1, fontSize: 14, fontWeight: 700, color: C.gray700 }}>No Meesho account connected yet.</span>
-          <Link to="/meesho-orders?tab=settings" style={{ ...btn("primary", "md"), textDecoration: "none" }}>Connect Meesho</Link>
+          <Link to="/meesho/settings" style={{ ...btn("primary", "md"), textDecoration: "none" }}>Connect Meesho</Link>
         </div>
       )}
       {failedAccounts.map((x) => (
         <div key={x.business_id} style={{ background: C.redLight, border: `1.5px solid ${C.redBorder}`, borderRadius: 12, padding: "10px 14px", color: C.red, fontSize: 13, fontWeight: 700 }}>
-          {multi ? `${x.business_name}: last` : "Last"} sync failed: {x.last_sync_message || x.status_message} <Link to="/meesho-orders?tab=settings" style={{ color: C.red }}>Fix it under Settings →</Link>
+          {multi ? `${x.business_name}: last` : "Last"} sync failed: {x.last_sync_message || x.status_message} <Link to="/meesho/settings" style={{ color: C.red }}>Fix it under Settings →</Link>
         </div>
       ))}
       {error && <div role="alert" style={{ color: C.red, fontWeight: 700, fontSize: 13 }}>{error}</div>}

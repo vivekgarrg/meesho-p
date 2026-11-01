@@ -6,14 +6,35 @@
  * other direction would be a cycle.
  *
  * `path` values must match accounts/nav.py on the server, which is the source of
- * truth for access control and rejects paths it doesn't recognise.
+ * truth for access control and rejects paths it doesn't recognise — except
+ * where an item names its permission in `access`: then that path decides who
+ * sees it (the Meesho pages all go by "/meesho-orders", one permission for the
+ * whole Meesho group), and `path` is only the page's address.
  */
+const MEESHO = '/meesho-orders';
 export const NAV_GROUPS = [
+  {
+    // Every section of the Meesho panel sync, each its own page (MeeshoHubTab).
+    label: 'Meesho',
+    color: '#F43397',
+    items: [
+      { path: '/meesho', label: 'Meesho Overview', icon: '◧', end: true, access: MEESHO, accessLabel: 'Meesho (every page in this group)' },
+      { path: '/meesho/pending', label: 'Pending Orders', icon: '✋', access: MEESHO },
+      { path: '/meesho/ready-to-ship', label: 'Ready to Ship', icon: '📦', access: MEESHO },
+      { path: '/meesho/shipped', label: 'Shipped', icon: '🚚', access: MEESHO },
+      { path: '/meesho/cancelled', label: 'Cancelled', icon: '✕', access: MEESHO },
+      { path: '/meesho/linking', label: 'Order Linking', icon: '🔗', access: MEESHO },
+      { path: '/meesho/returns', label: 'Meesho Returns', icon: '↩', access: MEESHO },
+      { path: '/meesho/otps', label: 'Delivery OTPs', icon: '🔑', access: MEESHO },
+      { path: '/meesho/inventory', label: 'Meesho Inventory', icon: '▤', access: MEESHO },
+      { path: '/meesho/payments', label: 'Meesho Payments', icon: '₹', access: MEESHO },
+      { path: '/meesho/settings', label: 'Meesho Settings', icon: '⚙', access: MEESHO },
+    ],
+  },
   {
     label: 'Analytics',
     color: '#A78BFA',
     items: [
-      { path: '/meesho-orders', label: 'Meesho Orders', icon: '📦' },
       { path: '/', label: 'Overview', icon: '◈', end: true },
       { path: '/combined-dashboard', label: 'Combined Dashboard', icon: '🧩' },
       { path: '/sku-analysis', label: 'SKU Analysis', icon: '↗' },
@@ -89,10 +110,19 @@ export const NAV_GROUPS = [
 
 export const ALL_NAV = NAV_GROUPS.flatMap((g) => g.items);
 
+/** The permission that decides whether an item shows (see `access` above). */
+export const accessOf = (item) => item.access || item.path;
+
+/** The distinct permissions, in sidebar order — what an access rule can grant. */
+export const ALL_PERMISSIONS = [...new Set(ALL_NAV.map(accessOf))];
+
 /**
  * Paths an access rule can never hide from a super admin, so an over-restrictive
  * rule can always be undone from the Admin Panel.
  */
 export const ALWAYS_VISIBLE_PATHS = ['/admin'];
 
-export const NAV_LABEL_BY_PATH = Object.fromEntries(ALL_NAV.map((i) => [i.path, i.label]));
+export const NAV_LABEL_BY_PATH = Object.fromEntries([
+  ...ALL_NAV.map((i) => [i.path, i.label]),
+  ...ALL_NAV.filter((i) => i.accessLabel).map((i) => [i.access, i.accessLabel]),
+]);

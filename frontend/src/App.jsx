@@ -46,7 +46,7 @@ import { MeeshoPricingTab } from './Components/Tabs/MeeshoPricingTab';
 import { ReturnScanTab } from './Components/Tabs/ReturnScanTab';
 import { OrderScanTab } from './Components/Tabs/OrderScanTab';
 import { ReturnDeskTab } from './Components/Tabs/ReturnDeskTab';
-import { MeeshoHubTab } from './Components/Tabs/MeeshoHubTab';
+import { MeeshoHubTab, MeeshoLegacyRedirect } from './Components/Tabs/MeeshoHubTab';
 import { ScanLookupTab } from './Components/Tabs/ScanLookupTab';
 import { ExtensionTab } from './Components/Tabs/ExtensionTab';
 import { BulkListingTab } from './Components/Tabs/BulkListingTab';
@@ -71,7 +71,7 @@ import { GlobalDateFilterBar } from './Components/shared/GlobalDateFilterBar';
 import ChangePasswordModal from './Components/ChangePasswordModal';
 import AdminPanel from './Components/Admin/AdminPanel';
 import ErrorBoundary from './Components/shared/ErrorBoundary';
-import { NAV_GROUPS, ALL_NAV } from './navConfig';
+import { NAV_GROUPS, ALL_NAV, accessOf } from './navConfig';
 import { useAccess } from './contexts/AccessContext';
 import { useAuth } from './contexts/AuthContext';
 
@@ -679,7 +679,7 @@ function Sidebar({ collapsed, setCollapsed, compact, mobileOpen, closeMobile }) 
     setGroupState((s) => ({ ...s, [label]: s[label] === false ? true : false }));
 
   const navGroups = NAV_GROUPS.filter((g) => !g.adminOnly || isSuperAdmin)
-    .map((g) => ({ ...g, items: g.items.filter((item) => isPathVisible(item.path)) }))
+    .map((g) => ({ ...g, items: g.items.filter((item) => isPathVisible(accessOf(item))) }))
     .filter((g) => g.items.length > 0);
 
   // Search matches a group's own name (e.g. "Operations") as well as any of
@@ -1217,7 +1217,8 @@ function AppShell() {
             business switches so it's never remounted, only its context value
             changes. Every tab reads the active range from useDateFilter(). */}
         {/* Order Scan is a live packing desk (its own noon-to-noon day), not a report — a period filter means nothing there. */}
-        {!['/order-scan', '/return-scan', '/scan-lookup', '/meesho-sync', '/meesho-orders', '/meesho-live-inventory'].includes(loc.pathname) && <GlobalDateFilterBar />}
+        {!['/order-scan', '/return-scan', '/scan-lookup', '/meesho-sync', '/meesho-orders', '/meesho-live-inventory', '/meesho'].includes(loc.pathname)
+          && !loc.pathname.startsWith('/meesho/') && <GlobalDateFilterBar />}
         {/* key by active business + settlement mode so switching either remounts
             the routed view, forcing every tab (dashboard included) to refetch
             fresh data against the newly-set business-scoped API base / the
@@ -1242,9 +1243,12 @@ function AppShell() {
                 <Route path="/order-scan" element={<OrderScanTab />} />
                 <Route path="/return-scan" element={<ReturnDeskTab />} />
                 {/* Sync and Inventory are tabs of Meesho Orders now; old links land on the right tab. */}
-                <Route path="/meesho-sync" element={<Navigate to="/meesho-orders?tab=settings" replace />} />
-                <Route path="/meesho-orders" element={<MeeshoHubTab />} />
-                <Route path="/meesho-live-inventory" element={<Navigate to="/meesho-orders?tab=inventory" replace />} />
+                {/* Meesho: one page per section, each in the sidebar's Meesho group. */}
+                <Route path="/meesho" element={<MeeshoHubTab />} />
+                <Route path="/meesho/:section" element={<MeeshoHubTab />} />
+                <Route path="/meesho-orders" element={<MeeshoLegacyRedirect />} />
+                <Route path="/meesho-sync" element={<Navigate to="/meesho/settings" replace />} />
+                <Route path="/meesho-live-inventory" element={<Navigate to="/meesho/inventory" replace />} />
                 <Route path="/scan-lookup" element={<ScanLookupTab />} />
                 <Route path="/unsettled" element={<UnsettledOrdersTab />} />
                 <Route path="/payments" element={<PaymentsTab />} />
@@ -1324,7 +1328,7 @@ function RouteGuard({ children }) {
 
   const match = ALL_NAV.find((item) => (item.end ? loc.pathname === item.path : loc.pathname.startsWith(item.path)));
   // An unknown path falls through to the existing catch-all route.
-  if (match && !isPathVisible(match.path) && landingPath) {
+  if (match && !isPathVisible(accessOf(match)) && landingPath) {
     return <Navigate to={landingPath} replace />;
   }
 
