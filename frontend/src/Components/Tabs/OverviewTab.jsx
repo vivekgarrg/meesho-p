@@ -1990,7 +1990,8 @@ function MeeshoOverviewTab() {
                       {fmt(profit.total_tax_cost ?? 0)}
                     </p>
                   </div>
-                  <div>
+                  {Number(profit.total_buffer_cost || 0) > 0 && (
+                    <div>
                       <p style={{ fontSize: 10, color: C.gray400, marginBottom: 2 }}>🛟 Loss buffer</p>
                       <p style={{ fontSize: 13, fontFamily: 'monospace', fontWeight: 700, color: C.amber }}>
                         {fmt(profit.total_buffer_cost)}

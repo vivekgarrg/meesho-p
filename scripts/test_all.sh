@@ -34,7 +34,8 @@ if [ "${1:-}" = "ingestion" ]; then
 else
   run "Django: all" bash -c "cd '$ROOT/backend' && '$PY' manage.py test --noinput meesho_app accounts"
   run "Rails: worker jobs" bash -c "cd '$ROOT/sync' && bin/rails test"
-  run "Frontend: build" bash -c "cd '$ROOT/frontend' && npm run build --silent >/dev/null"
+  # Vite can print a plugin error (bad JSX…) and still say "built" — fail on it.
+  run "Frontend: build" bash -c "cd '$ROOT/frontend' && out=\$(npm run build --silent 2>&1) && ! grep -q '\[plugin:' <<<\"\$out\" || { grep -A6 '\[plugin:' <<<\"\$out\"; exit 1; }"
 fi
 
 echo
