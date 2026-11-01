@@ -4,10 +4,12 @@
 #
 # The table feeds more than that page (the parent stock sheet, Price Update,
 # SKU analysis), so rows are updated in place, matched by product and
-# variation, and keep their id and the seller's own "your stock count". Only
-# live SKUs are listed, as in Meesho's own sheet. A row is removed only when
-# its product is no longer live on Meesho, the read was complete, and it has
-# no saved price update (those would go with it).
+# variation, and keep their id and the seller's own "your stock count". Every
+# SKU read from the Inventory page is listed — live and paused, as Meesho's
+# own sheet lists them (MeeshoInventoryJob also imports that sheet, which adds
+# blocked and pending ones). A row is removed only when its product is on
+# neither the Inventory page nor Meesho's latest sheet, the read was complete,
+# and it has no saved price update (those would go with it).
 module MeeshoStockSheet
   module_function
 
@@ -21,7 +23,7 @@ module MeeshoStockSheet
     serial = rows.map(&:serial_no).max.to_i
     touched = []
     now = Time.current
-    live = account.listings.where(archived: false).includes(:catalog).order(:catalog_id, :product_id)
+    live = account.listings.includes(:catalog).order(:catalog_id, :product_id)
     MeeshoStockRow.transaction do
       live.each do |l|
         want = wanted(l)
@@ -42,6 +44,10 @@ module MeeshoStockSheet
         end
       end
       if complete
+        # Rows Meesho's own sheet still lists stay (blocked, pending…).
+        official = MeeshoSyncSnapshot.find_by(account_id: account.id, endpoint: "inventory_sheet")&.payload
+        keep = Array(official.is_a?(Hash) ? official["keys"] : nil).map { |p, v| [p.to_i, v&.to_i] }.to_set
+        touched += rows.select { |r| keep.include?([r.product_id, r.variation_id]) }.map(&:id)
         gone = MeeshoStockRow.where(business_id: business_id).where.not(id: touched)
                              .where("id NOT IN (SELECT inventory_id FROM meesho_price_updates)")
         stats[:removed] = gone.delete_all

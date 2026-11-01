@@ -42,6 +42,8 @@ class MeeshoSyncScheduleTest < ActiveSupport::TestCase
   end
 
   test "inventory reads as many catalogs' SKUs per run as the schedule says" do
+    stub_request(:post, %r{catalogManagement/getInventoryTemplateDownloadStatus}).to_return(status: 200, body: { status: "Not Found" }.to_json,
+                                                                                         headers: { "Content-Type" => "application/json" })
     schedule(inventory_sku_reads: 1)
     base = "https://supplier.meesho.com/api/services/catalogManagement/"
     json = ->(b) { { status: 200, headers: { "Content-Type" => "application/json" }, body: b.to_json } }

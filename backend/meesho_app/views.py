@@ -9857,14 +9857,19 @@ def _safe_inv_int(val, default=None):
         return default
 
 
-@api_view(["POST"])
-@parser_classes([MultiPartParser])
-def meesho_inventory_upload(request, business_id):
-    business = get_authorized_business(request, business_id)
-    file = request.FILES.get("file")
-    if not file:
-        return Response({"error": "No file provided."}, status=status.HTTP_400_BAD_REQUEST)
+class InventorySheetError(ValueError):
+    """A Meesho inventory sheet that can't be read."""
 
+
+def import_meesho_inventory_sheet(business, file):
+    """
+    Meesho's inventory sheet (the panel's Inventory → Download, or the sync
+    fetching it) → Meesho Stock, matched by product + variation. `file` is a
+    file object with a .name. Returns {created, updated, skipped, keys} — keys
+    being the (product, variation) pairs the sheet lists. Raises
+    InventorySheetError when the file can't be read.
+    """
+    from .api_cache import deferred_bumps
     try:
         if file.name.lower().endswith((".xlsx", ".xls")):
             import openpyxl as _opxl
@@ -9882,13 +9887,13 @@ def meesho_inventory_upload(request, business_id):
         else:
             df = pd.read_csv(file, dtype=str)
     except Exception as exc:
-        return Response({"error": f"Could not read file: {exc}"}, status=status.HTTP_400_BAD_REQUEST)
+        raise InventorySheetError(f"Could not read file: {exc}")
 
     df.columns = [str(c).strip().lower() for c in df.columns]
     df.rename(columns=_INV_COL_MAP, inplace=True)
 
     if "serial_no" not in df.columns:
-        return Response({"error": "Missing required column: SERIAL NO"}, status=status.HTTP_400_BAD_REQUEST)
+        raise InventorySheetError("Missing required column: SERIAL NO")
 
     def _is_description_row(row):
         val = str(row.get("serial_no", "")).strip().lower()
@@ -9903,7 +9908,8 @@ def meesho_inventory_upload(request, business_id):
     existing = {(r.product_id, r.variation_id): r for r in MeeshoInventory.objects.filter(business=business)}
     serials = set(MeeshoInventory.objects.filter(business=business).values_list("serial_no", flat=True))
     next_serial = max(serials, default=0) + 1
-    with transaction.atomic():
+    keys = []
+    with deferred_bumps(business.pk), transaction.atomic():
         for _, row in df.iterrows():
             sno     = _safe_inv_int(row.get("serial_no"))
             cat_id  = _safe_inv_int(row.get("catalog_id"))
@@ -9927,6 +9933,7 @@ def meesho_inventory_upload(request, business_id):
                 "system_stock_count": _safe_inv_int(row.get("system_stock_count"), 0),
                 "seller_stock_count": seller_count,
             }
+            keys.append([prod_id, defaults["variation_id"]])
             inv = existing.get((prod_id, defaults["variation_id"])) or existing.get((prod_id, None))
             if inv:
                 for k, v in defaults.items():
@@ -9942,8 +9949,22 @@ def meesho_inventory_upload(request, business_id):
             existing[(prod_id, defaults["variation_id"])] = inv
             created += 1
 
+    return {"created": created, "updated": updated, "skipped": skipped, "keys": keys}
+
+
+@api_view(["POST"])
+@parser_classes([MultiPartParser])
+def meesho_inventory_upload(request, business_id):
+    business = get_authorized_business(request, business_id)
+    file = request.FILES.get("file")
+    if not file:
+        return Response({"error": "No file provided."}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        res = import_meesho_inventory_sheet(business, file)
+    except InventorySheetError as exc:
+        return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
     return Response(
-        {"success": True, "created": created, "updated": updated, "skipped": skipped},
+        {"success": True, "created": res["created"], "updated": res["updated"], "skipped": res["skipped"]},
         status=status.HTTP_201_CREATED,
     )
 

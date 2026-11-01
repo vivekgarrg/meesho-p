@@ -28,7 +28,10 @@ class MeeshoInventoryJobTest < ActiveSupport::TestCase
       "low_stock_count" => 0, "products" => products }.merge(counts.transform_keys(&:to_s))
   end
 
-  def stub_inventory(active:, paused: [], pending: [], products: {}, archived_products: {})
+  def stub_inventory(active:, paused: [], pending: [], products: {}, archived_products: {}, sheet: nil)
+    # Meesho's own inventory sheet: none ready, unless a test hands one.
+    stub_request(:post, "#{BASE}getInventoryTemplateDownloadStatus")
+      .to_return(json(sheet ? { status: "OK", file_ref_id: sheet, file_status: "COMPLETED" } : { status: "Not Found" }))
     stub_request(:post, "#{BASE}fetchTabCountV2").to_return(json(counts: [
       { key: "active", value: active.size, name: "Active" }, { key: "activation_pending", value: pending.size },
       { key: "blocked", value: 2 }, { key: "paused", value: paused.size }]))
@@ -168,13 +171,40 @@ class MeeshoInventoryJobTest < ActiveSupport::TestCase
                    archived_products: { 3 => [product(31, "lota", archived: true)] })
     MeeshoInventoryJob.new.perform(account.id)
 
-    assert_match(/Meesho Stock: 1 added, 1 updated, 1 removed/, account.runs.last.message)
+    assert_match(/Meesho Stock: 2 added, 1 updated, 1 removed/, account.runs.last.message)
     rows = MeeshoStockRow.where(business_id: account.business_id).order(:serial_no)
-    assert_equal [[1, 11, "thali-a", 7, "IN_STOCK", 40, "Catalog 1"], [3, 98, "old", 0, "ALL", nil, "old"], [4, 21, "thali-b", 0, "OUT_OF_STOCK", nil, "Catalog 2"]],
+    # Paused SKUs are listed too (lota), as Meesho's own sheet lists them.
+    assert_equal [[1, 11, "thali-a", 7, "IN_STOCK", 40, "Catalog 1"], [3, 98, "old", 0, "ALL", nil, "old"], [4, 21, "thali-b", 0, "OUT_OF_STOCK", nil, "Catalog 2"],
+                  [5, 31, "lota", 10, "IN_STOCK", nil, "Catalog 3"]],
                  rows.map { |r| [r.serial_no, r.product_id, r.style_id, r.system_stock_count, r.stock_type, r.seller_stock_count, r.catalog_name] }
     assert_equal kept.id, rows.first.id                                  # same row: Price Update's link holds
     refute MeeshoStockRow.exists?(gone.id)
     assert MeeshoStockRow.exists?(business_id: 777)                     # another business untouched
+  end
+
+  test "Meesho's own inventory sheet is imported when it is new, and its rows are never removed by the mirror" do
+    now = Time.current
+    blocked = MeeshoStockRow.create!(business_id: account.business_id, serial_no: 1, catalog_name: "x", catalog_id: 9, product_name: "x",
+                                     product_id: 90, style_id: "blocked-sku", variation_id: 167, variation: "", stock_type: "ALL",
+                                     system_stock_count: 0, uploaded_at: now, updated_at: now)
+    stub_inventory(active: [catalog(1, products: [product(11, "thali-a")])], sheet: "1793554967516-Inventory-Update-File")
+    file = "https://storage.googleapis.com/gcs-supl-ctlng-cis-template-prd/Inventory-Update-File_2026-11-01_4313711.xlsx?X-Goog-Signature=x"
+    stub_request(:post, "#{BASE}downloadInventoryTemplate")
+      .with { |r| JSON.parse(r.body)["file_ref_id"] == "1793554967516-Inventory-Update-File" }.to_return(json(file_url: file))
+    stub_request(:get, file).to_return(status: 200, body: "PK-xlsx")
+    imported = []
+    orig = DjangoCommand.method(:run)
+    DjangoCommand.define_singleton_method(:run) do |*a|
+      next(imported << [a[0], a[2], File.binread(a[4])] && { "created" => 1, "updated" => 1, "keys" => [[11, 167], [90, 167]] }) if a[0] == "import_meesho_inventory_sheet"
+      {}
+    end
+    MeeshoInventoryJob.new.perform(account.id)
+    MeeshoInventoryJob.new.perform(account.id)                             # the same sheet again: not imported twice
+    assert_equal [["import_meesho_inventory_sheet", account.business_id, "PK-xlsx"]], imported
+    assert_match(/Meesho's inventory sheet: 2 SKUs \(1 new, 1 updated\)/, account.runs.order(:id).first.message)
+    assert MeeshoStockRow.exists?(blocked.id)                              # on the sheet: kept, though not on the Inventory page
+  ensure
+    DjangoCommand.define_singleton_method(:run, orig) if orig
   end
 
   test "nothing is removed from Meesho Stock while SKUs are still loading" do

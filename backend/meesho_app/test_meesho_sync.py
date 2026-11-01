@@ -573,6 +573,36 @@ class MeeshoSkusIntoPricingTests(TestCase):
         self.assertEqual(vars(ids["lota-b"][0])["product_id"], 2)
 
 
+class MeeshoInventorySheetImportTests(TestCase):
+    def test_meeshos_own_sheet_fills_meesho_stock_with_every_sku_and_its_ids(self):
+        import os
+        import tempfile
+        import openpyxl
+        from io import StringIO
+        from django.core.management import call_command
+        from .models import MeeshoInventory
+        biz = Business.objects.create(name="Rudam")
+        MeeshoInventory.objects.create(business=biz, serial_no=7, catalog_name="old", catalog_id=1, product_name="old",
+                                       product_id=1139809167, style_id="old", variation_id=167, system_stock_count=3)
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Inventory-Update-Data-Fill This"
+        ws.append(["SERIAL NO", "CATALOG NAME", "CATALOG ID", "PRODUCT NAME", "PRODUCT ID", "STYLE ID", "VARIATION ID", "VARIATION",
+                   "STOCK", "SYSTEM STOCK COUNT", "YOUR STOCK COUNT"])
+        ws.append(["Row identifier", "Catalog name", "Catalog id", "Product name", "Product id", "Product ID/Style ID", "Variation id",
+                   "Variation", "Stock type (IN_STOCK / OUT_OF_STOCK / ALL)", "Current system stock count", "Edit this"])
+        ws.append(["1", "Classic Puja", "606663705", "Golden Thali", "1139809167", "katori-thaali-027", "167", "Free Size", "ALL", "20", ""])
+        ws.append(["2", "Stylish Puja", "606663699", "Brass Thali", "1139809159", "katori-thaali-028", "167", "Free Size", "ALL", "1000", ""])
+        path = os.path.join(tempfile.mkdtemp(), "Inventory-Update-File_4313711.xlsx")
+        wb.save(path)
+        out = StringIO()
+        call_command("import_meesho_inventory_sheet", business=biz.pk, file=path, stdout=out)
+        res = json.loads(out.getvalue())
+        self.assertEqual((res["created"], res["updated"], res["keys"]), (1, 1, [[1139809167, 167], [1139809159, 167]]))
+        rows = {r.product_id: (r.catalog_id, r.style_id, r.system_stock_count) for r in MeeshoInventory.objects.filter(business=biz)}
+        self.assertEqual(rows, {1139809167: (606663705, "katori-thaali-027", 20), 1139809159: (606663699, "katori-thaali-028", 1000)})
+
+
 class LiveInventoryTests(TestCase):
     def setUp(self):
         from django.utils import timezone

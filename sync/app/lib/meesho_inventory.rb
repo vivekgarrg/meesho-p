@@ -64,6 +64,35 @@ module MeeshoInventory
     Array(body.is_a?(Hash) ? body["products"] : nil).select { |p| p.is_a?(Hash) && p["id"] && p["variation_id"] }
   end
 
+  # Meesho's own inventory sheet (the panel's Inventory → Download): every
+  # SKU of the supplier — active, paused, blocked… — with its catalog,
+  # product and variation ids and stock. Returns { "file_ref_id", "url" } of
+  # the newest one Meesho has made, or nil when it has none ready.
+  def latest_sheet(client, account)
+    body = { supplier_id: account.supplier_id.to_i, identifier: account.supplier_identifier }
+    status = client.post("#{BASE}getInventoryTemplateDownloadStatus", body: body, headers: headers(account)).body
+    return nil unless status.is_a?(Hash) && status["file_ref_id"].present? && status["file_status"].to_s.upcase == "COMPLETED"
+    file = client.post("#{BASE}downloadInventoryTemplate", body: body.merge(file_ref_id: status["file_ref_id"]),
+                       headers: headers(account)).body
+    url = file.is_a?(Hash) ? file["file_url"].presence : nil
+    url && { "file_ref_id" => status["file_ref_id"], "url" => url }
+  end
+
+  SHEET_HOSTS = %w[storage.googleapis.com].freeze
+
+  # Fetch the sheet (its link lives three minutes) into `dir`. Only from Meesho's storage.
+  def download_sheet(url, dir)
+    uri = URI(url)
+    raise MeeshoClient::RequestError, "inventory sheet link points somewhere unexpected (#{uri.host})" unless
+      uri.scheme == "https" && SHEET_HOSTS.include?(uri.host)
+    res = Net::HTTP.start(uri.host, uri.port, use_ssl: true, open_timeout: 30, read_timeout: 120) { |h| h.get(uri.request_uri) }
+    raise MeeshoClient::RequestError, "inventory sheet download failed (HTTP #{res.code})" unless res.is_a?(Net::HTTPSuccess)
+    path = File.join(dir, File.basename(uri.path).presence || "inventory.xlsx")
+    path += ".xlsx" unless path.end_with?(".xlsx")
+    File.binwrite(path, res.body)
+    path
+  end
+
   # Pause SKUs of one catalog. products: [{ product_id:, variation_id: }, …]
   def archive(client, account, catalog_id, products)
     res = client.post("#{BASE}archiveSKU",

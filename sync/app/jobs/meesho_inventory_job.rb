@@ -1,3 +1,5 @@
+require "tmpdir"
+
 # Read one account's Inventory page on the Meesho panel into
 # meesho_inventory_catalogs / meesho_inventory_listings — and from them the
 # Meesho Stock page (MeeshoStockSheet): every catalog under
@@ -110,6 +112,7 @@ class MeeshoInventoryJob
       stored += save_listings(account, e[:record], by_tab, now)
     end
 
+    official = import_sheet(account)
     sheet = MeeshoStockSheet.mirror!(account, complete: left.zero? && failed.zero?)
     # Django's response cache can't see these writes (Meesho Stock is cached
     # like any page): this stamp, part of every cache key, tells it.
@@ -122,6 +125,7 @@ class MeeshoInventoryJob
     message += left.positive? ? " — #{left} more on the next pulls." : "."
     message += " #{failed} catalog#{'s' unless failed == 1} Meesho wouldn't hand over — tried again next pull." if failed.positive?
     message += " Meesho Stock: #{sheet[:added]} added, #{sheet[:updated]} updated, #{sheet[:removed]} removed."
+    message += " #{official}" if official
     # Every SKU listed on Meesho gets a row in SKU Pricing (unpriced, to link to a parent).
     begin
       added = DjangoCommand.run("meesho_inject", "--account", account.id, "--kind", "skus")["added"].to_i
@@ -130,6 +134,31 @@ class MeeshoInventoryJob
       Sidekiq.logger.warn("MeeshoInventoryJob #{account.id}: adding SKUs to SKU Pricing failed: #{e.message}")
     end
     [message, stored, left]
+  end
+
+  SHEET_SNAPSHOT = "inventory_sheet"
+
+  # Meesho's own inventory sheet, when it has a new one: imported into Meesho
+  # Stock (every SKU with Meesho's ids — paused and blocked too) by Django.
+  # The sheet's (product, variation) pairs are kept on a snapshot, so the
+  # listing mirror never removes a row the sheet still lists. Returns a line
+  # for the run's message, or nil when there was nothing new.
+  def import_sheet(account)
+    snap = MeeshoSyncSnapshot.find_or_initialize_by(account_id: account.id, endpoint: SHEET_SNAPSHOT)
+    latest = relogin(account) { MeeshoInventory.latest_sheet(@client, account) }
+    return nil if latest.nil? || (snap.payload.is_a?(Hash) && snap.payload["file_ref_id"] == latest["file_ref_id"])
+    res = Dir.mktmpdir("meesho-inventory-sheet") do |dir|
+      path = MeeshoInventory.download_sheet(latest["url"], dir)
+      DjangoCommand.run("import_meesho_inventory_sheet", "--business", account.business_id, "--file", path)
+    end
+    snap.update!(http_status: 200, fetched_at: Time.current,
+                 payload: { "file_ref_id" => latest["file_ref_id"], "imported_at" => Time.current.iso8601,
+                            "created" => res["created"], "updated" => res["updated"], "keys" => res["keys"] })
+    "Meesho's inventory sheet: #{Array(res['keys']).size} SKUs (#{res['created']} new, #{res['updated']} updated)."
+  rescue MeeshoClient::RequestError, DjangoCommand::Failed, SystemCallError, JSON::ParserError => e
+    # An extra on top of the Inventory page: never fails the read.
+    Sidekiq.logger.warn("MeeshoInventoryJob #{account.id}: Meesho's inventory sheet: #{e.message}")
+    "Meesho's inventory sheet not read this time (#{e.message.truncate(120)})."
   end
 
   def stale?(cat)
