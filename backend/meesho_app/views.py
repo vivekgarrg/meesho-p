@@ -4029,6 +4029,7 @@ def orders_grouped(request, business_id):
             "product_name":   first.product_name,
             "order_date":     str(first.order_date.date()) if first.order_date else None,
             "row_count":      len(rows),
+            "updated_at":     max((r.updated_at or r.uploaded_at for r in rows if r.updated_at or r.uploaded_at), default=None),
             "rows":           [],     # filled below for the requested page only
         })
 

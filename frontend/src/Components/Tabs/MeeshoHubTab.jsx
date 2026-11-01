@@ -18,7 +18,10 @@ import { Panel, ago } from "./MeeshoUI";
  * Meesho — everything the Meesho panel sync does, as one dashboard:
  *
  *   Overview       what needs doing now, orders, money, stock, accounts
- *   Orders         accept, ready to ship, labels
+ *   Pending        accept new orders (on hold listed too)
+ *   Ready to ship  make labels, link packets
+ *   Shipped        with the courier; check every packet link
+ *   Cancelled      what was cancelled and why
  *   Order linking  AWB ↔ packet at the packing desk
  *   Returns & OTPs couriers' delivery OTPs; returns by status
  *   Inventory      every SKU by parent; pause
@@ -31,15 +34,19 @@ import { Panel, ago } from "./MeeshoUI";
 
 const TABS = [
   { key: "overview", label: "Overview", icon: "◧" },
-  { key: "orders", label: "Orders", icon: "📦" },
+  { key: "pending", label: "Pending", icon: "✋" },
+  { key: "ready_to_ship", label: "Ready to ship", icon: "📦" },
+  { key: "shipped", label: "Shipped", icon: "🚚" },
+  { key: "cancelled", label: "Cancelled", icon: "✕" },
   { key: "linking", label: "Order linking", icon: "🔗" },
   { key: "returns", label: "Returns & OTPs", icon: "↩" },
   { key: "inventory", label: "Inventory", icon: "▤" },
   { key: "payments", label: "Payments", icon: "₹" },
   { key: "settings", label: "Settings", icon: "⚙" },
 ];
-// Older links (?tab=sync) land on Settings.
-const ALIASES = { sync: "settings" };
+// Older links: ?tab=sync lands on Settings, ?tab=orders on Pending.
+const ALIASES = { sync: "settings", orders: "pending", rts: "ready_to_ship" };
+const ORDER_TABS = ["pending", "ready_to_ship", "shipped", "cancelled"];
 
 function Badge({ n, tone }) {
   if (!n) return null;
@@ -105,7 +112,8 @@ export function MeeshoHubTab() {
   const healthColor = { bad: C.red, warn: "#B45309", good: "#15803D", neutral: C.gray500 }[health?.tone || "neutral"];
 
   const badge = {
-    orders: summary && <Badge n={summary.orders.tabs.pending.count} tone="brand" />,
+    pending: summary && <Badge n={summary.orders.tabs.pending.count} tone="brand" />,
+    ready_to_ship: summary && <Badge n={summary.orders.tabs.ready_to_ship.count} />,
     linking: summary && <Badge n={summary.packing.open_problems} tone="bad" />,
     inventory: summary && <Badge n={summary.stock.out_of_stock} />,
     settings: (broken || failing) ? <span title="Needs attention" style={{ width: 8, height: 8, borderRadius: 4, background: C.red }} /> : null,
@@ -168,12 +176,13 @@ export function MeeshoHubTab() {
         {tab === "overview" && (summary
           ? <MeeshoOverview summary={summary} overview={overview} go={go} onReconnect={setReconnect} />
           : <div style={{ display: "flex", justifyContent: "center", padding: 60 }}><CircularProgress style={{ color: C.orange }} /></div>)}
-        {tab === "orders" && (
+        {tab === "ready_to_ship" && (
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            <MeeshoOrdersTab status="ready_to_ship" key="ready_to_ship" />
             <LatestLabels />
-            <MeeshoOrdersTab embedded />
           </div>
         )}
+        {ORDER_TABS.includes(tab) && tab !== "ready_to_ship" && <MeeshoOrdersTab status={tab} key={tab} />}
         {tab === "linking" && <MeeshoLinkingTab />}
         {tab === "returns" && <MeeshoReturnsTab />}
         {tab === "inventory" && <MeeshoLiveInventoryTab embedded />}

@@ -164,3 +164,47 @@ class OrderLinkingTests(TestCase):
         self.assertFalse(MeeshoPacketLink.objects.exists())
         self.assertTrue(ScannedOrder.objects.filter(status="PACKED").exists())
         self.assertEqual(list(MeeshoLinkLog.objects.order_by("pk").values_list("action", flat=True)), ["LINK", "UNLINK"])
+
+    # ── Where each link stands on Meesho, and relinking ──────────────────────
+    def test_the_link_states(self):
+        st = meesho_linking.link_state
+        self.assertEqual(st("VL1", "KP1", ""), "linked")                 # Meesho has a packet
+        self.assertEqual(st("VL1", "kp1", "KP1"), "linked")
+        self.assertEqual(st("VL1", "KP1", "KP2"), "other_packet")
+        self.assertEqual(st("VL1", "", "KP2"), "linked_here_only")
+        self.assertEqual(st("VL1", None, ""), "not_linked")
+        self.assertEqual(st("", None, ""), "no_awb")
+        self.assertEqual(st("VL1", None, "KP2", on_meesho=False), "not_seen")
+
+    def test_the_days_links_carry_their_state_on_meesho_now(self):
+        self.link("VL1001", "KP4AUSE32034836")                            # matches Meesho
+        self.link("DL2001", "KP9ZZZZ12345678")                            # Meesho has no packet for it
+        d = self.c.get(self.base).data
+        got = {l["awb"]: (l["state"], l["meesho_packet"]) for l in d["links"]}
+        self.assertEqual(got, {"VL1001": ("linked", "KP4AUSE32034836"), "DL2001": ("linked_here_only", None)})
+        self.assertEqual(d["states"], {"linked": 1, "linked_here_only": 1})
+        self.assertIsNotNone(d["checked_at"])
+
+    def test_relink_sends_the_same_or_a_new_packet_to_meesho(self):
+        link_id = self.link("DL2001", "KP9ZZZZ12345678").data["link"]["id"]
+        self.submit.reset_mock()
+        r = self.c.post(f"{self.base}{link_id}/relink/", {}, format="json")              # Meesho didn't show it: send again
+        self.assertEqual(r.status_code, 201, r.data)
+        self.assertEqual(self.submit.call_args.args[1:3], ("DL2001", "KP9ZZZZ12345678"))
+        r = self.c.post(f"{self.base}{link_id}/relink/", {"packet_id": " kp7newp11111111 "}, format="json")   # repacked
+        self.assertEqual((r.status_code, r.data["link"]["packet_id"], r.data["previous_packet"]), (201, "KP7NEWP11111111", "KP9ZZZZ12345678"))
+        self.assertEqual(MeeshoPacketLink.objects.get().packet_id, "KP7NEWP11111111")
+        self.assertEqual(list(MeeshoLinkLog.objects.order_by("pk").values_list("action", flat=True)), ["LINK", "RELINK", "RELINK"])
+        self.submit.return_value = ("ERR_INVALID_PACKET_ID", "req-9")                    # Meesho refuses: nothing changes
+        r = self.c.post(f"{self.base}{link_id}/relink/", {"packet_id": "KP1BADP00000000"}, format="json")
+        self.assertEqual(r.status_code, 409)
+        self.assertEqual(MeeshoPacketLink.objects.get().packet_id, "KP7NEWP11111111")
+        self.assertEqual(self.c.post(f"{self.base}{link_id + 99}/relink/", {}, format="json").status_code, 404)
+
+    def test_ready_to_ship_and_shipped_orders_show_their_link_state(self):
+        self.link("DL2001", "KP9ZZZZ12345678")
+        d = self.c.get(f"/api/business/{self.biz.id}/meesho-orders/").data
+        rts = {r["sub_order_num"]: r for r in next(t for t in d["tabs"] if t["key"] == "ready_to_ship")["rows"]}
+        self.assertEqual(rts["11_1"]["link_state"], "linked")
+        self.assertEqual((rts["13_1"]["link_state"], rts["13_1"]["link"]["packet_id"]), ("linked_here_only", "KP9ZZZZ12345678"))
+        self.assertEqual(next(t for t in d["tabs"] if t["key"] == "ready_to_ship")["link_states"], {"linked": 2, "linked_here_only": 1})

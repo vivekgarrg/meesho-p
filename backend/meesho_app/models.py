@@ -231,6 +231,9 @@ class OrderPayment(models.Model):
     recovery_reason = models.TextField(null=True, blank=True)
 
     uploaded_at = models.DateTimeField(auto_now_add=True)
+    # Last written — by an upload or the Meesho payments read (rows from before
+    # this was kept have none: their uploaded_at stands in).
+    updated_at = models.DateTimeField(auto_now=True, null=True)
 
     business = models.ForeignKey(
         "accounts.Business", on_delete=models.PROTECT,

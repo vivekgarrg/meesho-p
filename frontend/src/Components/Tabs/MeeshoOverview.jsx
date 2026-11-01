@@ -34,12 +34,12 @@ export function MeeshoOverview({ summary, overview, go, onReconnect }) {
       <div style={{ display: "grid", gap: 12, gridTemplateColumns: isMobile ? "repeat(2, minmax(0, 1fr))" : "repeat(auto-fit, minmax(170px, 1fr))" }}>
         <Kpi icon="✋" label="To accept" value={num(o.tabs.pending.count)} tone={o.tabs.pending.count ? "brand" : "neutral"}
           sub={auto.enabled && auto.accept_every_minutes ? `Accepted automatically ${every(auto.accept_every_minutes)}` : "Accept them on Orders"}
-          onClick={() => go("orders")} />
+          onClick={() => go("pending")} />
         <Kpi icon="📦" label="Ready to ship" value={num(o.tabs.ready_to_ship.count)} tone="info"
-          sub={o.labels_pending ? `${num(o.labels_pending)} labels not downloaded` : "All labels downloaded"} onClick={() => go("orders")} />
+          sub={o.labels_pending ? `${num(o.labels_pending)} labels not downloaded` : "All labels downloaded"} onClick={() => go("ready_to_ship")} />
         <Kpi icon="⏱" label="SLA at risk" value={num(atRisk)} tone={o.breached ? "bad" : atRisk ? "warn" : "good"}
           sub={atRisk ? `${num(o.breached)} breached · ${num(o.breaching_soon)} breaching soon` : `On time · ${num(o.due_today)} to dispatch today`}
-          onClick={() => go("orders")} />
+          onClick={() => go("ready_to_ship")} />
         <Kpi icon="🔗" label="Packed today" value={num(p.linked_today)} tone={p.open_problems ? "warn" : "good"}
           sub={p.open_problems ? `${num(p.open_problems)} linking problems to look at` : "AWBs linked to packets"} onClick={() => go("linking")} />
         <Kpi icon="₹" label="Next payout" value={m.next_payout ? inrShort(m.next_payout.net) : "—"} tone="good"
@@ -51,8 +51,8 @@ export function MeeshoOverview({ summary, overview, go, onReconnect }) {
       {/* ── Orders & money ───────────────────────────────────────────────── */}
       <div style={grid(360)}>
         <Panel title="Order pipeline" subtitle={`${num(o.open)} open orders · updated ${ago(o.updated_at)}`}
-          action={<button onClick={() => go("orders")} style={btn("ghost", "sm")}>Open orders</button>}>
-          <BarList color="#2563EB" onRow={() => go("orders")}
+          action={<button onClick={() => go("pending")} style={btn("ghost", "sm")}>Open orders</button>}>
+          <BarList color="#2563EB" onRow={(r) => go(r.key === "hold" ? "pending" : r.key)}
             rows={STAGES.map((s) => ({
               key: s.key, label: s.label, value: o.tabs[s.key]?.count || 0,
               tooltip: `${s.label}: ${num(o.tabs[s.key]?.count || 0)}` + Object.entries(o.tabs[s.key]?.by_business || {}).map(([b, n]) => `\n${b}: ${num(n)}`).join(""),

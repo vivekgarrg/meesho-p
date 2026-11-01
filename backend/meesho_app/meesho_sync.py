@@ -449,6 +449,7 @@ ORDER_TABS = [
 ]
 # Tabs already out of the seller's hands: newest first, no SLA.
 DONE_TABS = ("shipped", "cancelled")
+LINK_TABS = ("ready_to_ship", "shipped")      # tabs whose orders have an AWB to link to a packet
 DASHBOARD_ROWS = 2000
 DESK_PATH = "meesho-orders/"
 
@@ -536,13 +537,24 @@ def meesho_orders_dashboard(request, business_id):
                 subs_by_biz.setdefault(biz.pk, set()).add(r.get("sub_order_num"))
         tab_rows[key] = rows
     packets = _packet_ids(subs_by_biz)
+    from . import meesho_linking
+    ours = meesho_linking.links_by_awb([b.pk for b in desk], [r.get("awb") for k in LINK_TABS for r in tab_rows.get(k, [])])
 
     tabs = []
     for key, label in ORDER_TABS:
         rows = tab_rows[key]
+        states = {}
         for r in rows:
+            meesho_packet = r.get("packet_id")
             # The panel's own packet ID (Ready to ship) first, else the Orders CSV's.
-            r["packet_id"] = r.get("packet_id") or packets.get((r["business_id"], r.get("sub_order_num")))
+            r["packet_id"] = meesho_packet or packets.get((r["business_id"], r.get("sub_order_num")))
+            if key in LINK_TABS:
+                # Where its AWB ↔ packet link stands: on Meesho, here, or nowhere yet.
+                link = ours.get((r["business_id"], meesho_linking._clean(r.get("awb"))))
+                r["meesho_packet"] = meesho_linking._clean(meesho_packet) or None
+                r["link"] = {"id": link.pk, "packet_id": link.packet_id, "linked_at": link.linked_at} if link else None
+                r["link_state"] = meesho_linking.link_state(r.get("awb"), meesho_packet, link.packet_id if link else "")
+                states[r["link_state"]] = states.get(r["link_state"], 0) + 1
         fetched = [s.fetched_at for s in snaps.get(f"orders_{key}", [])]
         sla = {}
         for r in ([] if key in DONE_TABS else rows):
@@ -555,6 +567,7 @@ def meesho_orders_dashboard(request, business_id):
             "breaching_soon": sla.get("breaching_soon", 0),
             "due_today": 0 if key in DONE_TABS else sum(1 for r in rows if r.get("dispatch_by") == today),
             "label_pending": sum(1 for r in rows if r.get("label") in (False, "Not Downloaded")),
+            "link_states": states,
             "rows": ordered[:DASHBOARD_ROWS],
         })
 
@@ -1115,6 +1128,7 @@ def meesho_payments(request, business_id):
         "order_date": o.order_date, "expected": o.expected_payment_date, "sku": o.supplier_sku, "product": o.product_name,
         "status": o.live_order_status, "quantity": o.quantity, "amount": _money(o.final_settlement_amount),
         "sale": _money(o.total_sale_amount),
+        "updated_at": o.imported_at,                   # when the payments read last brought it in
     } for o in qs.order_by("expected_payment_date", "sub_order_no")[:OUTSTANDING_ROWS]]
     busy = [MeeshoSyncRun.STATUS_QUEUED, MeeshoSyncRun.STATUS_RUNNING]
     live = [a for a in accounts if a.status != MeeshoAccount.STATUS_DISABLED]

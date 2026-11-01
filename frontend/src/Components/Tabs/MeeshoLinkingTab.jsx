@@ -14,6 +14,13 @@ const isPacket = (c) => /^KP[A-Z0-9]{6,}$/.test(c);
 const clean = (c) => String(c || "").replace(/\s+/g, "").toUpperCase();
 const time = (iso) => (iso ? new Date(iso).toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit" }) : "—");
 const when = (iso) => (iso ? new Date(iso).toLocaleString("en-IN", { day: "2-digit", month: "short", hour: "numeric", minute: "2-digit" }) : "—");
+// Where each link stands on Meesho now (meesho_linking.link_state), from its latest Ready to ship / Shipped lists.
+const STATE = {
+  linked: { label: "Linked on Meesho", tag: "green" },
+  other_packet: { label: "Different packet on Meesho", tag: "red" },
+  linked_here_only: { label: "Not on Meesho yet", tag: "amber" },
+  not_seen: { label: "Not in Meesho's lists", tag: "gray" },
+};
 const CHECK = {
   MATCH: { label: "Matches Meesho", tag: "green" },
   UNKNOWN: { label: "Not in Meesho data yet", tag: "gray" },
@@ -133,6 +140,9 @@ export function MeeshoLinkingTab() {
   const [q, setQ] = useState("");
   const [logKey, setLogKey] = useState(0);
   const [courierBusy, setCourierBusy] = useState(false);
+  const [relinking, setRelinking] = useState(null);     // {id, packet} — a link being sent to Meesho again
+  const [checking, setChecking] = useState(false);
+  const [rowNote, setRowNote] = useState(null);
   const awbRef = useRef(null);
   const packetRef = useRef(null);
   // When each code started arriving: a scanner types a whole code in a blink,
@@ -207,6 +217,28 @@ export function MeeshoLinkingTab() {
   };
   const clearAll = () => { setAwb(""); setPacket(""); setResult(null); focusField(awbRef); };
 
+  // Send a link to Meesho again — the same packet, or a new one typed in.
+  const relink = async (l, packetId) => {
+    setRowNote(null);
+    const r = await call(`${l.id}/relink/`, "POST", { packet_id: packetId || l.packet_id, packet_method: packetId ? "SCAN" : "MANUAL" });
+    setRelinking(null);
+    setRowNote(r.ok || r.data.code === "already_linked"
+      ? { ok: true, text: r.data.error || `Relinked ${l.awb} → ${r.data.link?.packet_id || packetId || l.packet_id} on Meesho.` }
+      : { ok: false, text: r.data.error || "Relink failed — it's in the log." });
+    load(); setLogKey((k) => k + 1);
+  };
+  // Read Meesho's lists again, then show each link's state from them.
+  const checkMeesho = async () => {
+    setChecking(true);
+    await fetch(`${API}/meesho-orders/refresh/`, { method: "POST" }).catch(() => null);
+    for (let i = 0; i < 20; i++) {
+      await new Promise((ok) => setTimeout(ok, 3000));
+      const st = await fetch(`${API}/meesho-orders/`).then((x) => x.json()).catch(() => null);
+      if (st && !st.syncing) break;
+    }
+    await load();
+    setChecking(false);
+  };
   const unlink = async (l) => {
     if (!window.confirm(`Unlink AWB ${l.awb} from packet ${l.packet_id}? (It stays packed in Order Scan.)`)) return;
     await call(`${l.id}/`, "DELETE");
@@ -296,26 +328,54 @@ export function MeeshoLinkingTab() {
 
       <div style={{ ...S.card, padding: 0, overflow: "hidden" }}>
         <div style={{ padding: "12px 14px", display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", borderBottom: `1px solid ${C.gray100}` }}>
-          <span style={{ fontWeight: 800, fontSize: 14.5, flex: 1 }}>Today's links</span>
+          <span style={{ fontWeight: 800, fontSize: 14.5, flex: 1 }}>
+            Today's links
+            {data.states && <span style={{ fontSize: 12, fontWeight: 600, color: C.gray500, marginLeft: 8 }}>
+              {Object.entries(data.states).map(([k, n]) => `${n} ${(STATE[k]?.label || k).toLowerCase()}`).join(" · ")}
+              {data.checked_at ? ` · Meesho checked ${when(data.checked_at)}` : ""}
+            </span>}
+          </span>
+          <button onClick={checkMeesho} disabled={checking} style={{ ...btn("ghost", "sm"), opacity: checking ? 0.6 : 1 }}>
+            {checking ? "Checking with Meesho…" : "↻ Check with Meesho"}
+          </button>
           <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search AWB, packet, sub-order, SKU…" style={{ ...S.inp, width: 240 }} />
         </div>
+        {rowNote && <div role="status" style={{ padding: "8px 14px", fontSize: 13, fontWeight: 700, color: rowNote.ok ? "#15803D" : C.red, borderBottom: `1px solid ${C.gray100}` }}>
+          {rowNote.ok ? "✓ " : "✕ "}{rowNote.text}</div>}
         <div style={{ overflowX: "auto", maxHeight: 460, overflowY: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
-            <thead><tr>{["Time", "AWB", "Packet", "Business", "Sub-order / SKU", "Courier", "Meesho", "Order Scan", ""].map((h) => <th key={h} style={S.th}>{h}</th>)}</tr></thead>
+            <thead><tr>{["Time", "AWB", "Packet", "Business", "Sub-order / SKU", "Courier", "On Meesho now", "Order Scan", ""].map((h) => <th key={h} style={S.th}>{h}</th>)}</tr></thead>
             <tbody>
               {data.links.length === 0 && <tr><td colSpan={9} style={{ ...S.td, textAlign: "center", color: C.gray400, padding: 20 }}>Nothing linked yet today.</td></tr>}
               {data.links.map((l) => (
                 <tr key={l.id}>
                   <td style={{ ...S.td, whiteSpace: "nowrap", color: C.gray500 }}>{time(l.linked_at)}</td>
                   <td style={{ ...S.td, fontFamily: "monospace" }}>{l.awb}</td>
-                  <td style={{ ...S.td, fontFamily: "monospace" }}>{l.packet_id}</td>
+                  <td style={{ ...S.td, fontFamily: "monospace" }}>
+                    {relinking?.id === l.id ? (
+                      <span style={{ display: "inline-flex", gap: 4 }}>
+                        <input autoFocus value={relinking.packet} onChange={(e) => setRelinking({ id: l.id, packet: e.target.value.toUpperCase() })}
+                          onKeyDown={(e) => { if (e.key === "Enter") relink(l, relinking.packet.trim()); if (e.key === "Escape") setRelinking(null); }}
+                          placeholder="New KP…" style={{ ...S.inp, width: 150, padding: "4px 8px", fontFamily: "monospace" }} />
+                        <button onClick={() => relink(l, relinking.packet.trim())} style={btn("primary", "sm")}>Send</button>
+                      </span>
+                    ) : l.packet_id}
+                  </td>
                   <td style={S.td}>{l.business_name}</td>
                   <td style={S.td}><span style={{ fontFamily: "monospace" }}>{l.sub_order_no || "—"}</span><div style={{ fontSize: 11.5, color: C.gray500 }}>{l.sku}</div></td>
                   <td style={S.td}>{l.courier || (l.carrier_id ? `#${l.carrier_id}` : "—")}</td>
                   <td style={S.td}>
-                    {l.meesho_status === "LINKED" ? <Tag variant="green">Linked</Tag>
-                      : l.meesho_status ? <Tag variant="amber">Already linked</Tag> : <Tag variant="gray">Not sent</Tag>}
-                    {l.check === "OVERRIDDEN" && <> <Tag variant="amber">Linked anyway</Tag></>}
+                    <div style={{ display: "flex", flexDirection: "column", gap: 4, alignItems: "flex-start" }}>
+                      {STATE[l.state] ? <Tag variant={STATE[l.state].tag}>{STATE[l.state].label}</Tag> : <Tag variant="gray">{l.meesho_status || "Not sent"}</Tag>}
+                      {l.state === "other_packet" && <span style={{ fontSize: 11, fontFamily: "monospace", color: C.gray600 }}>Meesho has {l.meesho_packet}</span>}
+                      {l.check === "OVERRIDDEN" && <Tag variant="amber">Linked anyway</Tag>}
+                      {["linked_here_only", "other_packet"].includes(l.state) && (
+                        <span style={{ display: "inline-flex", gap: 4 }}>
+                          <button onClick={() => relink(l)} title="Send this AWB and packet to Meesho again" style={{ ...btn("ghost", "sm"), padding: "2px 8px" }}>↻ Relink</button>
+                          <button onClick={() => setRelinking({ id: l.id, packet: "" })} title="Link a different packet" style={{ ...btn("ghost", "sm"), padding: "2px 8px" }}>New packet</button>
+                        </span>
+                      )}
+                    </div>
                   </td>
                   <td style={S.td}>{l.scan_status ? <Tag variant={l.scan_status === "PACKED" ? "green" : "blue"}>{l.scan_status.toLowerCase()}</Tag> : "—"}</td>
                   <td style={S.td}><button onClick={() => unlink(l)} title="Unlink" style={{ border: "none", background: "none", color: C.gray400, cursor: "pointer", fontSize: 16 }}>×</button></td>

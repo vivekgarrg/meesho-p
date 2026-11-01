@@ -83,13 +83,51 @@ def _shipments(accounts):
     return by_awb
 
 
+# Where a shipment's AWB ↔ packet link stands, from Meesho's own lists (Ready
+# to ship / Shipped carry the packet Meesho has for each AWB) and our links.
+LINKED = "linked"                    # Meesho has a packet for it (ours, if we have one)
+OTHER_PACKET = "other_packet"        # Meesho has a different packet than the one linked here
+HERE_ONLY = "linked_here_only"       # linked here, Meesho doesn't show it yet (relink, or wait for the next sync)
+NOT_LINKED = "not_linked"            # has an AWB, no packet anywhere — link it
+NO_AWB = "no_awb"                    # no label yet: nothing to link
+NOT_SEEN = "not_seen"                # linked here, but the AWB is on neither Meesho list (shipped on, or cancelled)
+LINK_STATES = (LINKED, OTHER_PACKET, HERE_ONLY, NOT_LINKED, NO_AWB, NOT_SEEN)
+
+
+def link_state(awb, meesho_packet, our_packet, on_meesho=True):
+    """The link state for one shipment (see LINK_STATES)."""
+    meesho_packet, our_packet = _clean(meesho_packet), _clean(our_packet)
+    if not on_meesho:
+        return NOT_SEEN
+    if meesho_packet:
+        return OTHER_PACKET if our_packet and our_packet != meesho_packet else LINKED
+    if our_packet:
+        return HERE_ONLY
+    return NOT_LINKED if _clean(awb) else NO_AWB
+
+
+def links_by_awb(business_ids, awbs):
+    """{(business_id, AWB): MeeshoPacketLink} for these AWBs."""
+    awbs = [a for a in {_clean(a) for a in awbs} if a]
+    out = {}
+    for i in range(0, len(awbs), 500):
+        for l in MeeshoPacketLink.objects.filter(business_id__in=business_ids, awb_number__in=awbs[i:i + 500]):
+            out[(l.business_id, l.awb_number)] = l
+    return out
+
+
 def _courier_names():
     return {c.carrier_id: c.name for c in MeeshoCourier.objects.exclude(name="")}
 
 
-def _link_json(link, couriers=None):
+def _link_json(link, couriers=None, ships=None):
     couriers = couriers if couriers is not None else _courier_names()
-    return {
+    ship = (ships or {}).get(link.awb_number) if ships is not None else None
+    meesho = {} if ships is None else {
+        "state": link_state(link.awb_number, (ship or {}).get("packet_id"), link.packet_id, on_meesho=ship is not None),
+        "meesho_packet": (ship or {}).get("packet_id") or None,
+    }
+    return {**meesho,
         "id": link.pk, "business_id": link.business_id, "business_name": link.business.name,
         "awb": link.awb_number, "packet_id": link.packet_id, "sub_order_no": link.sub_order_no, "sku": link.sku,
         "carrier_id": link.carrier_id, "courier": link.courier_name or couriers.get(link.carrier_id, ""),
@@ -289,7 +327,11 @@ def linking(request, business_id):
     if q:
         qs = qs.filter(Q(awb_number__icontains=q) | Q(packet_id__icontains=q) | Q(sub_order_no__icontains=q) | Q(sku__icontains=q))
     couriers = _courier_names()
-    links = [_link_json(l, couriers) for l in qs[:2000]]
+    ships = _shipments(_)                       # what Meesho shows now, for each link's state
+    links = [_link_json(l, couriers, ships) for l in qs[:2000]]
+    states = {}
+    for l in links:
+        states[l["state"]] = states.get(l["state"], 0) + 1
     by_courier = {}
     for l in links:
         name = l["courier"] or (f"Courier #{l['carrier_id']}" if l["carrier_id"] else "Courier not known")
@@ -300,6 +342,8 @@ def linking(request, business_id):
     return Response({
         "day": day, "links": links, "count": len(links),
         "matched": sum(1 for l in links if l["check"] == MeeshoPacketLink.CHECK_MATCH),
+        "states": states,
+        "checked_at": _checked_at(_),
         "by_courier": sorted(({"courier": k, "count": n} for k, n in by_courier.items()), key=lambda x: -x["count"]),
         "open_errors": errors,
         "couriers": [{"carrier_id": c.carrier_id, "name": c.name, "source": c.source, "shipments": c.shipments_seen}
@@ -351,6 +395,30 @@ def _do_link(request, business, awb, packet, override, action, retry_of=None, sc
         # As Meesho's own prompt: already done — scan the next order.
         return Response({**body, "error": _meesho_message(meesho_code), "code": "already_linked"}, status=status.HTTP_409_CONFLICT)
     return Response(body, status=status.HTTP_201_CREATED)
+
+
+def _checked_at(accounts):
+    """When Meesho's lists the states come from were last read (the older of the two)."""
+    t = [s.fetched_at for s in MeeshoSyncSnapshot.objects.filter(account__in=accounts, endpoint__in=SHIPMENT_TABS)]
+    return min(t) if t else None
+
+
+@api_view(["POST"])
+def link_relink(request, business_id, link_id):
+    """
+    Link this AWB on Meesho again — with the same packet (Meesho didn't take it,
+    or doesn't show it), or a new one ({packet_id}) when the parcel was repacked.
+    Meesho's answer decides, as for a fresh link; logged as a relink.
+    """
+    v = _views()
+    business = v.get_authorized_business(request, business_id)
+    desk, _ = _desk(request, business)
+    link = MeeshoPacketLink.objects.filter(pk=link_id, business__in=desk).first()
+    if not link:
+        return Response({"error": "No such link."}, status=status.HTTP_404_NOT_FOUND)
+    d = request.data if isinstance(request.data, dict) else {}
+    packet = _clean(d.get("packet_id")) or link.packet_id
+    return _do_link(request, business, link.awb_number, packet, True, MeeshoLinkLog.ACTION_RELINK, scan=_scan_info(d))
 
 
 @api_view(["DELETE"])

@@ -388,7 +388,7 @@ function MeeshoPaymentsTab() {
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
               <thead>
                 <tr>
-                  {['', 'Sub-Order No', 'Status', 'SKU / Product', 'Order Date', 'Settlement', 'Rows'].map((h) => (
+                  {['', 'Sub-Order No', 'Status', 'SKU / Product', 'Order Date', 'Settlement', 'Rows', 'Updated at'].map((h) => (
                     <th key={h} style={{ ...S.th, fontSize: 10, whiteSpace: 'nowrap' }}>
                       {h}
                     </th>
@@ -398,7 +398,7 @@ function MeeshoPaymentsTab() {
               <tbody>
                 {groups.length === 0 ? (
                   <tr>
-                    <td colSpan={7} style={{ ...S.td, textAlign: 'center', padding: 56, color: C.gray400 }}>
+                    <td colSpan={8} style={{ ...S.td, textAlign: 'center', padding: 56, color: C.gray400 }}>
                       No payment groups found for the selected filters.
                     </td>
                   </tr>
@@ -494,13 +494,18 @@ function MeeshoPaymentsTab() {
                           <td style={{ ...S.td, textAlign: 'center' }}>
                             <Tag variant={g.row_count > 1 ? 'amber' : 'gray'}>{g.row_count}</Tag>
                           </td>
+                          {/* When it was last written — by an upload or the Meesho payments read */}
+                          <td style={{ ...S.td, color: C.gray500, fontSize: 11, whiteSpace: 'nowrap' }}
+                            title={g.updated_at ? new Date(g.updated_at).toLocaleString('en-IN') : ''}>
+                            {g.updated_at ? new Date(g.updated_at).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—'}
+                          </td>
                         </tr>
 
                         {/* Expanded rows */}
                         {isOpen && (
                           <>
                             <tr style={{ background: '#F0F9FF' }}>
-                              <td colSpan={7} style={{ padding: 0 }}>
+                              <td colSpan={8} style={{ padding: 0 }}>
                                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
                                   <thead>
                                     <tr style={{ background: '#E0F2FE' }}>

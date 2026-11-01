@@ -4,15 +4,15 @@ import { API, C, S, btn, Tag, useIsMobile } from "../../App";
 import { CircularProgress } from "@mui/material";
 
 /*
- * Meesho Orders — the Meesho supplier panel's order tabs (On hold, Pending,
- * Ready to ship, Cancelled) as the sync last pulled them: counts, what is close
- * to or past its dispatch SLA, and every order. Refresh pulls now; otherwise
- * the sync pulls on its own every few minutes (Meesho Sync page).
+ * Meesho Orders — one of the Meesho panel's order lists as the sync last
+ * pulled it, as its own tab on the Meesho page (status = pending |
+ * ready_to_ship | shipped | cancelled): the numbers that matter for that step,
+ * one row of filters, the orders, and that step's action — accept (Pending),
+ * make labels and link packets (Ready to ship), check links (Shipped).
+ * Refresh pulls now; otherwise the sync pulls every few minutes.
  */
 
 const TONE = { hold: "#B45309", pending: C.orange, ready_to_ship: "#2563EB", shipped: "#059669", cancelled: C.red };
-// Tabs already out of the seller's hands — no SLA, no dispatch date to chase.
-const DONE = ["shipped", "cancelled"];
 const SLA = {
   breached: { label: "SLA breached", tag: "red" },
   breaching_soon: { label: "Breaching soon", tag: "amber" },
@@ -43,32 +43,8 @@ const SLA_FILTERS = [
   { key: "soon", label: "Breaching soon", test: (r) => r.sla_status === "breaching_soon" },
   { key: "ok", label: "On time", test: (r) => !isBreached(r) && r.sla_status !== "breaching_soon" },
 ];
-const PACKET_FILTERS = [
-  { key: "all", label: "Any packet", test: () => true },
-  { key: "has", label: "Has packet ID", test: (r) => !!r.packet_id },
-  { key: "none", label: "No packet ID", test: (r) => !r.packet_id },
-];
 const keyOf = (r) => `${r.business_id}:${r.sub_order_num}`;
 const BUSY = ["QUEUED", "RUNNING"];
-
-function Chips({ options, value, onChange, rows, color = "#2563EB" }) {
-  return (
-    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-      {options.map((f) => {
-        const on = value === f.key;
-        return (
-          <button key={f.key} onClick={() => onChange(f.key)} aria-pressed={on}
-            style={{
-              padding: "6px 12px", borderRadius: 999, fontSize: 12.5, fontWeight: 700, fontFamily: "inherit", cursor: "pointer",
-              border: `1.5px solid ${on ? color : C.gray200}`, background: on ? color : C.white, color: on ? "#fff" : C.gray700
-            }}>
-            {f.label} · {rows.filter(f.test).length}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
 
 /** Packet ID (from the Orders CSV) and AWB (once Meesho has labelled it). */
 function ShipIds({ r, compact }) {
@@ -108,31 +84,6 @@ function Img({ src, size = 44 }) {
         </div>
       )}
     </div>
-  );
-}
-
-function TabTile({ t, on, onClick }) {
-  const tone = TONE[t.key];
-  const open = !DONE.includes(t.key);      // SLA means nothing once shipped or cancelled
-  const notes = [
-    open && t.breached ? { text: `${t.breached} past SLA`, color: C.red } : null,
-    open && t.breaching_soon ? { text: `${t.breaching_soon} breaching soon`, color: "#B45309" } : null,
-    open && t.due_today ? { text: `${t.due_today} to dispatch today`, color: C.gray600 } : null,
-    t.key === "ready_to_ship" && t.label_pending ? { text: `${t.label_pending} labels not downloaded`, color: C.gray600 } : null,
-  ].filter(Boolean);
-  return (
-    <button onClick={onClick} aria-pressed={on}
-      style={{
-        textAlign: "left", cursor: "pointer", fontFamily: "inherit", background: on ? tone : C.white, color: on ? "#fff" : C.gray900,
-        border: `2px solid ${on ? tone : C.gray200}`, borderTop: `6px solid ${tone}`, borderRadius: 14, padding: "12px 14px",
-        display: "flex", flexDirection: "column", gap: 4, minWidth: 0
-      }}>
-      <span style={{ fontSize: 13.5, fontWeight: 800, color: on ? "rgba(255,255,255,.95)" : tone }}>{t.label}</span>
-      <span style={{ fontFamily: "monospace", fontSize: 34, fontWeight: 900, lineHeight: 1 }}>{t.count}</span>
-      {notes.length ? notes.map((n) => (
-        <span key={n.text} style={{ fontSize: 12, fontWeight: 700, color: on ? "#fff" : n.color }}>{n.text}</span>
-      )) : <span style={{ fontSize: 12, color: on ? "rgba(255,255,255,.85)" : C.gray400 }}>{!t.count ? "None" : open ? "All on time" : t.key === "shipped" ? "On the way" : "Recent cancellations"}</span>}
-    </button>
   );
 }
 
@@ -264,10 +215,139 @@ function ConfirmAccept({ count, businesses, onYes, onNo, busy }) {
   );
 }
 
-export function MeeshoOrdersTab({ embedded = false }) {
+
+// What each tab is for, which panel lists it shows, and its action.
+const VIEWS = {
+  pending: { tabs: ["pending"], title: "Pending", action: "accept",
+    help: "New orders waiting to be accepted — accept them before their dispatch date. Orders Meesho holds back are listed under On hold." },
+  ready_to_ship: { tabs: ["ready_to_ship"], title: "Ready to ship", action: "labels",
+    help: "Accepted orders: make their labels, pack them, and link each AWB to its packet." },
+  shipped: { tabs: ["shipped"], title: "Shipped", action: null,
+    help: "With the courier, until delivered. Check every AWB is linked to its packet on Meesho." },
+  cancelled: { tabs: ["cancelled"], title: "Cancelled", action: null, help: "Recently cancelled orders and why." },
+};
+
+// Where an AWB ↔ packet link stands (meesho_linking.link_state).
+const LINK = {
+  linked: { label: "Linked on Meesho", tag: "green" },
+  other_packet: { label: "Different packet on Meesho", tag: "red" },
+  linked_here_only: { label: "Not on Meesho yet", tag: "amber" },
+  not_linked: { label: "Not linked", tag: "gray" },
+  no_awb: { label: "No label yet", tag: "gray" },
+};
+const LINK_FILTERS = [
+  { key: "all", label: "Any link", test: () => true },
+  { key: "linked", label: "Linked on Meesho", test: (r) => r.link_state === "linked" },
+  { key: "todo", label: "Needs linking", test: (r) => ["not_linked", "linked_here_only", "other_packet"].includes(r.link_state) },
+  { key: "other_packet", label: "Different packet", test: (r) => r.link_state === "other_packet" },
+  { key: "no_awb", label: "No label yet", test: (r) => r.link_state === "no_awb" },
+];
+const PAGE = 200;
+
+/** A compact dropdown filter: label, options with counts. */
+function Pick({ label, options, value, onChange, rows }) {
+  return (
+    <label style={{ display: "inline-flex", flexDirection: "column", gap: 3, fontSize: 11.5, fontWeight: 700, color: C.gray500, minWidth: 0 }}>
+      {label}
+      <select value={value} onChange={(e) => onChange(e.target.value)}
+        style={{ ...S.inp, width: "auto", padding: "7px 10px", fontWeight: 700, color: value === "all" ? C.gray700 : C.gray900,
+          borderColor: value === "all" ? C.gray200 : "#2563EB", background: value === "all" ? C.white : "#EFF6FF" }}>
+        {options.map((o) => <option key={o.key} value={o.key}>{o.label} ({rows.filter(o.test).length})</option>)}
+      </select>
+    </label>
+  );
+}
+
+/** A headline number that also filters the list when clicked. */
+function Num({ label, value, tone = C.gray900, sub, on, onClick }) {
+  return (
+    <button onClick={onClick} disabled={!onClick} aria-pressed={on}
+      style={{ ...S.card, padding: "12px 14px", textAlign: "left", fontFamily: "inherit", cursor: onClick ? "pointer" : "default", minWidth: 0,
+        border: `${on ? 2 : 1}px solid ${on ? tone : C.gray200}`, background: on ? C.gray50 : C.white, display: "flex", flexDirection: "column", gap: 3 }}>
+      <span style={{ fontSize: 12, fontWeight: 700, color: C.gray500 }}>{label}</span>
+      <span style={{ fontSize: 26, fontWeight: 900, lineHeight: 1, color: tone, fontVariantNumeric: "tabular-nums" }}>{value}</span>
+      {sub && <span style={{ fontSize: 11.5, color: C.gray500 }}>{sub}</span>}
+    </button>
+  );
+}
+
+function LinkCell({ r, onLink }) {
+  const st = LINK[r.link_state];
+  if (!st) return null;
+  const can = ["not_linked", "linked_here_only", "other_packet"].includes(r.link_state);
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4, alignItems: "flex-start" }}>
+      <Tag variant={st.tag}>{st.label}</Tag>
+      {r.link_state === "other_packet" && (
+        <span style={{ fontSize: 11, color: C.gray600, fontFamily: "monospace" }}>Meesho {r.meesho_packet} · here {r.link?.packet_id}</span>
+      )}
+      {can && onLink && (
+        <button onClick={() => onLink(r)} style={{ ...btn(r.link_state === "not_linked" ? "primary" : "ghost", "sm"), padding: "3px 10px" }}>
+          {r.link_state === "not_linked" ? "🔗 Link" : "↻ Relink"}
+        </button>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Link (or relink) one shipment's AWB to its packet — on Meesho, as the panel's
+ * Scan now does, through Order linking (stored, logged, marked packed).
+ */
+function LinkDialog({ r, onClose, onDone }) {
+  const [packet, setPacket] = useState(r.link_state === "other_packet" ? "" : (r.link?.packet_id || ""));
+  const [busy, setBusy] = useState(false);
+  const [res, setRes] = useState(null);
+  const relink = !!r.link;
+  const submit = async (override = false) => {
+    if (!packet.trim()) return;
+    setBusy(true); setRes(null);
+    try {
+      const path = relink ? `meesho-orders/linking/${r.link.id}/relink/` : "meesho-orders/linking/";
+      const resp = await fetch(`${API}/${path}`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ awb: r.awb, packet_id: packet.trim(), override, awb_method: "MANUAL", packet_method: "SCAN",
+          awb_ts: Date.now() - 1000, packet_ts: Date.now() }),
+      });
+      const d = await resp.json().catch(() => ({}));
+      if (resp.ok || d.code === "already_linked") { setRes({ ok: true, text: d.error || `Linked ${r.awb} → ${d.link?.packet_id || packet}.` }); onDone(); }
+      else setRes({ ok: false, text: d.error || "Couldn't link it.", canOverride: d.can_override });
+    } catch { setRes({ ok: false, text: "Network error." }); }
+    finally { setBusy(false); }
+  };
+  return (
+    <div role="dialog" aria-modal="true" aria-label="Link packet" onClick={onClose}
+      style={{ position: "fixed", inset: 0, zIndex: 3400, background: "rgba(15,23,42,.5)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ ...S.card, maxWidth: 460, width: "100%", padding: 20, display: "flex", flexDirection: "column", gap: 12, borderTop: `5px solid #2563EB` }}>
+        <div style={{ fontSize: 18, fontWeight: 900, color: C.gray900 }}>{relink ? "Relink packet" : "Link packet"}</div>
+        <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "4px 12px", fontSize: 13 }}>
+          <span style={{ color: C.gray500 }}>Order</span><b style={{ fontFamily: "monospace" }}>{r.sub_order_num}{r.sku ? ` · ${r.sku}` : ""}</b>
+          <span style={{ color: C.gray500 }}>AWB</span><b style={{ fontFamily: "monospace" }}>{r.awb}</b>
+          <span style={{ color: C.gray500 }}>On Meesho</span><span style={{ fontFamily: "monospace" }}>{r.meesho_packet || "no packet yet"}</span>
+          {r.link && <><span style={{ color: C.gray500 }}>Linked here</span><span style={{ fontFamily: "monospace" }}>{r.link.packet_id}</span></>}
+        </div>
+        <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 12.5, fontWeight: 800, color: C.gray600 }}>
+          Packet ID (scan the KP… QR)
+          <input autoFocus value={packet} onChange={(e) => setPacket(e.target.value.toUpperCase())} onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
+            placeholder="KP…" style={{ ...S.inp, fontFamily: "monospace", fontSize: 16, fontWeight: 800 }} />
+        </label>
+        {res && <div style={{ fontSize: 13, fontWeight: 700, color: res.ok ? "#15803D" : C.red }}>{res.ok ? "✓ " : "✕ "}{res.text}</div>}
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", flexWrap: "wrap" }}>
+          <button onClick={onClose} style={btn("ghost", "md")}>{res?.ok ? "Done" : "Cancel"}</button>
+          {res?.canOverride && <button onClick={() => submit(true)} disabled={busy} style={btn("ghost", "md")}>Link anyway</button>}
+          {!res?.ok && <button onClick={() => submit()} disabled={busy || !packet.trim()} style={{ ...btn("primary", "md"), opacity: busy || !packet.trim() ? 0.5 : 1 }}>
+            {busy ? "Linking on Meesho…" : relink ? "Relink on Meesho" : "Link on Meesho"}
+          </button>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function MeeshoOrdersTab({ status = "pending" }) {
   const isMobile = useIsMobile();
+  const view = VIEWS[status] || VIEWS.pending;
   const [data, setData] = useState(null);
-  const [tab, setTab] = useState("pending");
   const [q, setQ] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
@@ -275,11 +355,13 @@ export function MeeshoOrdersTab({ embedded = false }) {
   const [confirming, setConfirming] = useState(false);
   const [labelFilter, setLabelFilter] = useState("all");
   const [slaFilter, setSlaFilter] = useState("all");
-  const [packetFilter, setPacketFilter] = useState("all");
+  const [linkFilter, setLinkFilter] = useState("all");
   const [bizFilter, setBizFilter] = useState("all");
   const [downloading, setDownloading] = useState(false);
-  // A selection belongs to one tab — switching tabs starts afresh.
-  useEffect(() => { setPicked(new Set()); }, [tab]);
+  const [linking, setLinking] = useState(null);
+  const [shown, setShown] = useState(PAGE);
+  const [showHold, setShowHold] = useState(false);
+  useEffect(() => { setShown(PAGE); }, [q, labelFilter, slaFilter, linkFilter, bizFilter]);
 
   const load = useCallback(async () => {
     try {
@@ -294,41 +376,22 @@ export function MeeshoOrdersTab({ embedded = false }) {
     return () => clearInterval(t);
   }, [load, data?.syncing]);
 
-  const refresh = async () => {
+  const post = async (path, body, fail) => {
     setBusy(true); setError(null);
     try {
-      const res = await fetch(`${API}/meesho-orders/refresh/`, { method: "POST" });
-      const d = await res.json().catch(() => ({}));
-      if (!res.ok) setError(d.error || "Couldn't start a refresh.");
-      await load();
-    } finally { setBusy(false); }
-  };
-
-  const accept = async () => {
-    setBusy(true); setError(null);
-    try {
-      const res = await fetch(`${API}/meesho-orders/accept/`, {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ orders: chosen() }),
+      const res = await fetch(`${API}/meesho-orders/${path}`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined,
       });
       const d = await res.json().catch(() => ({}));
-      if (!res.ok) setError(d.error || "Couldn't accept those orders.");
-      else setPicked(new Set());
-      setConfirming(false);
+      if (!res.ok) setError(d.error || fail);
+      else if (body) setPicked(new Set());
       await load();
+      return res.ok;
     } finally { setBusy(false); }
   };
-  const generateLabels = async () => {
-    setBusy(true); setError(null);
-    try {
-      const res = await fetch(`${API}/meesho-orders/labels/`, {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ orders: chosen() }),
-      });
-      const d = await res.json().catch(() => ({}));
-      if (!res.ok) setError(d.error || "Couldn't generate those labels.");
-      else setPicked(new Set());
-      await load();
-    } finally { setBusy(false); }
-  };
+  const refresh = () => post("refresh/", null, "Couldn't start a refresh.");
+  const accept = async () => { await post("accept/", { orders: chosen() }, "Couldn't accept those orders."); setConfirming(false); };
+  const generateLabels = () => post("labels/", { orders: chosen() }, "Couldn't generate those labels.");
   const downloadLabels = async (batch) => {
     setDownloading(true); setError(null);
     try {
@@ -344,81 +407,106 @@ export function MeeshoOrdersTab({ embedded = false }) {
       setTimeout(() => URL.revokeObjectURL(url), 10000);
     } finally { setDownloading(false); }
   };
-  const togglePick = (k) => setPicked((p) => { const n = new Set(p); if (n.has(k)) n.delete(k); else n.add(k); return n; });
-  // Each picked order goes to its own business's Meesho account.
-  const chosen = () => (current?.rows || []).filter((r) => picked.has(keyOf(r)))
-    .map((r) => ({ business_id: r.business_id, sub_order_num: r.sub_order_num }));
 
-  const current = data?.tabs.find((t) => t.key === tab);
+  const tabOf = (k) => data?.tabs.find((t) => t.key === k);
+  const all = useMemo(() => view.tabs.flatMap((k) => tabOf(k)?.rows || []), [data, status]);   // eslint-disable-line react-hooks/exhaustive-deps
+  const byBiz = useMemo(() => all.filter((r) => bizFilter === "all" || String(r.business_id) === bizFilter), [all, bizFilter]);
   const rows = useMemo(() => {
-    let all = current?.rows || [];
-    if (bizFilter !== "all") all = all.filter((r) => String(r.business_id) === bizFilter);
-    if (tab === "ready_to_ship") {
-      all = all.filter(LABEL_FILTERS.find((f) => f.key === labelFilter).test)
-        .filter(SLA_FILTERS.find((f) => f.key === slaFilter).test)
-        .filter(PACKET_FILTERS.find((f) => f.key === packetFilter).test);
-    }
+    let out = byBiz;
+    if (status === "ready_to_ship") out = out.filter(LABEL_FILTERS.find((f) => f.key === labelFilter).test);
+    if (status === "pending" || status === "ready_to_ship") out = out.filter(SLA_FILTERS.find((f) => f.key === slaFilter).test);
+    if (status === "ready_to_ship" || status === "shipped") out = out.filter(LINK_FILTERS.find((f) => f.key === linkFilter).test);
     const s = q.trim().toLowerCase();
-    if (!s) return all;
-    return all.filter((r) => [r.sku, r.sub_order_num, r.order_num, r.product_name, r.packet_id, r.awb, r.business_name]
+    if (!s) return out;
+    return out.filter((r) => [r.sku, r.sub_order_num, r.order_num, r.product_name, r.packet_id, r.awb, r.business_name, r.meesho_packet]
       .some((v) => (v || "").toLowerCase().includes(s)));
-  }, [current, q, tab, labelFilter, slaFilter, packetFilter, bizFilter]);
+  }, [byBiz, q, status, labelFilter, slaFilter, linkFilter]);
 
   if (!data) {
     return error
       ? <div style={{ ...S.card, color: C.red, fontWeight: 700 }}>{error}</div>
       : <div style={{ display: "flex", justifyContent: "center", padding: 60 }}><CircularProgress style={{ color: C.orange }} /></div>;
   }
+  const current = tabOf(view.tabs[0]);
   const accounts = data.accounts || (data.account ? [data.account] : []);
   const multi = accounts.length > 1;
   const syncing = data.syncing || busy;
   const lastAccepts = latestAccepts(data.accepts);
   const lastLabels = data.label_batches?.[0];
-  const accepting = (tab === "pending" && lastAccepts.some((r) => BUSY.includes(r.status)))
-    || (tab === "ready_to_ship" && !!lastLabels?.busy);
-  // Oldest pull across the combined accounts — what "updated" honestly means.
+  const working = (status === "pending" && lastAccepts.some((r) => BUSY.includes(r.status))) || (status === "ready_to_ship" && !!lastLabels?.busy);
   const synced = accounts.map((x) => x.last_sync_at).filter(Boolean).sort()[0];
-  const nextPull = accounts.filter((x) => x.sync_enabled && x.next_sync_at).map((x) => x.next_sync_at).sort()[0];
   const failedAccounts = accounts.filter((x) => x.last_sync_status === "FAILED" || x.status === "FAILED");
-  // Pending: accept. Ready to ship: generate labels.
-  const canAccept = data.is_admin && data.connected && (tab === "pending" || tab === "ready_to_ship");
-  const isLabels = tab === "ready_to_ship";
-  const rtsRows = (data.tabs.find((t) => t.key === "ready_to_ship")?.rows || [])
-    .filter((r) => bizFilter === "all" || String(r.business_id) === bizFilter);
-  // Only orders still in the list count as picked (accepted ones drop out on the next pull).
-  const inTab = new Set((current?.rows || []).map(keyOf));
+  const canAct = !!view.action && data.is_admin && data.connected;
+  const inTab = new Set(all.map(keyOf));
   const pickedNow = [...picked].filter((x) => inTab.has(x));
   const pickedBiz = new Set(pickedNow.map((k) => k.split(":")[0])).size;
   const allShownPicked = rows.length > 0 && rows.every((r) => picked.has(keyOf(r)));
+  const togglePick = (k) => setPicked((p) => { const n = new Set(p); if (n.has(k)) n.delete(k); else n.add(k); return n; });
   const pickAllShown = () => setPicked((p) => {
     const n = new Set(p);
     if (allShownPicked) rows.forEach((r) => n.delete(keyOf(r))); else rows.forEach((r) => n.add(keyOf(r)));
     return n;
   });
+  const chosen = () => all.filter((r) => picked.has(keyOf(r))).map((r) => ({ business_id: r.business_id, sub_order_num: r.sub_order_num }));
   const bizOptions = [{ key: "all", label: "All businesses", test: () => true },
-  ...accounts.map((x) => ({ key: String(x.business_id), label: x.business_name, test: (r) => r.business_id === x.business_id }))];
-  const total = data.tabs.filter((t) => !DONE.includes(t.key)).reduce((n, t) => n + t.count, 0);
+    ...accounts.map((x) => ({ key: String(x.business_id), label: x.business_name, test: (r) => r.business_id === x.business_id }))];
+  const filtered = [labelFilter, slaFilter, linkFilter, bizFilter].some((f) => f !== "all") || q;
+  const clear = () => { setLabelFilter("all"); setSlaFilter("all"); setLinkFilter("all"); setBizFilter("all"); setQ(""); };
+  const hold = tabOf("hold")?.rows || [];
+  const count = (test) => byBiz.filter(test).length;
+  const today = (r) => r.dispatch_by === data.today;
+  const needsLink = LINK_FILTERS.find((f) => f.key === "todo").test;
+
+  // The headline numbers for this step — each one filters the list.
+  const nums = {
+    pending: [
+      { label: "To accept", value: byBiz.length, tone: C.orange, on: slaFilter === "all", onClick: () => setSlaFilter("all") },
+      { label: "Past SLA", value: count(isBreached), tone: C.red, on: slaFilter === "breached", onClick: () => setSlaFilter("breached") },
+      { label: "Breaching soon", value: count((r) => r.sla_status === "breaching_soon"), tone: "#B45309", on: slaFilter === "soon", onClick: () => setSlaFilter("soon") },
+      { label: "Dispatch today", value: count(today), tone: C.gray900 },
+      { label: "On hold", value: hold.length, tone: C.gray600, sub: "Meesho holds these back", onClick: hold.length ? () => setShowHold((x) => !x) : null, on: showHold },
+    ],
+    ready_to_ship: [
+      { label: "Ready to ship", value: byBiz.length, tone: "#2563EB", on: !filtered, onClick: clear },
+      { label: "Labels to make", value: count((r) => !labelDone(r)), tone: C.orange, on: labelFilter === "todo", onClick: () => setLabelFilter(labelFilter === "todo" ? "all" : "todo") },
+      { label: "Needs linking", value: count(needsLink), tone: "#7C3AED", on: linkFilter === "todo", onClick: () => setLinkFilter(linkFilter === "todo" ? "all" : "todo") },
+      { label: "Past SLA", value: count(isBreached), tone: C.red, on: slaFilter === "breached", onClick: () => setSlaFilter(slaFilter === "breached" ? "all" : "breached") },
+      { label: "Dispatch today", value: count(today), tone: C.gray900 },
+    ],
+    shipped: [
+      { label: "Shipped", value: byBiz.length, tone: "#059669", on: linkFilter === "all", onClick: () => setLinkFilter("all") },
+      { label: "Linked on Meesho", value: count((r) => r.link_state === "linked"), tone: "#15803D", on: linkFilter === "linked", onClick: () => setLinkFilter("linked") },
+      { label: "Needs linking", value: count(needsLink), tone: "#7C3AED", on: linkFilter === "todo", onClick: () => setLinkFilter("todo") },
+      { label: "Different packet", value: count((r) => r.link_state === "other_packet"), tone: C.red, on: linkFilter === "other_packet", onClick: () => setLinkFilter("other_packet") },
+    ],
+    cancelled: [{ label: "Cancelled", value: byBiz.length, tone: C.red }],
+  }[status];
+
+  const showLink = status === "ready_to_ship" || status === "shipped";
+  const cols = [
+    ...(canAct ? [""] : []), "Product", ...(multi ? ["Business"] : []), "Qty", "Sub-order",
+    ...(showLink ? ["AWB / Packet", "Link"] : []),
+    ...(status === "ready_to_ship" ? ["Label"] : []),
+    status === "cancelled" ? "Reason" : status === "shipped" ? "Ordered" : "Dispatch by",
+    ...(["pending", "ready_to_ship"].includes(status) ? ["SLA"] : []),
+  ];
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 14, paddingBottom: pickedNow.length ? 72 : 0 }}>
+      {/* What this tab is for, how fresh it is, and Refresh */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
-        <div style={{ minWidth: 0 }}>
-          {!embedded && <h1 style={{ fontSize: 22, fontWeight: 800, color: C.gray900, margin: 0 }}>Meesho Orders</h1>}
-          <p style={{ fontSize: 13, color: C.gray500, marginTop: embedded ? 0 : 3 }}>
-            {data.connected
-              ? <>Live from the Meesho panel · {multi ? `${accounts.length} businesses combined (${accounts.map((x) => x.business_name).join(", ")})` : (accounts[0]?.supplier_name || accounts[0]?.business_name)}
-                {" "}· updated <b>{ago(synced)}</b>{nextPull ? ` · next pull ${time(nextPull)}` : ""}</>
-              : "Connect the Meesho account to see its orders here."}
-          </p>
+        <div style={{ minWidth: 0, maxWidth: 760 }}>
+          <div style={{ fontSize: 13.5, color: C.gray600 }}>{view.help}</div>
+          <div style={{ fontSize: 12, color: C.gray500, marginTop: 3 }}>
+            {data.connected ? <>From the Meesho panel{multi ? ` · ${accounts.length} businesses` : ""} · updated <b>{ago(current?.fetched_at || synced)}</b></>
+              : "Connect a Meesho account to see its orders here."}
+          </div>
         </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          {!embedded && <Link to="/meesho-orders?tab=settings" style={{ ...btn("ghost", "md"), textDecoration: "none" }}>Sync settings</Link>}
-          {data.connected && (
-            <button onClick={refresh} disabled={syncing} style={{ ...btn("primary", "md"), minWidth: 140, opacity: syncing ? 0.7 : 1 }}>
-              {syncing ? <><CircularProgress size={14} style={{ color: "#fff", marginRight: 6, verticalAlign: "-2px" }} />Syncing…</> : "↻ Refresh"}
-            </button>
-          )}
-        </div>
+        {data.connected && (
+          <button onClick={refresh} disabled={syncing} style={{ ...btn("ghost", "md"), minWidth: 120, opacity: syncing ? 0.7 : 1 }}>
+            {syncing ? <><CircularProgress size={13} style={{ marginRight: 6, verticalAlign: "-2px" }} />Syncing…</> : "↻ Refresh"}
+          </button>
+        )}
       </div>
 
       {!data.connected && (
@@ -427,120 +515,105 @@ export function MeeshoOrdersTab({ embedded = false }) {
           <Link to="/meesho-orders?tab=settings" style={{ ...btn("primary", "md"), textDecoration: "none" }}>Connect Meesho</Link>
         </div>
       )}
-      {data.connected && (!data.queue || !data.worker) && (
-        <div style={{ background: C.amberLight, border: `1.5px solid ${C.amberBorder}`, borderRadius: 12, padding: "10px 14px", color: "#92400E", fontSize: 13, fontWeight: 700 }}>
-          ⚠ {!data.queue ? "The job queue (Redis) can't be reached" : "The sync worker isn't running"} — these numbers won't update until it is.
-        </div>
-      )}
       {failedAccounts.map((x) => (
         <div key={x.business_id} style={{ background: C.redLight, border: `1.5px solid ${C.redBorder}`, borderRadius: 12, padding: "10px 14px", color: C.red, fontSize: 13, fontWeight: 700 }}>
           {multi ? `${x.business_name}: last` : "Last"} sync failed: {x.last_sync_message || x.status_message} <Link to="/meesho-orders?tab=settings" style={{ color: C.red }}>Fix it under Settings →</Link>
         </div>
       ))}
-      {error && <div style={{ color: C.red, fontWeight: 700, fontSize: 13 }}>{error}</div>}
+      {error && <div role="alert" style={{ color: C.red, fontWeight: 700, fontSize: 13 }}>{error}</div>}
 
-      <div style={{ display: "grid", gap: 10, gridTemplateColumns: isMobile ? "repeat(2, minmax(0, 1fr))" : `repeat(${data.tabs.length}, minmax(0, 1fr))` }}>
-        {data.tabs.map((t) => <TabTile key={t.key} t={t} on={tab === t.key} onClick={() => setTab(t.key)} />)}
+      <div style={{ display: "grid", gap: 10, gridTemplateColumns: isMobile ? "repeat(2, minmax(0, 1fr))" : `repeat(${nums.length}, minmax(0, 1fr))` }}>
+        {nums.map((n) => <Num key={n.label} {...n} />)}
       </div>
-      {data.connected && <div style={{ fontSize: 12.5, color: C.gray500 }}>{total} open order{total === 1 ? "" : "s"} on the panel (on hold, pending and ready to ship).</div>}
 
-      {tab === "pending" && <AcceptStatus runs={lastAccepts} showBiz={multi} />}
-      {tab === "ready_to_ship" && <LabelStatus batch={lastLabels} onDownload={downloadLabels} downloading={downloading} showBiz={multi} />}
-      {(multi || tab === "ready_to_ship") && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          {multi && <Chips options={bizOptions} value={bizFilter} onChange={setBizFilter} rows={current?.rows || []} color={C.gray800} />}
-          {tab === "ready_to_ship" && <>
-            <Chips options={LABEL_FILTERS} value={labelFilter} onChange={setLabelFilter} rows={rtsRows} />
-            <Chips options={SLA_FILTERS} value={slaFilter} onChange={setSlaFilter} rows={rtsRows} color={C.red} />
-            <Chips options={PACKET_FILTERS} value={packetFilter} onChange={setPacketFilter} rows={rtsRows} color="#7C3AED" />
-          </>}
+      {status === "pending" && <AcceptStatus runs={lastAccepts} showBiz={multi} />}
+      {status === "ready_to_ship" && <LabelStatus batch={lastLabels} onDownload={downloadLabels} downloading={downloading} showBiz={multi} />}
+      {status === "pending" && showHold && hold.length > 0 && (
+        <div style={{ ...S.card, padding: 0, overflow: "hidden", borderTop: `4px solid ${TONE.hold}` }}>
+          <div style={{ padding: "10px 14px", fontWeight: 800, color: TONE.hold }}>On hold · {hold.length}</div>
+          {hold.map((r) => <OrderCard key={keyOf(r)} r={r} showBiz={multi} />)}
         </div>
       )}
       {confirming && <ConfirmAccept count={pickedNow.length} businesses={pickedBiz} busy={busy} onYes={accept} onNo={() => setConfirming(false)} />}
+      {linking && <LinkDialog r={linking} onClose={() => setLinking(null)} onDone={load} />}
 
       <div style={{ ...S.card, padding: 0, overflow: "hidden" }}>
-        {canAccept && (
-          <div style={{
-            padding: "10px 14px", display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", borderBottom: `1px solid ${C.gray100}`,
-            background: pickedNow.length ? C.orangeLight : C.gray50
-          }}>
-            <label style={{ display: "inline-flex", gap: 8, alignItems: "center", fontSize: 13, fontWeight: 700, color: C.gray700, cursor: "pointer" }}>
-              <input type="checkbox" checked={allShownPicked} onChange={pickAllShown} disabled={accepting || !rows.length}
-                style={{ width: 18, height: 18, accentColor: C.orange }} />
-              Select all {rows.length}{q ? " shown" : ""}
-            </label>
-            <span style={{ fontSize: 13, color: C.gray600 }}>{pickedNow.length ? `${pickedNow.length} selected${pickedBiz > 1 ? ` · ${pickedBiz} businesses` : ""}` : isLabels ? "Tick orders to make their labels" : "Tick orders to accept them"}</span>
-            {pickedNow.length > 0 && (
-              <span style={{ marginLeft: "auto", display: "inline-flex", gap: 8 }}>
-                <button onClick={() => setPicked(new Set())} disabled={accepting} style={btn("ghost", "sm")}>Clear</button>
-                {isLabels ? (
-                  <button onClick={generateLabels} disabled={accepting || busy} style={{ ...btn("primary", "md"), opacity: accepting || busy ? 0.5 : 1 }}>
-                    🏷 Generate {pickedNow.length} label{pickedNow.length === 1 ? "" : "s"}
-                  </button>
-                ) : (
-                  <button onClick={() => setConfirming(true)} disabled={accepting} style={{ ...btn("primary", "md"), opacity: accepting ? 0.5 : 1 }}>
-                    ✓ Accept {pickedNow.length} order{pickedNow.length === 1 ? "" : "s"}
-                  </button>
-                )}
-              </span>
-            )}
-          </div>
-        )}
-        <div style={{ padding: "12px 14px", display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", borderBottom: `1px solid ${C.gray100}` }}>
-          <span style={{ fontSize: 15, fontWeight: 800, color: TONE[tab] }}>{current?.label}</span>
-          <span style={{ fontSize: 12.5, color: C.gray500 }}>{rows.length} of {current?.count ?? 0}{current?.fetched_at ? ` · fetched ${time(current.fetched_at)}` : ""}</span>
-          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search SKU, sub-order, packet ID, AWB…"
-            style={{ ...S.inp, marginLeft: "auto", width: isMobile ? "100%" : 280 }} />
+        {/* One row of filters */}
+        <div style={{ padding: "12px 14px", display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap", borderBottom: `1px solid ${C.gray100}`, background: C.gray50 }}>
+          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search SKU, sub-order, AWB, packet…" aria-label="Search orders"
+            style={{ ...S.inp, flex: "1 1 240px", minWidth: 0 }} />
+          {multi && <Pick label="Business" options={bizOptions} value={bizFilter} onChange={setBizFilter} rows={all} />}
+          {status === "ready_to_ship" && <Pick label="Label" options={LABEL_FILTERS} value={labelFilter} onChange={setLabelFilter} rows={byBiz} />}
+          {["pending", "ready_to_ship"].includes(status) && <Pick label="SLA" options={SLA_FILTERS} value={slaFilter} onChange={setSlaFilter} rows={byBiz} />}
+          {showLink && <Pick label="Packet link" options={LINK_FILTERS} value={linkFilter} onChange={setLinkFilter} rows={byBiz} />}
+          {filtered && <button onClick={clear} style={{ ...btn("ghost", "sm"), alignSelf: "flex-end" }}>Clear filters</button>}
         </div>
+        <div style={{ padding: "8px 14px", display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", borderBottom: `1px solid ${C.gray100}`, fontSize: 12.5, color: C.gray500 }}>
+          {canAct && rows.length > 0 && (
+            <label style={{ display: "inline-flex", gap: 8, alignItems: "center", fontWeight: 700, color: C.gray700, cursor: "pointer" }}>
+              <input type="checkbox" checked={allShownPicked} onChange={pickAllShown} disabled={working} style={{ width: 17, height: 17, accentColor: C.orange }} />
+              Select all {rows.length}{filtered ? " shown" : ""}
+            </label>
+          )}
+          <span>{rows.length} of {byBiz.length} {view.title.toLowerCase()} order{byBiz.length === 1 ? "" : "s"}</span>
+        </div>
+
         {rows.length === 0 ? (
           <div style={{ padding: 40, textAlign: "center", color: C.gray500, fontSize: 14 }}>
-            {!current?.fetched_at ? "Not pulled yet — press Refresh."
-              : q ? "No orders match."
-                : tab === "ready_to_ship" && [labelFilter, slaFilter, packetFilter].some((f) => f !== "all") ? "No orders match these filters."
-                  : bizFilter !== "all" ? "No orders for this business here."
-                    : `No ${current.label.toLowerCase()} orders right now.`}
+            {!current?.fetched_at ? "Not pulled yet — press Refresh." : filtered ? "No orders match these filters." : `No ${view.title.toLowerCase()} orders right now.`}
           </div>
         ) : isMobile ? (
-          rows.map((r) => <OrderCard key={keyOf(r)} r={r} cancelled={tab === "cancelled"} shipped={tab === "shipped"} showBiz={multi}
-            selectable={canAccept && !accepting} picked={picked.has(keyOf(r))} onPick={() => togglePick(keyOf(r))} />)
+          rows.slice(0, shown).map((r) => (
+            <div key={keyOf(r)}>
+              <OrderCard r={r} cancelled={status === "cancelled"} shipped={status === "shipped"} showBiz={multi}
+                selectable={canAct && !working} picked={picked.has(keyOf(r))} onPick={() => togglePick(keyOf(r))} />
+              {showLink && <div style={{ padding: "0 12px 12px 74px" }}><LinkCell r={r} onLink={data.is_admin ? setLinking : null} /></div>}
+            </div>
+          ))
         ) : (
           <div style={{ overflowX: "auto" }}>
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-              <thead><tr>{canAccept && <th style={{ ...S.th, width: 36 }} />}{["Product", ...(multi ? ["Business"] : []), "Qty", "Sub-order", ...(["ready_to_ship", "shipped"].includes(tab) ? ["Packet ID / AWB"] : []), "Ordered", tab === "cancelled" ? "Status" : "Dispatch by", DONE.includes(tab) ? "" : "SLA", tab === "ready_to_ship" ? "Label" : ""]
-                .map((h, i) => <th key={i} style={{ ...S.th, whiteSpace: "nowrap" }}>{h}</th>)}</tr></thead>
+              <thead><tr>{cols.map((h, i) => <th key={i} style={{ ...S.th, whiteSpace: "nowrap", ...(h === "" ? { width: 36 } : {}) }}>{h}</th>)}</tr></thead>
               <tbody>
-                {rows.map((r) => {
-                  console.log(r, "~r")
+                {rows.slice(0, shown).map((r) => {
                   const sla = slaOf(r.sla_status);
+                  const on = picked.has(keyOf(r));
                   return (
-                    <tr key={keyOf(r)} style={{ background: picked.has(keyOf(r)) ? C.orangeLight : undefined }}>
-                      {canAccept && (
+                    <tr key={keyOf(r)} style={{ background: on ? C.orangeLight : undefined }}>
+                      {canAct && (
                         <td style={{ ...S.td, width: 36 }}>
-                          <input type="checkbox" checked={picked.has(keyOf(r))} onChange={() => togglePick(keyOf(r))} disabled={accepting}
-                            aria-label={`Select ${r.sub_order_num}`} style={{ width: 18, height: 18, accentColor: C.orange }} />
+                          <input type="checkbox" checked={on} onChange={() => togglePick(keyOf(r))} disabled={working}
+                            aria-label={`Select ${r.sub_order_num}`} style={{ width: 17, height: 17, accentColor: C.orange }} />
                         </td>
                       )}
                       <td style={S.td}>
-                        <div style={{ display: "flex", gap: 10, alignItems: "center", minWidth: 260 }}>
+                        <div style={{ display: "flex", gap: 10, alignItems: "center", minWidth: 240 }}>
                           <Img src={r.image} />
                           <div style={{ minWidth: 0 }}>
                             <div style={{ fontFamily: "monospace", fontWeight: 800 }}>{r.sku || "—"}</div>
-                            <div style={{ fontSize: 12, color: C.gray500, maxWidth: 340, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            <div style={{ fontSize: 12, color: C.gray500, maxWidth: 300, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={r.product_name}>
                               {r.product_name}{r.variation && r.variation !== "Free Size" ? ` · ${r.variation}` : ""}
                             </div>
                           </div>
                         </div>
                       </td>
-                      {multi && <td style={{ ...S.td, whiteSpace: "nowrap" }}><Tag variant="gray">{r.business_name}</Tag></td>}
+                      {multi && <td style={{ ...S.td, whiteSpace: "nowrap" }}>{r.business_name}</td>}
                       <td style={{ ...S.td, fontFamily: "monospace", fontWeight: 800 }}>{r.quantity ?? 1}</td>
-                      <td style={{ ...S.td, fontFamily: "monospace", fontSize: 12 }}>{r.sub_order_num}</td>
-                      {["ready_to_ship", "shipped"].includes(tab) && <td style={{ ...S.td, whiteSpace: "nowrap" }}><ShipIds r={r} /></td>}
-                      <td style={{ ...S.td, whiteSpace: "nowrap" }}>{time(r.created_iso)}</td>
-                      {tab === "cancelled"
+                      <td style={{ ...S.td, fontFamily: "monospace", fontSize: 12, whiteSpace: "nowrap" }}>
+                        {r.sub_order_num}
+                        {status !== "shipped" && <div style={{ fontSize: 11, color: C.gray400, fontFamily: "inherit" }}>{time(r.created_iso)}</div>}
+                      </td>
+                      {showLink && <td style={{ ...S.td, whiteSpace: "nowrap" }}><ShipIds r={r} /></td>}
+                      {showLink && <td style={S.td}><LinkCell r={r} onLink={data.is_admin ? setLinking : null} /></td>}
+                      {status === "ready_to_ship" && <td style={{ ...S.td, fontSize: 12 }}><Tag variant={labelDone(r) ? "green" : "amber"}>{labelDone(r) ? "Downloaded" : "To make"}</Tag></td>}
+                      {status === "cancelled"
                         ? <td style={S.td}><Tag variant="red">{r.cancelled_message || "Cancelled"}</Tag></td>
-                        : <td style={{ ...S.td, whiteSpace: "nowrap", fontWeight: r.dispatch_by === data.today ? 800 : 500 }}>{day(r.dispatch_by)}{r.dispatch_by === data.today ? " · today" : ""}</td>}
-                      <td style={S.td}>{!DONE.includes(tab) && sla && <Tag variant={sla.tag}>{sla.label}</Tag>}{r.is_express && <> <Tag variant="blue">Express</Tag></>}</td>
-                      <td style={{ ...S.td, fontSize: 12, color: C.gray600 }}>{tab === "ready_to_ship" ? labelText(r.label) : ""}</td>
+                        : status === "shipped"
+                          ? <td style={{ ...S.td, whiteSpace: "nowrap" }}>{time(r.created_iso)}</td>
+                          : <td style={{ ...S.td, whiteSpace: "nowrap", fontWeight: today(r) ? 800 : 500, color: today(r) ? C.gray900 : C.gray700 }}>{day(r.dispatch_by)}{today(r) ? " · today" : ""}</td>}
+                      {["pending", "ready_to_ship"].includes(status) && (
+                        <td style={S.td}>{sla && <Tag variant={sla.tag}>{sla.label}</Tag>}{r.is_express && <> <Tag variant="blue">Express</Tag></>}</td>
+                      )}
                     </tr>
                   );
                 })}
@@ -548,7 +621,34 @@ export function MeeshoOrdersTab({ embedded = false }) {
             </table>
           </div>
         )}
+        {rows.length > shown && (
+          <div style={{ padding: 10, textAlign: "center", borderTop: `1px solid ${C.gray100}` }}>
+            <button onClick={() => setShown((n) => n + PAGE)} style={btn("ghost", "sm")}>Show {Math.min(PAGE, rows.length - shown)} more of {rows.length - shown}</button>
+          </div>
+        )}
       </div>
+
+      {/* The step's action, always in reach while orders are ticked */}
+      {canAct && pickedNow.length > 0 && (
+        <div role="region" aria-label="Selected orders"
+          style={{ position: "sticky", bottom: 12, zIndex: 30, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap",
+            padding: "12px 16px", borderRadius: 14, background: C.gray900, color: "#fff", boxShadow: "0 12px 30px rgba(15,23,42,.3)" }}>
+          <b>{pickedNow.length} selected</b>
+          {pickedBiz > 1 && <span style={{ fontSize: 12.5, opacity: 0.8 }}>across {pickedBiz} businesses</span>}
+          <span style={{ marginLeft: "auto", display: "inline-flex", gap: 8 }}>
+            <button onClick={() => setPicked(new Set())} disabled={working} style={{ ...btn("ghost", "sm"), background: "transparent", color: "#fff", borderColor: "rgba(255,255,255,.4)" }}>Clear</button>
+            {view.action === "labels" ? (
+              <button onClick={generateLabels} disabled={working || busy} style={{ ...btn("primary", "md"), opacity: working || busy ? 0.5 : 1 }}>
+                🏷 Make {pickedNow.length} label{pickedNow.length === 1 ? "" : "s"}
+              </button>
+            ) : (
+              <button onClick={() => setConfirming(true)} disabled={working} style={{ ...btn("primary", "md"), opacity: working ? 0.5 : 1 }}>
+                ✓ Accept {pickedNow.length} order{pickedNow.length === 1 ? "" : "s"}
+              </button>
+            )}
+          </span>
+        </div>
+      )}
     </div>
   );
 }

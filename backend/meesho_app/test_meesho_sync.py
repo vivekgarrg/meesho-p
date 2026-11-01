@@ -830,6 +830,23 @@ class MeeshoPaymentsTests(TestCase):
         self.assertEqual(a["paid"][0]["ads"], -150.05)
         self.assertEqual((d["outstanding_count"], d["outstanding_total"]), (1, 99.0))
 
+    def test_every_payment_row_says_when_it_was_last_updated(self):
+        from django.utils import timezone
+        from .models import MeeshoOutstandingPayment, OrderPayment
+        Membership.objects.get_or_create(user=self.admin, business=self.biz)
+        now = timezone.now()
+        MeeshoOutstandingPayment.objects.create(business=self.biz, sub_order_no="9_1", final_settlement_amount=99, imported_at=now)
+        self.assertEqual(self.c.get(self.base + "/").data["outstanding"][0]["updated_at"], now)
+        path = self.file("paid.xlsx", [{"sub_order_no": "1_1", "transaction_id": "AXIS1", "payment_date": "2026-10-08",
+                                        "final_settlement_amount": 10, "live_order_status": "Delivered"}])
+        self.run_command("completed", path)
+        first = OrderPayment.objects.get().updated_at
+        self.assertIsNotNone(first)
+        self.run_command("completed", path)                                   # read again two hours on
+        self.assertGreaterEqual(OrderPayment.objects.get().updated_at, first)
+        g = self.c.get(f"/api/business/{self.biz.id}/orders/grouped/").data
+        self.assertEqual(g["groups"][0]["updated_at"], OrderPayment.objects.get().updated_at)
+
     def test_refresh_queues_a_payments_read(self):
         with mock.patch.object(meesho_sync, "enqueue", return_value="jid") as enq:
             r = self.c.post(self.base + "/refresh/")

@@ -53,6 +53,7 @@ function Payouts({ title, rows, upcoming, multi }) {
             </div>
             <span style={{ fontSize: 11.5, color: C.gray500 }}>
               orders {inr(d.orders)}{d.ads ? ` · ads ${inr(d.ads)}` : ""}
+              {d.parts[0]?.updated_at ? ` · updated ${when(d.parts.map((p) => p.updated_at).sort()[0])}` : ""}
               {!upcoming && !multi && d.parts[0]?.transfer_id ? ` · UTR ${d.parts[0].transfer_id}` : ""}
             </span>
             {multi && d.parts.map((p) => (
@@ -114,8 +115,9 @@ export function MeeshoPaymentsTab() {
     return <div style={{ ...S.card, padding: 18, fontSize: 13.5, color: C.gray600 }}>No Meesho account is connected here yet. <Link to="/meesho-orders?tab=settings" style={{ color: C.orange, fontWeight: 800 }}>Connect one under Settings</Link>.</div>;
   }
 
-  const paid = accounts.flatMap((a) => a.paid.map((p) => ({ ...p, business_name: a.business_name })));
-  const upcoming = accounts.flatMap((a) => a.upcoming.map((p) => ({ ...p, business_name: a.business_name })));
+  // Each payout carries when its business's payments were last read from Meesho.
+  const paid = accounts.flatMap((a) => a.paid.map((p) => ({ ...p, business_name: a.business_name, updated_at: a.fetched_at })));
+  const upcoming = accounts.flatMap((a) => a.upcoming.map((p) => ({ ...p, business_name: a.business_name, updated_at: a.fetched_at })));
   const outTotal = sum(outstanding, (o) => o.amount);
 
   return (
@@ -174,11 +176,11 @@ export function MeeshoPaymentsTab() {
         </div>
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
-            <thead><tr>{["Expected", ...(multi && biz === "all" ? ["Business"] : []), "Sub-order", "SKU", "Status", "Qty", "Sale", "Settlement"].map((h) => (
+            <thead><tr>{["Expected", ...(multi && biz === "all" ? ["Business"] : []), "Sub-order", "SKU", "Status", "Qty", "Sale", "Settlement", "Updated at"].map((h) => (
               <th key={h} style={{ ...S.th, textAlign: ["Qty", "Sale", "Settlement"].includes(h) ? "right" : "left" }}>{h}</th>
             ))}</tr></thead>
             <tbody>
-              {rows.length === 0 && <tr><td colSpan={8} style={{ ...S.td, textAlign: "center", color: C.gray400, padding: 24 }}>{outstanding.length ? "Nothing matches." : "Nothing outstanding — or not read yet."}</td></tr>}
+              {rows.length === 0 && <tr><td colSpan={10} style={{ ...S.td, textAlign: "center", color: C.gray400, padding: 24 }}>{outstanding.length ? "Nothing matches." : "Nothing outstanding — or not read yet."}</td></tr>}
               {rows.slice(0, shown).map((o) => (
                 <tr key={`${o.business_id}-${o.sub_order_no}-${o.expected}`}>
                   <td style={{ ...S.td, whiteSpace: "nowrap" }}>{day(o.expected)}</td>
@@ -189,6 +191,7 @@ export function MeeshoPaymentsTab() {
                   <td style={{ ...S.td, textAlign: "right" }}>{o.quantity ?? "—"}</td>
                   <td style={{ ...S.td, textAlign: "right" }}>{inr2(o.sale)}</td>
                   <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", fontWeight: 800, color: (o.amount || 0) < 0 ? C.red : C.gray800 }}>{inr2(o.amount)}</td>
+                  <td style={{ ...S.td, whiteSpace: "nowrap", color: C.gray600 }} title={o.updated_at ? new Date(o.updated_at).toLocaleString("en-IN") : ""}>{when(o.updated_at)}</td>
                 </tr>
               ))}
             </tbody>
