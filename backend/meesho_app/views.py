@@ -791,7 +791,6 @@ def compute_order_net(payment_rows, sku_final_price, sku_packaging_price, quanti
     net = 0
     status = ""
 
-    unknown_rows = c["other_adj_rows"]  or c["other_status_rows"]
     claimed_orders = c["claim_rows"]
     return_orders = c["return_rows"]
     rto_orders = c["rto_rows"]
@@ -804,12 +803,12 @@ def compute_order_net(payment_rows, sku_final_price, sku_packaging_price, quanti
     # was deducted rather than what the SKU's rate happens to be.
     packaging_applied = ZERO
 
-    if unknown_rows:
-        final_purchasing  = 0
-        net = 0 - final_purchasing
-        status = unique_statuses[-1]
-
-    elif claimed_orders:
+    # Miscellaneous deductions (recoveries such as "missing items", insurance,
+    # short-video commission — blank-status rows) are separate money movements:
+    # already in total_settlement, they never decide how the order is costed.
+    # They used to zero the whole order — dropping its item cost while its
+    # settlement still counted as revenue, and the deduction from its SKU.
+    if claimed_orders:
         packaging_applied = packaging_for(BusinessCostSetting.CLAIM)
         final_purchasing = purchase_cost + packaging_applied
         net = total_settlement - final_purchasing
@@ -849,9 +848,13 @@ def compute_order_net(payment_rows, sku_final_price, sku_packaging_price, quanti
         net = total_settlement - final_purchasing
         status = "Shipped"
     else:
+        # No delivered/return/RTO/exchange/shipped row: a cancelled (or other)
+        # order's charges, or deductions alone. No goods went out, so no item
+        # cost — but every rupee Meesho took or paid counts.
         final_purchasing = 0
-        net = total_settlement - final_purchasing
-        status = unique_statuses[-1]
+        net = total_settlement
+        cancelled = any((r.live_order_status or "").upper() == "CANCELLED" for r in c["other_status_rows"])
+        status = "Cancelled" if cancelled else unique_statuses[-1]
 
     return {
         "net": net, 
@@ -1784,22 +1787,39 @@ def _profit_payments_qs(business, date_from, date_to, request):
     """
     qs = _apply_settlement_filter(OrderPayment.objects.filter(business=business), request)
     if date_from or date_to:
-        ord_qs = Order.objects.filter(business=business)
+        # A payment belongs to the month its ORDER was placed — whenever it was
+        # paid. The order's date comes from the orders table; a payment whose
+        # order isn't there (not uploaded / synced yet) goes by the order date
+        # on its own row, and one with neither by when it was paid. Each
+        # payment counts in exactly one period, and none is left out — a
+        # deduction on an order missing from the orders table used to vanish.
+        # An order's date is the day it was placed: its earliest row's (an
+        # exchange or a re-delivery adds a row with a later date, which must not
+        # put the same order in a second month).
+        from django.db.models import Min
+        ord_qs = (Order.objects.filter(business=business).values("sub_order_no")
+                  .annotate(placed=Min("order_date")))
         if date_from:
-            ord_qs = ord_qs.filter(order_date__gte=date_from)
+            ord_qs = ord_qs.filter(placed__gte=date_from)
         if date_to:
-            ord_qs = ord_qs.filter(order_date__lte=date_to)
-        # Use a DB subquery — avoids loading thousands of IDs into Python memory
-        if ord_qs.exists():
-            qs = qs.filter(sub_order_no__in=ord_qs.values("sub_order_no"))
-        else:
-            # Fallback: filter OrderPayment.order_date directly (DateTimeField) —
-            # via aware day-bounds, not __date, see _aware_day_bounds.
-            _start, _end = _aware_day_bounds(date_from, date_to)
-            if _start:
-                qs = qs.filter(order_date__gte=_start)
-            if _end:
-                qs = qs.filter(order_date__lt=_end)
+            ord_qs = ord_qs.filter(placed__lte=date_to)
+        known = Order.objects.filter(business=business).values("sub_order_no")
+        _start, _end = _aware_day_bounds(date_from, date_to)
+        own = DQ()
+        if _start:
+            own &= DQ(order_date__gte=_start)
+        if _end:
+            own &= DQ(order_date__lt=_end)
+        paid = DQ()
+        if date_from:
+            paid &= DQ(payment_date__gte=date_from)
+        if date_to:
+            paid &= DQ(payment_date__lte=date_to)
+        qs = qs.filter(
+            DQ(sub_order_no__in=ord_qs.values("sub_order_no"))
+            | (~DQ(sub_order_no__in=known) & DQ(order_date__isnull=False) & own)
+            | (~DQ(sub_order_no__in=known) & DQ(order_date__isnull=True) & paid)
+        )
     return qs
 
 
