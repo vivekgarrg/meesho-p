@@ -3372,7 +3372,7 @@ class MeeshoSyncSetting(models.Model):
     inventory_every = models.PositiveIntegerField(default=30)
     inventory_sku_reads = models.PositiveIntegerField(default=300)    # catalogs whose SKUs are read per run
     payments_every = models.PositiveIntegerField(default=120)
-    payments_paid_days = models.PositiveIntegerField(default=30)
+    payments_paid_days = models.PositiveIntegerField(default=15)
     payments_upcoming_days = models.PositiveIntegerField(default=7)
     returns_every = models.PositiveIntegerField(default=10)
     returns_window = models.CharField(max_length=20, default="last_2_week")   # delivered / lost returns read for

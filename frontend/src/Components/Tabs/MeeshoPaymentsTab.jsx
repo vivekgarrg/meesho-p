@@ -124,9 +124,9 @@ export function MeeshoPaymentsTab() {
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
         <p style={{ fontSize: 13, color: C.gray500, margin: 0, maxWidth: 760 }}>
-          Read from the Meesho panel every two hours. Completed payments of the last 30 days go straight into the{" "}
+          Read from the Meesho panel every two hours. Payments settled in the last {data.paid_days || 15} days go straight into the{" "}
           <Link to="/payments" style={{ color: C.orange, fontWeight: 700 }}>Payments</Link> tables — no file to upload. Outstanding payments
-          (next 7 days) are listed here and kept apart, since they haven't been paid yet.
+          (every upcoming payout date Meesho has data for) are listed here and kept apart, since they haven't been paid yet.
         </p>
         <button onClick={refresh} disabled={data.syncing} style={{ ...btn("primary", "md"), minWidth: 170, opacity: data.syncing ? 0.6 : 1 }}>
           {data.syncing ? <><CircularProgress size={14} style={{ color: "#fff", marginRight: 6, verticalAlign: "-2px" }} />Reading payments…</> : "↻ Refresh payments"}
@@ -147,10 +147,10 @@ export function MeeshoPaymentsTab() {
       </div>
 
       <div style={{ display: "grid", gap: 10, gridTemplateColumns: isMobile ? "repeat(2, minmax(0, 1fr))" : "repeat(4, minmax(0, 1fr))" }}>
-        <Stat label="Paid · last 30 days" value={inr(sum(accounts, (a) => a.paid_total))} sub={`${plural(paid.length, "payout")}`} tone={C.green} />
-        <Stat label="Upcoming · next 7 days" value={inr(sum(accounts, (a) => a.upcoming_total))} sub="Meesho's estimate" tone="#2563EB" />
+        <Stat label="Paid · recent payouts" value={inr(sum(accounts, (a) => a.paid_total))} sub={`${plural(paid.length, "payout")}`} tone={C.green} />
+        <Stat label="Upcoming payouts" value={inr(sum(accounts, (a) => a.upcoming_total))} sub="Meesho's estimate" tone="#2563EB" />
         <Stat label="Outstanding orders" value={outstanding.length.toLocaleString("en-IN")} sub={`${inr(outTotal)} to settle`} tone="#B45309" />
-        <Stat label="Ads deducted · 30 days" value={inr(Math.abs(sum(paid, (p) => p.ads)))} sub="from paid payouts" tone={C.red} />
+        <Stat label="Ads deducted · recent" value={inr(Math.abs(sum(paid, (p) => p.ads)))} sub="from paid payouts" tone={C.red} />
       </div>
 
       {multi && (

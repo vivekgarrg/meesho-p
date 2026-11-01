@@ -1139,6 +1139,7 @@ def meesho_payments(request, business_id):
         "outstanding": outstanding,
         "outstanding_count": qs.count(),
         "outstanding_total": _money(qs.aggregate(t=Sum("final_settlement_amount"))["t"]) or 0,
+        "paid_days": MeeshoSyncSetting.get().payments_paid_days,
         "syncing": MeeshoSyncRun.objects.filter(account__in=live, kind=KIND_PAYMENTS, status__in=busy,
                                                 queued_at__gte=timezone.now() - STUCK_AFTER).exists(),
     })

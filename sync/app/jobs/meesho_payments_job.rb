@@ -7,8 +7,9 @@ require "tmpdir"
 #      Payments tab shows;
 #   2. the payment file for the last PAID_DAYS days (completed) → the
 #      payments tables, through the same importer as the Payments upload;
-#   3. the outstanding payment file, from today to the last payout day the
-#      summary lists (up to UPCOMING_DAYS ahead) → meesho_outstanding_payments,
+#   3. the outstanding payment file, from today to the last payout day Meesho
+#      has data for (the summary is asked for every upcoming payout — its
+#      limit counts payouts, not days) → meesho_outstanding_payments,
 #      replaced each time. Should Meesho refuse that one file, then one file
 #      per listed day — replaced only when every one of them was read.
 #
@@ -26,8 +27,10 @@ class MeeshoPaymentsJob
   sidekiq_options queue: "default", retry: false
 
   INTERVAL = 120                 # minutes between scheduled reads
-  PAID_DAYS = 30
-  UPCOMING_DAYS = 7
+  PAID_DAYS = 15                 # completed payments settled in the last 15 days
+  UPCOMING_DAYS = 7              # only when Meesho lists no upcoming payout: look this far, day by day
+  UPCOMING_PAYOUTS = 60          # ask the summary for every upcoming payout (it caps the count, not days)
+  HORIZON = 90                   # never ask for an outstanding file further out than this
   POLL_SECONDS = 6
   POLL_TIMES = 30                # up to three minutes for Meesho to build a file
   REQUEST_TRIES = 3
@@ -80,7 +83,7 @@ class MeeshoPaymentsJob
   def pull(account)
     @paid_days = MeeshoSyncSetting.value(:payments_paid_days, PAID_DAYS).to_i
     @upcoming_days = MeeshoSyncSetting.value(:payments_upcoming_days, UPCOMING_DAYS).to_i
-    summary = patient(account) { MeeshoPayments.summary(@client, account, paid_days: @paid_days, upcoming_days: @upcoming_days) }
+    summary = patient(account) { MeeshoPayments.summary(@client, account, paid_days: @paid_days, upcoming_days: UPCOMING_PAYOUTS) }
     MeeshoSyncSnapshot.find_or_initialize_by(account_id: account.id, endpoint: "payments_summary")
                       .update!(http_status: 200, payload: summary, fetched_at: Time.current)
 
@@ -114,7 +117,7 @@ class MeeshoPaymentsJob
   # no listing, day by day from today, stopping at the first day without a file.
   def outstanding(account, today, dir, listed)
     last = today + @upcoming_days
-    listed = listed.select { |d| d > today && d <= last }
+    listed = listed.select { |d| d > today && d <= today + HORIZON }   # every day Meesho has data for
     base = { "from" => today.iso8601, "listed" => listed.map(&:iso8601) }
     if listed.any?
       begin

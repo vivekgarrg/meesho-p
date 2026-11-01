@@ -26,7 +26,7 @@ const ROWS = [
     last: "payments", fields: [
       { f: "payments_every", label: "Read", every: [0, 30, 60, 120, 240, 720, 1440] },
       { f: "payments_paid_days", label: "Completed payments for the last (days)", number: true },
-      { f: "payments_upcoming_days", label: "Outstanding payments for the next (days)", number: true },
+      { f: "payments_upcoming_days", label: "Outstanding: when Meesho lists no payout dates, look ahead (days)", number: true },
     ] },
   { key: "returns", title: "Returns & OTPs", what: "Courier OTPs, and every return in transit, out for delivery, delivered, lost or disposed.",
     last: "returns", fields: [

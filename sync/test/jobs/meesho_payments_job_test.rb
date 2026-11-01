@@ -92,7 +92,7 @@ class MeeshoPaymentsJobTest < ActiveSupport::TestCase
     end
     ist = ->(t) { Time.iso8601(t).in_time_zone("Asia/Kolkata") }
     assert_equal [0, 0, 0], ist.(completed["start_date"]).then { |t| [t.hour, t.min, t.sec] }       # midnight IST…
-    assert_equal 30, (ist.(completed["end_date"]).to_date - ist.(completed["start_date"]).to_date).to_i
+    assert_equal 15, (ist.(completed["end_date"]).to_date - ist.(completed["start_date"]).to_date).to_i   # settled in the last 15 days
   end
 
   test "a refused file request is tried again, and one file failing doesn't stop the other" do
@@ -108,6 +108,14 @@ class MeeshoPaymentsJobTest < ActiveSupport::TestCase
     assert_match(/5 new, 2 updated order payments/, run.message)                   # completed went through on the retry
     assert_match(/Outstanding: no outstanding file from .+ \(Meesho answered \(HTTP 400\)/, run.message)
     assert_equal ["completed"], @imports.map(&:last)
+  end
+
+  test "every upcoming payout Meesho lists is asked for, and fetched however far out" do
+    stub_request(:post, "#{BASE}upcoming-payments").to_return(json(daywisePayments: [
+      { date: (@today + 1).iso8601, netAmount: 100 }, { date: (@today + 15).iso8601, netAmount: 50 }], count: 2))
+    run_job
+    assert_requested(:post, "#{BASE}upcoming-payments") { |r| JSON.parse(r.body)["limit"] == MeeshoPaymentsJob::UPCOMING_PAYOUTS }
+    assert_equal [[@today, @today + 15]], pending_spans_requested.uniq        # past the old 7-day cap
   end
 
   test "outstanding is one file, from today to the last listed payout day" do
