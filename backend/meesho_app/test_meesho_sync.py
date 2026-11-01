@@ -615,6 +615,32 @@ class LiveInventoryTests(TestCase):
         self.assertEqual(c.post(self.base + "/pause/", {"listings": [self.l22.pk]}, format="json").status_code, 400)   # already paused
         self.assertEqual(self.queued, [])
 
+    def test_set_stock_goes_sku_by_sku_in_order_and_unpauses_the_paused(self):
+        c = self.client_for(self.admin)
+        r = c.post(self.base + "/stock/", {"listings": [self.l22.pk, self.l11.pk, self.l21.pk], "inventory": 1000}, format="json")
+        self.assertEqual((r.status_code, r.data["skus"], r.data["unpausing"]), (202, 3, 1), r.data)
+        (job, (acct_id, run_id, items)), = self.queued
+        self.assertEqual((job, acct_id), ("MeeshoStockJob", self.acct.pk))
+        # In order — catalog by catalog, SKU by SKU; the paused one flagged (it is unpaused by stock).
+        self.assertEqual([(i["catalog_id"], i["sku"], i["product_id"], i["inventory"], i["paused"]) for i in items],
+                         [(1, "thali-a", 11, 1000, False), (2, "lota", 22, 1000, True), (2, "thali-b", 21, 1000, False)])
+        run = MeeshoSyncRun.objects.get(pk=run_id)
+        self.assertEqual((run.kind, run.records), ("STOCK", 3))
+        self.assertEqual(c.post(self.base + "/stock/", {"listings": [self.l31.pk], "inventory": 5}, format="json").status_code, 409)  # one at a time
+        d = self.client_for(self.worker).get(self.base + "/").data
+        self.assertTrue(d["stocking"])
+        self.assertEqual(d["stock_runs"][0]["business_name"], "Cosmify")
+
+    def test_set_stock_checks_who_and_what(self):
+        self.assertEqual(self.client_for(self.worker).post(self.base + "/stock/", {"listings": [self.l11.pk], "inventory": 5},
+                                                           format="json").status_code, 403)
+        c = self.client_for(self.admin)
+        for bad in ({"listings": [self.l11.pk], "inventory": -1}, {"listings": [self.l11.pk], "inventory": "lots"},
+                    {"listings": [self.l11.pk], "inventory": 100000}, {"listings": [], "inventory": 5}):
+            self.assertEqual(c.post(self.base + "/stock/", bad, format="json").status_code, 400, bad)
+        self.assertEqual(c.post(self.base + "/stock/", {"listings": [self.l11.pk, 999999], "inventory": 5}, format="json").status_code, 409)
+        self.assertEqual(self.queued, [])
+
     def test_refresh_queues_an_inventory_read(self):
         r = self.client_for(self.worker).post(self.base + "/refresh/")
         self.assertEqual(r.status_code, 202)

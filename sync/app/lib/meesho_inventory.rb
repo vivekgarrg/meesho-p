@@ -77,6 +77,21 @@ module MeeshoInventory
     body
   end
 
+  # Set one SKU's stock — what the panel's stock box does, on any tab. Giving
+  # a paused SKU stock is also how the panel brings it back (unpauses it).
+  def update_stock(client, account, catalog_id:, product_id:, variation_id:, inventory:, tab: nil)
+    res = client.post("#{BASE}updateStock",
+                      body: { variation: { inventory: inventory.to_i.to_s, catalog_id: catalog_id.to_i,
+                                           product_id: product_id.to_i, variation_id: variation_id.to_i },
+                              supplier_id: account.supplier_id.to_i },
+                      headers: headers(account, tab).merge("content-type" => "application/json;charset=UTF-8"))
+    body = res.body
+    if body.is_a?(Hash) && (body["success"] == false || body["status"].to_s.downcase.in?(%w[failure failed error]))
+      raise MeeshoClient::RequestError, (body["message"].presence || body["error"].presence || "Meesho refused it").to_s.truncate(200)
+    end
+    body
+  end
+
   # The fields a catalog row keeps, from a list entry.
   def catalog_attrs(c)
     {

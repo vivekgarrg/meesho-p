@@ -207,6 +207,7 @@ urlpatterns = [
     path("meesho-live-inventory/",        meesho_sync.meesho_live_inventory,         name="meesho_live_inventory"),
     path("meesho-live-inventory/refresh/", meesho_sync.meesho_live_inventory_refresh, name="meesho_live_inventory_refresh"),
     path("meesho-live-inventory/pause/",   meesho_sync.meesho_live_inventory_pause,   name="meesho_live_inventory_pause"),
+    path("meesho-live-inventory/stock/",   meesho_sync.meesho_live_inventory_stock,   name="meesho_live_inventory_stock"),
     path("meesho-sync/",            meesho_sync.meesho_sync_status,     name="meesho_sync_status"),
     path("meesho-sync/connect/",    meesho_sync.meesho_sync_connect,    name="meesho_sync_connect"),
     path("meesho-sync/refresh/",    meesho_sync.meesho_sync_refresh,    name="meesho_sync_refresh"),

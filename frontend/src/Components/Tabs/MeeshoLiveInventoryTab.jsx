@@ -79,8 +79,79 @@ function PauseStatus({ pauses, showBiz }) {
   );
 }
 
-function ListingRow({ l, view, admin, picked, onPick, isMobile }) {
-  const selectable = admin && view === "live";
+/** How the latest stock update went (one run per business, sent together). */
+function StockStatus({ runs: all, showBiz }) {
+  const first = all?.[0];
+  if (!first || Date.now() - new Date(first.queued_at) > 30 * 60 * 1000) return null;
+  const t = new Date(first.queued_at);
+  const runs = all.filter((p) => Math.abs(t - new Date(p.queued_at)) < 60 * 1000);
+  const busy = runs.some((r) => ["QUEUED", "RUNNING"].includes(r.status));
+  const ok = runs.every((r) => r.status === "OK");
+  return (
+    <div role="status" style={{ background: busy ? "#EFF6FF" : ok ? C.greenLight : C.redLight, border: `1.5px solid ${busy ? "#BFDBFE" : ok ? C.greenBorder : C.redBorder}`,
+      borderRadius: 12, padding: "10px 14px", color: busy ? "#1E3A8A" : ok ? "#166534" : C.red, fontSize: 13.5, fontWeight: 700, display: "flex", flexDirection: "column", gap: 3 }}>
+      <span>{busy ? "Setting stock on Meesho, SKU by SKU…" : ok ? `✓ ${runs.length === 1 ? runs[0].message : "Stock updated"}` : "Some SKUs weren't updated"}</span>
+      {(showBiz || runs.length > 1 || !ok) && runs.map((r) => <span key={r.id} style={{ fontSize: 12.5, fontWeight: 600 }}>{r.business_name}: {r.message}</span>)}
+    </div>
+  );
+}
+
+/**
+ * Set stock on the chosen SKUs — on Meesho, one SKU after another (a parent's
+ * in order). Stock on a paused SKU unpauses it; 0 takes a live one out of stock.
+ */
+function StockDialog({ ask, listingById, onClose, onSent }) {
+  const rows = ask.ids.map((id) => listingById.get(id)).filter(Boolean);
+  const paused = rows.filter((l) => l.archived).length;
+  const [stock, setStock] = useState(ask.unpause ? "1000" : String(rows.length === 1 ? rows[0].inventory ?? 1000 : 1000));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const n = Number(stock);
+  const valid = stock !== "" && Number.isInteger(n) && n >= 0 && n <= 99999;
+  const send = async () => {
+    setBusy(true); setError(null);
+    try {
+      const res = await fetch(`${API}/meesho-live-inventory/stock/`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ listings: rows.map((l) => l.id), inventory: n }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) { setError(d.error || "Couldn't send it."); return; }
+      onSent();
+    } catch { setError("Network error."); }
+    finally { setBusy(false); }
+  };
+  return (
+    <div role="dialog" aria-modal="true" aria-label="Set stock" onClick={onClose}
+      style={{ position: "fixed", inset: 0, zIndex: 3400, background: "rgba(15,23,42,.5)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ ...S.card, maxWidth: 440, width: "100%", padding: 20, display: "flex", flexDirection: "column", gap: 12, borderTop: `5px solid ${C.green}` }}>
+        <div style={{ fontSize: 18, fontWeight: 900, color: C.gray900 }}>{ask.unpause ? "Unpause" : "Set stock"}{ask.what ? ` — ${ask.what}` : ""}</div>
+        <div style={{ fontSize: 13.5, color: C.gray700, lineHeight: 1.5 }}>
+          {plural(rows.length, "SKU")} on Meesho, one after another.
+          {paused > 0 && n > 0 && <> <b>{plural(paused, "paused SKU")}</b> will be unpaused.</>}
+          {n === 0 && rows.length - paused > 0 && <> Stock 0 takes them out of stock.</>}
+        </div>
+        <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 12.5, fontWeight: 800, color: C.gray600 }}>
+          Stock for each SKU
+          <input autoFocus type="number" min={0} max={99999} value={stock} onChange={(e) => setStock(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter" && valid && !busy) send(); }}
+            style={{ ...S.inp, fontSize: 18, fontFamily: "monospace", fontWeight: 800 }} />
+        </label>
+        {error && <div style={{ color: C.red, fontWeight: 700, fontSize: 13 }}>{error}</div>}
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+          <button onClick={onClose} disabled={busy} style={btn("ghost", "md")}>Cancel</button>
+          <button onClick={send} disabled={busy || !valid} style={{ ...btn("primary", "md"), background: C.green, borderColor: C.green, opacity: busy || !valid ? 0.5 : 1 }}>
+            {busy ? "Sending…" : ask.unpause ? `Unpause ${plural(rows.length, "SKU")}` : `Set stock on ${plural(rows.length, "SKU")}`}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const stockBtn = (busy) => ({ ...btn("ghost", "sm"), color: "#15803D", opacity: busy ? 0.5 : 1, whiteSpace: "nowrap" });
+
+function ListingRow({ l, view, admin, picked, onPick, isMobile, onStock, busy }) {
+  const selectable = admin;
   return (
     <div onClick={selectable ? onPick : undefined}
       style={{ display: "flex", gap: 10, alignItems: "center", padding: "8px 10px 8px 34px", borderTop: `1px solid ${C.gray100}`,
@@ -99,15 +170,21 @@ function ListingRow({ l, view, admin, picked, onPick, isMobile }) {
         {l.archived ? <Tag variant="amber">Paused{l.archived_at ? ` ${l.archived_at}` : ""}</Tag>
           : l.inventory === 0 ? <Tag variant="red">Out of stock</Tag> : <Tag variant="green">Live</Tag>}
       </span>
+      {admin && onStock && (
+        <button onClick={(e) => { e.stopPropagation(); onStock([l.id], l.sku_id || l.catalog_name, l.archived); }} disabled={busy} style={stockBtn(busy)}>
+          {l.archived ? "Unpause" : "Stock"}
+        </button>
+      )}
     </div>
   );
 }
 
-function SkuBlock({ sku, view, admin, picked, toggle, onPause, isMobile, busy }) {
+function SkuBlock({ sku, view, admin, picked, toggle, onPause, onStock, isMobile, busy }) {
   const [open, setOpen] = useState(false);
   const ids = sku.listings.map((l) => l.id);
   const on = ids.filter((id) => picked.has(id)).length;
-  const selectable = admin && view === "live";
+  const selectable = admin;
+  const paused = view === "paused";
   return (
     <div style={{ borderTop: `1px solid ${C.gray100}` }}>
       <div onClick={() => setOpen((v) => !v)} style={{ display: "flex", gap: 10, alignItems: "center", padding: "9px 10px", cursor: "pointer" }}>
@@ -116,23 +193,30 @@ function SkuBlock({ sku, view, admin, picked, toggle, onPause, isMobile, busy })
         <span style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 13, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{sku.sku_id}</span>
         <span style={{ fontSize: 12, color: C.gray500, whiteSpace: "nowrap" }}>{plural(sku.listings.length, "catalog")}</span>
         <span style={{ minWidth: 54, textAlign: "right", fontSize: 12.5 }}><StockTag n={sum(sku.listings, (l) => l.inventory)} /></span>
-        {selectable && (
+        {admin && (
+          <button onClick={(e) => { e.stopPropagation(); onStock(ids, `SKU ${sku.sku_id}`, paused); }} disabled={busy} style={stockBtn(busy)}>
+            {paused ? "Unpause SKU" : "Set stock"}
+          </button>
+        )}
+        {admin && !paused && (
           <button onClick={(e) => { e.stopPropagation(); onPause(ids, `SKU ${sku.sku_id}`); }} disabled={busy}
             style={{ ...btn("ghost", "sm"), color: "#B45309", opacity: busy ? 0.5 : 1, whiteSpace: "nowrap" }}>Pause SKU</button>
         )}
       </div>
       {open && sku.listings.map((l) => (
-        <ListingRow key={l.id} l={l} view={view} admin={admin} picked={picked.has(l.id)} onPick={() => toggle([l.id], !picked.has(l.id))} isMobile={isMobile} />
+        <ListingRow key={l.id} l={{ ...l, sku_id: sku.sku_id }} view={view} admin={admin} picked={picked.has(l.id)} onPick={() => toggle([l.id], !picked.has(l.id))}
+          isMobile={isMobile} onStock={onStock} busy={busy} />
       ))}
     </div>
   );
 }
 
-function ParentCard({ g, view, admin, picked, toggle, onPause, showBiz, isMobile, busy }) {
+function ParentCard({ g, view, admin, picked, toggle, onPause, onStock, showBiz, isMobile, busy }) {
   const [open, setOpen] = useState(false);
   const ids = g.skus.flatMap((s) => s.listings.map((l) => l.id));
   const on = ids.filter((id) => picked.has(id)).length;
-  const selectable = admin && view === "live";
+  const selectable = admin;
+  const paused = view === "paused";
   const title = g.parent || "No parent SKU";
   return (
     <div style={{ ...S.card, padding: 0, overflow: "hidden", border: on ? `1.5px solid ${C.orangeBorder}` : undefined }}>
@@ -148,14 +232,18 @@ function ParentCard({ g, view, admin, picked, toggle, onPause, showBiz, isMobile
             {plural(g.skus.length, "SKU")} · {plural(ids.length, "listing")} · stock <StockTag n={sum(g.skus.flatMap((s) => s.listings), (l) => l.inventory)} />
           </span>
         </div>
-        {selectable && (
+        {admin && (
+          <button onClick={(e) => { e.stopPropagation(); onStock(ids, g.parent ? `parent ${g.parent}` : plural(g.skus.length, "unlinked SKU"), paused); }}
+            disabled={busy} style={{ ...stockBtn(busy), fontWeight: 800 }}>{paused ? "Unpause parent" : "Set stock"}</button>
+        )}
+        {admin && !paused && (
           <button onClick={(e) => { e.stopPropagation(); onPause(ids, g.parent ? `parent ${g.parent}` : `${plural(g.skus.length, "unlinked SKU")}`); }} disabled={busy}
             style={{ ...btn("ghost", "sm"), color: "#B45309", fontWeight: 800, opacity: busy ? 0.5 : 1, whiteSpace: "nowrap" }}>Pause parent</button>
         )}
         <span style={{ color: C.gray400, fontSize: 12 }}>{open ? "▾" : "▸"}</span>
       </div>
       {open && g.skus.map((s) => (
-        <SkuBlock key={s.sku_id} sku={s} view={view} admin={admin} picked={picked} toggle={toggle} onPause={onPause} isMobile={isMobile} busy={busy} />
+        <SkuBlock key={s.sku_id} sku={s} view={view} admin={admin} picked={picked} toggle={toggle} onPause={onPause} onStock={onStock} isMobile={isMobile} busy={busy} />
       ))}
     </div>
   );
@@ -218,6 +306,10 @@ export function MeeshoLiveInventoryTab({ embedded = false }) {
   }, [data]);
   // Drop picks that are no longer live (paused meanwhile, or gone).
   const pickedLive = useMemo(() => [...picked].filter((id) => listingById.get(id) && !listingById.get(id).archived), [picked, listingById]);
+  const pickedAll = useMemo(() => [...picked].filter((id) => listingById.get(id)), [picked, listingById]);
+  // Set stock / unpause: {ids, what, unpause} while the dialog is open.
+  const [stockAsk, setStockAsk] = useState(null);
+  const openStock = useCallback((ids, what, unpause) => setStockAsk({ ids, what, unpause: !!unpause }), []);
 
   const toggle = useCallback((ids, on) => setPicked((prev) => {
     const next = new Set(prev);
@@ -257,7 +349,7 @@ export function MeeshoLiveInventoryTab({ embedded = false }) {
   const counts = Object.fromEntries(COUNT_TILES.map((t) => [t.key, sum(accounts, (a) => a.counts?.[t.key])]));
   const haveCounts = accounts.some((a) => Object.keys(a.counts || {}).length);
   const waiting = sum(accounts, (a) => a.catalogs_waiting);
-  const busy = sending || data.pausing;
+  const busy = sending || data.pausing || data.stocking;
   const viewCount = (k) => (k === "pending" ? (data.pending || []).filter((c) => biz === "all" || String(c.business_id) === biz).length
     : sum(data.groups.filter((g) => biz === "all" || String(g.business_id) === biz).flatMap((g) => g.skus.flatMap((s) => s.listings)),
       (l) => (k === "paused" ? l.archived : !l.archived) ? 1 : 0));
@@ -283,6 +375,9 @@ export function MeeshoLiveInventoryTab({ embedded = false }) {
       )}
       {error && <div style={{ background: C.redLight, border: `1.5px solid ${C.redBorder}`, borderRadius: 12, padding: "10px 14px", color: C.red, fontWeight: 700, fontSize: 13 }}>{error}</div>}
       <PauseStatus pauses={data.pauses} showBiz={multi} />
+      <StockStatus runs={data.stock_runs} showBiz={multi} />
+      {stockAsk && <StockDialog ask={stockAsk} listingById={listingById} onClose={() => setStockAsk(null)}
+        onSent={() => { setStockAsk(null); setPicked(new Set()); load(); }} />}
 
       {haveCounts && (
         <div style={{ display: "grid", gap: 10, gridTemplateColumns: isMobile ? "repeat(2, minmax(0, 1fr))" : "repeat(4, minmax(0, 1fr))" }}>
@@ -350,7 +445,7 @@ export function MeeshoLiveInventoryTab({ embedded = false }) {
             </div>
           )}
           {groups.slice(0, shown).map((g) => (
-            <ParentCard key={g.key} g={g} view={view} admin={admin} picked={picked} toggle={toggle} onPause={pause}
+            <ParentCard key={g.key} g={g} view={view} admin={admin} picked={picked} toggle={toggle} onPause={pause} onStock={openStock}
               showBiz={multi && biz === "all"} isMobile={isMobile} busy={busy} />
           ))}
           {groups.length > shown && (
@@ -361,18 +456,22 @@ export function MeeshoLiveInventoryTab({ embedded = false }) {
         </div>
       )}
 
-      {admin && pickedLive.length > 0 && (
+      {admin && pickedAll.length > 0 && (
         <div style={{ position: "fixed", left: 0, right: 0, bottom: 0, zIndex: 50, display: "flex", justifyContent: "center", padding: "10px 16px",
           background: C.white, borderTop: `1px solid ${C.gray200}`, boxShadow: "0 -6px 20px rgba(15,23,42,.08)" }}>
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", maxWidth: 1200, width: "100%" }}>
             <span style={{ fontWeight: 800, fontSize: 13.5, flex: 1 }}>
-              {plural(pickedLive.length, "SKU")} selected in {plural(new Set(pickedLive.map((id) => listingById.get(id).catalog_id)).size, "catalog")}
+              {plural(pickedAll.length, "SKU")} selected in {plural(new Set(pickedAll.map((id) => listingById.get(id).catalog_id)).size, "catalog")}
             </span>
             <button onClick={() => setPicked(new Set())} style={btn("ghost", "md")}>Clear</button>
-            <button onClick={() => pause(pickedLive)} disabled={busy}
+            <button onClick={() => openStock(pickedAll, null, pickedAll.every((id) => listingById.get(id).archived))} disabled={busy}
+              style={{ ...btn("primary", "md"), background: C.green, borderColor: C.green, opacity: busy ? 0.6 : 1 }}>
+              {pickedAll.every((id) => listingById.get(id).archived) ? `Unpause ${plural(pickedAll.length, "SKU")}` : `Set stock on ${plural(pickedAll.length, "SKU")}`}
+            </button>
+            {pickedLive.length > 0 && <button onClick={() => pause(pickedLive)} disabled={busy}
               style={{ ...btn("primary", "md"), background: "#B45309", borderColor: "#B45309", opacity: busy ? 0.6 : 1 }}>
               {busy ? "Pausing…" : `Pause ${plural(pickedLive.length, "SKU")}`}
-            </button>
+            </button>}
           </div>
         </div>
       )}

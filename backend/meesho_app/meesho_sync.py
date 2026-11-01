@@ -895,6 +895,9 @@ def meesho_orders_labels_pdf(request, business_id, run_id):
 # worker (MeeshoArchiveJob), one request per catalog.
 
 ARCHIVE_JOB = "MeeshoArchiveJob"
+STOCK_JOB = "MeeshoStockJob"
+KIND_STOCK = "STOCK"
+STOCK_MAX = 99999           # the most stock one SKU can be given here
 KIND_ARCHIVE = "ARCHIVE"
 PAUSE_MAX = 2000
 INVENTORY_PATH = "meesho-live-inventory/"
@@ -991,6 +994,9 @@ def meesho_live_inventory(request, business_id):
         "accounts": acc_json,
         "syncing": MeeshoSyncRun.objects.filter(account__in=live, kind=KIND_INVENTORY, status__in=busy, queued_at__gte=recent).exists(),
         "pausing": MeeshoSyncRun.objects.filter(account__in=live, kind=KIND_ARCHIVE, status__in=busy, queued_at__gte=recent).exists(),
+        "stocking": MeeshoSyncRun.objects.filter(account__in=live, kind=KIND_STOCK, status__in=busy, queued_at__gte=recent).exists(),
+        "stock_runs": [{**_run_json(r), "business_name": r.account.business.name}
+                       for r in MeeshoSyncRun.objects.filter(account__in=accounts, kind=KIND_STOCK).select_related("account__business")[:10]],
         "groups": out_groups,
         "pending": pending,
         "pauses": pauses,
@@ -1013,6 +1019,71 @@ def meesho_live_inventory_refresh(request, business_id):
     except SyncNotConfigured as exc:
         return Response({"error": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
     return Response({"queued": queued}, status=status.HTTP_202_ACCEPTED)
+
+
+@api_view(["POST"])
+def meesho_live_inventory_stock(request, business_id):
+    """
+    Admin: set stock on the Meesho panel. Body: {"listings": [ids…], "inventory": N}
+    — the rows of the inventory list (a parent picks all its SKUs). Stock on a
+    paused SKU unpauses it. Each business's SKUs go to its own account, one
+    request per SKU in order — a parent's SKUs one after another
+    (MeeshoStockJob). Nothing is sent unless every business's part checks out.
+    """
+    v = _views()
+    business = v.get_authorized_business(request, business_id)
+    if not v._is_admin(request.user):
+        return Response({"error": "Only an admin can change stock on Meesho."}, status=status.HTTP_403_FORBIDDEN)
+    _desk, accounts = _inventory_accounts(request, business)
+    data = request.data if isinstance(request.data, dict) else {}
+    try:
+        inventory = int(str(data.get("inventory", "")).strip())
+    except (TypeError, ValueError):
+        return Response({"error": "Give the stock as a whole number."}, status=status.HTTP_400_BAD_REQUEST)
+    if not 0 <= inventory <= STOCK_MAX:
+        return Response({"error": f"Stock must be between 0 and {STOCK_MAX}."}, status=status.HTTP_400_BAD_REQUEST)
+    ids = []
+    for x in data.get("listings") or []:
+        try:
+            ids.append(int(x))
+        except (TypeError, ValueError):
+            continue
+    ids = list(dict.fromkeys(ids))
+    if not ids:
+        return Response({"error": "Choose the SKUs first."}, status=status.HTTP_400_BAD_REQUEST)
+    if len(ids) > PAUSE_MAX:
+        return Response({"error": f"At most {PAUSE_MAX} SKUs at a time."}, status=status.HTTP_400_BAD_REQUEST)
+    rows = list(MeeshoListing.objects.filter(pk__in=ids, account__in=accounts).select_related("catalog", "account__business"))
+    if len(rows) != len(ids):
+        return Response({"error": "Some of these are no longer listed — refresh and choose again."}, status=status.HTTP_409_CONFLICT)
+    # In order: catalog by catalog, then SKU by SKU (a parent's SKUs one after another).
+    rows.sort(key=lambda r: (r.account_id, r.catalog.catalog_id, r.sku_id, r.variation_id))
+    plan = {}
+    for r in rows:
+        plan.setdefault(r.account, []).append({
+            "listing_id": r.pk, "catalog_id": r.catalog.catalog_id, "product_id": r.product_id, "variation_id": r.variation_id,
+            "inventory": inventory, "sku": r.sku_id, "paused": bool(r.archived)})
+    for a in plan:
+        name = a.business.name
+        if a.status != MeeshoAccount.STATUS_ACTIVE:
+            return Response({"error": f"{name}: the Meesho account isn't connected — fix it under Meesho → Settings."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if not (a.supplier_id and a.supplier_identifier):
+            return Response({"error": f"{name}: set the supplier ID and code under Meesho → Settings first."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if a.runs.filter(kind=KIND_STOCK, status__in=[MeeshoSyncRun.STATUS_QUEUED, MeeshoSyncRun.STATUS_RUNNING],
+                         queued_at__gte=timezone.now() - STUCK_AFTER).exists():
+            return Response({"error": f"{name}: a stock update is already in progress — wait for it to finish."},
+                            status=status.HTTP_409_CONFLICT)
+    work = {a: (items, len(items)) for a, items in plan.items()}
+    unpausing = sum(1 for items in plan.values() for i in items if i["paused"]) if inventory > 0 else 0
+    try:
+        runs = _send(work, KIND_STOCK, STOCK_JOB,
+                     lambda n: f"Setting stock to {inventory} on {n} SKU{'' if n == 1 else 's'}…")
+    except SyncNotConfigured as exc:
+        return Response({"error": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+    return Response({"runs": [_run_json(r) for r in runs], "skus": len(rows), "unpausing": unpausing},
+                    status=status.HTTP_202_ACCEPTED)
 
 
 @api_view(["POST"])
