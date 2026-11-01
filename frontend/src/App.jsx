@@ -1246,6 +1246,7 @@ function AppShell() {
                 {/* Meesho: one page per section, each in the sidebar's Meesho group. */}
                 <Route path="/meesho" element={<MeeshoHubTab />} />
                 <Route path="/meesho/:section" element={<MeeshoHubTab />} />
+                <Route path="/meesho/:section/:status" element={<MeeshoHubTab />} />
                 <Route path="/meesho-orders" element={<MeeshoLegacyRedirect />} />
                 <Route path="/meesho-sync" element={<Navigate to="/meesho/settings" replace />} />
                 <Route path="/meesho-live-inventory" element={<Navigate to="/meesho/inventory" replace />} />

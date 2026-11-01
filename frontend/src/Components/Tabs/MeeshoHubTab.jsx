@@ -20,10 +20,11 @@ import { Panel, ago } from "./MeeshoUI";
  * header (sync health, Refresh everything, expired sessions):
  *
  *   Overview       what needs doing now, orders, money, stock, accounts
- *   Pending        accept new orders (on hold listed too)
- *   Ready to ship  make labels, link packets
- *   Shipped        with the courier; check every packet link
- *   Cancelled      what was cancelled and why
+ *   Orders         one page, a tab per status (/meesho/orders/<status>):
+ *                    Pending        accept new orders (on hold listed too)
+ *                    Ready to ship  make labels, link packets
+ *                    Shipped        with the courier; check every packet link
+ *                    Cancelled      what was cancelled and why
  *   Order linking  AWB ↔ packet at the packing desk
  *   Returns        every return by status
  *   OTPs           couriers' delivery OTPs
@@ -38,10 +39,7 @@ import { Panel, ago } from "./MeeshoUI";
 // The sections, their addresses and sidebar entries (navConfig.js lists the same).
 export const MEESHO_SECTIONS = [
   { key: "overview", slug: "", label: "Overview", icon: "◧" },
-  { key: "pending", slug: "pending", label: "Pending orders", icon: "✋" },
-  { key: "ready_to_ship", slug: "ready-to-ship", label: "Ready to ship", icon: "📦" },
-  { key: "shipped", slug: "shipped", label: "Shipped", icon: "🚚" },
-  { key: "cancelled", slug: "cancelled", label: "Cancelled", icon: "✕" },
+  { key: "orders", slug: "orders", label: "Orders", icon: "📦" },
   { key: "linking", slug: "linking", label: "Order linking", icon: "🔗" },
   { key: "returns", slug: "returns", label: "Returns", icon: "↩" },
   { key: "otps", slug: "otps", label: "Delivery OTPs", icon: "🔑" },
@@ -49,19 +47,49 @@ export const MEESHO_SECTIONS = [
   { key: "payments", slug: "payments", label: "Payments", icon: "₹" },
   { key: "settings", slug: "settings", label: "Settings", icon: "⚙" },
 ];
+// The Orders page's tabs, one per Meesho order status.
+export const ORDER_STATUSES = [
+  { key: "pending", slug: "pending", label: "Pending", icon: "✋" },
+  { key: "ready_to_ship", slug: "ready-to-ship", label: "Ready to ship", icon: "📦" },
+  { key: "shipped", slug: "shipped", label: "Shipped", icon: "🚚" },
+  { key: "cancelled", slug: "cancelled", label: "Cancelled", icon: "✕" },
+];
 export const meeshoPath = (key) => {
+  const status = ORDER_STATUSES.find((x) => x.key === key);
+  if (status) return `/meesho/orders/${status.slug}`;
   const sec = MEESHO_SECTIONS.find((x) => x.key === key);
   return sec?.slug ? `/meesho/${sec.slug}` : "/meesho";
 };
 // Old ?tab= values (and keys) → a section.
 const ALIASES = { sync: "settings", orders: "pending", rts: "ready_to_ship" };
-const ORDER_TABS = ["pending", "ready_to_ship", "shipped", "cancelled"];
 
 /** /meesho-orders?tab=… (the page before it was split) → the matching page. */
 export function MeeshoLegacyRedirect() {
   const [params] = useSearchParams();
   const asked = ALIASES[params.get("tab")] || params.get("tab");
-  return <Navigate to={meeshoPath(MEESHO_SECTIONS.some((x) => x.key === asked) ? asked : "overview")} replace />;
+  const known = MEESHO_SECTIONS.some((x) => x.key === asked) || ORDER_STATUSES.some((x) => x.key === asked);
+  return <Navigate to={meeshoPath(known ? asked : "overview")} replace />;
+}
+
+/** The Orders page's status tabs, each with how many orders it holds. */
+function StatusTabs({ current, counts, onPick }) {
+  return (
+    <nav role="tablist" aria-label="Order status" style={{ display: "flex", gap: 4, padding: 4, background: C.gray100, borderRadius: 12, overflowX: "auto" }}>
+      {ORDER_STATUSES.map((s) => {
+        const on = current === s.key;
+        const n = counts?.[s.key]?.count;
+        return (
+          <button key={s.key} role="tab" aria-selected={on} onClick={() => onPick(s.key)}
+            style={{ border: "none", cursor: "pointer", fontFamily: "inherit", padding: "9px 16px", borderRadius: 9, whiteSpace: "nowrap",
+              background: on ? C.white : "transparent", boxShadow: on ? "0 1px 3px rgba(15,23,42,.12)" : "none",
+              color: on ? C.gray900 : C.gray600, fontWeight: on ? 800 : 700, fontSize: 13.5, display: "flex", gap: 7, alignItems: "center" }}>
+            <span aria-hidden>{s.icon}</span>{s.label}
+            {n != null && <span style={{ fontSize: 12, fontWeight: 800, color: on ? C.gray700 : C.gray500, fontVariantNumeric: "tabular-nums" }}>{n.toLocaleString("en-IN")}</span>}
+          </button>
+        );
+      })}
+    </nav>
+  );
 }
 
 function Badge({ n, tone }) {
@@ -75,9 +103,12 @@ function Badge({ n, tone }) {
 
 export function MeeshoHubTab() {
   const navigate = useNavigate();
-  const { section } = useParams();
+  const { section, status: statusSlug } = useParams();
+  // /meesho/pending … (when each status was its own page) → the Orders tab.
+  const oldStatus = ORDER_STATUSES.find((x) => x.slug === section);
   const current = MEESHO_SECTIONS.find((x) => x.slug === (section || "")) || MEESHO_SECTIONS[0];
   const tab = current.key;
+  const status = ORDER_STATUSES.find((x) => x.slug === statusSlug) || ORDER_STATUSES[0];
   const go = useCallback((key) => {
     navigate(meeshoPath(ALIASES[key] || key));
     window.scrollTo({ top: 0, behavior: "smooth" });
@@ -128,13 +159,13 @@ export function MeeshoHubTab() {
   const healthColor = { bad: C.red, warn: "#B45309", good: "#15803D", neutral: C.gray500 }[health?.tone || "neutral"];
 
   const badge = {
-    pending: summary && <Badge n={summary.orders.tabs.pending.count} tone="brand" />,
-    ready_to_ship: summary && <Badge n={summary.orders.tabs.ready_to_ship.count} />,
+    orders: summary && <Badge n={summary.orders.tabs.pending.count} tone="brand" />,
     linking: summary && <Badge n={summary.packing.open_problems} tone="bad" />,
     inventory: summary && <Badge n={summary.stock.out_of_stock} />,
     settings: (broken || failing) ? <span title="Needs attention" style={{ width: 8, height: 8, borderRadius: 4, background: C.red }} /> : null,
   };
 
+  if (oldStatus) return <Navigate to={meeshoPath(oldStatus.key)} replace />;
   if (!overview) return <div style={{ display: "flex", justifyContent: "center", padding: 80 }}><CircularProgress style={{ color: C.orange }} /></div>;
 
   return (
@@ -178,13 +209,13 @@ export function MeeshoHubTab() {
         {tab === "overview" && (summary
           ? <MeeshoOverview summary={summary} overview={overview} go={go} onReconnect={setReconnect} />
           : <div style={{ display: "flex", justifyContent: "center", padding: 60 }}><CircularProgress style={{ color: C.orange }} /></div>)}
-        {tab === "ready_to_ship" && (
+        {tab === "orders" && (
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-            <MeeshoOrdersTab status="ready_to_ship" key="ready_to_ship" />
-            <LatestLabels />
+            <StatusTabs current={status.key} counts={summary?.orders.tabs} onPick={go} />
+            <MeeshoOrdersTab status={status.key} key={status.key} />
+            {status.key === "ready_to_ship" && <LatestLabels />}
           </div>
         )}
-        {ORDER_TABS.includes(tab) && tab !== "ready_to_ship" && <MeeshoOrdersTab status={tab} key={tab} />}
         {tab === "linking" && <MeeshoLinkingTab />}
         {tab === "returns" && <MeeshoReturnsTab part="returns" key="returns" />}
         {tab === "otps" && <MeeshoReturnsTab part="otps" key="otps" />}

@@ -19,10 +19,8 @@ export const NAV_GROUPS = [
     color: '#F43397',
     items: [
       { path: '/meesho', label: 'Meesho Overview', icon: '◧', end: true, access: MEESHO, accessLabel: 'Meesho (every page in this group)' },
-      { path: '/meesho/pending', label: 'Pending Orders', icon: '✋', access: MEESHO },
-      { path: '/meesho/ready-to-ship', label: 'Ready to Ship', icon: '📦', access: MEESHO },
-      { path: '/meesho/shipped', label: 'Shipped', icon: '🚚', access: MEESHO },
-      { path: '/meesho/cancelled', label: 'Cancelled', icon: '✕', access: MEESHO },
+      // Pending, Ready to ship, Shipped and Cancelled — tabs of one page.
+      { path: '/meesho/orders', label: 'Meesho Orders', icon: '📦', access: MEESHO },
       { path: '/meesho/linking', label: 'Order Linking', icon: '🔗', access: MEESHO },
       { path: '/meesho/returns', label: 'Meesho Returns', icon: '↩', access: MEESHO },
       { path: '/meesho/otps', label: 'Delivery OTPs', icon: '🔑', access: MEESHO },
