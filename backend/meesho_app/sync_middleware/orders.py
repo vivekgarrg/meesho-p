@@ -12,6 +12,12 @@ them — snapshots orders_<tab>, rows already trimmed by PanelOrders.normalize)
     exception is CANCELLED — an order the panel lists live again wasn't.
 
 Rows without a sub-order number or with an unknown tab are rejected.
+
+After shipping, an order leaves the panel's lists (they have no Delivered tab).
+settle() then takes its outcome from what Meesho says elsewhere — its returns
+(the returns table) first, then the order status on its payments — mapped to
+the statuses an Orders sheet writes. With neither, it stays SHIPPED: nothing is
+guessed.
 """
 
 from datetime import datetime
@@ -20,7 +26,8 @@ from zoneinfo import ZoneInfo
 from django.db import transaction
 from django.utils import timezone
 
-from ..models import MeeshoSyncSnapshot, Order
+from ..meesho_images import meesho_image
+from ..models import MeeshoSyncSnapshot, Order, OrderPayment, ReturnDelivery
 from .base import Result, deferred_bumps, missing
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -29,7 +36,8 @@ STATUS = {"hold": "HOLD", "pending": "PENDING", "ready-to-ship": "READY_TO_SHIP"
 STAGE = {"HOLD": 1, "PENDING": 1, "READY_TO_SHIP": 2, "SHIPPED": 3}
 AFTER_SHIPPING = 4                     # DELIVERED, RTO…, RETURN… — anything the panel's tabs don't show
 SOURCE = "Meesho panel sync"
-DETAILS = {"sku": "sku", "size": "variation", "quantity": "quantity", "product_name": "product_name", "packet_id": "packet_id"}
+DETAILS = {"sku": "sku", "size": "variation", "quantity": "quantity", "product_name": "product_name", "packet_id": "packet_id",
+           "meesho_image_url": "image"}
 
 
 def stage(status):
@@ -63,6 +71,8 @@ def details_of(row):
     out = {}
     for field, key in DETAILS.items():
         v = row.get(key)
+        if field == "meesho_image_url":
+            v = meesho_image(v)                  # only a real Meesho product image is kept
         if v not in (None, ""):
             out[field] = int(v) if field == "quantity" and str(v).isdigit() else v
     return out
@@ -139,3 +149,79 @@ def inject(business, rows):
                                      customer_state=latest.customer_state, **details)
             res.add("status_changed")
     return res
+
+
+# The order status on Meesho's payments → the Orders sheet's, as the two agree
+# on orders both have (Return: the order was delivered, then sent back).
+PAYMENT_OUTCOME = {"delivered": "DELIVERED", "return": "DELIVERED", "rto": "RTO_COMPLETE", "exchange": "DOOR_STEP_EXCHANGED"}
+# A courier return (RTO) by its stage in the returns table → the Orders sheet's.
+RTO_OUTCOME = {ReturnDelivery.STAGE_IN_TRANSIT: "RTO_INITIATED", ReturnDelivery.STAGE_DELIVERED: "RTO_COMPLETE",
+               ReturnDelivery.STAGE_LOST: "LOST", ReturnDelivery.STAGE_DISPOSED: "DISPOSED"}
+
+
+def _is_rto(ret):
+    return "rto" in f"{ret.type_of_return} {ret.sub_type}".lower()
+
+
+def outcomes(business, subs):
+    """{sub-order: (status, from)} for these sub-orders, from Meesho's returns, else its payments."""
+    out = {}
+    subs = list(subs)
+    for i in range(0, len(subs), 500):
+        chunk = subs[i:i + 500]
+        for p in (OrderPayment.objects.filter(business=business, sub_order_no__in=chunk)
+                  .exclude(live_order_status__isnull=True).order_by("payment_date", "id")
+                  .only("sub_order_no", "live_order_status")):
+            st = PAYMENT_OUTCOME.get(str(p.live_order_status or "").strip().lower())
+            if st:
+                out[p.sub_order_no] = (st, "payments")          # the latest payment's wins
+        for r in ReturnDelivery.objects.filter(business=business, suborder_no__in=chunk).order_by("id"):
+            st = RTO_OUTCOME.get(r.stage) if _is_rto(r) else "DELIVERED"   # a customer return: it was delivered
+            if st:
+                out[r.suborder_no] = (st, "returns")
+    return out
+
+
+def settle(business, live):
+    """
+    Orders whose current status is SHIPPED but that the panel no longer lists
+    (`live`: every sub-order on its lists now) — moved on to what Meesho's
+    returns or payments say happened. Returns a Result.
+    """
+    res = Result()
+    for k in ("settled", "settled_from_returns", "settled_from_payments", "still_shipped"):
+        res.add(k, 0)
+    shipped = [o for o in Order.latest_per_order(Order.objects.filter(business=business, reason_for_credit_entry="SHIPPED"))
+               if o.sub_order_no not in live]
+    if not shipped:
+        return res
+    known = outcomes(business, [o.sub_order_no for o in shipped])
+    have = {}
+    for o in Order.objects.filter(business=business, sub_order_no__in=[o.sub_order_no for o in shipped if o.sub_order_no in known]):
+        have.setdefault(o.sub_order_no, []).append(o)
+    now = timezone.now()
+    with deferred_bumps(business.pk), transaction.atomic():
+        for latest in shipped:
+            hit = known.get(latest.sub_order_no)
+            if not hit:
+                res.add("still_shipped")
+                continue
+            status, source = hit
+            back = next((o for o in have.get(latest.sub_order_no, [])
+                         if o.reason_for_credit_entry == status and o.order_date == latest.order_date), None)
+            if back:
+                Order.objects.filter(pk=back.pk).update(created_at=now, updated_at=now)
+            else:
+                Order.objects.create(business=business, sub_order_no=latest.sub_order_no, reason_for_credit_entry=status,
+                                     order_date=latest.order_date, order_source=SOURCE, catalog_id=latest.catalog_id,
+                                     customer_state=latest.customer_state, product_name=latest.product_name, sku=latest.sku,
+                                     size=latest.size, quantity=latest.quantity, packet_id=latest.packet_id,
+                                     meesho_image_url=latest.meesho_image_url)
+            res.add("settled")
+            res.add(f"settled_from_{source}")
+    return res
+
+
+def settle_account(account):
+    """settle() for one account, against the panel lists it last read. Returns a Result."""
+    return settle(account.business, {r["sub_order_num"] for r in rows_of(account) if r.get("sub_order_num")})

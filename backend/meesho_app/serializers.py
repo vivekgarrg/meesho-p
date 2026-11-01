@@ -227,9 +227,12 @@ class ReturnDeliverySerializer(serializers.ModelSerializer):
     claim_urgency  = serializers.SerializerMethodField()
     claim_window_days = serializers.IntegerField(source="CLAIM_WINDOW_DAYS", read_only=True)
     business_name  = serializers.CharField(source="business.name", read_only=True, default=None)
-    # The product's photo, via its parent SKU. A list passes `image_map` in the
-    # context so a page costs one query per business; a lone row works it out itself.
+    # The product's photo: Meesho's (of the return, else of the order), else
+    # the parent SKU's; the fallback is the parent SKU's, for when Meesho's
+    # doesn't load. A list passes `photo_map` in the context so a page costs a
+    # few queries per business; a lone row works it out itself.
     image_url      = serializers.SerializerMethodField()
+    image_fallback_url = serializers.SerializerMethodField()
 
     class Meta:
         model = ReturnDelivery
@@ -245,12 +248,18 @@ class ReturnDeliverySerializer(serializers.ModelSerializer):
     def get_claim_urgency(self, obj):
         return obj.claim_urgency()
 
+    def _photo(self, obj):
+        from .meesho_images import photo_map
+        photos = self.context.get("photo_map")
+        if photos is None:
+            photos = photo_map([obj])
+        return photos.get((obj.business_id, obj.suborder_no), (None, None))
+
     def get_image_url(self, obj):
-        from .return_images import return_image_map, _norm
-        image_map = self.context.get("image_map")
-        if image_map is None:
-            image_map = return_image_map([obj])
-        return image_map.get((obj.business_id, _norm(obj.sku)))
+        return self._photo(obj)[0]
+
+    def get_image_fallback_url(self, obj):
+        return self._photo(obj)[1]
 
 
 class ScannedOrderSerializer(serializers.ModelSerializer):

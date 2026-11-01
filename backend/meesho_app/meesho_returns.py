@@ -11,6 +11,7 @@ from rest_framework import status
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
+from .meesho_images import photo_map
 from .models import MeeshoAccount, MeeshoSyncSnapshot, ReturnDelivery
 
 from .sync_middleware.returns import (OTP_SNAPSHOT, SNAPSHOT, STATUSES, normalize,  # noqa: F401 — the middleware
@@ -147,7 +148,8 @@ def returns_list(request, business_id):
     except ValueError:
         page = 1
     total = qs.count()
-    rows = qs.order_by(*LIST_ORDER[stage])[(page - 1) * LIST_PAGE: page * LIST_PAGE]
+    rows = list(qs.order_by(*LIST_ORDER[stage])[(page - 1) * LIST_PAGE: page * LIST_PAGE])
+    photos = photo_map(rows)
     return Response({"stage": stage, "total": total, "page": page, "page_size": LIST_PAGE, "returns": [{
         "id": r.pk, "business_name": r.business.name, "suborder_no": r.suborder_no, "order_no": r.order_no,
         "awb": r.awb_number, "sku": r.sku, "product": r.product_name, "variation": r.variation, "qty": r.qty,
@@ -159,4 +161,6 @@ def returns_list(request, business_id):
         "proof_of_delivery": r.proof_of_delivery, "otp_verified_at": r.otp_verified_at,
         "claim_status": r.claim_status, "claim_label": r.get_claim_status_display(),
         "synced_at": r.synced_at,
+        "image_url": photos.get((r.business_id, r.suborder_no), (None, None))[0],
+        "image_fallback_url": photos.get((r.business_id, r.suborder_no), (None, None))[1],
     } for r in rows]})

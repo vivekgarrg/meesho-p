@@ -370,6 +370,8 @@ class Order(models.Model):
     supplier_listed_price      = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     supplier_discounted_price  = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     packet_id       = models.CharField(max_length=100, blank=True, null=True)
+    # The product photo Meesho shows on the order (from the panel sync).
+    meesho_image_url = models.URLField(max_length=500, blank=True, null=True)
     created_at      = models.DateTimeField(auto_now_add=True)
     updated_at      = models.DateTimeField(auto_now=True)
 
@@ -1323,6 +1325,8 @@ class ReturnDelivery(models.Model):
                                               help_text="e.g. a lost return's settlement status")
     synced_at              = models.DateTimeField(null=True, blank=True,
                                                   help_text="When the Meesho sync last read it")
+    meesho_image_url       = models.URLField(max_length=500, blank=True,
+                                             help_text="The product photo Meesho shows on the return")
 
     # ── Claim tracking (entered in the app, never from the sheet) ──────────
     claim_status    = models.CharField(max_length=20, choices=CLAIM_STATUS_CHOICES,

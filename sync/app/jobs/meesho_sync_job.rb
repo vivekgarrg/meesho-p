@@ -74,8 +74,12 @@ class MeeshoSyncJob
       # Short only when fewer rows came than Meesho lists (Ready to ship's
       # total counts shipments, which can hold several of its rows).
       short = total && rows.size < total && self.class.counted(rows) < total
+      # Meesho's count runs ahead of its own list (cancelled says 1,410 and its
+      # pages end at ~1,265, the count changing page to page) — say whose limit.
+      why = pages >= MeeshoEndpoints::MAX_PAGES ? "stopped at the #{pages}-page limit, of the #{total} Meesho counts" \
+                                                : "Meesho's list ended there, though it counts #{total}"
       notes << "#{ep[:key].tr('_', ' ')}: #{rows.size}#{" (#{pages} pages)" if pages > 1}" \
-               "#{" — short of the #{total} Meesho lists" if short}."
+               "#{" — #{why}" if short}."
     end
     if panel_rows.any?
       # The orders middleware (Django, sync_middleware/orders.py) brings the
@@ -84,8 +88,9 @@ class MeeshoSyncJob
       m = DjangoCommand.run("meesho_inject", "--account", account.id, "--kind", "orders")
       notes << "Orders table: #{m['added'].to_i} added, #{m['status_changed'].to_i} status changes, #{m['updated'].to_i} updated" \
                "#{", #{m['kept_further_on']} kept further on" if m['kept_further_on'].to_i.positive?}" \
+               "#{", #{m['settled']} shipped orders settled from Meesho's returns and payments" if m['settled'].to_i.positive?}" \
                "#{", #{m['rejected']} refused (#{m['reject_reasons'].keys.join('; ')})" if m['rejected'].to_i.positive?}."
-      account.orders_changed_at = Time.current if (m["added"].to_i + m["status_changed"].to_i + m["updated"].to_i).positive?
+      account.orders_changed_at = Time.current if (m["added"].to_i + m["status_changed"].to_i + m["updated"].to_i + m["settled"].to_i).positive?
     end
     account.cookies = @client.cookies
     account.save!

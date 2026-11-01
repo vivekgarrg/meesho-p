@@ -25,6 +25,10 @@ class MeeshoClient
 
   attr_reader :cookies
 
+  # What Meesho answers when the session is no longer good: 401/403, and 463
+  # ("Unauthorized call. Token missing.") once the session token has expired.
+  SESSION_GONE = [401, 403, 463].freeze
+
   def initialize(account, cookies: nil)
     @account = account
     @cookies = (cookies || account.cookies).dup
@@ -66,7 +70,7 @@ class MeeshoClient
 
   def authed(method, path, **opts)
     res = request(method, path, **opts)
-    raise AuthError, describe_failure(res, "Session not accepted") if [401, 403].include?(res.status)
+    raise AuthError, describe_failure(res, "Session not accepted") if SESSION_GONE.include?(res.status)
     raise RequestError, describe_failure(res, "Meesho answered") unless res.status.between?(200, 299)
     res
   end

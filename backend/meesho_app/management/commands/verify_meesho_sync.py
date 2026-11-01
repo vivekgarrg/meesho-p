@@ -3,7 +3,8 @@ Check the Meesho sync end to end: what the worker last read from Meesho (its
 snapshots and runs) against what the middleware put in the app's tables.
 
   orders    every order the panel lists is in the orders table, its current
-            status the panel's or one further on (never behind)
+            status the panel's or one further on (never behind); no order
+            left SHIPPED that Meesho's returns or payments say has ended
   returns   every return Meesho lists is in the returns table, in its stage
             (a delivered one may already be delivered; never the other way)
   payments  no unpaid (future, no bank transfer) row in the paid table; the
@@ -66,6 +67,16 @@ def check_orders(a):
             c.bad({"sub_order": sub, "panel": want, "table": None, "why": "not in the orders table"})
         elif have != want and orders_mw.moves_on(have, want):
             c.bad({"sub_order": sub, "panel": want, "table": have, "why": "the table is behind the panel"})
+    # Shipped orders the panel no longer lists: none left SHIPPED while Meesho's
+    # returns or payments say how it ended.
+    gone = [o.sub_order_no for o in Order.latest_per_order(Order.objects.filter(business=a.business, reason_for_credit_entry="SHIPPED"))
+            if o.sub_order_no not in rows]
+    known = orders_mw.outcomes(a.business, gone)
+    c.checked += len(gone)
+    for sub, (status, source) in known.items():
+        c.bad({"sub_order": sub, "table": "SHIPPED", source: status, "why": f"Meesho's {source} say {status} — run meesho_inject"})
+    if gone:
+        c.notes.append(f"{len(gone) - len(known)} shipped orders the panel no longer lists and Meesho says nothing more of yet")
     return c
 
 

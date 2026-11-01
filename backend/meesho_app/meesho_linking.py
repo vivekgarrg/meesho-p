@@ -156,7 +156,7 @@ def _meesho_submit(account, awb, packet, scan):
         answer = res.json()
     except ValueError:
         answer = {}
-    if res.status_code in (401, 403):
+    if res.status_code in (401, 403, 463):          # 463: "Unauthorized call. Token missing." — the session token expired
         why = "Meesho's bot protection blocked the server" if "<html" in res.text[:500].lower() else "the Meesho session has expired"
         raise LinkRefused(f"Not linked — {why}. Log in again (or paste a session) under Meesho → Settings.", "meesho_session",
                           status.HTTP_409_CONFLICT, meesho_http=res.status_code)

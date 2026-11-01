@@ -62,15 +62,19 @@ function dayLabel(iso, current) {
 
 export const fmtTime = (iso) => (iso ? new Date(iso).toLocaleString("en-IN", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }) : "—");
 
-export function Photo({ url, size = 48, radius = 8 }) {
-  const [broken, setBroken] = useState(false);
-  useEffect(() => setBroken(false), [url]);
+// Meesho's photo first; if it doesn't load, the parent SKU's (`fallback`); then a placeholder.
+export function Photo({ url, fallback, size = 48, radius = 8 }) {
+  const [tries, setTries] = useState(0);
+  useEffect(() => setTries(0), [url, fallback]);
+  const candidates = [url, fallback].filter((u, i, all) => u && all.indexOf(u) === i);
+  const src = candidates[tries];
+  const broken = !src;
   const box = {
     width: size, height: size, borderRadius: radius, flexShrink: 0, overflow: "hidden", background: C.gray50,
     border: `1px solid ${C.gray200}`, display: "flex", alignItems: "center", justifyContent: "center", color: C.gray300,
   };
-  if (!url || broken) return <div style={{ ...box, fontSize: size * 0.4 }}>📦</div>;
-  return <div style={box}><img src={url} alt="" onError={() => setBroken(true)} style={{ width: "100%", height: "100%", objectFit: "cover" }} /></div>;
+  if (broken) return <div style={{ ...box, fontSize: size * 0.4 }}>📦</div>;
+  return <div style={box}><img src={src} alt="" onError={() => setTries((t) => t + 1)} style={{ width: "100%", height: "100%", objectFit: "cover" }} /></div>;
 }
 
 // ── The desk: queue, scanning, record ─────────────────────────────────────────
@@ -190,7 +194,7 @@ function useScanDesk(platform) {
       if (data.cross_business) lines.push(`Filed under ${data.business_name}`);
       if (row.platform === "flipkart") lines.push("Flipkart parcel");
 
-      const out = { kind, title, lines, code: row.sub_order_no, image_url: item?.image_url };
+      const out = { kind, title, lines, code: row.sub_order_no, image_url: item?.image_url, image_fallback_url: item?.image_fallback_url };
       if (my === seq.current) setLatest(out);
 
       // Mark it off the list straight away; the refetch below confirms.
@@ -298,7 +302,7 @@ export function LatestPanel({ latest, busy, minHeight = 130, idle }) {
         </div>
       ) : latest ? (
         <>
-          <Photo url={latest.image_url} size={86} radius={12} />
+          <Photo url={latest.image_url} fallback={latest.image_fallback_url} size={86} radius={12} />
           <div style={{ minWidth: 0, flex: 1 }}>
             <div style={{ fontSize: 20, fontWeight: 800, color: k.fg, lineHeight: 1.2 }}>{k.mark} {latest.title}</div>
             {latest.lines.map((l, i) => (
@@ -355,7 +359,7 @@ function ItemRow({ item, compact, showBusiness, admin, selecting, selected, onTo
     }}>
       {selecting && <input type="checkbox" checked={!!selected} onChange={onToggle} onClick={(e) => e.stopPropagation()}
         style={{ width: 20, height: 20, accentColor: C.orange, flexShrink: 0 }} />}
-      <Photo url={item.image_url} size={compact ? 46 : 52} />
+      <Photo url={item.image_url} fallback={item.image_fallback_url} size={compact ? 46 : 52} />
       <div style={{ minWidth: 0, flex: 1 }}>
         <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
           <span style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 14.5, color: C.gray900, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.sku || "—"}</span>

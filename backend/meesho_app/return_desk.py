@@ -23,6 +23,7 @@ from rest_framework import status
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
+from .meesho_images import photo_map
 from .models import LabelOrder, ReturnDelivery, ReturnScan
 
 API_PATH = "return-scan/"
@@ -106,7 +107,8 @@ def _item(r, names, image_map, scan=None, bucket="pending"):
         "expected_date": r.expected_delivery_date.isoformat() if r.expected_delivery_date else None,
         "transit_status": r.transit_status,
         "claim_status": r.claim_status,
-        "image_url": image_map.get((r.business_id, v.return_image_map_key(r.sku))),
+        "image_url": image_map.get((r.business_id, r.suborder_no), (None, None))[0],
+        "image_fallback_url": image_map.get((r.business_id, r.suborder_no), (None, None))[1],
         "scan_id": scan.pk if scan else None,
         "received_day": scan.scan_day.isoformat() if scan else None,
         "received_at": scan.last_scanned_at.isoformat() if scan else None,
@@ -151,7 +153,7 @@ def return_scan_queue(request, business_id):
         business_id__in=ids, delivered_date__lt=day, delivered_date__gte=day - timedelta(days=MISSING_DAYS))
         .exclude(desk_scans__isnull=False).order_by("-delivered_date")[:1000])
 
-    image_map = v.return_image_map(expected + in_transit + missing
+    image_map = photo_map(expected + in_transit + missing
                                    + [s.return_delivery for s in day_scans if s.return_delivery])
     items = [_item(r, names, image_map, received.get(r.pk), "received" if r.pk in received else "pending")
              for r in expected]
@@ -275,7 +277,7 @@ def return_scan_record(request, business_id):
             where = "earlier"
         else:
             where = "later"
-        item = _item(r, names, v.return_image_map([r]), scan, "received" if where == "on_list" else "extra")
+        item = _item(r, names, photo_map([r]), scan, "received" if where == "on_list" else "extra")
         return Response({"matched": True, "already_scanned": again, "where": where, "item": item},
                         status=status.HTTP_200_OK if again else status.HTTP_201_CREATED)
 

@@ -14,6 +14,7 @@ same row:
 
 from django.utils import timezone
 
+from ..meesho_images import meesho_image
 from ..models import MeeshoSyncSnapshot
 from .base import Result, deferred_bumps, missing
 
@@ -55,6 +56,7 @@ def normalize(r, meesho_status):
         "return_reason": _v(reasons.get("return_reason")), "detailed_return_reason": _v(reasons.get("detailed_reason")),
         "meesho_status": _v(r.get("shipment_status")),
         "delivery_attempts": attempt.get("reverse_ofd_attempt_count_value"),
+        "meesho_image_url": next((u for u in map(meesho_image, product.get("image_urls") or []) if u), ""),
     }
     if meesho_status in ("intransit", "ofd_reverse"):
         row.update({

@@ -124,18 +124,21 @@ function useScannerInput(onScan, { minLen = 5, idleMs = 220 } = {}) {
 
 // ── Pieces ────────────────────────────────────────────────────────────────────
 
-function Photo({ url, size = 64, radius = 10 }) {
-  const [broken, setBroken] = useState(false);
-  useEffect(() => setBroken(false), [url]);
+// Meesho's photo first; if it doesn't load, the parent SKU's (`fallback`); then a placeholder.
+function Photo({ url, fallback, size = 64, radius = 10 }) {
+  const [tries, setTries] = useState(0);
+  useEffect(() => setTries(0), [url, fallback]);
+  const candidates = [url, fallback].filter((u, i, all) => u && all.indexOf(u) === i);
+  const src = candidates[tries];
   const box = {
     width: size, height: size, borderRadius: radius, flexShrink: 0, overflow: "hidden",
     border: `1px solid ${C.gray200}`, background: C.gray50,
     display: "flex", alignItems: "center", justifyContent: "center", color: C.gray300,
   };
-  if (!url || broken) return <div style={{ ...box, fontSize: size * 0.4 }}>📷</div>;
+  if (!src) return <div style={{ ...box, fontSize: size * 0.4 }}>📷</div>;
   return (
-    <a href={url} target="_blank" rel="noreferrer" title="Open full photo" style={box}>
-      <img src={url} alt="" onError={() => setBroken(true)} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+    <a href={src} target="_blank" rel="noreferrer" title="Open full photo" style={box}>
+      <img src={src} alt="" onError={() => setTries((t) => t + 1)} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
     </a>
   );
 }
@@ -196,7 +199,7 @@ function ReturnSummary({ row, compact }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       <div style={{ display: "flex", gap: compact ? 14 : 20, alignItems: "flex-start", flexWrap: "wrap" }}>
-        <Photo url={row.image_url} size={compact ? 118 : 150} radius={16} />
+        <Photo url={row.image_url} fallback={row.image_fallback_url} size={compact ? 118 : 150} radius={16} />
         <div style={{ minWidth: 0, flex: "1 1 200px" }}>
           <Label>SKU</Label>
           <div style={{ fontFamily: "monospace", fontWeight: 800, lineHeight: 1.2, wordBreak: "break-all",
@@ -714,7 +717,7 @@ function RecentStrip({ recent, activeId, onOpen }) {
         <button key={r.id} onClick={() => onOpen(r)}
           style={{ display: "flex", alignItems: "center", gap: 6, padding: "5px 10px 5px 5px", borderRadius: 999, cursor: "pointer", whiteSpace: "nowrap",
             border: `1.5px solid ${r.id === activeId ? C.orange : C.gray200}`, background: r.id === activeId ? C.orangeLight : C.white, fontFamily: "inherit" }}>
-          <Photo url={r.image_url} size={26} radius={999} />
+          <Photo url={r.image_url} fallback={r.image_fallback_url} size={26} radius={999} />
           <span style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 12, color: C.gray800 }}>{r.sku} ×{r.qty}</span>
           <span style={{ width: 8, height: 8, borderRadius: 999, background: { REQUIRED: C.amber, RAISED: C.blue, APPROVED: C.green, REJECTED: C.red }[r.claim_status] || C.gray300 }} />
         </button>
@@ -783,7 +786,7 @@ function MobileReturns({ desk }) {
                 {recent.map((r) => (
                   <div key={r.id} onClick={() => open(r)}
                     style={{ ...S.card, padding: "10px 12px", display: "flex", gap: 10, alignItems: "center", cursor: "pointer" }}>
-                    <Photo url={r.image_url} size={44} radius={8} />
+                    <Photo url={r.image_url} fallback={r.image_fallback_url} size={44} radius={8} />
                     <div style={{ minWidth: 0, flex: 1 }}>
                       <div style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 13, color: C.gray900, wordBreak: "break-all" }}>{r.sku} × {r.qty}</div>
                       <div style={{ fontSize: 11.5, color: C.gray500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.return_reason || "No reason"}</div>
@@ -952,7 +955,7 @@ function ReturnsList({ onPick, activeId, touch }) {
               <button key={r.id} onClick={() => onPick(r)}
                 style={{ ...S.card, display: "flex", gap: 12, alignItems: "center", padding: "12px 14px", cursor: "pointer", textAlign: "left",
                   fontFamily: "inherit", border: `1.5px solid ${on ? C.orange : C.gray100}`, background: on ? C.orangeLight : C.white, minHeight: 84 }}>
-                <Photo url={r.image_url} size={58} radius={10} />
+                <Photo url={r.image_url} fallback={r.image_fallback_url} size={58} radius={10} />
                 <div style={{ minWidth: 0, flex: 1 }}>
                   <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
                     <span style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 14, color: C.gray900, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>

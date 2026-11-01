@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { API, C, S, btn, useIsMobile } from "../../App";
 import { CircularProgress } from "@mui/material";
 import { Panel, Kpi, StatusDot, num, ago, dayLabel } from "./MeeshoUI";
+import { Photo } from "./OrderScanTab";
 
 /*
  * Meesho → Returns & OTPs. The delivery OTP each courier needs to hand returns
@@ -141,9 +142,14 @@ function ReturnsTable({ stage, accounts, multi }) {
                       <div style={{ fontSize: 11.5, color: C.gray500 }}>{x.type || "—"}{x.awb ? <> · <span style={{ fontFamily: "monospace" }}>{x.awb}</span></> : null}</div>
                     </td>
                     {multi && biz === "all" && <td style={S.td}>{x.business_name}</td>}
-                    <td style={{ ...S.td, maxWidth: 280 }}>
-                      <div style={{ fontFamily: "monospace", fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{x.sku || "—"}</div>
-                      <div style={{ fontSize: 11.5, color: C.gray500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{x.product}</div>
+                    <td style={{ ...S.td, maxWidth: 320 }}>
+                      <div style={{ display: "flex", gap: 10, alignItems: "center", minWidth: 0 }}>
+                        <Photo url={x.image_url} fallback={x.image_fallback_url} size={40} />
+                        <div style={{ minWidth: 0 }}>
+                          <div style={{ fontFamily: "monospace", fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{x.sku || "—"}</div>
+                          <div style={{ fontSize: 11.5, color: C.gray500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{x.product}</div>
+                        </div>
+                      </div>
                     </td>
                     <td style={{ ...S.td, whiteSpace: "nowrap" }}>{x.courier || "—"}</td>
                     <td style={{ ...S.td, whiteSpace: "nowrap" }}>

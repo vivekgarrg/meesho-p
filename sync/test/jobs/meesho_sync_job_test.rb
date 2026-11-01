@@ -41,6 +41,17 @@ class MeeshoSyncJobTest < ActiveSupport::TestCase
     assert_equal "new", account.reload.cookies["session_token"]
   end
 
+  test "Meesho's 463 (token missing) is a lapsed session too: it logs in again" do
+    account = active_account
+    stub_login(cookies: ["session_token=new; Path=/"])
+    stub_request(:post, ORDERS_URL).with(headers: { "Cookie" => "session_token=old" })
+      .to_return(status: 463, body: { message: "Unauthorized call. Token missing." }.to_json)
+    stub_request(:post, ORDERS_URL).with(headers: { "Cookie" => "session_token=new" }).to_return(status: 200, body: "[]")
+    with_endpoints([ORDERS]) { MeeshoSyncJob.new.perform(account.id) }
+    assert_equal "OK", account.runs.last.status, account.runs.last.message
+    assert_equal "new", account.reload.cookies["session_token"]
+  end
+
   test "a session with no cookies logs in first" do
     account = make_account(status: "ACTIVE")
     stub_login
@@ -229,7 +240,7 @@ class MeeshoSyncJobTest < ActiveSupport::TestCase
     rts = MeeshoEndpoints.orders_tab("ready-to-ship", 3)
     stub_request(:post, PENDING_URL).to_return(real_page([real_sub(3)], total: 69, cursor: nil, groups: true))
     with_endpoints([rts]) { MeeshoSyncJob.new.perform(account.id) }
-    assert_match(/ready to ship: 1 — short of the 69 Meesho lists/, account.runs.last.message)
+    assert_match(/ready to ship: 1 — Meesho's list ended there, though it counts 69/, account.runs.last.message)
   end
 
   test "a scheduled pull skips shipped while its last pull is recent; refresh doesn't" do

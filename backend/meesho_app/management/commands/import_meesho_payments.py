@@ -13,7 +13,8 @@ import json
 from django.core.management.base import BaseCommand, CommandError
 
 from accounts.models import Business
-from meesho_app.sync_middleware import payments
+from meesho_app.models import MeeshoAccount
+from meesho_app.sync_middleware import orders, payments
 
 
 class Command(BaseCommand):
@@ -35,4 +36,9 @@ class Command(BaseCommand):
         except Exception as exc:
             raise CommandError(f"Could not read the payment file: {exc}")
         res = payments.import_completed(biz, books) if kind == "completed" else payments.import_outstanding(biz, books)
-        self.stdout.write(json.dumps(res.as_dict(), default=str))
+        out = res.as_dict()
+        if kind == "completed":
+            # Paid orders say how they ended: settle shipped orders the panel no longer lists.
+            for a in MeeshoAccount.objects.filter(business=biz):
+                out["settled"] = out.get("settled", 0) + orders.settle_account(a).counts["settled"]
+        self.stdout.write(json.dumps(out, default=str))

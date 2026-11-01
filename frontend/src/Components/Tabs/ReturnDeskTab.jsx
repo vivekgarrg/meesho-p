@@ -91,7 +91,7 @@ function useReturnDesk() {
         else if (d.where === "in_transit") { kind = "warn"; title = "Received · arrived early"; lines.push(`Sheet still shows it in transit${i.expected_date ? ` (expected ${fmtDay(i.expected_date)})` : ""}.`); }
         else if (d.where === "earlier") { kind = "warn"; title = `Received · from ${fmtDay(i.delivered_date)}'s list`; }
         else if (d.where === "later") { kind = "warn"; title = "Received · not on this day's list"; lines.push(`Sheet says delivered ${fmtDay(i.delivered_date)}.`); }
-        out = { kind, title, lines, image_url: i.image_url };
+        out = { kind, title, lines, image_url: i.image_url, image_fallback_url: i.image_fallback_url };
         setQueue((q) => q && { ...q, items: q.items.map((x) => (x.id === i.id ? { ...x, bucket: "received", scan_id: i.scan_id, received_day: i.received_day } : x)) });
       }
       if (my === seq.current) setLatest(out);
@@ -135,7 +135,7 @@ function ReturnRow({ r, onUndo, compact, showBusiness }) {
   return (
     <div style={{ display: "flex", gap: 12, alignItems: "center", padding: compact ? "11px 12px" : "12px 16px", borderBottom: `1px solid ${C.gray100}`,
       background: r.bucket === "missing" ? C.redLight : C.white }}>
-      <Photo url={r.image_url} size={compact ? 46 : 52} />
+      <Photo url={r.image_url} fallback={r.image_fallback_url} size={compact ? 46 : 52} />
       <div style={{ minWidth: 0, flex: 1 }}>
         <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
           <span style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 14.5, color: C.gray900, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.sku || r.suborder_no || "—"}</span>

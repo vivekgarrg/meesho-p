@@ -24,6 +24,7 @@ from .helpers.helper import status_wise_summary, strip_html
 from accounts.models import Business, User
 from .permissions import get_authorized_business, accessible_businesses
 from .helpers import label_pdf
+from .meesho_images import photo_map
 from .return_images import return_image_map, _norm as return_image_map_key
 from .helpers.label_pdf import extract_all_pages
 from . import master_pricing, pricing_sync
@@ -12076,6 +12077,8 @@ def upsert_return_rows(business, rows, kind, now=None):
                     "meesho_note":       _return_text(row.get("meesho_note"))[:200],
                     "synced_at":         now,
                 })
+                if row.get("meesho_image_url"):
+                    defaults["meesho_image_url"] = row["meesho_image_url"]
             existing = ReturnDelivery.objects.filter(business=business, suborder_no=suborder,
                                                      awb_number=awb).only("stage", "claim_status").first()
             if in_transit:
@@ -12319,7 +12322,7 @@ def return_deliveries_list(request, business_id):
         "total": total,
         "page": page,
         "page_size": page_size,
-        "results": ReturnDeliverySerializer(rows, many=True, context={"image_map": return_image_map(rows)}).data,
+        "results": ReturnDeliverySerializer(rows, many=True, context={"photo_map": photo_map(rows)}).data,
         "stats": _return_claim_stats(business),
         "claim_window_days": window,
     })
@@ -12901,9 +12904,9 @@ def return_delivery_lookup(request, business_id):
         }, status=status.HTTP_404_NOT_FOUND)
 
     matches = []
-    image_map = return_image_map(rows)
+    photos = photo_map(rows)
     for row in rows:
-        data = ReturnDeliverySerializer(row, context={"image_map": image_map}).data
+        data = ReturnDeliverySerializer(row, context={"photo_map": photos}).data
         data["order_context"] = _order_context(owner, row.suborder_no)
         matches.append(data)
 
@@ -14069,7 +14072,8 @@ def scan_queue(request, business_id):
     # list — the most advanced status wins, so READY_TO_SHIP never hides a later
     # SHIPPED / DELIVERED / RTO row.
     sheet_status = _sheet_status_raws(desk_ids, ids)
-    image_map = return_image_map(labels)
+    # Meesho's photo of the order, else the parent SKU's.
+    photos = photo_map(labels, sub_of=lambda l: l.order_id, own=lambda l: "")
 
     items = []
     for l in labels:
@@ -14096,7 +14100,8 @@ def scan_queue(request, business_id):
             "platform": l.platform,
             "customer_name": l.customer_name,
             "customer_city": l.customer_city,
-            "image_url": image_map.get((l.business_id, return_image_map_key(l.sku))),
+            "image_url": photos.get((l.business_id, l.order_id), (None, None))[0],
+            "image_fallback_url": photos.get((l.business_id, l.order_id), (None, None))[1],
             "scan_id": sc.id if sc else None,
             "state": sc.status if sc else "PENDING",
             "scan_count": sc.scan_count if sc else 0,
