@@ -39,7 +39,9 @@ class Command(BaseCommand):
         parser.add_argument("--apply", action="store_true")
 
     def handle(self, *args, business=None, apply=False, **opts):
-        base = OrderPayment.objects.all()
+        # Outstanding rows (from Meesho's outstanding file) are meant to be
+        # there — expected, flagged, replaced by every read — never "unpaid junk".
+        base = OrderPayment.objects.filter(outstanding=False)
         if business:
             base = base.filter(business_id=business)
 

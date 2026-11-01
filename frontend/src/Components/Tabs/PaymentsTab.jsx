@@ -449,6 +449,7 @@ function MeeshoPaymentsTab() {
                           {/* Status */}
                           <td style={{ ...S.td }}>
                             <StatusBadge status={g.status} />
+                            {g.outstanding && <div style={{ marginTop: 3 }}><Tag variant="amber">Outstanding · not paid yet</Tag></div>}
                           </td>
                           {/* SKU + Product */}
                           <td style={{ ...S.td, maxWidth: 220 }}>

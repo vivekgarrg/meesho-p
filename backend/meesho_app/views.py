@@ -235,6 +235,54 @@ ORDER_PAYMENT_COLUMNS = [
 ]
 
 
+def _order_payment_defaults(row):
+    """One Order Payments sheet row → OrderPayment's fields (payment date and status included)."""
+    return {
+        "order_date": safe_datetime(row.get("order_date")),
+        "dispatch_date": safe_date(row.get("dispatch_date")),
+        "product_name": safe_str(row.get("product_name")),
+        "supplier_sku": safe_str(row.get("supplier_sku")),
+        "catalog_id": safe_int(row.get("catalog_id")),
+        "order_source": safe_str(row.get("order_source")),
+        "live_order_status": safe_str(row.get("live_order_status")),
+        "product_gst_percent": safe_decimal(row.get("product_gst_percent")),
+        "listing_price_incl_taxes": safe_decimal(row.get("listing_price_incl_taxes")),
+        "quantity": safe_int(row.get("quantity")),
+        "transaction_id": safe_str(row.get("transaction_id")),
+        "payment_date": safe_date(row.get("payment_date")),
+        "final_settlement_amount": safe_decimal(row.get("final_settlement_amount")),
+        "price_type": safe_str(row.get("price_type")),
+        "total_sale_amount": safe_decimal(row.get("total_sale_amount")),
+        "total_sale_return_amount": safe_decimal(row.get("total_sale_return_amount")),
+        "fixed_fee_revenue": safe_decimal(row.get("fixed_fee_revenue")),
+        "warehousing_fee": safe_decimal(row.get("warehousing_fee")),
+        "return_premium": safe_decimal(row.get("return_premium")),
+        "return_premium_of_return": safe_decimal(row.get("return_premium_of_return")),
+        "meesho_commission_percentage": safe_decimal(row.get("meesho_commission_percentage")),
+        "meesho_commission_incl_gst": safe_decimal(row.get("meesho_commission_incl_gst")),
+        "meesho_gold_platform_fee": safe_decimal(row.get("meesho_gold_platform_fee")),
+        "meesho_mall_platform_fee": safe_decimal(row.get("meesho_mall_platform_fee")),
+        "fixed_fee_deduction": safe_decimal(row.get("fixed_fee_deduction")),
+        "warehousing_fee_deduction": safe_decimal(row.get("warehousing_fee_deduction")),
+        "return_shipping_charge": safe_decimal(row.get("return_shipping_charge")),
+        "gst_compensation_prp_shipping": safe_decimal(row.get("gst_compensation_prp_shipping")),
+        "shipping_charge_incl_gst": safe_decimal(row.get("shipping_charge_incl_gst")),
+        "other_support_service_charges": safe_decimal(row.get("other_support_service_charges")),
+        "waivers": safe_decimal(row.get("waivers")),
+        "net_other_support_service_charges": safe_decimal(row.get("net_other_support_service_charges")),
+        "gst_on_net_other_support_service_charges": safe_decimal(row.get("gst_on_net_other_support_service_charges")),
+        "tcs": safe_decimal(row.get("tcs")),
+        "tds_rate_percent": safe_decimal(row.get("tds_rate_percent")),
+        "tds": safe_decimal(row.get("tds")),
+        "compensation": safe_decimal(row.get("compensation")),
+        "claims": safe_decimal(row.get("claims")),
+        "recovery": safe_decimal(row.get("recovery")),
+        "compensation_reason": safe_str(row.get("compensation_reason")),
+        "claims_reason": safe_str(row.get("claims_reason")),
+        "recovery_reason": safe_str(row.get("recovery_reason")),
+    }
+
+
 def import_payment_workbook(business, xl):
     """
     Read a Meesho payment workbook (pd.ExcelFile) — Order Payments, Ads Cost,
@@ -268,50 +316,8 @@ def import_payment_workbook(business, xl):
                 if not _paid_txn(row.get("transaction_id")) and (safe_date(row.get("payment_date")) or today) > today:
                     unpaid += 1
                     continue
-                defaults = {
-                    "order_date": safe_datetime(row.get("order_date")),
-                    "dispatch_date": safe_date(row.get("dispatch_date")),
-                    "product_name": safe_str(row.get("product_name")),
-                    "supplier_sku": safe_str(row.get("supplier_sku")),
-                    "catalog_id": safe_int(row.get("catalog_id")),
-                    "order_source": safe_str(row.get("order_source")),
-                    "live_order_status": safe_str(row.get("live_order_status")),
-                    "product_gst_percent": safe_decimal(row.get("product_gst_percent")),
-                    "listing_price_incl_taxes": safe_decimal(row.get("listing_price_incl_taxes")),
-                    "quantity": safe_int(row.get("quantity")),
-                    "transaction_id": safe_str(row.get("transaction_id")),
-                    "payment_date": safe_date(row.get("payment_date")),
-                    "final_settlement_amount": safe_decimal(row.get("final_settlement_amount")),
-                    "price_type": safe_str(row.get("price_type")),
-                    "total_sale_amount": safe_decimal(row.get("total_sale_amount")),
-                    "total_sale_return_amount": safe_decimal(row.get("total_sale_return_amount")),
-                    "fixed_fee_revenue": safe_decimal(row.get("fixed_fee_revenue")),
-                    "warehousing_fee": safe_decimal(row.get("warehousing_fee")),
-                    "return_premium": safe_decimal(row.get("return_premium")),
-                    "return_premium_of_return": safe_decimal(row.get("return_premium_of_return")),
-                    "meesho_commission_percentage": safe_decimal(row.get("meesho_commission_percentage")),
-                    "meesho_commission_incl_gst": safe_decimal(row.get("meesho_commission_incl_gst")),
-                    "meesho_gold_platform_fee": safe_decimal(row.get("meesho_gold_platform_fee")),
-                    "meesho_mall_platform_fee": safe_decimal(row.get("meesho_mall_platform_fee")),
-                    "fixed_fee_deduction": safe_decimal(row.get("fixed_fee_deduction")),
-                    "warehousing_fee_deduction": safe_decimal(row.get("warehousing_fee_deduction")),
-                    "return_shipping_charge": safe_decimal(row.get("return_shipping_charge")),
-                    "gst_compensation_prp_shipping": safe_decimal(row.get("gst_compensation_prp_shipping")),
-                    "shipping_charge_incl_gst": safe_decimal(row.get("shipping_charge_incl_gst")),
-                    "other_support_service_charges": safe_decimal(row.get("other_support_service_charges")),
-                    "waivers": safe_decimal(row.get("waivers")),
-                    "net_other_support_service_charges": safe_decimal(row.get("net_other_support_service_charges")),
-                    "gst_on_net_other_support_service_charges": safe_decimal(row.get("gst_on_net_other_support_service_charges")),
-                    "tcs": safe_decimal(row.get("tcs")),
-                    "tds_rate_percent": safe_decimal(row.get("tds_rate_percent")),
-                    "tds": safe_decimal(row.get("tds")),
-                    "compensation": safe_decimal(row.get("compensation")),
-                    "claims": safe_decimal(row.get("claims")),
-                    "recovery": safe_decimal(row.get("recovery")),
-                    "compensation_reason": safe_str(row.get("compensation_reason")),
-                    "claims_reason": safe_str(row.get("claims_reason")),
-                    "recovery_reason": safe_str(row.get("recovery_reason")),
-                }
+                defaults = _order_payment_defaults(row)
+                defaults["outstanding"] = False           # in a completed file: paid (or Meesho's own record of it)
                 # Composite lookup: (sub_order_no, payment_date, live_order_status)
                 # allows multiple rows per order (e.g. affiliate-fee adjustments
                 # alongside the main delivery row).
@@ -323,9 +329,11 @@ def import_payment_workbook(business, xl):
                     # A payment Meesho has made replaces what was only expected
                     # of it: an outstanding sheet's rows for the order (no bank
                     # transfer) would count it twice.
+                    # (Outstanding rows of the order due on other days are real
+                    # money still to come — those go when their own payout does.)
                     if pk not in projections_cleared:
                         projections_cleared.add(pk)
-                        superseded += OrderPayment.objects.filter(business=business, sub_order_no=pk).filter(
+                        superseded += OrderPayment.objects.filter(business=business, sub_order_no=pk, outstanding=False).filter(
                             DQ(transaction_id__isnull=True) | DQ(transaction_id__in=_NO_TXN)).delete()[0]
                     # The same payment read again after the order's live status
                     # moved on (Shipped → Delivered…) is that row, not a new one.
@@ -356,7 +364,8 @@ def import_payment_workbook(business, xl):
                     updated += 1
         results["order_payments"] = {"created": created, "updated": updated}
         # A payout this file shows as made: any row for that date with no bank
-        # transfer was only what an outstanding sheet expected.
+        # transfer — the outstanding rows due that day included — was only
+        # what was expected of it.
         if paid_dates:
             superseded += OrderPayment.objects.filter(business=business, payment_date__in=paid_dates).filter(
                 DQ(transaction_id__isnull=True) | DQ(transaction_id__in=_NO_TXN)).exclude(pk__in=written_no_txn).delete()[0]
@@ -1051,7 +1060,7 @@ def unsettled_orders(request, business_id):
             DQ(product_name__icontains=search)
         )
 
-    settled_nos = set(OrderPayment.objects.filter(business=business).values_list("sub_order_no", flat=True).distinct())
+    settled_nos = set(OrderPayment.objects.filter(business=business, outstanding=False).values_list("sub_order_no", flat=True).distinct())
     # Deduplicate to latest status per sub_order_no before listing
     latest_qs    = Order.latest_per_order(base_qs=order_qs)
     unsettled_qs = (
@@ -1127,7 +1136,7 @@ def unscheduled_payments(request, business_id):
             DQ(product_name__icontains=search)
         )
 
-    settled_nos = set(OrderPayment.objects.filter(business=business).values_list("sub_order_no", flat=True).distinct())
+    settled_nos = set(OrderPayment.objects.filter(business=business, outstanding=False).values_list("sub_order_no", flat=True).distinct())
     unsettled_qs = (
         Order.latest_per_order(base_qs=order_qs)
         .exclude(sub_order_no__in=settled_nos)
@@ -1253,7 +1262,7 @@ def payment_mismatch(request, business_id):
     if date_to:
         order_qs = order_qs.filter(order_date__lte=date_to)
 
-    payment_sub_nos = set(OrderPayment.objects.filter(business=business).values_list("sub_order_no", flat=True).distinct())
+    payment_sub_nos = set(OrderPayment.objects.filter(business=business, outstanding=False).values_list("sub_order_no", flat=True).distinct())
     latest_orders   = Order.latest_per_order(base_qs=order_qs)
     orders_no_pay   = (
         latest_orders
@@ -1772,8 +1781,9 @@ def _apply_settlement_filter(qs, request):
     kept anyway — see the switch's own tooltip on the frontend for this caveat.
     """
     if _settlement_mode(request) != SETTLEMENT_SETTLED:
-        return qs
-    return qs.exclude(DQ(transaction_id__isnull=True) | DQ(transaction_id=""))
+        return qs                       # overall: paid and outstanding alike
+    # Settled: paid by Meesho — never an outstanding (expected) payment.
+    return qs.exclude(outstanding=True).exclude(DQ(transaction_id__isnull=True) | DQ(transaction_id=""))
 
 
 def _profit_payments_qs(business, date_from, date_to, request):
@@ -2356,9 +2366,15 @@ def compute_profit_summary(business, date_from="", date_to="", request=None):
 
 
 
+    # Of the payments counted, those Meesho hasn't paid yet (its outstanding
+    # file) — 0 with the Settled-only switch on, which leaves them out.
+    _out = qs.filter(outstanding=True).aggregate(t=Sum("final_settlement_amount"), n=Count("sub_order_no", distinct=True))
+
     return {
         "gross_revenue":          round(gross_revenue, 2),
         "total_settled":          round(revenue, 2), 
+        "outstanding_settlement": round(_out["t"] or Decimal("0"), 2),
+        "outstanding_orders":     _out["n"] or 0,
         "total_purchase_cost":    round(total_purchase_cost, 2),
         "total_packaging_cost":   round(total_packaging_cost, 2),
         "total_packaging_cost_for_returns": round(total_packaging_cost_for_return, 2),
@@ -4050,6 +4066,8 @@ def orders_grouped(request, business_id):
             "order_date":     str(first.order_date.date()) if first.order_date else None,
             "row_count":      len(rows),
             "updated_at":     max((r.updated_at or r.uploaded_at for r in rows if r.updated_at or r.uploaded_at), default=None),
+            # Expected from Meesho's outstanding file, nothing of it paid yet.
+            "outstanding":    all(r.outstanding for r in rows),
             "rows":           [],     # filled below for the requested page only
         })
 

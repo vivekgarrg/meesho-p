@@ -101,7 +101,7 @@ def check_returns(a):
 
 def check_payments(a):
     c = Check("payments")
-    unpaid = (OrderPayment.objects.filter(business=a.business, payment_date__gt=_ist_today())
+    unpaid = (OrderPayment.objects.filter(business=a.business, payment_date__gt=_ist_today(), outstanding=False)
               .filter(Q(transaction_id__isnull=True) | Q(transaction_id__in=["", "nan", "None", "-"])))
     c.checked += 1
     if unpaid.exists():
@@ -114,9 +114,14 @@ def check_payments(a):
         c.checked += 1
         if not o.get("note") and not o.get("error") and o.get("rows") is not None and int(o["rows"]) != outstanding:
             c.bad({"why": f"the last read found {o['rows']} outstanding, the table holds {outstanding}"})
+        flagged = OrderPayment.objects.filter(business=a.business, outstanding=True).count()
+        c.checked += 1
+        if flagged != outstanding:
+            c.bad({"why": f"{outstanding} outstanding payments listed, {flagged} in the payments table — run a payments refresh"})
         done = (run.result.get("files") or {}).get("completed") or {}
         if done.get("from") and done.get("to"):
-            on_file = (OrderPayment.objects.filter(business=a.business, payment_date__gte=done["from"], payment_date__lte=done["to"])
+            on_file = (OrderPayment.objects.filter(business=a.business, payment_date__gte=done["from"], payment_date__lte=done["to"],
+                                                   outstanding=False)
                        .aggregate(t=Sum("final_settlement_amount"))["t"] or Decimal(0))
             snap = MeeshoSyncSnapshot.objects.filter(account=a, endpoint="payments_summary").first()
             days = ((snap.payload or {}).get("previous") or {}).get("daywisePayments") or [] if snap and isinstance(snap.payload, dict) else []
@@ -131,7 +136,7 @@ def check_payments(a):
                 if not (done["from"] <= str(day.get("date")) <= done["to"]) or day.get("netOrderAmount") is None:
                     continue
                 c.checked += 1
-                ours = (OrderPayment.objects.filter(business=a.business, payment_date=day["date"])
+                ours = (OrderPayment.objects.filter(business=a.business, payment_date=day["date"], outstanding=False)
                         .aggregate(t=Sum("final_settlement_amount"))["t"] or Decimal(0))
                 gap = Decimal(str(ours)) - Decimal(str(day["netOrderAmount"]))
                 if abs(gap) > 1:

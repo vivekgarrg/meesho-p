@@ -717,11 +717,12 @@ class MeeshoPaymentsTests(TestCase):
         first = self.file("o1.xlsx", [{"sub_order_no": "1_1", "payment_date": "2026-11-02", "final_settlement_amount": 100, "live_order_status": "Shipped"},
                                       {"sub_order_no": "2_1", "payment_date": "2026-11-03", "final_settlement_amount": -40, "live_order_status": "RTO"}])
         out = self.run_command("outstanding", first)
-        self.assertEqual((out["outstanding"], out["rejected"]), ({"rows": 2, "replaced": 0, "files": 1}, 0))
+        self.assertEqual((out["outstanding"], out["rejected"]), ({"rows": 2, "replaced": 0, "files": 1, "in_payments_table": 2}, 0))
         second = self.file("o2.xlsx", [{"sub_order_no": "3_1", "payment_date": "2026-11-04", "final_settlement_amount": 70}])
         self.run_command("outstanding", second)
         self.assertEqual(list(MeeshoOutstandingPayment.objects.values_list("sub_order_no", flat=True)), ["3_1"])
-        self.assertFalse(OrderPayment.objects.exists())          # not paid yet: never counted as settled
+        # In the payments table too, flagged outstanding (no bank transfer) — replaced on every read.
+        self.assertEqual(list(OrderPayment.objects.values_list("sub_order_no", "outstanding", "transaction_id")), [("3_1", True, None)])
 
     def test_the_payments_upload_skips_rows_not_paid_yet(self):
         from .models import OrderPayment
@@ -748,7 +749,7 @@ class MeeshoPaymentsTests(TestCase):
         call_command("import_meesho_payments", "--business", str(self.biz.pk), "--kind", "outstanding",
                      "--file", day1, "--file", day2, stdout=out)                 # as the worker runs it
         out = json.loads(out.getvalue())
-        self.assertEqual((out["outstanding"], out["duplicates"]), ({"rows": 2, "replaced": 0, "files": 2}, 1))
+        self.assertEqual((out["outstanding"], out["duplicates"]), ({"rows": 2, "replaced": 0, "files": 2, "in_payments_table": 2}, 1))
         self.assertEqual(sorted(MeeshoOutstandingPayment.objects.values_list("sub_order_no", flat=True)), ["1_1", "2_1"])
 
     def test_unpaid_rows_already_in_the_table_can_be_removed(self):

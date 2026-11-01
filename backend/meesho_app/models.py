@@ -234,6 +234,10 @@ class OrderPayment(models.Model):
     # Last written — by an upload or the Meesho payments read (rows from before
     # this was kept have none: their uploaded_at stands in).
     updated_at = models.DateTimeField(auto_now=True, null=True)
+    # Expected, not paid yet: from Meesho's outstanding-payments file, replaced
+    # by every read, and by the paid row once Meesho pays it. Counted in the
+    # overall profit; the "Settled only" switch leaves it out.
+    outstanding = models.BooleanField(default=False, db_index=True)
 
     business = models.ForeignKey(
         "accounts.Business", on_delete=models.PROTECT,

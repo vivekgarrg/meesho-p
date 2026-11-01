@@ -14,6 +14,7 @@ import io
 import json
 import os
 import tempfile
+from decimal import Decimal as D
 
 from django.core.management import call_command
 from django.test import TestCase, override_settings
@@ -196,7 +197,57 @@ class PaymentsIntoTheTableTests(PipelineTestCase):
         self.assertEqual(OrderPayment.objects.count(), 1)
         self.import_payments([{"sub_order_no": "3_1", "payment_date": future, "final_settlement_amount": 70}], kind="outstanding")
         self.assertEqual(list(MeeshoOutstandingPayment.objects.values_list("sub_order_no", flat=True)), ["3_1"])
-        self.assertFalse(OrderPayment.objects.filter(sub_order_no="3_1").exists())
+        out = OrderPayment.objects.get(sub_order_no="3_1")                   # in the payments table — flagged, not paid
+        self.assertEqual((out.outstanding, out.transaction_id), (True, None))
+        self.assertEqual(check_payments(self.acct).problems, 0)
+
+
+class OutstandingPaymentsTests(PipelineTestCase):
+    """Outstanding payments are in the payments table, flagged: overall profit counts them, settled profit doesn't."""
+
+    def setUp(self):
+        super().setUp()
+        from .views import _ist_today
+        self.today = _ist_today()
+        self.soon = (self.today + dt.timedelta(days=3)).isoformat()
+        self.later = (self.today + dt.timedelta(days=9)).isoformat()
+
+    def outstanding(self, *rows):
+        return self.import_payments(list(rows), kind="outstanding")
+
+    def row(self, sub, amount, day, status="Delivered", **kw):
+        return {"sub_order_no": sub, "payment_date": day, "final_settlement_amount": amount, "live_order_status": status,
+                "supplier_sku": "diya-029", "quantity": 1, "order_date": "2026-10-20 10:00", **kw}
+
+    def test_settled_and_overall_profit_differ_by_the_outstanding(self):
+        self.order_paid = self.import_payments([self.row("1_1", 180, "2026-10-27", transaction_id="AXIS1")])
+        self.outstanding(self.row("2_1", 150, self.soon))
+        overall = self.api.get(f"{self.base}/profit/").json()
+        settled = self.api.get(f"{self.base}/profit/", HTTP_X_SETTLEMENT_MODE="settled").json()
+        self.assertEqual((float(overall["total_settled"]), float(overall["outstanding_settlement"]), overall["outstanding_orders"]),
+                         (330.0, 150.0, 1))
+        self.assertEqual((float(settled["total_settled"]), float(settled["outstanding_settlement"])), (180.0, 0.0))
+
+    def test_every_read_replaces_them_and_a_payout_replaces_its_days(self):
+        self.outstanding(self.row("1_1", 100, self.soon), self.row("1_1", -30, self.later, status="Return"),
+                         self.row("2_1", 50, self.soon))
+        self.outstanding(self.row("1_1", 100, self.soon), self.row("1_1", -30, self.later, status="Return"))   # 2_1 dropped off
+        self.assertEqual(sorted(OrderPayment.objects.filter(outstanding=True).values_list("sub_order_no", "final_settlement_amount")),
+                         [("1_1", D("-30.00")), ("1_1", D("100.00"))])
+        # Meesho pays the first payout: its day's expected row goes, the later one (still to come) stays.
+        self.import_payments([self.row("1_1", 100, self.soon, transaction_id="AXIS9")])
+        rows = sorted(OrderPayment.objects.values_list("payment_date", "outstanding", "transaction_id"))
+        self.assertEqual(rows, [(dt.date.fromisoformat(self.soon), False, "AXIS9"), (dt.date.fromisoformat(self.later), True, None)])
+
+    def test_cleanups_and_landed_money_screens_leave_them_be(self):
+        import io
+        Order.objects.create(business=self.biz, sub_order_no="2_1", reason_for_credit_entry="SHIPPED", order_date=DAY, sku="diya-029")
+        self.outstanding(self.row("2_1", 50, self.soon))
+        call_command("remove_unpaid_order_payments", apply=True, stdout=io.StringIO())
+        self.assertTrue(OrderPayment.objects.filter(outstanding=True).exists())          # expected, not junk
+        unsettled = self.api.get(f"{self.base}/orders/unsettled/").json()
+        rows = unsettled.get("results", unsettled.get("orders", unsettled))
+        self.assertIn("2_1", json.dumps(rows))                                            # not paid: still unsettled
         self.assertEqual(check_payments(self.acct).problems, 0)
 
 

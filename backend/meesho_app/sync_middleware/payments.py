@@ -8,9 +8,11 @@ same file the Payments upload takes) → the payments tables.
                 so reading the same days again updates rows, never duplicates
                 them; a row with no bank transfer and a payment date still to
                 come isn't paid and is skipped.
-  outstanding → MeeshoOutstandingPayment, replaced as a whole (one file a day,
-                read together) — never OrderPayment: a row there means the
-                money has landed.
+  outstanding → MeeshoOutstandingPayment (the Payments tab's list), and
+                OrderPayment flagged outstanding (expected, not paid yet) —
+                both replaced as a whole on every read. Overall profit counts
+                them; the "Settled only" switch leaves them out; the paid row
+                replaces them once Meesho pays (import_completed).
 
 Before writing, each Order Payments row is checked for what the table needs —
 a sub-order number, and on a completed file a payment date and an amount —
@@ -24,7 +26,7 @@ import pandas as pd
 from django.db import transaction
 from django.utils import timezone
 
-from ..models import MeeshoOutstandingPayment
+from ..models import MeeshoOutstandingPayment, OrderPayment
 from .base import Result, deferred_bumps, missing
 
 DESCRIPTION_ROW = r"^[A-Z\s\(\)\+\-\*\/]+$"      # the sheet's formula row: "A", "B", "C + D"…
@@ -82,7 +84,7 @@ def import_outstanding(business, books):
     """Outstanding payment files (one a day) → MeeshoOutstandingPayment, replacing it. Returns a Result."""
     from .. import views
     res = Result()
-    rows, seen = [], set()
+    rows, payments, seen = [], [], set()
     now = timezone.now()
     for xl in books:
         df = order_payment_rows(xl)
@@ -112,9 +114,15 @@ def import_outstanding(business, books):
                 details=json.loads(json.dumps(details, default=str)),
                 imported_at=now,
             ))
+            fields = views._order_payment_defaults(r)
+            fields["transaction_id"] = None               # not paid: no bank transfer
+            payments.append(OrderPayment(business=business, sub_order_no=sub, outstanding=True, **fields))
     # Bulk writes send no model signals: invalidate the business explicitly.
     with deferred_bumps(business.pk), transaction.atomic():
         removed, _ = MeeshoOutstandingPayment.objects.filter(business=business).delete()
         MeeshoOutstandingPayment.objects.bulk_create(rows, batch_size=500)
-    res.counts["outstanding"] = {"rows": len(rows), "replaced": removed, "files": len(books)}
+        # The same expected payments in the payments table, flagged outstanding.
+        OrderPayment.objects.filter(business=business, outstanding=True).delete()
+        OrderPayment.objects.bulk_create(payments, batch_size=500)
+    res.counts["outstanding"] = {"rows": len(rows), "replaced": removed, "files": len(books), "in_payments_table": len(payments)}
     return res

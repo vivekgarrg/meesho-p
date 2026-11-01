@@ -1725,6 +1725,11 @@ function MeeshoOverviewTab() {
               {[
                 { label: 'Gross Revenue', value: fmt(profit.gross_revenue), color: C.gray800 },
                 { label: 'Net Settlement', value: fmt(profit.total_settled), color: C.green },
+                // Included in the overall figures; the Settled-only switch leaves it out.
+                ...(Number(profit.outstanding_settlement || 0) !== 0 ? [{
+                  label: `of which outstanding (${profit.outstanding_orders} orders, not paid yet)`,
+                  value: fmt(profit.outstanding_settlement), color: '#B45309',
+                }] : []),
                 {
                   label: 'Order Net P&L',
                   value: showPnl ? fmt(profit?.net_profit_loss) : '₹ ••••••',

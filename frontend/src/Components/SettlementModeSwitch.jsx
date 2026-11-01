@@ -4,8 +4,9 @@ import { useSettlementMode } from "../contexts/SettlementModeContext";
 
 /**
  * The global Settled-only switch, next to the business switcher. Off
- * (default): every payment counts, same as before this existed. On: only
- * payments with a transaction id. Flipping it is enough on its own — see
+ * (default): every payment counts — paid, and outstanding (expected from
+ * Meesho's outstanding file, not paid yet): the overall profit. On: only
+ * payments Meesho has paid (with a bank transfer): the settled profit. Flipping it is enough on its own — see
  * SettlementModeContext for why no tab needs to read this directly; every
  * API call already carries the X-Settlement-Mode header, and the backend's
  * one shared filter (_apply_settlement_filter) is what every money-touching
@@ -17,7 +18,7 @@ export default function SettlementModeSwitch() {
   return (
     <button
       onClick={toggle}
-      title="On: every number in the app counts only payments with a transaction id (Meesho's export has no real bank-settlement reference, so this is the closest proxy). Off (default): all payment data is included, unfiltered."
+      title="On: settled profit — only payments Meesho has paid (with a bank transfer). Off (default): overall profit — paid payments plus outstanding ones (Meesho's outstanding file, not paid yet)."
       style={{
         display: "flex", alignItems: "center", gap: 7,
         background: isSettled ? C.greenLight : C.white,
