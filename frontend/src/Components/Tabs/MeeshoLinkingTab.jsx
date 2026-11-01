@@ -146,12 +146,13 @@ function BlockingError({ e, onOk, onOverride }) {
     return () => window.removeEventListener("keydown", swallow, true);
   }, []);
   const already = e.code === "already_linked";
+  const cancelled = e.code === "cancelled";
   return (
     <div role="alertdialog" aria-modal="true" aria-labelledby="link-error-title"
       style={{ position: "fixed", inset: 0, zIndex: 4000, background: "rgba(127,29,29,.55)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
       <div style={{ ...S.card, maxWidth: 520, width: "100%", padding: 22, display: "flex", flexDirection: "column", gap: 12, borderTop: `6px solid ${already ? "#D97706" : C.red}` }}>
         <div id="link-error-title" style={{ fontSize: 20, fontWeight: 900, color: already ? "#92400E" : C.red }}>
-          {already ? "⚠ Already linked on Meesho" : "✕ Not linked"} — not marked packed
+          {already ? "⚠ Already linked on Meesho" : cancelled ? "✕ Order cancelled" : "✕ Not linked"} — not marked packed
         </div>
         <div style={{ fontSize: 15, color: C.gray800, lineHeight: 1.5, fontWeight: 600 }}>{e.error || "Meesho didn't link it."}</div>
         <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "4px 12px", fontSize: 13.5 }}>
@@ -245,7 +246,7 @@ export function MeeshoLinkingTab() {
     const b = blocked;
     setBlocked(null);
     if (!b) return;
-    if (b.code === "already_linked") {                       // done before: on to the next parcel
+    if (b.code === "already_linked" || b.code === "cancelled") {   // done before / not to ship: on to the next parcel
       setAwb(""); setPacket("");
       typed.current = { awb: null, packet: null, awbAt: null };
       focusField(awbRef);

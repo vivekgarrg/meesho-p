@@ -43,17 +43,17 @@ const MODES = [
   { key: "DISPATCHED", label: "Dispatched", help: "marking parcels handed to the courier" },
 ];
 
-/** Today's packing day: it runs noon to noon, so before 12 pm it's still yesterday's. */
+/** Today's packing day: it runs 1 pm to 1 pm, so before 1 pm it's still yesterday's. */
 function packingDayISO() {
   const now = new Date();
-  if (now.getHours() < 12) now.setDate(now.getDate() - 1);
+  if (now.getHours() < 13) now.setDate(now.getDate() - 1);
   const p = (n) => String(n).padStart(2, "0");
   return `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}`;
 }
 export const fmtDay = (iso) => (iso ? new Date(`${iso}T00:00:00`).toLocaleDateString("en-IN", { day: "2-digit", month: "short" }) : "");
 function dayLabel(iso, current) {
   if (!iso) return "";
-  if (iso === current) return `Today · ${fmtDay(iso)} (from 12 pm)`;
+  if (iso === current) return `Today · ${fmtDay(iso)} (from 1 pm)`;
   const prev = new Date(`${current}T00:00:00`); prev.setDate(prev.getDate() - 1);
   const p = (n) => String(n).padStart(2, "0");
   const prevIso = `${prev.getFullYear()}-${p(prev.getMonth() + 1)}-${p(prev.getDate())}`;
@@ -81,7 +81,7 @@ export function Photo({ url, fallback, size = 48, radius = 8 }) {
 
 function useScanDesk(platform) {
   // The day picked by hand; "" while the screen follows today. Following, the
-  // server decides what to show: today's list — or, after 12 pm until today's
+  // server decides what to show: today's list — or, after 1 pm until today's
   // first scan or labels, the previous day's, so the screen never goes blank.
   const [picked, setPicked] = useState("");
   const following = !picked;
@@ -124,7 +124,7 @@ function useScanDesk(platform) {
   }, [load]);
   useEffect(() => () => clearTimeout(reloadTimer.current), []);
 
-  // At 12 pm a new packing day starts: ask the server again, which keeps the
+  // At 1 pm a new packing day starts: ask the server again, which keeps the
   // previous day's list up until the new day has its first scan or labels.
   const seenDay = useRef(packingDayISO());
   useEffect(() => {
@@ -144,8 +144,8 @@ function useScanDesk(platform) {
     try {
       const res = await fetch(`${API}/order-scan/`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        // Following today: let the server's own noon cut-off decide the day, so a
-        // device clock a minute off around 12 pm can't misfile a scan. A day
+        // Following today: let the server's own 1 pm cut-off decide the day, so a
+        // device clock a minute off around 1 pm can't misfile a scan. A day
         // picked by hand is sent as-is.
         body: JSON.stringify({ code, status: mode, day: picked || undefined }),
       });
@@ -471,12 +471,16 @@ function AdminBar({ sel, shownCount, compact }) {
  * until then an unshipped order carries over to the next day.
  */
 function bucketOf(i) {
-  if (i.ship_status === "CANCELLED" || i.state === "CANCELLED") return "cancelled";
+  // Scanned at the desk or linked: packed — and it stays packed if the order
+  // is cancelled afterwards, or marked cancelled here. Only a label cancelled
+  // before anyone scanned it is "cancelled".
+  const scanned = !!i.scan_id && i.state !== "PENDING";
   if (i.ship_status === "RETURNED") return "returned";
   if (i.ship_status === "SHIPPED") return "shipped";
   if (i.state === "ON_HOLD" || i.state === "ISSUE") return "issues";
-  if (i.state === "PENDING") return "pending";
-  return "packed";
+  if (scanned) return "packed";
+  if (i.ship_status === "CANCELLED" || i.state === "CANCELLED") return "cancelled";
+  return "pending";
 }
 
 const FILTERS = [
@@ -524,7 +528,7 @@ export function courierTone(name) {
  * it was packed STILL counts — 100 packed stays 100 when 3 are cancelled later;
  * those 3 are flagged to take out of the bag instead of vanishing from the count.
  */
-const wentOut = (i) => (i.scan_id && !["ON_HOLD", "ISSUE", "CANCELLED"].includes(i.state))
+const wentOut = (i) => (i.scan_id && !["ON_HOLD", "ISSUE"].includes(i.state))
   || i.ship_status === "SHIPPED" || i.ship_status === "RETURNED";
 
 function courierStats(items, offList = []) {
@@ -532,17 +536,19 @@ function courierStats(items, offList = []) {
   for (const i of items) {
     const b = bucketOf(i);
     const out = wentOut(i);
-    if (!out && b !== "pending") continue;          // cancelled before packing, or on hold
     const name = cleanCourier(i.courier);
     const key = name.toLowerCase();
-    if (!by.has(key)) by.set(key, { courier: name, packed: 0, shipped: 0, left: 0, total: 0, cancelled: 0 });
+    // Every courier on the day's labels gets a tile — even one whose orders
+    // were all cancelled before packing.
+    if (!by.has(key)) by.set(key, { courier: name, packed: 0, shipped: 0, left: 0, total: 0, cancelled: 0, cancelledUnpacked: 0 });
     const c = by.get(key);
     if (out) {
       c.total += 1;
       if (b === "shipped" || b === "returned") c.shipped += 1;
-      else if (b === "cancelled") c.cancelled += 1;
-      else c.packed += 1;
-    } else c.left += 1;
+      else c.packed += 1;                                  // packed stays packed…
+      if (i.ship_status === "CANCELLED") c.cancelled += 1; // …only flagged to take out of the bag
+    } else if (b === "pending") c.left += 1;
+    else if (b === "cancelled") c.cancelledUnpacked += 1;   // cancelled before packing: not counted
   }
   // Parcels scanned that day that aren't on its labels (labels not uploaded
   // yet, or a code the system didn't know) are still packed — count them under
@@ -550,12 +556,12 @@ function courierStats(items, offList = []) {
   for (const o of offList) {
     const name = cleanCourier(o.courier);
     const key = name.toLowerCase();
-    if (!by.has(key)) by.set(key, { courier: name, packed: 0, shipped: 0, left: 0, total: 0, cancelled: 0 });
+    if (!by.has(key)) by.set(key, { courier: name, packed: 0, shipped: 0, left: 0, total: 0, cancelled: 0, cancelledUnpacked: 0 });
     const c = by.get(key);
     c.packed += o.scanned;
     c.total += o.scanned;
   }
-  return [...by.values()].filter((c) => c.total || c.left)
+  return [...by.values()]
     .sort((a, b) => b.total - a.total || b.left - a.left || a.courier.localeCompare(b.courier));
 }
 
@@ -580,7 +586,7 @@ function summaryCounts(items) {
   return out;
 }
 
-/** Which packing day is open: today's (counting since 12 pm) or an earlier one picked on purpose. */
+/** Which packing day is open: today's (counting since 1 pm) or an earlier one picked on purpose. */
 function DayNotice({ desk, compact }) {
   const { date, currentDay, backToToday, startToday, following, queue } = desk;
   if (!date) return null;
@@ -589,7 +595,7 @@ function DayNotice({ desk, compact }) {
       <div style={{ background: "#EFF6FF", border: "1.5px solid #BFDBFE", borderRadius: 12, padding: compact ? "8px 12px" : "10px 14px",
         display: "flex", gap: 10, alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" }}>
         <span style={{ fontSize: compact ? 12.5 : 13, fontWeight: 700, color: "#1E3A8A" }}>
-          Showing {fmtDay(date)}'s counts{compact ? " until today's first scan" : ` — they stay up until the first new order is scanned today (from 12 pm), then today's list takes over.`}
+          Showing {fmtDay(date)}'s counts{compact ? " until today's first scan" : ` — they stay up until today has work (a scan, a link on Order linking, or its labels downloaded — from 1 pm), then today's list takes over.`}
         </span>
         <button onClick={startToday} style={{ ...btn("ghost", "sm") }}>Start today's list</button>
       </div>
@@ -599,7 +605,7 @@ function DayNotice({ desk, compact }) {
     if (compact) return null;
     return (
       <div style={{ fontSize: 12, color: C.gray500 }}>
-        Counting since <b>{fmtDay(currentDay)}, 12:00 pm</b> — the count starts fresh at 12 pm every day.
+        Counting since <b>{fmtDay(currentDay)}, 1:00 pm</b> — the count starts fresh at 1 pm every day.
       </div>
     );
   }
@@ -731,7 +737,10 @@ function CourierTiles({ couriers, active, onPick, compact }) {
             </span>
             {detail && <span style={{ fontSize: 12, fontWeight: 600, color: C.gray600 }}>{detail}</span>}
             {c.cancelled > 0 && (
-              <span style={{ fontSize: 12, fontWeight: 800, color: C.red }}>⚠ {c.cancelled} cancelled after packing — take out</span>
+              <span style={{ fontSize: 12, fontWeight: 800, color: C.red }}>⚠ {c.cancelled} cancelled after packing — counted packed, keep out of the pickup</span>
+            )}
+            {c.cancelledUnpacked > 0 && (
+              <span style={{ fontSize: 12, fontWeight: 700, color: C.gray500 }}>{c.cancelledUnpacked} cancelled before packing — not counted</span>
             )}
             <span style={{ fontSize: 12.5, fontWeight: 800, color: done ? "#15803D" : C.red }}>
               {done ? "✓ none left to pack" : `${c.left} left to pack`}

@@ -52,13 +52,13 @@ function toLocalISO(d) {
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
 }
 
-// A "processing day" runs noon-to-noon, not midnight-to-midnight: labels
-// downloaded late at night and the rest packed the next morning before noon
+// A "processing day" runs 1 pm to 1 pm, not midnight-to-midnight: labels
+// downloaded late at night and the rest packed the next morning before 1 pm
 // are one night's work, so both should default to the same batch date. Only
-// once it's past noon does the default roll over to the new calendar day.
+// once it's past 1 pm does the default roll over to the new calendar day.
 function businessDateISO() {
   const now = new Date();
-  if (now.getHours() < 12) now.setDate(now.getDate() - 1);
+  if (now.getHours() < 13) now.setDate(now.getDate() - 1);
   return toLocalISO(now);
 }
 

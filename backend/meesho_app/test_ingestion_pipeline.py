@@ -268,7 +268,8 @@ class ProfitFollowsTheDataTests(PipelineTestCase):
 
 class PackingDeskTests(PipelineTestCase):
     def test_every_downloaded_label_is_on_the_desk_and_meeshos_lagging_flag_only_noted(self):
-        day = timezone.localdate()
+        from .views import _current_business_date
+        day = _current_business_date()
         for sub in ("1_1", "2_1", "3_1"):
             LabelOrder.objects.create(business=self.biz, order_id=sub, sku="diya-029", awb_number=f"AWB{sub}",
                                       uploaded_date=day, platform="meesho", courier_name="Valmo")
@@ -282,3 +283,22 @@ class PackingDeskTests(PipelineTestCase):
         self.assertEqual(q["summary"]["meesho_not_downloaded"], 1)
         self.assertEqual(q["summary"]["meesho_not_downloaded_orders"][0]["order_id"], "2_1")
         self.assertFalse(ScannedOrder.objects.exists())                     # looking records nothing
+
+    def test_a_scanned_order_stays_packed_when_cancelled_and_only_unscanned_cancellations_count_as_cancelled(self):
+        from .views import _current_business_date
+        day = _current_business_date()
+        for sub, courier in (("1_1", "Valmo"), ("2_1", "Valmo"), ("3_1", "Delhivery"), ("4_1", "Shadowfax")):
+            LabelOrder.objects.create(business=self.biz, order_id=sub, sku="diya-029", awb_number=f"AWB{sub}",
+                                      uploaded_date=day, platform="meesho", courier_name=courier)
+        # 1_1 scanned at the desk, cancelled afterwards; 2_1 marked cancelled at the desk; 3_1 cancelled, never scanned.
+        for sub, status in (("1_1", ScannedOrder.STATUS_PACKED), ("2_1", ScannedOrder.STATUS_CANCELLED)):
+            ScannedOrder.objects.create(business=self.biz, sub_order_no=sub, awb_number=f"AWB{sub}", scanned_code=f"AWB{sub}",
+                                        status=status, scan_day=day, last_scanned_at=timezone.now(),
+                                        ship_status=ScannedOrder.SHIP_CANCELLED if sub == "1_1" else ScannedOrder.SHIP_UNKNOWN)
+        Order.objects.create(business=self.biz, sub_order_no="3_1", reason_for_credit_entry="CANCELLED", order_date=DAY)
+        Order.objects.create(business=self.biz, sub_order_no="1_1", reason_for_credit_entry="CANCELLED", order_date=DAY)
+        s = self.api.get(f"{self.base}/order-scan/queue/", {"date": day.isoformat()}).json()["summary"]
+        self.assertEqual((s["packed"], s["cancelled"], s["cancelled_after_packing"], s["remaining"]), (2, 1, 1, 1))
+        couriers = {c["courier"]: c for c in s["by_courier"]}
+        self.assertEqual(set(couriers), {"Valmo", "Delhivery", "Shadowfax"})        # every courier on the day's labels
+        self.assertEqual((couriers["Valmo"]["packed"], couriers["Delhivery"]["cancelled"], couriers["Shadowfax"]["left"]), (2, 1, 1))

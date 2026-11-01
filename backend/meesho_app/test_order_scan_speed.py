@@ -160,7 +160,7 @@ class SpeedTests(ScanTestCase):
 
 
 class PackingDayTests(ScanTestCase):
-    """A packing day runs noon to noon; scans count toward the day the desk has open."""
+    """A packing day runs 1 pm to 1 pm; scans count toward the day the desk has open."""
 
     def test_scan_counts_toward_todays_packing_day_by_default(self):
         self.scan("ANY-CODE-1")
@@ -187,16 +187,16 @@ class PackingDayTests(ScanTestCase):
         self.assertEqual(r.status_code, 400)
         self.assertFalse(ScannedOrder.objects.exists())
 
-    def test_counts_start_fresh_at_noon(self):
+    def test_counts_start_fresh_at_1_pm(self):
         from datetime import datetime
         tz = timezone.get_current_timezone()
-        with mock.patch("django.utils.timezone.now", return_value=datetime(2026, 10, 23, 11, 59, tzinfo=tz)):
-            self.client.post(self.base + "/", {"code": "BEFORE-NOON"}, format="json")
-        with mock.patch("django.utils.timezone.now", return_value=datetime(2026, 10, 23, 12, 1, tzinfo=tz)):
-            self.client.post(self.base + "/", {"code": "AFTER-NOON"}, format="json")
+        with mock.patch("django.utils.timezone.now", return_value=datetime(2026, 10, 23, 12, 59, tzinfo=tz)):
+            self.client.post(self.base + "/", {"code": "BEFORE-ONE"}, format="json")
+        with mock.patch("django.utils.timezone.now", return_value=datetime(2026, 10, 23, 13, 1, tzinfo=tz)):
+            self.client.post(self.base + "/", {"code": "AFTER-ONE"}, format="json")
         days = dict(ScannedOrder.objects.values_list("scanned_code", "scan_day"))
-        self.assertEqual(str(days["BEFORE-NOON"]), "2026-10-22")
-        self.assertEqual(str(days["AFTER-NOON"]), "2026-10-23")
+        self.assertEqual(str(days["BEFORE-ONE"]), "2026-10-22")
+        self.assertEqual(str(days["AFTER-ONE"]), "2026-10-23")
 
 
 class PipedAwbTests(ScanTestCase):

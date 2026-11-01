@@ -7585,24 +7585,28 @@ def label_batch_history(request, business_id):
     })
 
 
+# The hour a new packing / labels day starts (IST): the day runs 1 pm to 1 pm.
+PACKING_DAY_STARTS = 13
+
+
 def _packing_day_window(day):
-    """(start, end) aware datetimes of a packing day: noon of `day` to noon of
-    the next day — so counts start fresh at 12 pm."""
-    start = timezone.make_aware(datetime.combine(day, time(12, 0)))
+    """(start, end) aware datetimes of a packing day: 1 pm of `day` to 1 pm of
+    the next day — so counts start fresh at 1 pm."""
+    start = timezone.make_aware(datetime.combine(day, time(PACKING_DAY_STARTS, 0)))
     return start, start + timedelta(days=1)
 
 
 def _current_business_date():
     """
-    Noon-to-noon "business day", not midnight-to-midnight: before 12pm,
+    A 1 pm-to-1 pm "business day", not midnight-to-midnight: before 1 pm,
     "today" is still yesterday's date, since a batch processed late at night
-    and topped up the next morning before noon is one night's work. Shared by
+    and topped up the next morning before 1 pm is one night's work. Shared by
     label_today_summary / label_today_reset and BulkLabelsTab's date-picker
     default (see businessDateISO() there) so both sides agree on which date
     "today" means at any given moment.
     """
     now = timezone.localtime()
-    return now.date() if now.hour >= 12 else now.date() - timedelta(days=1)
+    return now.date() if now.hour >= PACKING_DAY_STARTS else now.date() - timedelta(days=1)
 
 
 def _compute_label_today_summary(business, business_date, platform=None):
@@ -13705,9 +13709,10 @@ def _following_day(request, desk_ids):
     """
     The packing day the desk opens on when nobody picked one.
 
-    The day turns at 12 pm, but the screen doesn't go blank then: it keeps
-    showing the last day that had work until the new day gets its first scan
-    or its labels. Returns (day, carried_over).
+    The day turns at 1 pm, but the screen doesn't go blank then: it keeps
+    showing the last day's scans and counts until the new day has work — a
+    scan (at the desk, or a link on Order linking) or its labels downloaded.
+    Returns (day, carried_over).
     """
     today = _current_business_date()
     labels = _scope_labels(request, LabelOrder.objects.filter(business_id__in=desk_ids))
@@ -13715,13 +13720,10 @@ def _following_day(request, desk_ids):
     platform = _label_view_platform(request)
     if platform:
         scans = scans.filter(platform=platform)
-    # Only a scan starts the new day. Today's labels arriving (they are often
-    # uploaded just after noon) must not blank out the previous day's courier
-    # counts while the last pickups are still being checked against them.
-    if scans.filter(scan_day=today).exists():
+    # A scan, a link (it records a scan) or the day's labels start the new day.
+    if scans.filter(scan_day=today).exists() or _labels_on_day(labels, today).exists():
         return today, False
-    has_labels_today = _labels_on_day(labels, today).exists()
-    since = today - timedelta(days=1 if has_labels_today else 7)
+    since = today - timedelta(days=7)
     last = [d for d in (
         _with_pack_day(labels).filter(eff_day__lt=today, eff_day__gte=since).aggregate(d=Max("eff_day"))["d"],
         scans.filter(scan_day__lt=today, scan_day__gte=since).aggregate(d=Max("scan_day"))["d"],
@@ -13982,7 +13984,7 @@ def _record_scan(request, business, desk, payload):
         if scan_day is None:
             return Response({"error": "day must be YYYY-MM-DD."}, status=status.HTTP_400_BAD_REQUEST)
         if scan_day > current_day:
-            return Response({"error": "That packing day hasn't started yet — scans count from 12 pm."},
+            return Response({"error": "That packing day hasn't started yet — scans count from 1 pm."},
                             status=status.HTTP_400_BAD_REQUEST)
 
     scan_platform = str(payload.get("platform") or "").strip().lower() or None
@@ -14158,7 +14160,11 @@ def scan_queue(request, business_id):
             "ship_status_raw": ship_raw,
         })
 
-    packed_states = (ScannedOrder.STATUS_PACKED, ScannedOrder.STATUS_DISPATCHED)
+    # Packed: scanned at the desk or linked — and it stays packed if the order
+    # is cancelled afterwards, or marked cancelled at the desk. Only a label
+    # cancelled before anyone scanned it counts as cancelled.
+    packed_states = (ScannedOrder.STATUS_PACKED, ScannedOrder.STATUS_DISPATCHED, ScannedOrder.STATUS_SCANNED,
+                     ScannedOrder.STATUS_CANCELLED)
     summary = {
         "assigned":   len(items),
         # Of those, moved here from earlier days by an admin.
@@ -14170,7 +14176,8 @@ def scan_queue(request, business_id):
         "shipped":    sum(1 for i in items if i["ship_status"] == ScannedOrder.SHIP_SHIPPED),
         "returned":   sum(1 for i in items if i["ship_status"] == ScannedOrder.SHIP_RETURNED),
         "not_shipped": sum(1 for i in items if i["ship_status"] == ScannedOrder.SHIP_NOT_SHIPPED),
-        "cancelled":  sum(1 for i in items if i["ship_status"] == ScannedOrder.SHIP_CANCELLED),
+        "cancelled":  sum(1 for i in items if i["ship_status"] == ScannedOrder.SHIP_CANCELLED and not i["scan_id"]),
+        "cancelled_after_packing": sum(1 for i in items if i["ship_status"] == ScannedOrder.SHIP_CANCELLED and i["scan_id"]),
         "unknown":    sum(1 for i in items if i["ship_status"] == ScannedOrder.SHIP_UNKNOWN),
         "pieces":     sum(i["qty"] or 0 for i in items),
         # On the list, but Meesho still flags their labels "Not Downloaded".

@@ -113,6 +113,17 @@ class OrderLinkingTests(TestCase):
         log = MeeshoLinkLog.objects.get()
         self.assertEqual((log.ok, log.details["meesho_code"]), (False, "ERR_ALREADY_LINKED_AWB_AND_PACKET_ID"))
 
+    def test_a_cancelled_order_is_refused_at_linking_and_never_counted(self):
+        acct = MeeshoAccount.objects.get(business=self.biz)
+        MeeshoSyncSnapshot.objects.create(account=acct, endpoint="orders_cancelled", http_status=200, fetched_at=timezone.now(),
+                                          payload=[{"sub_order_num": "13_1", "tab": "cancelled"}])
+        r = self.link("DL2001", "KP9ZZZZ12345678")
+        self.assertEqual((r.status_code, r.data["code"]), (409, "cancelled"))
+        self.assertIn("cancelled on Meesho", r.data["error"])
+        self.submit.assert_not_called()                                             # not even sent to Meesho
+        self.assertFalse(ScannedOrder.objects.exists())
+        self.assertFalse(MeeshoPacketLink.objects.exists())
+
     def test_any_failure_answer_from_meesho_marks_nothing_packed(self):
         for code in ("FAILED", "INVALID_AWB", "ERR_SOMETHING"):
             self.submit.return_value = (code, "req")

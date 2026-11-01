@@ -120,6 +120,18 @@ def links_by_awb(business_ids, awbs):
     return out
 
 
+def _cancelled(business, accounts, sub_order):
+    """Whether Meesho shows this order cancelled: its Cancelled list as last read,
+    or the orders table's current status."""
+    from .models import Order
+    for snap in MeeshoSyncSnapshot.objects.filter(account__in=[a for a in accounts if a.business_id == business.pk],
+                                                  endpoint="orders_cancelled"):
+        if any(isinstance(r, dict) and r.get("sub_order_num") == sub_order for r in snap.payload or []):
+            return True
+    latest = Order.latest_per_order(Order.objects.filter(business=business, sub_order_no=sub_order)).first()
+    return bool(latest and latest.reason_for_credit_entry == "CANCELLED")
+
+
 def _courier_names():
     return {c.carrier_id: c.name for c in MeeshoCourier.objects.exclude(name="")}
 
@@ -260,6 +272,12 @@ def _link(request, business, awb, packet, override=False, scan=None):
     if taken and not override:
         raise LinkRefused(f"Packet {packet} is already linked to AWB {taken.awb_number} ({taken.business.name}). "
                           f"Unlink that first — or link anyway.", "packet_taken", other_awb=taken.awb_number)
+
+    # A cancelled order isn't packed: refused here, so it never counts in Order Scan.
+    sub = (ship or {}).get("sub_order_num") or snap.get("sub_order_no") or ""
+    if sub and _cancelled(owner, accounts, sub):
+        raise LinkRefused(f"Order {sub} is cancelled on Meesho — not linked, not marked packed. Keep the parcel aside.",
+                          "cancelled", status.HTTP_409_CONFLICT, sub_order=sub)
 
     # Meesho first: nothing is stored or marked packed unless Meesho takes it
     # (or already had it — then this only brings our side in line).
