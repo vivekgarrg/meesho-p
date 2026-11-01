@@ -267,22 +267,18 @@ class ProfitFollowsTheDataTests(PipelineTestCase):
 
 
 class PackingDeskTests(PipelineTestCase):
-    def test_only_packages_whose_labels_were_downloaded_are_on_the_desk(self):
+    def test_every_downloaded_label_is_on_the_desk_and_meeshos_lagging_flag_only_noted(self):
         day = timezone.localdate()
         for sub in ("1_1", "2_1", "3_1"):
             LabelOrder.objects.create(business=self.biz, order_id=sub, sku="diya-029", awb_number=f"AWB{sub}",
-                                      uploaded_date=day, platform="meesho")
+                                      uploaded_date=day, platform="meesho", courier_name="Valmo")
         LabelOrder.objects.create(business=self.biz, order_id="FK1", sku="diya-029", awb_number="FKAWB", uploaded_date=day,
-                                  platform="flipkart")
+                                  platform="flipkart", courier_name="Ekart")
         self.snap("orders_ready_to_ship", [order_row("1_1", "ready-to-ship", label="Downloaded"),
                                            order_row("2_1", "ready-to-ship", label="Not Downloaded")])
         q = self.api.get(f"{self.base}/order-scan/queue/", {"date": day.isoformat()}).json()
-        self.assertEqual(sorted(i["order_id"] for i in q["items"]), ["1_1", "3_1", "FK1"])   # 3_1 has moved past ready to ship
-        self.assertEqual(q["summary"]["assigned"], 3)
-        self.assertEqual(q["summary"]["hidden_not_downloaded"], 1)
-        self.assertEqual(q["summary"]["hidden_not_downloaded_orders"][0]["order_id"], "2_1")
-        # Downloaded on Meesho: the next sync shows it, and the desk with it.
-        self.snap("orders_ready_to_ship", [order_row("2_1", "ready-to-ship", label="Downloaded")])
-        q = self.api.get(f"{self.base}/order-scan/queue/", {"date": day.isoformat()}).json()
-        self.assertEqual((q["summary"]["assigned"], q["summary"]["hidden_not_downloaded"]), (4, 0))
+        self.assertEqual(sorted(i["order_id"] for i in q["items"]), ["1_1", "2_1", "3_1", "FK1"])   # every courier, nothing hidden
+        self.assertEqual({c["courier"] for c in q["summary"]["by_courier"]}, {"Valmo", "Ekart"})
+        self.assertEqual(q["summary"]["meesho_not_downloaded"], 1)
+        self.assertEqual(q["summary"]["meesho_not_downloaded_orders"][0]["order_id"], "2_1")
         self.assertFalse(ScannedOrder.objects.exists())                     # looking records nothing

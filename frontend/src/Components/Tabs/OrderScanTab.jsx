@@ -743,18 +743,18 @@ function CourierTiles({ couriers, active, onPick, compact }) {
   );
 }
 
-/** Packages kept off the desk because Meesho says their labels aren't downloaded yet. */
+/** Packages on the list that Meesho still flags "Not Downloaded" — shown, only pointed out. */
 function HiddenNotDownloaded({ sum }) {
-  const n = sum?.hidden_not_downloaded || 0;
+  const n = sum?.meesho_not_downloaded || 0;
   if (!n) return null;
-  const list = sum.hidden_not_downloaded_orders || [];
+  const list = sum.meesho_not_downloaded_orders || [];
   return (
     <details style={{ ...S.card, padding: "10px 14px", background: C.amberLight, border: `1px solid ${C.amber}`, fontSize: 13, color: "#92400E" }}>
       <summary style={{ cursor: "pointer", fontWeight: 800 }}>
-        {n} package{n === 1 ? "" : "s"} not shown — Meesho says {n === 1 ? "its label isn't" : "their labels aren't"} downloaded yet
+        {n} package{n === 1 ? "" : "s"} Meesho still shows as label “Not Downloaded”
       </summary>
       <div style={{ marginTop: 6, lineHeight: 1.5 }}>
-        They appear here once the labels are downloaded on Meesho (the next sync picks it up).
+        Their labels are here, so they're on the list. If Meesho refuses the next label request, download these once on the Meesho panel.
         <div style={{ marginTop: 4, fontFamily: "monospace", fontSize: 12 }}>
           {list.map((o) => <div key={o.order_id}>{o.order_id}{o.sku ? ` · ${o.sku}` : ""}{o.business ? ` · ${o.business}` : ""}</div>)}
         </div>

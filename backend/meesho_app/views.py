@@ -14100,13 +14100,12 @@ def scan_queue(request, business_id):
         _labels_on_day(_scope_labels(request, LabelOrder.objects.filter(business_id__in=desk_ids)), day)
         .order_by("courier_name", "sku", "order_id")[:4000]
     )
-    # Only packages whose label was downloaded: a Meesho order the panel still
-    # lists as ready to ship with its label "Not Downloaded" (labels made, but
-    # the download never registered on Meesho) stays off the desk until it is.
+    # The desk lists the packages whose labels were downloaded — every label
+    # here came from a downloaded labels PDF. Meesho's own "Not Downloaded"
+    # flag lags (telling it can fail; a PDF fetched elsewhere never tells it),
+    # so it never hides a package: those it still flags are only pointed out.
     not_downloaded = _meesho_labels_not_downloaded(desk_ids)
-    hidden = [l for l in labels if l.platform != "flipkart" and (l.business_id, l.order_id) in not_downloaded]
-    if hidden:
-        labels = [l for l in labels if not (l.platform != "flipkart" and (l.business_id, l.order_id) in not_downloaded)]
+    flagged = [l for l in labels if l.platform != "flipkart" and (l.business_id, l.order_id) in not_downloaded]
     ids = [l.order_id for l in labels]
     awbs = [l.awb_number for l in labels if l.awb_number]
 
@@ -14174,10 +14173,10 @@ def scan_queue(request, business_id):
         "cancelled":  sum(1 for i in items if i["ship_status"] == ScannedOrder.SHIP_CANCELLED),
         "unknown":    sum(1 for i in items if i["ship_status"] == ScannedOrder.SHIP_UNKNOWN),
         "pieces":     sum(i["qty"] or 0 for i in items),
-        # Left off the list: Meesho says their labels aren't downloaded yet.
-        "hidden_not_downloaded": len(hidden),
-        "hidden_not_downloaded_orders": [{"order_id": l.order_id, "business": names.get(l.business_id, ""), "sku": l.sku}
-                                         for l in hidden[:50]],
+        # On the list, but Meesho still flags their labels "Not Downloaded".
+        "meesho_not_downloaded": len(flagged),
+        "meesho_not_downloaded_orders": [{"order_id": l.order_id, "business": names.get(l.business_id, ""), "sku": l.sku}
+                                         for l in flagged[:50]],
         "pieces_packed": sum(i["qty"] or 0 for i in items if i["state"] in packed_states),
     }
     # Per courier: how many it has to take today, how many are scanned, how many
