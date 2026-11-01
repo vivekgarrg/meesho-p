@@ -1,0 +1,8 @@
+# Lets the deploy user restart the app's services without a password — what
+# update.sh (run by autodeploy.sh from cron) does after every deploy. Without
+# it the sync worker keeps running the code it started with.
+#
+# Install (as root):
+#   cp /home/deploy/meesho-p/deploy/hostinger/sudoers-meesho /etc/sudoers.d/meesho
+#   chmod 440 /etc/sudoers.d/meesho && visudo -c
+deploy ALL=(root) NOPASSWD: /usr/bin/systemctl restart meesho, /usr/bin/systemctl restart meesho-sidekiq, /usr/bin/systemctl restart meesho-sidekiq-web, /usr/bin/systemctl is-active meesho, /usr/bin/chown -R deploy\:deploy /home/deploy/meesho-p/*

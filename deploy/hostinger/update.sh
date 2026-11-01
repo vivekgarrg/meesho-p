@@ -164,7 +164,7 @@ echo "==> Stamping the deployed commit"
 git -C "$REPO_ROOT" rev-parse HEAD > "$REPO_ROOT/.deployed_sha"
 
 echo "==> Restarting gunicorn service"
-sudo systemctl restart meesho
+sudo -n systemctl restart meesho || echo "  !!! COULD NOT RESTART meesho (gunicorn) — see deploy/hostinger/sudoers-meesho"
 
 echo "==> Meesho sync worker (Rails + Sidekiq)"
 # Optional, and never allowed to fail the deploy: until Ruby/Bundler and the
@@ -172,10 +172,18 @@ echo "==> Meesho sync worker (Rails + Sidekiq)"
 if [ -d "$REPO_ROOT/sync" ] && command -v bundle >/dev/null 2>&1; then
     if ( cd "$REPO_ROOT/sync" && BUNDLE_PATH=vendor/bundle BUNDLE_WITHOUT=test bundle install --quiet ); then
         if systemctl list-unit-files meesho-sidekiq.service 2>/dev/null | grep -q meesho-sidekiq; then
-            sudo systemctl restart meesho-sidekiq || echo "  could not restart meesho-sidekiq"
+            # -n: never wait for a password (cron has no one to type it). If this
+            # fails the worker keeps running OLD code — new jobs fail with
+            # "uninitialized constant" — so say so loudly.
+            if sudo -n systemctl restart meesho-sidekiq; then
+                echo "  meesho-sidekiq restarted"
+            else
+                echo "  !!! COULD NOT RESTART meesho-sidekiq — the worker still runs the previous code."
+                echo "  !!! Install deploy/hostinger/sudoers-meesho (see the file), or run as root: systemctl restart meesho-sidekiq"
+            fi
             # The job-queue dashboard (/sidekiq/), when installed.
             if systemctl list-unit-files meesho-sidekiq-web.service 2>/dev/null | grep -q meesho-sidekiq-web; then
-                sudo systemctl restart meesho-sidekiq-web || echo "  could not restart meesho-sidekiq-web"
+                sudo -n systemctl restart meesho-sidekiq-web || echo "  !!! could not restart meesho-sidekiq-web (see sudoers-meesho)"
             fi
         else
             echo "  gems installed; meesho-sidekiq service not installed yet (see sync/README.md)"
@@ -187,4 +195,4 @@ else
     echo "  skipped — Ruby/Bundler not on this server yet (see sync/README.md)"
 fi
 
-echo "==> Done. $(sudo systemctl is-active meesho) at $(cat "$REPO_ROOT/.deployed_sha")"
+echo "==> Done. $(systemctl is-active meesho) at $(cat "$REPO_ROOT/.deployed_sha")"
