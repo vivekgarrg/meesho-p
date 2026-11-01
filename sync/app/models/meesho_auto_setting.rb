@@ -25,6 +25,17 @@ class MeeshoAutoSetting < ApplicationRecord
     end.max
   end
 
+  # Whether tonight's stock refill is due: its time has come (IST), within the
+  # catch-up window, and it hasn't run since. Its own switch — independent of
+  # the accept / labels automation.
+  def stock_refill_due?(now = Time.current)
+    return false unless respond_to?(:stock_refill_enabled) && stock_refill_enabled
+    h, m = stock_refill_time.to_s.split(":").map(&:to_i)
+    ist = now.in_time_zone(IST)
+    slot = ist.change(hour: h, min: m)
+    slot <= ist && ist - slot < CATCH_UP && (last_stock_refill_at.nil? || last_stock_refill_at < slot)
+  end
+
   # Whether it's time to accept again.
   def accept_due?(now = Time.current)
     every = accept_every_minutes.to_i

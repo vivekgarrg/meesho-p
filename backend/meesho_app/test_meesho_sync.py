@@ -546,6 +546,33 @@ class NeverCachedTests(TestCase):
 
 @mock.patch.dict(os.environ, {"MEESHO_SYNC_KEY": KEY})
 @mock.patch.object(meesho_sync, "_worker_alive", lambda: True)
+class MeeshoSkusIntoPricingTests(TestCase):
+    def test_every_meesho_sku_gets_a_row_in_sku_pricing_and_its_ids(self):
+        from django.utils import timezone
+        from io import StringIO
+        from django.core.management import call_command
+        from .models import FinalPrice, MeeshoCatalog, MeeshoListing
+        from .views import _meesho_ids
+        biz = Business.objects.create(name="Rudam")
+        acct = MeeshoAccount.objects.create(business=biz, phone_number="9", password_enc="x", status="ACTIVE", supplier_id="1",
+                                            supplier_identifier="x")
+        cat = MeeshoCatalog.objects.create(account=acct, catalog_id=606662647, name="c", seen_at=timezone.now())
+        for pid, sku, archived in ((1, "Lota-A", False), (2, "lota-b", True), (3, "diya", False)):
+            MeeshoListing.objects.create(account=acct, catalog=cat, product_id=pid, variation_id=167, sku_id=sku, archived=archived,
+                                         seen_at=timezone.now())
+        FinalPrice.objects.create(business=biz, sku_id="lota-a")                        # already there, in other case
+        out = StringIO()
+        call_command("meesho_inject", account=acct.pk, kind="skus", stdout=out)
+        self.assertEqual(json.loads(out.getvalue()), {"added": 2})
+        self.assertEqual(sorted(FinalPrice.objects.filter(business=biz).values_list("sku_id", flat=True)), ["diya", "lota-a", "lota-b"])
+        self.assertIsNone(FinalPrice.objects.get(business=biz, sku_id="diya").item_price)   # unpriced, unlinked
+        call_command("meesho_inject", account=acct.pk, kind="skus", stdout=StringIO())
+        self.assertEqual(FinalPrice.objects.filter(business=biz).count(), 3)             # never twice
+        ids = _meesho_ids(biz)
+        self.assertEqual(len(ids), 3)                                                     # paused ones too
+        self.assertEqual(vars(ids["lota-b"][0])["product_id"], 2)
+
+
 class LiveInventoryTests(TestCase):
     def setUp(self):
         from django.utils import timezone
@@ -949,6 +976,18 @@ class AutoLabelsSendTests(TestCase):
         w.force_authenticate(worker)
         self.assertEqual(w.get(url).status_code, 200)
         self.assertEqual(w.patch(url, {"enabled": False}, format="json").status_code, 403)
+
+    def test_nightly_stock_settings(self):
+        c = APIClient()
+        c.force_authenticate(self.admin)
+        Membership.objects.get_or_create(user=self.admin, business=self.biz)
+        url = f"/api/business/{self.biz.id}/meesho-orders/automation/"
+        d = c.get(url).data
+        self.assertEqual((d["stock_refill_enabled"], d["stock_refill_time"], d["stock_refill_qty"]), (False, "21:00", 5000))   # starts off
+        d = c.patch(url, {"stock_refill_enabled": True, "stock_refill_time": "9:30", "stock_refill_qty": 3000}, format="json").data
+        self.assertEqual((d["stock_refill_enabled"], d["stock_refill_time"], d["stock_refill_qty"]), (True, "09:30", 3000))
+        self.assertEqual(c.patch(url, {"stock_refill_qty": 0}, format="json").status_code, 400)
+        self.assertEqual(c.patch(url, {"stock_refill_time": "late"}, format="json").status_code, 400)
 
     def test_kept_labels_are_listed_and_served_to_print(self):
         from .models import MeeshoLabelFile

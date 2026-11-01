@@ -122,6 +122,13 @@ class MeeshoInventoryJob
     message += left.positive? ? " — #{left} more on the next pulls." : "."
     message += " #{failed} catalog#{'s' unless failed == 1} Meesho wouldn't hand over — tried again next pull." if failed.positive?
     message += " Meesho Stock: #{sheet[:added]} added, #{sheet[:updated]} updated, #{sheet[:removed]} removed."
+    # Every SKU listed on Meesho gets a row in SKU Pricing (unpriced, to link to a parent).
+    begin
+      added = DjangoCommand.run("meesho_inject", "--account", account.id, "--kind", "skus")["added"].to_i
+      message += " #{added} new SKU#{'s' unless added == 1} added to SKU Pricing." if added.positive?
+    rescue DjangoCommand::Failed => e
+      Sidekiq.logger.warn("MeeshoInventoryJob #{account.id}: adding SKUs to SKU Pricing failed: #{e.message}")
+    end
     [message, stored, left]
   end
 

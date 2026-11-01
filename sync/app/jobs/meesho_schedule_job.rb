@@ -22,6 +22,7 @@ class MeeshoScheduleJob
     queue_payments(now)
     queue_every(now, MeeshoSyncRun::KIND_RETURNS, MeeshoReturnsJob)
     queue_automation(now)
+    queue_stock_refill(now)
   end
 
   private
@@ -39,6 +40,14 @@ class MeeshoScheduleJob
       setting.update!(last_accept_at: now)
       MeeshoAutoLabelsJob.perform_async("accept")
     end
+  end
+
+  # Nightly stock (Meesho → Settings): every live SKU back to the set quantity.
+  def queue_stock_refill(now)
+    setting = MeeshoAutoSetting.current
+    return unless setting&.stock_refill_due?(now)
+    setting.update!(last_stock_refill_at: now)
+    MeeshoStockRefillJob.perform_async
   end
 
   # The Inventory page, every MeeshoInventoryJob::INTERVAL minutes.

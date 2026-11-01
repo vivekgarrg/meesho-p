@@ -48,6 +48,44 @@ function SendLabels({ s, admin, busy, onToggle }) {
   );
 }
 
+/** Every night: each live (not paused) SKU's stock on Meesho set back to a quantity, so nothing runs out by itself. */
+function NightlyStock({ s, admin, busy, save }) {
+  const [time, setTime] = useState(s.stock_refill_time || "21:00");
+  const [qty, setQty] = useState(String(s.stock_refill_qty ?? 5000));
+  useEffect(() => { setTime(s.stock_refill_time || "21:00"); setQty(String(s.stock_refill_qty ?? 5000)); }, [s.stock_refill_time, s.stock_refill_qty]);
+  const changed = time !== s.stock_refill_time || Number(qty) !== s.stock_refill_qty;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: "12px 14px", borderRadius: 12, background: C.gray50, border: `1px solid ${C.gray200}` }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 13.5, fontWeight: 800, color: C.gray900 }}>Nightly stock</div>
+          <div style={{ fontSize: 12.5, color: C.gray500, marginTop: 2 }}>
+            Every night at {timeLabel(s.stock_refill_time || "21:00")}, every <b>live</b> SKU of every business is set to {s.stock_refill_qty} on Meesho —
+            one SKU after another; paused ones are left alone.{s.last_stock_refill_at ? ` Last: ${when(s.last_stock_refill_at)}.` : ""}
+          </div>
+        </div>
+        {admin ? (
+          <button onClick={() => save({ stock_refill_enabled: !s.stock_refill_enabled })} disabled={busy}
+            style={{ ...btn(s.stock_refill_enabled ? "ghost" : "primary", "sm"), minWidth: 110, ...(s.stock_refill_enabled ? { color: C.red } : {}) }}>
+            {s.stock_refill_enabled ? "Switch off" : "Switch on"}
+          </button>
+        ) : <Tag variant={s.stock_refill_enabled ? "green" : "gray"}>{s.stock_refill_enabled ? "On" : "Off"}</Tag>}
+      </div>
+      {admin && (
+        <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
+          <label style={{ display: "flex", flexDirection: "column", gap: 3, fontSize: 12, fontWeight: 700, color: C.gray600 }}>
+            At (India time)<input type="time" value={time} onChange={(e) => setTime(e.target.value)} style={{ ...S.inp, width: 130 }} />
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 3, fontSize: 12, fontWeight: 700, color: C.gray600 }}>
+            Stock per SKU<input type="number" min={1} max={99999} value={qty} onChange={(e) => setQty(e.target.value)} style={{ ...S.inp, width: 120 }} />
+          </label>
+          {changed && <button onClick={() => save({ stock_refill_time: time, stock_refill_qty: Number(qty) })} disabled={busy} style={btn("primary", "sm")}>Save</button>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function AutomationCard() {
   const [s, setS] = useState(null);
   const [draft, setDraft] = useState(null);
@@ -142,6 +180,7 @@ export function AutomationCard() {
       </div>
 
       <SendLabels s={s} admin={admin} busy={busy} onToggle={() => save({ send_labels: !s.send_labels })} />
+      <NightlyStock s={s} admin={admin} busy={busy} save={save} />
 
       {admin && (
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>

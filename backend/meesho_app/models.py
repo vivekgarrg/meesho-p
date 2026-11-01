@@ -3347,6 +3347,12 @@ class MeeshoAutoSetting(models.Model):
     # Send each automatic labels PDF on the channels set up in .env (WhatsApp,
     # Telegram, email — notify.py) as soon as it is made.
     send_labels = models.BooleanField(default=False)
+    # Nightly stock: every live (not paused) SKU set to `stock_refill_qty` on
+    # Meesho at `stock_refill_time` (IST) — MeeshoStockRefillJob. Off by default.
+    stock_refill_enabled = models.BooleanField(default=False)
+    stock_refill_time = models.CharField(max_length=5, default="21:00")
+    stock_refill_qty = models.PositiveIntegerField(default=5000)
+    last_stock_refill_at = models.DateTimeField(null=True, blank=True)
     last_accept_at = models.DateTimeField(null=True, blank=True)
     last_labels_at = models.DateTimeField(null=True, blank=True)
     updated_by = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")

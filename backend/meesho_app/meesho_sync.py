@@ -1269,6 +1269,8 @@ def _automation_json(setting):
         "enabled": setting.enabled, "accept_every_minutes": setting.accept_every_minutes,
         "label_times": setting.label_times or [], "accept_choices": MeeshoAutoSetting.ACCEPT_CHOICES,
         "send_labels": setting.send_labels, "send_channels": notify.channels(),
+        "stock_refill_enabled": setting.stock_refill_enabled, "stock_refill_time": setting.stock_refill_time,
+        "stock_refill_qty": setting.stock_refill_qty, "last_stock_refill_at": setting.last_stock_refill_at,
         "last_accept_at": setting.last_accept_at, "last_labels_at": setting.last_labels_at,
         "next_accept_at": nxt_accept, "next_labels_at": nxt_labels,
         "updated_at": setting.updated_at, "updated_by": setting.updated_by.username if setting.updated_by else None,
@@ -1291,6 +1293,21 @@ def meesho_automation(request, business_id):
         d = request.data if isinstance(request.data, dict) else {}
         if "enabled" in d:
             setting.enabled = bool(d["enabled"])
+        if "stock_refill_enabled" in d:
+            setting.stock_refill_enabled = bool(d["stock_refill_enabled"])
+        if "stock_refill_time" in d:
+            m = _TIME.match(str(d["stock_refill_time"]).strip())
+            if not m:
+                return Response({"error": "Give the stock time as HH:MM, e.g. 21:00."}, status=status.HTTP_400_BAD_REQUEST)
+            setting.stock_refill_time = f"{int(m.group(1)):02d}:{m.group(2)}"
+        if "stock_refill_qty" in d:
+            try:
+                qty = int(d["stock_refill_qty"])
+            except (TypeError, ValueError):
+                qty = -1
+            if not 1 <= qty <= STOCK_MAX:
+                return Response({"error": f"Stock must be between 1 and {STOCK_MAX}."}, status=status.HTTP_400_BAD_REQUEST)
+            setting.stock_refill_qty = qty
         if "send_labels" in d:
             if d["send_labels"] and not notify.channels():
                 return Response({"error": "No channel is set up to send on — add the WhatsApp (or Telegram / email) settings "

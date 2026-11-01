@@ -17948,19 +17948,10 @@ def parent_price_children(request, business_id, item_id):
         units_sold[sku] = units_sold.get(sku, 0) + (qty or 1)
 
     # The Meesho identifiers a price sheet needs. Carried here so the UI can
-    # show, before anything is generated, which SKUs can actually be repriced
-    # and which are missing from the inventory upload. One SKU can appear under
-    # several variations, and each is its own line in Meesho's template.
-    catalog = {}
-    for inv in (MeeshoInventory.objects
-                .filter(business=business).exclude(style_id="")
-                .values("style_id", "catalog_id", "product_id", "variation", "variation_id")):
-        catalog.setdefault(_sku_key(inv["style_id"]), []).append({
-            "catalog_id":   inv["catalog_id"],
-            "product_id":   inv["product_id"],
-            "variation":    inv["variation"] or "Free Size",
-            "variation_id": inv["variation_id"],
-        })
+    # show, before anything is generated, which SKUs can actually be repriced.
+    # One SKU can appear under several variations, and each is its own line in
+    # Meesho's template.
+    catalog = {k: [vars(x) for x in v] for k, v in _meesho_ids(business).items()}
 
     for r in rows:
         r["order_count"] = counts.get(r["sku_id"], 0)
@@ -18256,6 +18247,53 @@ def _append_msp_row(ws, inv, msp, wdrp=None, mrp=None):
     ])
 
 
+def _meesho_ids(business):
+    """
+    {SKU key: [ids…]} — every Meesho catalog / product / variation a business
+    lists each SKU under, as the sync last read its Inventory page (live and
+    paused alike; kept up to date by itself), else as Meesho Stock holds it
+    (an uploaded inventory sheet). Each item has catalog_id, product_id,
+    variation, variation_id.
+    """
+    from types import SimpleNamespace
+    from .models import MeeshoListing
+    out, seen = {}, set()
+    for sku, cid, pid, variation, vid in (MeeshoListing.objects.filter(account__business=business).exclude(sku_id="")
+                                          .order_by("catalog__catalog_id", "product_id")
+                                          .values_list("sku_id", "catalog__catalog_id", "product_id", "variation", "variation_id")):
+        seen.add((pid, vid))
+        out.setdefault(_sku_key(sku), []).append(
+            SimpleNamespace(catalog_id=cid, product_id=pid, variation=variation or "Free Size", variation_id=vid))
+    for inv in MeeshoInventory.objects.filter(business=business).exclude(style_id=""):
+        if (inv.product_id, inv.variation_id) in seen:
+            continue
+        out.setdefault(_sku_key(inv.style_id), []).append(
+            SimpleNamespace(catalog_id=inv.catalog_id, product_id=inv.product_id, variation=inv.variation or "Free Size",
+                            variation_id=inv.variation_id))
+    return out
+
+
+def sync_meesho_skus(business):
+    """
+    Every SKU the business lists on Meesho gets a row in SKU Pricing — unpriced
+    and unlinked, ready to link to its parent — when it has none (matched as
+    orders are, by _sku_key). Returns how many were added.
+    """
+    from .models import MeeshoListing
+    have = {_sku_key(s) for s in FinalPrice.objects.filter(business=business).values_list("sku_id", flat=True)}
+    new = {}
+    for sku in MeeshoListing.objects.filter(account__business=business).exclude(sku_id="").values_list("sku_id", flat=True):
+        sku = str(sku).strip()[:200]
+        key = _sku_key(sku)
+        if sku and key not in have and key not in new:
+            new[key] = sku
+    if new:
+        from .api_cache import deferred_bumps
+        with deferred_bumps(business.pk):
+            FinalPrice.objects.bulk_create([FinalPrice(business=business, sku_id=s) for s in new.values()], ignore_conflicts=True)
+    return len(new)
+
+
 def _parent_msp_sheet(business, parent, rows, inventory_business):
     """
     The Meesho price sheet for chosen SKUs under one parent: (workbook, rows
@@ -18270,9 +18308,7 @@ def _parent_msp_sheet(business, parent, rows, inventory_business):
         .values_list("sku_id", flat=True)
     }
 
-    inventory = {}
-    for inv in MeeshoInventory.objects.filter(business=inventory_business).exclude(style_id=""):
-        inventory.setdefault(_sku_key(inv.style_id), []).append(inv)
+    inventory = _meesho_ids(inventory_business)
 
     wb, ws = _new_msp_workbook()
     written, skipped = 0, []

@@ -4,6 +4,7 @@ the app's tables, through that data's middleware (sync_middleware/):
 
   --kind orders   → Order           (sync_middleware/orders.py)
   --kind returns  → ReturnDelivery  (sync_middleware/returns.py)
+  --kind skus     → SKU Pricing: every SKU listed on Meesho gets a row (unpriced, to link to a parent)
 
 Either way, shipped orders the panel no longer lists are then settled from
 Meesho's returns and payments (orders.settle). Payments come as files:
@@ -24,12 +25,16 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument("--account", type=int, required=True)
-        parser.add_argument("--kind", choices=["orders", "returns"], required=True)
+        parser.add_argument("--kind", choices=["orders", "returns", "skus"], required=True)
 
     def handle(self, *args, account, kind, **opts):
         a = MeeshoAccount.objects.select_related("business").filter(pk=account).first()
         if not a:
             raise CommandError(f"No Meesho account {account}.")
+        if kind == "skus":
+            from meesho_app.views import sync_meesho_skus
+            self.stdout.write(json.dumps({"added": sync_meesho_skus(a.business)}))
+            return
         res = orders.inject(a.business, orders.rows_of(a)) if kind == "orders" else returns.inject(a)
         out = res.as_dict()
         # Then shipped orders the panel no longer lists take their outcome from

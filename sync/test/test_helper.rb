@@ -106,6 +106,10 @@ ActiveRecord::Schema.define do
     t.integer :accept_every_minutes, null: false, default: 30
     t.text :label_times                     # JSON
     t.boolean :send_labels, null: false, default: false
+    t.boolean :stock_refill_enabled, null: false, default: false
+    t.string :stock_refill_time, null: false, default: "21:00"
+    t.integer :stock_refill_qty, null: false, default: 5000
+    t.datetime :last_stock_refill_at
     t.datetime :last_accept_at
     t.datetime :last_labels_at
     t.integer :updated_by_id
