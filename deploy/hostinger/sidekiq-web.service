@@ -1,0 +1,23 @@
+# systemd service for the Sidekiq dashboard (job queues), at /sidekiq/ via nginx.
+# Copy to: /etc/systemd/system/meesho-sidekiq-web.service
+# Then:  sudo systemctl daemon-reload && sudo systemctl enable --now meesho-sidekiq-web
+# Needs SIDEKIQ_WEB_USER / SIDEKIQ_WEB_PASSWORD in the .env, and nginx's
+# "location /sidekiq/" block (nginx.conf).
+
+[Unit]
+Description=Meesho job queue dashboard (Sidekiq Web)
+After=network.target redis-server.service
+
+[Service]
+User=deploy
+Group=www-data
+WorkingDirectory=/home/deploy/meesho-p/sync
+EnvironmentFile=/home/deploy/meesho-p/deploy/hostinger/.env
+Environment=BUNDLE_PATH=vendor/bundle
+Environment=BUNDLE_WITHOUT=test
+ExecStart=/usr/bin/env bundle exec puma -b tcp://127.0.0.1:9292 -t 1:4 sidekiq_web.ru
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

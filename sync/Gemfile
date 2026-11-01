@@ -12,3 +12,7 @@ group :test do
   gem "sqlite3", ">= 2.1"           # tests run on an in-memory database
   gem "webmock", "~> 3.25"          # tests never reach the real Meesho
 end
+
+gem "puma", "~> 6.4"
+
+gem "rack-session", "~> 2.1"

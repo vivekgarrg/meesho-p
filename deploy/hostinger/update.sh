@@ -173,6 +173,10 @@ if [ -d "$REPO_ROOT/sync" ] && command -v bundle >/dev/null 2>&1; then
     if ( cd "$REPO_ROOT/sync" && BUNDLE_PATH=vendor/bundle BUNDLE_WITHOUT=test bundle install --quiet ); then
         if systemctl list-unit-files meesho-sidekiq.service 2>/dev/null | grep -q meesho-sidekiq; then
             sudo systemctl restart meesho-sidekiq || echo "  could not restart meesho-sidekiq"
+            # The job-queue dashboard (/sidekiq/), when installed.
+            if systemctl list-unit-files meesho-sidekiq-web.service 2>/dev/null | grep -q meesho-sidekiq-web; then
+                sudo systemctl restart meesho-sidekiq-web || echo "  could not restart meesho-sidekiq-web"
+            fi
         else
             echo "  gems installed; meesho-sidekiq service not installed yet (see sync/README.md)"
         fi

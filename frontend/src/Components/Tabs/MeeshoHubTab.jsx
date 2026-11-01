@@ -225,6 +225,15 @@ export function MeeshoHubTab() {
           <div style={{ display: "flex", flexDirection: "column", gap: 16, maxWidth: 1100 }}>
             <AutomationCard />
             <SyncScheduleCard isAdmin={overview.is_admin} />
+            {overview.is_admin && (
+              <Panel title="Job queue"
+                subtitle="Every job the sync worker runs — waiting, running, scheduled, retrying and failed — on Sidekiq's own dashboard. It asks for its own username and password."
+                action={<a href="/sidekiq/" target="_blank" rel="noreferrer" style={{ ...btn("ghost", "sm"), textDecoration: "none" }}>Open job queue ↗</a>}>
+                <div style={{ fontSize: 12.5, color: C.gray500 }}>
+                  Queues: <b>critical</b> (Refresh, accept, labels, linking) and <b>default</b> (scheduled reads). The Cron tab shows the every-minute scheduler.
+                </div>
+              </Panel>
+            )}
             <Panel title="Meesho accounts" pad={false}
               subtitle="One Meesho supplier account per business. When a session expires, log in again here — the sync picks up straight after.">
               <AccountsHealth businesses={businesses} isAdmin={overview.is_admin} onReconnect={setReconnect} />
