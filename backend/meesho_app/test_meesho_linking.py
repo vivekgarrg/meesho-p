@@ -103,16 +103,29 @@ class OrderLinkingTests(TestCase):
         self.assertEqual(names, {19: ("Valmo", 2), 4: ("Delhivery", 1)})
         self.assertEqual(MeeshoLinkLog.objects.get().action, "COURIERS")
 
-    def test_meesho_already_having_the_link_prompts_the_next_order_and_keeps_it_packed(self):
+    def test_meesho_already_having_the_link_is_an_error_and_marks_nothing_packed(self):
         self.submit.return_value = ("ERR_ALREADY_LINKED_AWB_AND_PACKET_ID", "req-2")
         r = self.link("VL1001", "KP4AUSE32034836")
         self.assertEqual((r.status_code, r.data["code"]), (409, "already_linked"))
         self.assertIn("scan the next order", r.data["error"])
-        link = MeeshoPacketLink.objects.get()
-        self.assertEqual((link.meesho_status, link.meesho_request_id), ("ERR_ALREADY_LINKED_AWB_AND_PACKET_ID", "req-2"))
-        self.assertEqual(ScannedOrder.objects.get().status, "PACKED")               # our side brought in line
+        self.assertFalse(MeeshoPacketLink.objects.exists())                         # only a link made now is stored
+        self.assertFalse(ScannedOrder.objects.exists())                             # …and marks the parcel packed
         log = MeeshoLinkLog.objects.get()
-        self.assertEqual((log.ok, log.details["meesho_code"]), (True, "ERR_ALREADY_LINKED_AWB_AND_PACKET_ID"))
+        self.assertEqual((log.ok, log.details["meesho_code"]), (False, "ERR_ALREADY_LINKED_AWB_AND_PACKET_ID"))
+
+    def test_any_failure_answer_from_meesho_marks_nothing_packed(self):
+        for code in ("FAILED", "INVALID_AWB", "ERR_SOMETHING"):
+            self.submit.return_value = (code, "req")
+            r = self.link("VL1001", "KP4AUSE32034836")
+            self.assertEqual(r.status_code, 409, code)
+        self.assertFalse(ScannedOrder.objects.exists())
+
+    def test_an_awb_barcode_with_a_routing_code_after_the_bar_links_by_the_awb(self):
+        r = self.link("VL1001|0G349GGK", "KP4AUSE32034836")                          # as some couriers' labels encode it
+        self.assertEqual(r.status_code, 201, r.data)
+        self.assertEqual(self.submit.call_args.args[1:3], ("VL1001", "KP4AUSE32034836"))   # Meesho is sent the AWB alone
+        self.assertEqual(MeeshoPacketLink.objects.get().awb_number, "VL1001")
+        self.assertEqual(ScannedOrder.objects.get().status, "PACKED")
 
     def test_meesho_refusing_changes_nothing_here_and_is_logged(self):
         self.submit.return_value = ("ERR_INVALID_PACKET_ID", "req-3")

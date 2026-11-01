@@ -6,8 +6,9 @@ A link is checked against what the sync knows of that AWB's packet (the Ready
 to ship / Shipped tabs carry each shipment's AWB, packet id and courier id),
 then sent to Meesho — the panel's own Scan now → link request — straight from
 here with the account's saved session, so the desk hears back at once. Only
-when Meesho takes it (or says it's already linked) is it stored
-(MeeshoPacketLink) and the parcel recorded PACKED in Order Scan — through
+when Meesho links it there and then is it stored (MeeshoPacketLink) and the
+parcel recorded PACKED in Order Scan — already linked, or refused, marks
+nothing — through
 Order Scan's own scan recording, so the packing day and the packed counts are
 exactly what a scan at the desk would give.
 
@@ -59,7 +60,10 @@ def _views():
 
 
 def _clean(code):
-    return re.sub(r"\s+", "", str(code or "")).upper()[:100]
+    """A scanned code as it is looked up and sent to Meesho. Some couriers'
+    labels put the AWB and a routing code in one barcode — "VL0085968979439|
+    0G349GGK" — and only the part before the "|" is the AWB (as Order Scan)."""
+    return re.sub(r"\s+", "", str(code or "")).split("|", 1)[0].upper()[:100]
 
 
 def _desk(request, business):
@@ -148,6 +152,12 @@ def _meesho_message(code):
         return MEESHO_MESSAGES[code]
     words = code[4:] if code.startswith("ERR_") else code
     return f"Meesho refused it: {words.replace('_', ' ').lower()} ({code})."
+
+
+def _meesho_ok(code):
+    """Whether Meesho's answer means it linked the pair."""
+    code = str(code or "").upper()
+    return not (code.startswith("ERR") or "FAIL" in code or "INVALID" in code)
 
 
 def _meesho_submit(account, awb, packet, scan):
@@ -258,7 +268,13 @@ def _link(request, business, awb, packet, override=False, scan=None):
         raise LinkRefused(f"{owner.name}'s Meesho account isn't connected — connect it under Meesho → Settings.", "no_account",
                           status.HTTP_409_CONFLICT)
     meesho_code, request_id = _meesho_submit(account, awb, packet, scan or {})
-    if meesho_code.startswith("ERR") and meesho_code != ALREADY_LINKED:
+    # Only a link Meesho made just now marks the parcel packed. Already linked,
+    # or any refusal: nothing is stored or marked here — the desk is told, and
+    # stops until someone acknowledges it.
+    if meesho_code == ALREADY_LINKED:
+        raise LinkRefused(_meesho_message(meesho_code) + " Not marked packed here.", "already_linked", status.HTTP_409_CONFLICT,
+                          meesho_code=meesho_code, request_id=request_id)
+    if not _meesho_ok(meesho_code):
         raise LinkRefused(_meesho_message(meesho_code), "meesho_refused", status.HTTP_409_CONFLICT,
                           meesho_code=meesho_code, request_id=request_id)
 
@@ -286,7 +302,7 @@ def _link(request, business, awb, packet, override=False, scan=None):
         link.carrier_id = carrier_id
         link.courier_name = courier
         link.meesho_check = check
-        link.meesho_status = "LINKED" if not meesho_code.startswith("ERR") else meesho_code
+        link.meesho_status = "LINKED"
         link.meesho_request_id = request_id[:64]
         link.scanned_order = scanned
         link.pack_day = scanned.scan_day if scanned else v._current_business_date()
@@ -381,9 +397,7 @@ def _do_link(request, business, awb, packet, override, action, retry_of=None, sc
         return Response({"error": "Something went wrong — it's in the log.", "code": "error", "log_id": log.pk},
                         status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     action = MeeshoLinkLog.ACTION_RELINK if before and before != packet and action == MeeshoLinkLog.ACTION_LINK else action
-    already = meesho_code == ALREADY_LINKED
-    log = _log(request, action, link.awb_number, link.packet_id, True,
-               _meesho_message(meesho_code) if already else "", business=link.business, link=link,
+    log = _log(request, action, link.awb_number, link.packet_id, True, "", business=link.business, link=link,
                check=link.meesho_check, previous_packet=before, already_scanned=bool(scan.get("already_scanned")),
                scan_count=scan.get("scan_count"), retry_of=retry_of, meesho_code=meesho_code,
                request_id=link.meesho_request_id)
@@ -391,9 +405,6 @@ def _do_link(request, business, awb, packet, override, action, retry_of=None, sc
         MeeshoLinkLog.objects.filter(pk=retry_of).update(resolved=True)
     body = {"link": _link_json(link), "log_id": log.pk, "previous_packet": before, "meesho_code": meesho_code,
             "already_scanned": bool(scan.get("already_scanned")), "stats": scan.get("stats")}
-    if already:
-        # As Meesho's own prompt: already done — scan the next order.
-        return Response({**body, "error": _meesho_message(meesho_code), "code": "already_linked"}, status=status.HTTP_409_CONFLICT)
     return Response(body, status=status.HTTP_201_CREATED)
 
 

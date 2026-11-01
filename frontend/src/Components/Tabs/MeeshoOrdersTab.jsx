@@ -310,8 +310,9 @@ function LinkDialog({ r, onClose, onDone }) {
           awb_ts: Date.now() - 1000, packet_ts: Date.now() }),
       });
       const d = await resp.json().catch(() => ({}));
-      if (resp.ok || d.code === "already_linked") { setRes({ ok: true, text: d.error || `Linked ${r.awb} → ${d.link?.packet_id || packet}.` }); onDone(); }
-      else setRes({ ok: false, text: d.error || "Couldn't link it.", canOverride: d.can_override });
+      // Only a link Meesho made now marks the parcel packed; anything else is an error.
+      if (resp.ok) { setRes({ ok: true, text: `Linked ${r.awb} → ${d.link?.packet_id || packet} and marked packed.` }); onDone(); }
+      else setRes({ ok: false, text: `${d.error || "Couldn't link it."} Not marked packed.`, canOverride: d.can_override });
     } catch { setRes({ ok: false, text: "Network error." }); }
     finally { setBusy(false); }
   };

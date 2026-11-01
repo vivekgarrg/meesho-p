@@ -144,6 +144,10 @@ with connection.cursor() as cur:
 "
 
 python manage.py migrate --noinput
+# New code can change how any screen's numbers are worked out (profit…), while
+# the cached answers only expire when data changes — so every deploy starts
+# the response cache afresh.
+python manage.py shell -c "from meesho_app import api_cache; api_cache.bump()" || true
 python manage.py collectstatic --noinput
 # Seed commands are idempotent: they no-op once the DB has data.
 python manage.py load_initial_data || true

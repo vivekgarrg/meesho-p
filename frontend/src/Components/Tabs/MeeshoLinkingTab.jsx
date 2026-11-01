@@ -11,7 +11,9 @@ import { CircularProgress } from "@mui/material";
  */
 
 const isPacket = (c) => /^KP[A-Z0-9]{6,}$/.test(c);
-const clean = (c) => String(c || "").replace(/\s+/g, "").toUpperCase();
+// As Order Scan: some couriers' barcodes carry the AWB and a routing code — "VL0085968979439|0G349GGK";
+// only the part before the "|" is the AWB.
+const clean = (c) => String(c || "").replace(/\s+/g, "").split("|")[0].toUpperCase();
 const time = (iso) => (iso ? new Date(iso).toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit" }) : "—");
 const when = (iso) => (iso ? new Date(iso).toLocaleString("en-IN", { day: "2-digit", month: "short", hour: "numeric", minute: "2-digit" }) : "—");
 // Where each link stands on Meesho now (meesho_linking.link_state), from its latest Ready to ship / Shipped lists.
@@ -130,12 +132,50 @@ function Logs({ onChanged }) {
   );
 }
 
+/**
+ * A linking error that stops the desk: nothing was marked packed, and nothing
+ * can be scanned until someone presses OK. Enter / Space don't dismiss it — a
+ * scanner ends every code with Enter, and the next parcel's scan mustn't slip
+ * past the error.
+ */
+function BlockingError({ e, onOk, onOverride }) {
+  const stopKeys = (ev) => { if (["Enter", " ", "Spacebar"].includes(ev.key)) { ev.preventDefault(); ev.stopPropagation(); } };
+  useEffect(() => {
+    const swallow = (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); ev.stopPropagation(); } };
+    window.addEventListener("keydown", swallow, true);
+    return () => window.removeEventListener("keydown", swallow, true);
+  }, []);
+  const already = e.code === "already_linked";
+  return (
+    <div role="alertdialog" aria-modal="true" aria-labelledby="link-error-title"
+      style={{ position: "fixed", inset: 0, zIndex: 4000, background: "rgba(127,29,29,.55)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div style={{ ...S.card, maxWidth: 520, width: "100%", padding: 22, display: "flex", flexDirection: "column", gap: 12, borderTop: `6px solid ${already ? "#D97706" : C.red}` }}>
+        <div id="link-error-title" style={{ fontSize: 20, fontWeight: 900, color: already ? "#92400E" : C.red }}>
+          {already ? "⚠ Already linked on Meesho" : "✕ Not linked"} — not marked packed
+        </div>
+        <div style={{ fontSize: 15, color: C.gray800, lineHeight: 1.5, fontWeight: 600 }}>{e.error || "Meesho didn't link it."}</div>
+        <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "4px 12px", fontSize: 13.5 }}>
+          <span style={{ color: C.gray500 }}>AWB</span><b style={{ fontFamily: "monospace" }}>{e.awb || "—"}</b>
+          <span style={{ color: C.gray500 }}>Packet</span><b style={{ fontFamily: "monospace" }}>{e.packet || "—"}</b>
+          {e.meesho_code && <><span style={{ color: C.gray500 }}>Meesho said</span><span style={{ fontFamily: "monospace" }}>{e.meesho_code}</span></>}
+        </div>
+        <div style={{ fontSize: 12.5, color: C.gray500 }}>Put this parcel aside and check it. It's in the log below{onOverride ? " — or link it anyway if the packet is right" : ""}.</div>
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", flexWrap: "wrap" }}>
+          {onOverride && <button onClick={onOverride} onKeyDown={stopKeys} style={btn("ghost", "lg")}>Link anyway</button>}
+          <button onClick={onOk} onKeyDown={stopKeys} style={{ ...btn("primary", "lg"), minWidth: 140 }}>OK — next</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function MeeshoLinkingTab() {
   const isMobile = useIsMobile();
   const [data, setData] = useState(null);
   const [awb, setAwb] = useState("");
   const [packet, setPacket] = useState("");
   const [result, setResult] = useState(null);
+  const [blocked, setBlocked] = useState(null);     // an error the desk must acknowledge before scanning on
   const [sending, setSending] = useState(false);
   const [q, setQ] = useState("");
   const [logKey, setLogKey] = useState(0);
@@ -171,24 +211,47 @@ export function MeeshoLinkingTab() {
 
   const link = async (a, p, override = false) => {
     setSending(true);
+    setBlocked(null);
     const t = typed.current;
-    const r = await call("", "POST", {
-      awb: a, packet_id: p, override,
-      awb_method: t.awbMethod || "MANUAL", awb_ts: t.awbAt || Date.now(),
-      packet_method: method(t.packet), packet_ts: Date.now(),
-    });
+    let r;
+    try {
+      r = await call("", "POST", {
+        awb: a, packet_id: p, override,
+        awb_method: t.awbMethod || "MANUAL", awb_ts: t.awbAt || Date.now(),
+        packet_method: method(t.packet), packet_ts: Date.now(),
+      });
+    } catch {
+      r = { ok: false, data: { error: "Couldn't reach the server — nothing was linked or marked packed.", code: "network" } };
+    }
     setSending(false);
-    if (r.ok || r.data.code === "already_linked") {
-      // Linked — or Meesho already had it ("scan the next order"): either way, on to the next parcel.
-      setResult({ ok: r.ok, already: !r.ok, ...r.data });
+    if (r.ok) {
+      // Linked on Meesho, and only then marked packed: on to the next parcel.
+      setResult({ ok: true, ...r.data });
       setAwb(""); setPacket("");
       typed.current = { awb: null, packet: null, awbAt: null };
       focusField(awbRef);
     } else {
-      setResult({ ok: false, awb: a, packet: p, ...r.data });
-      focusField(r.data.code === "missing" ? (a ? packetRef : awbRef) : AWB_ERRORS.includes(r.data.code) ? awbRef : packetRef);
+      // Anything else — refused, already linked, not found: nothing was marked
+      // packed. The screen stops until someone presses OK.
+      setResult(null);
+      setBlocked({ awb: a, packet: p, ...r.data });
+      document.activeElement?.blur?.();
+      navigator.vibrate?.([200, 100, 200]);
     }
     load(); setLogKey((k) => k + 1);
+  };
+  // OK on the error: back to the field that needs scanning again.
+  const acknowledge = () => {
+    const b = blocked;
+    setBlocked(null);
+    if (!b) return;
+    if (b.code === "already_linked") {                       // done before: on to the next parcel
+      setAwb(""); setPacket("");
+      typed.current = { awb: null, packet: null, awbAt: null };
+      focusField(awbRef);
+      return;
+    }
+    focusField(b.code === "missing" ? (b.awb ? packetRef : awbRef) : AWB_ERRORS.includes(b.code) ? awbRef : packetRef);
   };
 
   // A scanner types the code and presses Enter: AWB → on to the packet; packet → link.
@@ -222,9 +285,9 @@ export function MeeshoLinkingTab() {
     setRowNote(null);
     const r = await call(`${l.id}/relink/`, "POST", { packet_id: packetId || l.packet_id, packet_method: packetId ? "SCAN" : "MANUAL" });
     setRelinking(null);
-    setRowNote(r.ok || r.data.code === "already_linked"
-      ? { ok: true, text: r.data.error || `Relinked ${l.awb} → ${r.data.link?.packet_id || packetId || l.packet_id} on Meesho.` }
-      : { ok: false, text: r.data.error || "Relink failed — it's in the log." });
+    setRowNote(r.ok
+      ? { ok: true, text: `Relinked ${l.awb} → ${r.data.link?.packet_id || packetId || l.packet_id} on Meesho.` }
+      : { ok: false, text: `${r.data.error || "Relink failed — it's in the log."} Not marked packed.` });
     load(); setLogKey((k) => k + 1);
   };
   // Read Meesho's lists again, then show each link's state from them.
@@ -262,6 +325,8 @@ export function MeeshoLinkingTab() {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      {blocked && <BlockingError e={blocked} onOk={acknowledge}
+        onOverride={blocked.can_override ? () => link(blocked.awb, blocked.packet, true) : null} />}
       <p style={{ fontSize: 13, color: C.gray500, margin: 0, maxWidth: 780 }}>
         Scan the AWB on the label, then the packet QR (“KP…”). Each pair is linked <b>on Meesho</b> (as its Scan now page does), then stored here
         and the parcel marked <b>packed</b> in Order Scan. Everything is logged below.
@@ -271,14 +336,14 @@ export function MeeshoLinkingTab() {
         <div style={{ display: "grid", gap: 10, gridTemplateColumns: isMobile ? "minmax(0, 1fr)" : "minmax(0, 1fr) minmax(0, 1fr) auto", alignItems: "end" }}>
           <form onSubmit={onAwbEnter} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             <label htmlFor="link-awb" style={{ fontSize: 12.5, fontWeight: 800, color: C.gray600 }}>1 · AWB (on the label)</label>
-            <input id="link-awb" ref={awbRef} value={awb} onChange={onType("awb", setAwb)} autoFocus disabled={sending}
+            <input id="link-awb" ref={awbRef} value={awb} onChange={onType("awb", setAwb)} autoFocus disabled={sending || !!blocked}
               autoComplete="off" placeholder="Scan the AWB…"
               style={{ ...S.inp, fontSize: 18, fontFamily: "monospace", padding: "12px 14px",
                 borderColor: r && !r.ok && (AWB_ERRORS.includes(r.code) || (r.code === "missing" && !awb)) ? C.red : undefined }} />
           </form>
           <form onSubmit={onPacketEnter} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             <label htmlFor="link-packet" style={{ fontSize: 12.5, fontWeight: 800, color: C.gray600 }}>2 · Packet ID (KP… QR)</label>
-            <input id="link-packet" ref={packetRef} value={packet} onChange={onType("packet", setPacket)} disabled={sending}
+            <input id="link-packet" ref={packetRef} value={packet} onChange={onType("packet", setPacket)} disabled={sending || !!blocked}
               autoComplete="off" placeholder="Scan the packet QR…"
               style={{ ...S.inp, fontSize: 18, fontFamily: "monospace", padding: "12px 14px",
                 borderColor: r && !r.ok && !AWB_ERRORS.includes(r.code) && !(r.code === "missing" && !awb) ? C.red : undefined }} />
@@ -291,14 +356,7 @@ export function MeeshoLinkingTab() {
             {(awb || packet || r) && <button onClick={clearAll} style={{ ...btn("ghost", "md"), padding: "12px 14px" }}>Clear</button>}
           </div>
         </div>
-        {r && r.already ? (
-          <div role="alert" style={{ background: C.amberLight, border: `1.5px solid ${C.amberBorder}`, borderRadius: 12, padding: "12px 14px", color: "#92400E", fontSize: 14 }}>
-            <b>⚠ AWB and packet already linked</b>
-            <div style={{ marginTop: 3 }}>The AWB <b style={{ fontFamily: "monospace" }}>{r.link.awb}</b> is already scanned and linked to packet{" "}
-              <b style={{ fontFamily: "monospace" }}>{r.link.packet_id}</b> on Meesho. <b>Please scan the next order.</b></div>
-            <div style={{ fontSize: 12.5, marginTop: 3 }}>{r.link.business_name}{r.link.sub_order_no ? ` · ${r.link.sub_order_no}` : ""} — kept as packed here too.</div>
-          </div>
-        ) : r && (r.ok ? (
+        {r && (r.ok ? (
           <div role="status" style={{ background: C.greenLight, border: `1.5px solid ${C.greenBorder}`, borderRadius: 12, padding: "10px 14px", color: "#166534", fontSize: 13.5 }}>
             <b>✓ Linked on Meesho and packed</b> — AWB <b style={{ fontFamily: "monospace" }}>{r.link.awb}</b> ↔ <b style={{ fontFamily: "monospace" }}>{r.link.packet_id}</b>
             {" · "}{r.link.business_name}{r.link.sub_order_no ? ` · ${r.link.sub_order_no}` : ""}{r.link.sku ? ` · ${r.link.sku}` : ""}
@@ -307,12 +365,7 @@ export function MeeshoLinkingTab() {
             {r.previous_packet && r.previous_packet !== r.link.packet_id && <div>Was linked to {r.previous_packet} before.</div>}
             {r.already_scanned && <div>This parcel had been scanned before — now marked packed.</div>}
           </div>
-        ) : (
-          <div role="alert" style={{ background: C.redLight, border: `1.5px solid ${C.redBorder}`, borderRadius: 12, padding: "10px 14px", color: C.red, fontSize: 13.5, fontWeight: 700, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-            <span style={{ flex: 1, minWidth: 220 }}>✗ {r.error}</span>
-            {r.can_override && <button onClick={() => link(r.awb, r.packet, true)} style={{ ...btn("ghost", "sm"), color: "#B45309" }}>Link anyway</button>}
-          </div>
-        ))}
+        ) : null)}
       </div>
 
       <div style={{ display: "grid", gap: 10, gridTemplateColumns: isMobile ? "repeat(2, minmax(0, 1fr))" : "repeat(4, minmax(0, 1fr))" }}>
