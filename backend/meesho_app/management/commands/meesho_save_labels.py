@@ -36,6 +36,10 @@ class Command(BaseCommand):
                             default=MeeshoLabelFile.TRIGGER_AUTO)
 
     def handle(self, *args, batch, summary, send, trigger, **opts):
+        # An automatic run sends when Meesho → Settings says so.
+        if trigger == MeeshoLabelFile.TRIGGER_AUTO and not send:
+            from meesho_app.models import MeeshoAutoSetting
+            send = MeeshoAutoSetting.get().send_labels
         when = timezone.localtime().strftime("%-I:%M %p, %-d %b")
         runs = [r for r in MeeshoSyncRun.objects.filter(kind=meesho_sync.KIND_LABELS, result__batch=batch)
                 .select_related("account__business").order_by("queued_at") if (r.result or {}).get("label_url")]

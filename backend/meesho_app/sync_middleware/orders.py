@@ -112,7 +112,9 @@ def inject(business, rows):
         for o in Order.objects.filter(business=business, sub_order_no__in=subs[i:i + 500]):
             existing.setdefault(o.sub_order_no, []).append(o)
     now = timezone.now()
-    with deferred_bumps(business.pk), transaction.atomic():
+    # Rows created invalidate the cached screens through their signals; the
+    # bulk updates below don't, so each says so — nothing written, nothing redone.
+    with deferred_bumps() as bumps, transaction.atomic():
         for sub, row in by_sub.items():
             status = STATUS[row["tab"]]
             details = details_of(row)
@@ -128,6 +130,7 @@ def inject(business, rows):
             stale = [o for o in have if any(str(getattr(o, f)) != str(v) for f, v in details.items())]
             if stale:
                 Order.objects.filter(pk__in=[o.pk for o in stale]).update(**details, updated_at=now)
+                bumps.add(business.pk)
                 res.add("updated")
             # The order's current status is its latest row — as Order.latest_per_order picks it.
             latest = max(have, key=lambda o: (o.order_date or datetime(1970, 1, 1).date(),
@@ -143,6 +146,7 @@ def inject(business, rows):
                 # Back to a status it had on that date (one row per status and
                 # date): that row becomes the latest again.
                 Order.objects.filter(pk=back.pk).update(created_at=now, updated_at=now)
+                bumps.add(business.pk)
             else:
                 Order.objects.create(business=business, sub_order_no=sub, reason_for_credit_entry=status, order_date=day,
                                      order_source=latest.order_source, catalog_id=latest.catalog_id,
@@ -200,7 +204,9 @@ def settle(business, live):
     for o in Order.objects.filter(business=business, sub_order_no__in=[o.sub_order_no for o in shipped if o.sub_order_no in known]):
         have.setdefault(o.sub_order_no, []).append(o)
     now = timezone.now()
-    with deferred_bumps(business.pk), transaction.atomic():
+    # Rows created invalidate the cached screens through their signals; the
+    # bulk updates below don't, so each says so — nothing written, nothing redone.
+    with deferred_bumps() as bumps, transaction.atomic():
         for latest in shipped:
             hit = known.get(latest.sub_order_no)
             if not hit:
@@ -211,6 +217,7 @@ def settle(business, live):
                          if o.reason_for_credit_entry == status and o.order_date == latest.order_date), None)
             if back:
                 Order.objects.filter(pk=back.pk).update(created_at=now, updated_at=now)
+                bumps.add(business.pk)
             else:
                 Order.objects.create(business=business, sub_order_no=latest.sub_order_no, reason_for_credit_entry=status,
                                      order_date=latest.order_date, order_source=SOURCE, catalog_id=latest.catalog_id,

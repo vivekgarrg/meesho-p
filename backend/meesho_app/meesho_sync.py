@@ -25,6 +25,7 @@ from rest_framework import status
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
+from . import notify
 from .models import (MeeshoAccount, MeeshoAutoSetting, MeeshoCatalog, MeeshoLabelFile, MeeshoListing, MeeshoSyncRun,
                      MeeshoSyncSetting, MeeshoSyncSnapshot)
 
@@ -1178,6 +1179,7 @@ def _automation_json(setting):
     return {
         "enabled": setting.enabled, "accept_every_minutes": setting.accept_every_minutes,
         "label_times": setting.label_times or [], "accept_choices": MeeshoAutoSetting.ACCEPT_CHOICES,
+        "send_labels": setting.send_labels, "send_channels": notify.channels(),
         "last_accept_at": setting.last_accept_at, "last_labels_at": setting.last_labels_at,
         "next_accept_at": nxt_accept, "next_labels_at": nxt_labels,
         "updated_at": setting.updated_at, "updated_by": setting.updated_by.username if setting.updated_by else None,
@@ -1200,6 +1202,11 @@ def meesho_automation(request, business_id):
         d = request.data if isinstance(request.data, dict) else {}
         if "enabled" in d:
             setting.enabled = bool(d["enabled"])
+        if "send_labels" in d:
+            if d["send_labels"] and not notify.channels():
+                return Response({"error": "No channel is set up to send on — add the WhatsApp (or Telegram / email) settings "
+                                          "to the server's .env first."}, status=status.HTTP_400_BAD_REQUEST)
+            setting.send_labels = bool(d["send_labels"])
         if "accept_every_minutes" in d:
             try:
                 every = int(d["accept_every_minutes"])

@@ -1,6 +1,7 @@
 """The Meesho sync page: save the login (encrypted), queue Sidekiq jobs, show status."""
 
 import base64
+import io
 import json
 import os
 from unittest import mock
@@ -1022,3 +1023,92 @@ class MeeshoDashboardTests(TestCase):
         self.assertEqual(json.loads(meesho_sync.decrypt(MeeshoAccount.objects.get().cookies_enc))["connect.sid"], "fresh")
         self.assertEqual(enq.call_args[0][0], "MeeshoSyncJob")
         self.assertEqual(self.client_for(self.admin).post(url, {"session": "bm_sz=only"}, format="json").status_code, 400)
+
+
+@mock.patch.dict(os.environ, {"MEESHO_SYNC_KEY": KEY})
+class WhatsAppLabelsTests(TestCase):
+    """The labels PDF on WhatsApp (Cloud API): uploaded once, sent to every number as the approved template."""
+    ENV = {"WHATSAPP_TOKEN": "EAAG-token", "WHATSAPP_PHONE_NUMBER_ID": "1098765", "WHATSAPP_TEMPLATE": "rudam_labels",
+           "WHATSAPP_TO": "+91 98123 45678, 919000000001", "TELEGRAM_BOT_TOKEN": "", "LABELS_EMAIL_TO": ""}
+
+    def calls(self, answers):
+        sent = []
+
+        class Resp:
+            def __init__(self, req, body): sent.append(req); self.body = body
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self): return json.dumps(self.body).encode()
+
+        it = iter(answers)
+        return sent, (lambda req, timeout: Resp(req, next(it)))
+
+    def test_the_pdf_goes_to_every_number_as_the_labels_template(self):
+        from . import notify
+        sent, fake = self.calls([{"id": "MEDIA1"}, {"messages": [{"id": "m1"}]}, {"messages": [{"id": "m2"}]}])
+        with mock.patch.dict(os.environ, self.ENV), mock.patch("meesho_app.notify.urlopen", side_effect=fake):
+            self.assertEqual(notify.channels(), ["whatsapp"])
+            result = notify.send("Meesho labels — 5:00 PM", "42 labels from Rudam,\nCosmify", filename="l.pdf", data=b"%PDF-1.4 x")
+        self.assertEqual(result, {"whatsapp": "sent"})
+        upload, *messages = sent
+        self.assertEqual(upload.full_url, "https://graph.facebook.com/v21.0/1098765/media")
+        self.assertEqual(upload.get_header("Authorization"), "Bearer EAAG-token")
+        self.assertIn(b'name="file"; filename="l.pdf"', upload.data)
+        self.assertIn(b"%PDF-1.4 x", upload.data)
+        bodies = [json.loads(m.data) for m in messages]
+        self.assertEqual([b["to"] for b in bodies], ["919812345678", "919000000001"])
+        t = bodies[0]["template"]
+        self.assertEqual((t["name"], t["language"]["code"]), ("rudam_labels", "en"))
+        self.assertEqual(t["components"][0]["parameters"][0]["document"], {"id": "MEDIA1", "filename": "l.pdf"})
+        self.assertEqual(t["components"][1]["parameters"][0]["text"], "Meesho labels — 5:00 PM — 42 labels from Rudam, Cosmify")
+
+    def test_a_refusal_is_reported_with_metas_reason(self):
+        from urllib.error import HTTPError
+        from . import notify
+        err = HTTPError("u", 400, "Bad", {}, io.BytesIO(json.dumps({"error": {"message": "Template name does not exist"}}).encode()))
+        with mock.patch.dict(os.environ, self.ENV), mock.patch("meesho_app.notify.urlopen", side_effect=err):
+            result = notify.send("s", "t", filename="l.pdf", data=b"%PDF")
+        self.assertEqual(result, {"whatsapp": "error: Template name does not exist"})
+        with mock.patch.dict(os.environ, {**self.ENV, "WHATSAPP_TEMPLATE": ""}):
+            self.assertEqual(notify.channels(), [])                          # not fully set up: not a channel
+
+    def test_automatic_labels_are_sent_when_settings_say_so(self):
+        from io import StringIO
+        from django.core.management import call_command
+        from .models import MeeshoAutoSetting
+        from .test_label_engine import make_labels_pdf
+        biz = Business.objects.create(name="Rudam")
+        User.objects.create_user(username="a", password="pw", role=User.ROLE_SUPER_ADMIN)
+        acct = MeeshoAccount.objects.create(business=biz, phone_number="9000000001", password_enc="v1:x", status="ACTIVE",
+                                            supplier_id="1", supplier_identifier="x")
+        MeeshoSyncRun.objects.create(account=acct, kind="LABELS", status="OK", records=1,
+                                     result={"batch": "auto-5pm", "label_url": "https://storage.googleapis.com/a.pdf", "success": 1})
+        pdf = make_labels_pdf([("lota-a", "1_1", "Y")])
+
+        def run(trigger="AUTO"):
+            with mock.patch.object(meesho_sync, "_fetch_label_pdf", return_value=pdf), \
+                    mock.patch("meesho_app.notify.send", return_value={"whatsapp": "sent"}) as send:
+                call_command("meesho_save_labels", batch="auto-5pm", trigger=trigger, stdout=StringIO())
+            return send
+
+        self.assertFalse(run().called)                                       # off by default
+        s = MeeshoAutoSetting.get()
+        s.send_labels = True
+        s.save()
+        send = run()
+        self.assertTrue(send.call_args.kwargs["data"].startswith(b"%PDF"))
+        self.assertIn("1 label from Rudam", send.call_args.args[1])
+        self.assertFalse(run(trigger="MANUAL").called)                       # a Generate by hand isn't sent
+
+    def test_the_switch_needs_a_channel(self):
+        admin = User.objects.create_user(username="a", password="pw", role=User.ROLE_SUPER_ADMIN)
+        biz = Business.objects.create(name="Rudam")
+        Membership.objects.create(user=admin, business=biz)
+        c = APIClient()
+        c.force_authenticate(admin)
+        url = f"/api/business/{biz.id}/meesho-orders/automation/"
+        with mock.patch.dict(os.environ, {"WHATSAPP_TOKEN": "", "TELEGRAM_BOT_TOKEN": "", "LABELS_EMAIL_TO": ""}):
+            self.assertEqual(c.patch(url, {"send_labels": True}, format="json").status_code, 400)
+        with mock.patch.dict(os.environ, self.ENV):
+            d = c.patch(url, {"send_labels": True}, format="json").data
+        self.assertEqual((d["send_labels"], d["send_channels"]), (True, ["whatsapp"]))

@@ -743,6 +743,26 @@ function CourierTiles({ couriers, active, onPick, compact }) {
   );
 }
 
+/** Packages kept off the desk because Meesho says their labels aren't downloaded yet. */
+function HiddenNotDownloaded({ sum }) {
+  const n = sum?.hidden_not_downloaded || 0;
+  if (!n) return null;
+  const list = sum.hidden_not_downloaded_orders || [];
+  return (
+    <details style={{ ...S.card, padding: "10px 14px", background: C.amberLight, border: `1px solid ${C.amber}`, fontSize: 13, color: "#92400E" }}>
+      <summary style={{ cursor: "pointer", fontWeight: 800 }}>
+        {n} package{n === 1 ? "" : "s"} not shown — Meesho says {n === 1 ? "its label isn't" : "their labels aren't"} downloaded yet
+      </summary>
+      <div style={{ marginTop: 6, lineHeight: 1.5 }}>
+        They appear here once the labels are downloaded on Meesho (the next sync picks it up).
+        <div style={{ marginTop: 4, fontFamily: "monospace", fontSize: 12 }}>
+          {list.map((o) => <div key={o.order_id}>{o.order_id}{o.sku ? ` · ${o.sku}` : ""}{o.business ? ` · ${o.business}` : ""}</div>)}
+        </div>
+      </div>
+    </details>
+  );
+}
+
 /**
  * The courier KPIs, always shown: each courier's packed count (waiting for
  * pickup) and how many are left to pack. Scans that aren't on the day's labels
@@ -1359,6 +1379,7 @@ function MobilePack({ desk, platform, businesses, onScopeChanged, scopeTick, mul
               <DayNotice desk={desk} compact />
               <NoticeChips desk={desk} alerts={alerts} onAlerts={() => setShowAlerts(true)} onUnsent={() => setShowShift(true)}
                 onUnrec={() => setShowUnrec(true)} onMovedBack={moveBackAll} />
+              <HiddenNotDownloaded sum={sum} />
               <CourierSection desk={desk} items={items} sum={sum} active={courier} onPick={setCourier} compact />
               <div style={{ background: C.white, border: `1px solid ${C.gray200}`, borderRadius: 16, padding: 12, display: "flex", flexDirection: "column", gap: 12 }}>
                 <DayProgress items={items} counts={allCounts} pieces={sum ? { packed: sum.pieces_packed ?? 0, total: sum.pieces ?? 0 } : null} />
@@ -1620,6 +1641,7 @@ function DesktopPack({ desk, platform, setPlatform, businesses, onScopeChanged, 
             {/* Left: where every courier stands, then the list */}
             <div style={{ display: "flex", flexDirection: "column", gap: 16, minWidth: 0 }}>
               <div style={{ ...S.card, padding: 16, display: "flex", flexDirection: "column", gap: 14 }}>
+                <HiddenNotDownloaded sum={sum} />
                 <CourierSection desk={desk} items={items} sum={sum} active={courier} onPick={(c) => { setCourier(c); setTab(c ? "packed" : tab); refocus(); }} />
                 <DayProgress items={items} counts={allCounts} pieces={sum ? { packed: sum.pieces_packed ?? 0, total: sum.pieces ?? 0 } : null} />
               </div>

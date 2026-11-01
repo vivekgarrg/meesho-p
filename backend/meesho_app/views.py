@@ -6709,7 +6709,8 @@ def _process_labels_upload(request, business, pdf_bytes, upload_date_str, crop_l
     # Caller can pass upload_date=YYYY-MM-DD in the form to record historical
     # label batches under a past date. Must be ≤ today; defaults to today.
     from datetime import date as _date_cls
-    today = timezone.now().date()
+    # Today's noon-to-noon packing day, as the screens send it and Order Scan reads it.
+    today = _current_business_date()
     if upload_date_str:
         try:
             candidate = _date_cls.fromisoformat(upload_date_str)
@@ -12025,7 +12026,7 @@ def upsert_return_rows(business, rows, kind, now=None):
     Returns the counts.
     """
     in_transit = kind == "in_transit"
-    created = updated = skipped = 0
+    created = updated = skipped = unchanged = 0
     no_delivered_date = 0
     already_delivered = 0
     seen_keys = set()
@@ -12079,8 +12080,7 @@ def upsert_return_rows(business, rows, kind, now=None):
                 })
                 if row.get("meesho_image_url"):
                     defaults["meesho_image_url"] = row["meesho_image_url"]
-            existing = ReturnDelivery.objects.filter(business=business, suborder_no=suborder,
-                                                     awb_number=awb).only("stage", "claim_status").first()
+            existing = ReturnDelivery.objects.filter(business=business, suborder_no=suborder, awb_number=awb).first()
             if in_transit:
                 defaults.update({
                     "transit_status":         _return_text(row.get("transit_status"))[:60],
@@ -12109,6 +12109,13 @@ def upsert_return_rows(business, rows, kind, now=None):
                     if not existing or existing.claim_status == ReturnDelivery.CLAIM_UNREVIEWED:
                         defaults["claim_status"] = ReturnDelivery.CLAIM_NOT_REQUIRED
 
+            # The same as what's stored (bar when it was read): just note the
+            # read — no save, so the cached screens aren't recomputed for nothing.
+            stamps = ("synced_at", "transit_updated_at")
+            if existing and all(getattr(existing, k) == v for k, v in defaults.items() if k not in stamps):
+                ReturnDelivery.objects.filter(pk=existing.pk).update(**{k: v for k, v in defaults.items() if k in stamps})
+                unchanged += 1
+                continue
             _, was_created = ReturnDelivery.objects.update_or_create(
                 business=business, suborder_no=suborder, awb_number=awb,
                 defaults=defaults,
@@ -12117,7 +12124,7 @@ def upsert_return_rows(business, rows, kind, now=None):
                 created += 1
             else:
                 updated += 1
-    return {"created": created, "updated": updated, "skipped": skipped,
+    return {"created": created, "updated": updated, "unchanged": unchanged, "skipped": skipped,
             "without_delivered_date": no_delivered_date, "already_delivered": already_delivered}
 
 
@@ -13648,6 +13655,20 @@ def _scan_ship_check(business, codes):
     }
 
 
+def _meesho_labels_not_downloaded(business_ids):
+    """(business, sub-order) of the orders the Meesho panel (as the sync last
+    read it) lists as ready to ship with their label not downloaded."""
+    from .models import MeeshoSyncSnapshot
+    out = set()
+    for business_id, payload in (MeeshoSyncSnapshot.objects.filter(account__business_id__in=business_ids,
+                                                                    endpoint="orders_ready_to_ship")
+                                 .values_list("account__business_id", "payload")):
+        for r in payload if isinstance(payload, list) else []:
+            if isinstance(r, dict) and r.get("sub_order_num") and str(r.get("label") or "").strip().lower() == "not downloaded":
+                out.add((business_id, r["sub_order_num"]))
+    return out
+
+
 def _labels_on_day(qs, day):
     """Labels whose packing day is `day`: uploaded that day and not moved, or
     moved to it by an admin (LabelOrder.pack_day)."""
@@ -14058,6 +14079,13 @@ def scan_queue(request, business_id):
         _labels_on_day(_scope_labels(request, LabelOrder.objects.filter(business_id__in=desk_ids)), day)
         .order_by("courier_name", "sku", "order_id")[:4000]
     )
+    # Only packages whose label was downloaded: a Meesho order the panel still
+    # lists as ready to ship with its label "Not Downloaded" (labels made, but
+    # the download never registered on Meesho) stays off the desk until it is.
+    not_downloaded = _meesho_labels_not_downloaded(desk_ids)
+    hidden = [l for l in labels if l.platform != "flipkart" and (l.business_id, l.order_id) in not_downloaded]
+    if hidden:
+        labels = [l for l in labels if not (l.platform != "flipkart" and (l.business_id, l.order_id) in not_downloaded)]
     ids = [l.order_id for l in labels]
     awbs = [l.awb_number for l in labels if l.awb_number]
 
@@ -14125,6 +14153,10 @@ def scan_queue(request, business_id):
         "cancelled":  sum(1 for i in items if i["ship_status"] == ScannedOrder.SHIP_CANCELLED),
         "unknown":    sum(1 for i in items if i["ship_status"] == ScannedOrder.SHIP_UNKNOWN),
         "pieces":     sum(i["qty"] or 0 for i in items),
+        # Left off the list: Meesho says their labels aren't downloaded yet.
+        "hidden_not_downloaded": len(hidden),
+        "hidden_not_downloaded_orders": [{"order_id": l.order_id, "business": names.get(l.business_id, ""), "sku": l.sku}
+                                         for l in hidden[:50]],
         "pieces_packed": sum(i["qty"] or 0 for i in items if i["state"] in packed_states),
     }
     # Per courier: how many it has to take today, how many are scanned, how many

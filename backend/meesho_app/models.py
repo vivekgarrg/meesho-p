@@ -3337,6 +3337,9 @@ class MeeshoAutoSetting(models.Model):
     enabled = models.BooleanField(default=False)
     accept_every_minutes = models.PositiveIntegerField(default=30)     # 0 = never accept by itself
     label_times = models.JSONField(default=list, blank=True)           # ["17:00", …], IST
+    # Send each automatic labels PDF on the channels set up in .env (WhatsApp,
+    # Telegram, email — notify.py) as soon as it is made.
+    send_labels = models.BooleanField(default=False)
     last_accept_at = models.DateTimeField(null=True, blank=True)
     last_labels_at = models.DateTimeField(null=True, blank=True)
     updated_by = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")

@@ -20,6 +20,34 @@ const timeLabel = (t) => {
   return new Date(2000, 0, 1, h, m).toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit" });
 };
 
+const CHANNEL = { whatsapp: "WhatsApp", telegram: "Telegram", email: "Email" };
+
+/** Send each automatic labels PDF as soon as it's made — on the channels set up in the server's .env. */
+function SendLabels({ s, admin, busy, onToggle }) {
+  const channels = s.send_channels || [];
+  const names = channels.map((c) => CHANNEL[c] || c).join(", ");
+  return (
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap",
+      padding: "12px 14px", borderRadius: 12, background: C.gray50, border: `1px solid ${C.gray200}` }}>
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontSize: 13.5, fontWeight: 800, color: C.gray900 }}>Send the labels {names ? `to ${names}` : ""}</div>
+        <div style={{ fontSize: 12.5, color: C.gray500, marginTop: 2 }}>
+          {channels.length
+            ? "After each automatic labels run, the sorted PDF is sent straight away."
+            : "No channel set up yet — add the WhatsApp settings to the server's .env (WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_TEMPLATE, WHATSAPP_TO)."}
+        </div>
+      </div>
+      {admin ? (
+        <button onClick={onToggle} disabled={busy || (!channels.length && !s.send_labels)}
+          style={{ ...btn(s.send_labels ? "ghost" : "primary", "sm"), minWidth: 110, opacity: !channels.length && !s.send_labels ? 0.5 : 1,
+            ...(s.send_labels ? { color: C.red } : {}) }}>
+          {s.send_labels ? "Stop sending" : "Start sending"}
+        </button>
+      ) : <Tag variant={s.send_labels ? "green" : "gray"}>{s.send_labels ? "Sending" : "Not sending"}</Tag>}
+    </div>
+  );
+}
+
 export function AutomationCard() {
   const [s, setS] = useState(null);
   const [draft, setDraft] = useState(null);
@@ -112,6 +140,8 @@ export function AutomationCard() {
           </span>}
         </div>
       </div>
+
+      <SendLabels s={s} admin={admin} busy={busy} onToggle={() => save({ send_labels: !s.send_labels })} />
 
       {admin && (
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>

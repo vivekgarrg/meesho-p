@@ -105,6 +105,7 @@ ActiveRecord::Schema.define do
     t.boolean :enabled, null: false, default: false
     t.integer :accept_every_minutes, null: false, default: 30
     t.text :label_times                     # JSON
+    t.boolean :send_labels, null: false, default: false
     t.datetime :last_accept_at
     t.datetime :last_labels_at
     t.integer :updated_by_id

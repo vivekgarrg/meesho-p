@@ -89,7 +89,7 @@ def inject(account):
         account=account, endpoint__in=[SNAPSHOT.format(st) for st, _, _ in STATUSES])}
     res = Result()
     now = timezone.now()
-    with deferred_bumps(account.business_id):
+    with deferred_bumps():                     # rows saved invalidate through their signals; unchanged ones aren't saved
         for meesho_status, kind, _label in STATUSES:
             snap = snaps.get(SNAPSHOT.format(meesho_status))
             if not snap or not isinstance(snap.payload, list):
