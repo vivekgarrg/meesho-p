@@ -339,7 +339,11 @@ def claim_lookup(request, business_id):
         r = find_return(ids, code)
         if r:
             return Response({"found": True, "matched_code": code, "return": _return_json(r, names)})
-    return Response({"found": False, "error": "No return of your businesses matches that — check the code, or type the AWB."},
+    searched = ", ".join(names.values()) or "none"
+    return Response({"found": False, "searched": list(names.values()), "codes": codes[:12],
+                     "error": f"No return matches {', '.join(c for c in codes if c)[:120] or 'that'} in {searched}. "
+                              f"If it's another business's return, you need access to that business; if it's new, "
+                              f"upload the latest returns export (or let the Meesho returns sync run)."},
                     status=status.HTTP_404_NOT_FOUND)
 
 

@@ -136,7 +136,11 @@ export function ReturnClaimTab() {
     setFinding(true); setFindMsg(null);
     const r = await api(`lookup/?${list.map((c) => `code=${encodeURIComponent(c)}`).join("&")}`);
     setFinding(false);
-    if (!r.ok) { setFindMsg({ ok: false, text: r.data.error || "No return found." }); return; }
+    if (!r.ok) {
+      setFindMsg({ ok: false, text: r.data.error || r.data.detail
+        || `The search didn't answer (HTTP ${r.status || "—"}) — reload the page; if it stays, the server may still be updating.` });
+      return;
+    }
     const x = r.data.return;
     setRet(x);
     setCode(x.awb || r.data.matched_code);

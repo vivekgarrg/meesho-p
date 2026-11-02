@@ -64,6 +64,7 @@ _NEVER_CACHE_PREFIXES = (
     # the day changes at noon; and it changes with every scan anyway.
     "order-scan/",
     "return-scan/",           # the returns desk — same reasons
+    "return-claim/",          # return claims — across businesses, and read live from Meesho
     "meesho-sync/",           # live job status, written by the Sidekiq worker
     "meesho-orders/",         # the Meesho panel's orders — also written by the worker,
                               # which never bumps this cache's versions
