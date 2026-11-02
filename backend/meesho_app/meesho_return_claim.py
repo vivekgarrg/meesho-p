@@ -116,12 +116,18 @@ def _options(field):
     return []
 
 
+# The claim-type picker comes back as a field of the form; it's chosen separately and never sent.
+SKIP_KEYS = {"issue"}
+# Fields that are only notes on Meesho's form (a sample image, a warning) — shown, never sent.
+INFO_TYPES = {"text", "info", "html", "label"}
+
+
 def parse_fields(answer):
     """The form's fields from a subcategorySchema answer, in Meesho's order."""
     seen, out = set(), []
     for d in _walk(answer):
         key, typ = d.get("key"), d.get("type")
-        if not (isinstance(key, str) and isinstance(typ, str)) or key in seen:
+        if not (isinstance(key, str) and isinstance(typ, str)) or key in seen or key in SKIP_KEYS:
             continue
         seen.add(key)
         known = KNOWN_BY_KEY.get(key, {})
@@ -132,7 +138,10 @@ def parse_fields(answer):
             "required": bool(req) if req is not None else known.get("required", False),
             "options": _options(d) or known.get("options", []),
             "hint": _text(d, "placeholder", "hint", "help_text", "sub_title", "description"),
+            "info": typ in INFO_TYPES,
         })
+        if out[-1]["info"]:
+            out[-1]["required"] = False
     return out
 
 
@@ -148,12 +157,20 @@ def sub_categories(account):
     dicts = list(_walk(answer))
     # Entries that say they're sub-categories; else anything with an id and a name.
     picked = [d for d in dicts if "sub_category_id" in d] or [d for d in dicts if "id" in d]
+    # Meesho lists most types twice (e.g. 2 and 142, "Item/s are missing in my
+    # return"); its own form raises them under the lower id, so that one is kept.
+    by_label = {}
     for d in picked:
         sid = _text(d, "sub_category_id", "id")
         label = _text(d, "sub_category_name", "sub_category_title", "name", "title", "display_name", "label")
-        if sid and label and sid not in seen:
-            seen.add(sid)
-            out.append({"id": sid, "label": label})
+        if not (sid and label) or sid in seen:
+            continue
+        seen.add(sid)
+        if label not in by_label:
+            by_label[label] = {"id": sid, "label": label}
+            out.append(by_label[label])
+        elif sid.isdigit() and by_label[label]["id"].isdigit() and int(sid) < int(by_label[label]["id"]):
+            by_label[label]["id"] = sid
     if out:
         cache.set(key, out, CACHE_SECONDS)
     return out
@@ -185,7 +202,7 @@ def ticket_details(fields, values, labels=None, only=None):
     out = []
     for f in fields:
         k = f["key"]
-        if only is not None and k not in only:
+        if f.get("info") or (only is not None and k not in only):
             continue
         v = values.get(k)
         if f["type"] in FILE_TYPES:
@@ -199,6 +216,28 @@ def ticket_details(fields, values, labels=None, only=None):
     return out
 
 
+def _errors(answer):
+    """
+    Meesho's field errors, in words: {"errors": [{"error_message": "Ticket {{ticket_id}} has
+    already been raised…", "ticket_id": {"label": 7936…}, "field_name": "awb_number"}]} —
+    each {{name}} filled from the error's own values. Returns (message, ticket id or "").
+    """
+    msgs, ticket = [], ""
+    for e in (answer.get("errors") or []) if isinstance(answer, dict) else []:
+        if not isinstance(e, dict):
+            continue
+        text = str(e.get("error_message") or e.get("message") or "")
+        for k, v in e.items():
+            val = v.get("label") or v.get("value") or v.get(k) if isinstance(v, dict) else v
+            if isinstance(val, (str, int)) and f"{{{{{k}}}}}" in text:
+                text = text.replace(f"{{{{{k}}}}}", str(val))
+            if "ticket" in k and isinstance(val, (str, int)) and not ticket:
+                ticket = str(val)
+        if text:
+            msgs.append(text)
+    return " ".join(msgs), ticket
+
+
 def validate(account, sub_category_id, details):
     """Meesho's check of the fields filled so far: {ok, message, answer}."""
     body = {"supplier_id": str(account.supplier_id), "category_id": CATEGORY_ID, "sub_category_id": str(sub_category_id),
@@ -210,7 +249,8 @@ def validate(account, sub_category_id, details):
             raise
         return {"ok": False, "message": str(e), "answer": e.details.get("meesho_answer")}
     bad = isinstance(answer, dict) and (answer.get("is_valid") is False or answer.get("valid") is False)
-    return {"ok": not bad, "message": _reason(answer) if bad else "", "answer": _short(answer)}
+    message, ticket = _errors(answer) if bad else ("", "")
+    return {"ok": not bad, "message": message or (_reason(answer) if bad else ""), "ticket": ticket, "answer": _short(answer)}
 
 
 def upload(account, filename, data, content_type):
@@ -309,6 +349,7 @@ def _return_json(r, names):
                       .values_list("packet_id", flat=True).first())
     account = MeeshoAccount.objects.filter(business_id=r.business_id).first()
     claims = MeeshoReturnClaim.objects.filter(business_id=r.business_id, sub_order_no=r.suborder_no).select_related("business", "created_by")
+    scan = r.desk_scans.filter(damaged=True).first() if hasattr(r, "desk_scans") else None
     return {
         "id": r.pk, "business_id": r.business_id, "business_name": names.get(r.business_id, ""),
         "connected": bool(account and account.status == MeeshoAccount.STATUS_ACTIVE),
@@ -320,6 +361,8 @@ def _return_json(r, names):
         "claim_status": r.claim_status, "claim_reference": r.claim_reference,
         "image_url": photo, "image_fallback_url": fallback,
         "claims": [_claim_json(c) for c in claims[:10]],
+        # Flagged damaged / tampered on Return Scan — the claim starts from that.
+        "damaged": bool(scan), "damage_note": scan.damage_note if scan else "",
     }
 
 

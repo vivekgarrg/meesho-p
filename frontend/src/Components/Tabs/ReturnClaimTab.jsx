@@ -146,6 +146,7 @@ export function ReturnClaimTab() {
     setCode(x.awb || r.data.matched_code);
     setInfo({ sub_order_number: x.sub_order_no || "", awb_number: x.awb || r.data.matched_code });
     setPacket((p) => p || x.packet_id || "");
+    if (x.damaged && x.damage_note) setDesc((d) => d || `Packet received damaged / tampered: ${x.damage_note}`);
     setFindMsg({ ok: true, text: `Found — ${x.business_name}'s return.` });
   }, []);
   useEffect(() => { if (params.get("code")) find(params.get("code")); }, []);   // eslint-disable-line react-hooks/exhaustive-deps
@@ -162,10 +163,12 @@ export function ReturnClaimTab() {
     api(`options/?business_id=${business}&sub=${encodeURIComponent(sub)}`).then((r) => {
       if (!r.ok) { setOptsErr(r.data.error || "Couldn't read the claim form."); return; }
       setFields(r.data.fields);
-      // Each drop-down starts on its first choice, as Meesho's form does.
-      const first = {};
-      r.data.fields.filter((f) => f.type === "drop_down" && f.options?.length).forEach((f) => { first[f.key] = f.options[0].value; });
-      setValues((v) => ({ ...first, ...v }));
+      // Nothing is pre-chosen — except a packet Return Scan already flagged damaged, which starts as tampered.
+      const tampered = r.data.fields.find((f) => f.key === "packet_state")?.options?.find((o) => /tamper/i.test(o.value));
+      if (ret?.damaged && tampered) {
+        setValues((v) => ({ packet_state: tampered.value, ...v }));
+        setLabels((l) => ({ packet_state: tampered.label, ...l }));
+      }
     });
   }, [business, sub]);
 
@@ -250,7 +253,9 @@ export function ReturnClaimTab() {
   const missing = shown.filter((f) => f.required && (Array.isArray(vals[f.key]) ? !vals[f.key].length : !vals[f.key])).map((f) => f.label);
   const busyUploads = Object.values(slots).some((s) => ["reading", "compressing", "uploading"].includes(s.status));
   const okContact = /\S+@\S+\.\S+/.test(contact.email) && /^\d{10}$/.test(contact.callback.replace(/\D/g, "").slice(-10));
-  const ready = ret?.connected && sub && fields && !missing.length && !busyUploads && okContact && !sending;
+  // A field Meesho has flagged (e.g. "Ticket … has already been raised for this issue") — Meesho would refuse the claim.
+  const flagged = Object.values(checks).filter((c) => c && !c.busy && c.ok === false);
+  const ready = ret?.connected && sub && fields && !missing.length && !busyUploads && okContact && !sending && !flagged.length;
   const subLabel = opts?.sub_categories?.find((s) => s.id === sub)?.label || "";
 
   const raise = async () => {
@@ -354,13 +359,15 @@ export function ReturnClaimTab() {
             {sub && !fields && <CircularProgress size={20} style={{ color: C.orange }} />}
             {fields && (
               <div style={grid}>
-                {fields.filter((f) => !AUTO_KEYS.has(f.key)).map((f) => (
+                {fields.filter((f) => f.info).map((f) => <Note key={f.key} html={f.label} />)}
+                {fields.filter((f) => !AUTO_KEYS.has(f.key) && !f.info).map((f) => (
                   <Field key={f.key} label={f.label} required={f.required} hint={f.hint}>
                     {f.type === "drop_down" ? (
                       <select value={values[f.key] || ""} onChange={(e) => {
                         const o = f.options.find((x) => x.value === e.target.value);
                         setValues({ ...values, [f.key]: e.target.value }); setLabels({ ...labels, [f.key]: o?.label || e.target.value });
-                      }} style={inp}>
+                      }} style={{ ...inp, borderColor: values[f.key] ? C.gray200 : C.orange }}>
+                        <option value="">— choose —</option>
                         {f.options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
                       </select>
                     ) : FILE_TYPES.includes(f.type) ? (
@@ -407,6 +414,7 @@ export function ReturnClaimTab() {
           padding: isMobile ? "8px 0 calc(8px + env(safe-area-inset-bottom))" : 0, display: "flex", flexDirection: "column", gap: 6 }}>
           {missing.length > 0 && fields && <div style={{ fontSize: 12.5, color: C.gray600 }}>Still needed: {missing.join(", ")}</div>}
           {busyUploads && <div style={{ fontSize: 12.5, color: C.gray600 }}>Waiting for the photos / video to finish…</div>}
+          {flagged.length > 0 && <div style={{ fontSize: 12.5, color: C.red, fontWeight: 700 }}>Meesho won't take it yet: {flagged.map((c) => c.message).filter(Boolean).join(" ")}</div>}
           <button onClick={raise} disabled={!ready} style={{ ...btn("primary", "lg"), minHeight: 52, fontSize: 16, opacity: ready ? 1 : 0.5 }}>
             {sending ? <><CircularProgress size={16} style={{ color: "#fff", marginRight: 8, verticalAlign: "-3px" }} />Raising the claim…</>
               : `📨 Raise claim on ${ret.business_name}'s Meesho`}
@@ -429,6 +437,27 @@ export function ReturnClaimTab() {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * A note from Meesho's form (a tip, a sample image). Its HTML is never put on the
+ * page as HTML: only its text, and a sample image when it's Meesho's own.
+ */
+function Note({ html }) {
+  const doc = new DOMParser().parseFromString(String(html || ""), "text/html");
+  const text = (doc.body.textContent || "").replace(/\s+/g, " ").trim();
+  const img = [...doc.querySelectorAll("img")].map((i) => i.getAttribute("src") || "").find((u) => /^https:\/\/images\.meesho\.com\//.test(u));
+  if (!text && !img) return null;
+  return (
+    <div style={{ gridColumn: "1 / -1", background: "#EFF6FF", border: "1px solid #BFDBFE", borderRadius: 10, padding: "8px 12px",
+      fontSize: 12.5, color: "#1E3A8A", display: "flex", gap: 10, alignItems: "flex-start" }}>
+      <span aria-hidden>ℹ️</span>
+      <div style={{ minWidth: 0 }}>
+        {text}
+        {img && <img src={img} alt="Sample from Meesho" style={{ display: "block", maxWidth: 220, width: "100%", borderRadius: 8, marginTop: 6 }} />}
+      </div>
     </div>
   );
 }

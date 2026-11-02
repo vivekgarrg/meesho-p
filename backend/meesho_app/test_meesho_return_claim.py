@@ -28,6 +28,8 @@ class Res:
 
 
 SCHEMA = {"data": {"fields": [
+    {"key": "issue", "type": "drop_down", "label": "Issue", "options": [{"value": "2", "label": "Items missing"}]},
+    {"key": "description_text_2", "type": "text", "label": "<div>Enter NA if there's no Packet ID</div>"},
     {"key": "sub_order_number", "type": "action_single_text_box", "label": "Sub Order Number", "is_mandatory": True},
     {"key": "packet_state", "type": "drop_down", "label": "State of the packet", "is_mandatory": True,
      "options": [{"value": "intact", "label": "Intact"}, {"value": "tampered", "label": "Tampered"}]},
@@ -61,9 +63,19 @@ class ReturnClaimTests(TestCase):
 
     def test_the_schema_is_read_leniently(self):
         f = rc.parse_fields(SCHEMA)
-        self.assertEqual([x["key"] for x in f], ["sub_order_number", "packet_state", "product_openingvideo_link", "ticket_desc", "attachments"])
-        self.assertEqual(f[1]["options"][1], {"value": "tampered", "label": "Tampered"})
-        self.assertEqual((f[0]["required"], f[4]["required"]), (True, False))
+        self.assertEqual([x["key"] for x in f], ["description_text_2", "sub_order_number", "packet_state", "product_openingvideo_link",
+                                                 "ticket_desc", "attachments"])           # no "issue": that's the type picker
+        self.assertEqual((f[0]["info"], f[0]["required"]), (True, False))                   # a note, shown but never sent
+        self.assertEqual(f[2]["options"][1], {"value": "tampered", "label": "Tampered"})
+        self.assertEqual((f[1]["required"], f[5]["required"]), (True, False))
+
+    def test_each_claim_type_once_under_the_id_meesho_raises_it(self):
+        answer = {"data": [{"sub_category_id": 142, "sub_category_title": "Item/s are missing in my return"},
+                           {"sub_category_id": 5, "sub_category_title": "Not received"},
+                           {"sub_category_id": 2, "sub_category_title": "Item/s are missing in my return"}]}
+        with mock.patch.object(rc.requests, "post", return_value=Res(200, answer)):
+            subs = rc.sub_categories(MeeshoAccount.objects.get(business=self.cosmify))
+        self.assertEqual(subs, [{"id": "2", "label": "Item/s are missing in my return"}, {"id": "5", "label": "Not received"}])
 
     def test_the_awb_finds_the_return_and_its_business(self):
         r = self.c.get(f"{self.api}lookup/", {"code": ["NOT-A-CODE", "r2718300838fpl"]})
@@ -117,6 +129,8 @@ class ReturnClaimTests(TestCase):
                                                   "value": "tampered", "selectedLabel": "Tampered"})
         self.assertEqual(by_key["product_openingvideo_link"]["value"], [GCS])
         self.assertEqual(by_key["attachments"]["value"], [])                                  # every field the form has
+        self.assertNotIn("issue", by_key)                                                     # the type picker isn't a field
+        self.assertNotIn("description_text_2", by_key)                                        # nor is a note
         self.assertEqual(r.data["claim"]["ticket"], "TKT-77")
         self.ret.refresh_from_db()
         self.assertEqual((self.ret.claim_status, self.ret.claim_reference), ("RAISED", "TKT-77"))
@@ -166,3 +180,8 @@ class ReturnClaimTests(TestCase):
                                                      "values": {"sub_order_number": "341668276271146947_1"}, "keys": ["sub_order_number"]},
                             format="json")
         self.assertEqual((r.data["ok"], r.data["message"]), (False, "Sub order is not eligible for this issue"))
+
+    def test_meesho_says_why_a_field_is_refused(self):
+        answer = {"is_valid": False, "errors": [{"error_message": "Ticket {{ticket_id}} has already been raised for this issue.",
+                                                 "ticket_id": {"link": "SUPPORT/TICKET_DETAILS", "label": 793641126954}, "field_name": "awb_number"}]}
+        self.assertEqual(rc._errors(answer), ("Ticket 793641126954 has already been raised for this issue.", "793641126954"))
