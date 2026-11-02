@@ -99,7 +99,7 @@ def _clean(code):
 def _desk(request, business):
     """The businesses this desk combines (as Order Scan), and their Meesho accounts."""
     desk = _views()._scan_desk_scope(request, business, api_path="meesho-orders/linking/")
-    return desk, list(MeeshoAccount.objects.filter(business__in=desk))
+    return desk, list(MeeshoAccount.objects.filter(business__in=desk).select_related("business"))
 
 
 def _shipments(accounts):
@@ -270,6 +270,36 @@ def _meesho_submit(account, awb, packet, scan):
     return str(answer.get("status_code") or "LINKED"), str(answer.get("request_id") or "")
 
 
+# A session that can't be used — the next business's is tried instead.
+SESSION_CODES = ("no_session", "meesho_session")
+
+
+def _send_link(owner, accounts, awb, packet, scan):
+    """
+    Link on Meesho through the parcel's own business's session — or, when that
+    one isn't connected or has expired, through any other connected business on
+    the desk: Meesho links any business's AWB and packet from any of them. So
+    one expired session never stops the desk. A refusal from Meesho itself
+    (ERR_…) is final; only an unusable session moves on to the next.
+    Returns (status_code, request_id, the business it went through).
+    """
+    live = [a for a in accounts if a.status == MeeshoAccount.STATUS_ACTIVE]
+    order = sorted(live, key=lambda a: (a.business_id != owner.pk, a.pk))
+    if not order:
+        raise LinkRefused("No business on this desk has a connected Meesho session — log in under Meesho → Settings.",
+                          "no_account", status.HTTP_409_CONFLICT)
+    last = None
+    for account in order:
+        try:
+            code, request_id = _meesho_submit(account, awb, packet, scan)
+            return code, request_id, account.business.name
+        except LinkRefused as e:
+            if e.code not in SESSION_CODES:
+                raise
+            last = e
+    raise LinkRefused(f"{last} (every connected business's session was tried.)", last.code, last.http, **last.details)
+
+
 class LinkRefused(Exception):
     def __init__(self, message, code="refused", http=status.HTTP_409_CONFLICT, **details):
         super().__init__(message)
@@ -324,11 +354,7 @@ def _link(request, business, awb, packet, override=False, scan=None):
 
     # Meesho first: nothing is stored or marked packed unless Meesho takes it
     # (or already had it — then this only brings our side in line).
-    account = MeeshoAccount.objects.filter(business=owner).first()
-    if not account or account.status != MeeshoAccount.STATUS_ACTIVE:
-        raise LinkRefused(f"{owner.name}'s Meesho account isn't connected — connect it under Meesho → Settings.", "no_account",
-                          status.HTTP_409_CONFLICT)
-    meesho_code, request_id = _meesho_submit(account, awb, packet, scan or {})
+    meesho_code, request_id, via = _send_link(owner, accounts, awb, packet, scan or {})
     # Only a link Meesho made just now marks the parcel packed. Already linked,
     # or any refusal: nothing is stored or marked here — the desk is told, and
     # stops until someone acknowledges it.
@@ -372,6 +398,7 @@ def _link(request, business, awb, packet, override=False, scan=None):
         link.save()
         if carrier_id and snap.get("courier_name"):
             _learn_courier(carrier_id, snap["courier_name"])
+    link.via = via
     return link, before, res.data, meesho_code
 
 
@@ -494,12 +521,12 @@ def _do_link(request, business, awb, packet, override, action, retry_of=None, sc
     log = _log(request, action, link.awb_number, link.packet_id, True, "", business=link.business, link=link,
                check=link.meesho_check, previous_packet=before, already_scanned=bool(scan.get("already_scanned")),
                scan_count=scan.get("scan_count"), retry_of=retry_of, meesho_code=meesho_code,
-               request_id=link.meesho_request_id)
+               request_id=link.meesho_request_id, via=getattr(link, "via", None))
     if retry_of:
         MeeshoLinkLog.objects.filter(pk=retry_of).update(resolved=True)
     body = {"link": _link_json(link), "log_id": log.pk, "previous_packet": before, "meesho_code": meesho_code,
             "already_scanned": bool(scan.get("already_scanned")), "stats": scan.get("stats"),
-            "product": _product(link), "ms": int((time.monotonic() - started) * 1000)}
+            "product": _product(link), "ms": int((time.monotonic() - started) * 1000), "via": getattr(link, "via", None)}
     return Response(body, status=status.HTTP_201_CREATED)
 
 

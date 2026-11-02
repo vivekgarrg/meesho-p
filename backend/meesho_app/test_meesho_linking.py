@@ -106,6 +106,36 @@ class OrderLinkingTests(TestCase):
         meesho_linking._HTTP.cookies.clear()
         self.assertEqual(len(meesho_linking._HTTP.cookies), 0)
 
+    def test_an_expired_session_links_through_another_business_on_the_desk(self):
+        self.submit_patch.stop()
+        other = Business.objects.create(name="Rudam")
+        Membership.objects.create(user=self.user, business=other)
+        mine = MeeshoAccount.objects.get(business=self.biz)
+        mine.cookies_enc = meesho_sync.encrypt(json.dumps({"connect.sid": "expired"}))
+        mine.save()
+        MeeshoAccount.objects.create(business=other, phone_number="9000000002", password_enc="v1:x", status="ACTIVE",
+                                     supplier_id="77", supplier_identifier="rudam",
+                                     cookies_enc=meesho_sync.encrypt(json.dumps({"connect.sid": "fresh"})))
+        ok = mock.Mock(status_code=200, text="{}")
+        ok.json.return_value = {"request_id": "r1", "status_code": "SUCCESS"}
+        expired = mock.Mock(status_code=463, text="{}", json=lambda: {})
+        with mock.patch.object(meesho_linking._HTTP, "post", side_effect=[expired, ok]) as post:
+            r = self.link("VL1001", "KP4AUSE32034836")
+        self.assertEqual(r.status_code, 201, r.data)
+        self.assertEqual(r.data["via"], "Rudam")
+        self.assertEqual(r.data["link"]["business_name"], "Cosmify")                 # still Cosmify's parcel
+        self.assertEqual([c.kwargs["headers"]["identifier"] for c in post.call_args_list][1], "rudam")
+        self.assertIn("connect.sid=fresh", post.call_args_list[1].kwargs["headers"]["cookie"])
+
+    def test_a_refusal_from_meesho_is_not_tried_again_elsewhere(self):
+        other = Business.objects.create(name="Rudam")
+        Membership.objects.create(user=self.user, business=other)
+        MeeshoAccount.objects.create(business=other, phone_number="9000000002", password_enc="v1:x", status="ACTIVE")
+        self.submit.return_value = ("ERR_INVALID_PACKET_ID", "r2")
+        r = self.link("VL1001", "KP4AUSE32034836")
+        self.assertEqual(r.data["code"], "meesho_refused")
+        self.assertEqual(self.submit.call_count, 1)
+
     def test_bad_scans_are_refused_and_logged(self):
         for awb, packet, code in (("VL1001", "", "missing"), ("VL1001", "12345", "not_a_packet"),
                                   ("KP4AUSE32034836", "KP2SECT43976500", "two_packets"), ("NOPE999", "KP1AAAAAA11", "unknown_awb")):

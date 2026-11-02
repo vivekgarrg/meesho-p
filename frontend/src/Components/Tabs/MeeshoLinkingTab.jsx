@@ -82,6 +82,7 @@ function LinkedCard({ r }) {
         {" "}{CHECK[l.check] && l.check !== "MATCH" && <Tag variant={CHECK[l.check].tag}>{CHECK[l.check].label}</Tag>}
         {r.previous_packet && r.previous_packet !== l.packet_id && <div style={{ fontSize: 12.5 }}>Was linked to {r.previous_packet} before.</div>}
         {r.already_scanned && <div style={{ fontSize: 12.5 }}>Scanned before at the desk — now marked packed.</div>}
+        {r.via && r.via !== l.business_name && <div style={{ fontSize: 12.5 }}>Sent through {r.via}'s Meesho session — {l.business_name}'s isn't connected right now.</div>}
       </div>
     </div>
   );
