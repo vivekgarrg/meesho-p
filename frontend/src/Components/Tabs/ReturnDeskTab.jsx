@@ -19,17 +19,28 @@ import {
  * sheet are tracked by their expected date, and anything the sheet says was
  * delivered on an earlier day but never scanned is flagged as missing — the
  * ones to raise a claim for.
+ *
+ * Upcoming returns (still in transit on Meesho) can be scanned as they're handed
+ * over: they're "verified", and wait on the Verified tab until Meesho marks them
+ * delivered — then they show on that day's list as already received.
  */
 
 const TABS = [
   { key: "pending",    label: "To receive" },
   { key: "received",   label: "Received" },
+  { key: "upcoming",   label: "Upcoming" },
+  { key: "verified",   label: "Verified" },
   { key: "extra",      label: "Extra" },
-  { key: "in_transit", label: "In transit" },
   { key: "missing",    label: "Missing" },
   { key: "damaged",    label: "Damaged" },
 ];
-const TONES = { pending: C.orange, received: C.green, extra: "#2563EB", in_transit: "#0891B2", missing: C.red, damaged: "#B45309" };
+const TONES = { pending: C.orange, received: C.green, upcoming: "#0891B2", verified: "#7C3AED", extra: "#2563EB", missing: C.red, damaged: "#B45309" };
+const DUE = {
+  out_for_delivery: { text: "🛵 Out for delivery", variant: "amber" },
+  overdue: { text: "Overdue", variant: "red" },
+  today: { text: "Due today", variant: "blue" },
+  later: { text: "Expected", variant: "gray" },
+};
 const WHY = {
   early: "Arrived early — sheet still shows it in transit",
   earlier: "From an earlier day's list",
@@ -90,12 +101,13 @@ function useReturnDesk() {
         if (i.return_reason) lines.push(i.return_reason);
         let kind = "ok"; let title = "Received";
         if (d.already_scanned) { kind = "warn"; title = `Already received · ${fmtDay(i.received_day)}`; }
-        else if (d.where === "in_transit") { kind = "warn"; title = "Received · arrived early"; lines.push(`Sheet still shows it in transit${i.expected_date ? ` (expected ${fmtDay(i.expected_date)})` : ""}.`); }
+        else if (d.where === "in_transit") { title = "Verified · upcoming return"; lines.push(`Meesho still shows it in transit${i.expected_date ? ` (expected ${fmtDay(i.expected_date)})` : ""} — it ticks off as received when Meesho marks it delivered.`); }
         else if (d.where === "earlier") { kind = "warn"; title = `Received · from ${fmtDay(i.delivered_date)}'s list`; }
         else if (d.where === "later") { kind = "warn"; title = "Received · not on this day's list"; lines.push(`Sheet says delivered ${fmtDay(i.delivered_date)}.`); }
         out = { kind, title, lines, image_url: i.image_url, image_fallback_url: i.image_fallback_url, scanId: i.scan_id, damaged: i.damaged,
           label: [i.sku || i.suborder_no, i.awb].filter(Boolean).join(" · ") };
-        setQueue((q) => q && { ...q, items: q.items.map((x) => (x.id === i.id ? { ...x, bucket: "received", scan_id: i.scan_id, received_day: i.received_day } : x)) });
+        setQueue((q) => q && { ...q, items: q.items.map((x) => (x.id === i.id ? { ...x, bucket: "received", scan_id: i.scan_id, received_day: i.received_day } : x)),
+          upcoming: (q.upcoming || []).filter((x) => x.id !== i.id) });
       }
       if (my === seq.current) setLatest(out);
       reloadSoon();
@@ -115,7 +127,8 @@ function useReturnDesk() {
     if (!res?.ok) { window.alert("Couldn't save that — try again."); return; }
     const d = await res.json();
     const upd = (r) => (r.scan_id === scanId ? { ...r, ...d } : r);
-    setQueue((q) => q && { ...q, items: q.items.map(upd), extra: (q.extra || []).map(upd), damaged: (q.damaged || []).map(upd) });
+    setQueue((q) => q && { ...q, items: q.items.map(upd), extra: (q.extra || []).map(upd), damaged: (q.damaged || []).map(upd),
+      verified: (q.verified || []).map(upd) });
     setLatest((l) => (l && l.scanId === scanId ? { ...l, damaged: d.damaged } : l));
     load();
   };
@@ -152,7 +165,8 @@ function useReturnDesk() {
 function rowsFor(queue, tab) {
   if (!queue) return [];
   if (tab === "extra") return queue.extra || [];
-  if (tab === "in_transit") return queue.in_transit || [];
+  if (tab === "upcoming") return queue.upcoming || [];
+  if (tab === "verified") return queue.verified || [];
   if (tab === "missing") return queue.missing || [];
   if (tab === "damaged") return queue.damaged || [];
   return (queue.items || []).filter((i) => i.bucket === tab);
@@ -163,9 +177,13 @@ function rowsFor(queue, tab) {
 function ReturnRow({ r, desk, compact, showBusiness }) {
   const t = courierTone(r.courier);
   let tag;
-  if (r.bucket === "received") tag = <Tag variant="green">✓ Received {r.received_day ? fmtDay(r.received_day) : ""}</Tag>;
+  if (r.bucket === "received") tag = <Tag variant="green">✓ {r.received_early ? "Verified early" : "Received"} {r.received_day ? fmtDay(r.received_day) : ""}</Tag>;
+  else if (r.bucket === "upcoming") {
+    const due = DUE[r.due] || DUE.later;
+    tag = <Tag variant={due.variant}>{due.text}{r.expected_date && r.due !== "today" ? ` · ${fmtDay(r.expected_date)}` : ""}</Tag>;
+  }
+  else if (r.bucket === "verified") tag = <Tag variant="blue">✓ Verified {r.received_day ? fmtDay(r.received_day) : ""} · awaiting Meesho delivered</Tag>;
   else if (r.bucket === "extra") tag = <Tag variant={r.why === "unknown" ? "red" : "blue"}>{WHY[r.why] || "Extra"}</Tag>;
-  else if (r.bucket === "in_transit") tag = <Tag variant="blue">🚚 {r.transit_status || "In transit"}{r.expected_date ? ` · exp. ${fmtDay(r.expected_date)}` : ""}</Tag>;
   else if (r.bucket === "missing") tag = <Tag variant="red">Not received · delivered {fmtDay(r.delivered_date)}</Tag>;
   else if (r.bucket === "damaged") tag = <Tag variant="amber">⚠ Damaged · received {r.received_day ? fmtDay(r.received_day) : ""}</Tag>;
   else tag = <Tag variant="gray">To receive</Tag>;
@@ -189,7 +207,7 @@ function ReturnRow({ r, desk, compact, showBusiness }) {
       </button>,
       <button key="undo" onClick={() => desk.undo(r.scan_id)} className="os-btn" style={{ ...btn("ghost", "sm"), ...small, color: C.gray500 }}>Undo scan</button>,
     );
-  } else if ((r.bucket === "pending" || r.bucket === "missing" || r.bucket === "in_transit") && (r.awb || r.suborder_no)) {
+  } else if ((r.bucket === "pending" || r.bucket === "missing" || r.bucket === "upcoming") && (r.awb || r.suborder_no)) {
     actions.push(
       <button key="rcv" onClick={() => desk.receiveDamaged(r)} className="os-btn"
         style={{ ...btn("ghost", "sm"), ...small, color: "#B45309", borderColor: "#FCD34D" }}>⚠ Received damaged</button>,
@@ -301,6 +319,7 @@ function CourierCards({ couriers, active, onPick, compact }) {
             <span style={{ fontSize: 12.5, fontWeight: 800, color: done ? "#15803D" : c.expected ? C.red : C.gray500 }}>
               {c.expected === 0 ? "None on the sheet" : done ? "✓ all received" : `${c.left} not received yet`}
             </span>
+            {c.verified > 0 && <span style={{ fontSize: 12, fontWeight: 700, color: "#7C3AED" }}>+{c.verified} upcoming verified</span>}
             {c.extra > 0 && <span style={{ fontSize: 12, fontWeight: 700, color: "#2563EB" }}>+{c.extra} extra received</span>}
           </button>
         );
@@ -371,7 +390,8 @@ const EMPTY = {
   pending: "Every return on the sheet for this day is received. 🎉",
   received: "Nothing received yet for this day.",
   extra: "No extra parcels.",
-  in_transit: "Nothing due from the In-transit sheet.",
+  upcoming: "No returns on the way — everything Meesho shows in transit is verified.",
+  verified: "No upcoming returns verified yet — scan one as it's handed over.",
   missing: "No returns missing. 🎉",
   damaged: "No damaged packets.",
 };
@@ -388,6 +408,21 @@ function DamageLatest({ desk, dark }) {
   ) : (
     <button onClick={() => desk.markDamaged(l.scanId, true, l.label)} className="os-btn"
       style={{ ...base, background: "#F59E0B", color: "#1F1300", border: "2px solid #D97706" }}>⚠ Packet damaged / tampered</button>
+  );
+}
+
+/** Returns Meesho shows out for delivery or due — scan them as the delivery boy hands them over. */
+function UpcomingBanner({ s, onOpen, compact }) {
+  if (!s?.upcoming_due) return null;
+  return (
+    <button onClick={onOpen} className="os-btn" style={{ textAlign: "left", cursor: "pointer", fontFamily: "inherit", background: "#ECFEFF",
+      border: "1.5px solid #67E8F9", borderRadius: 12, padding: compact ? "8px 12px" : "10px 14px", color: "#155E75", display: "flex", gap: 10, alignItems: "center" }}>
+      <span style={{ fontSize: 18 }}>🛵</span>
+      <span style={{ flex: 1, fontSize: 13, fontWeight: 800 }}>
+        {s.upcoming_due} upcoming return{s.upcoming_due === 1 ? "" : "s"} due{s.out_for_delivery ? ` (${s.out_for_delivery} out for delivery)` : ""} — scan to verify as they're handed over
+      </span>
+      <span style={{ fontSize: 12.5, fontWeight: 800 }}>View →</span>
+    </button>
   );
 }
 
@@ -425,7 +460,7 @@ function MobileDesk({ desk, businesses, onScopeChanged, multi }) {
       <style>{DESK_CSS}</style>
       <DamageDialog desk={desk} />
       {camera && (
-        <BarcodeScanner continuous title="Receive returns" hint="Scan the label on each returned parcel — keep scanning"
+        <BarcodeScanner continuous title="Receive returns" hint="Scan each returned parcel — delivered or still upcoming — keep scanning"
           progress={{ done: s?.received ?? 0, total: s?.expected ?? 0, label: "Received" }}
           latest={latest} busy={busy} onDetected={(code) => record(code)} onClose={() => setCamera(false)}
           latestAction={<DamageLatest desk={desk} dark />} />
@@ -452,11 +487,12 @@ function MobileDesk({ desk, businesses, onScopeChanged, multi }) {
           ) : (
             <>
               <DamagedBanner n={s?.damaged_unreported} onOpen={() => v.setTab("damaged")} compact />
+              <UpcomingBanner s={s} onOpen={() => v.setTab("upcoming")} compact />
               <MissingBanner n={s?.missing} onOpen={() => v.setTab("missing")} compact />
               <CourierCards couriers={s?.by_courier} active={v.courier} onPick={v.setCourier} compact />
               <div style={{ background: C.white, border: `1px solid ${C.gray200}`, borderRadius: 16, padding: 12, display: "flex", flexDirection: "column", gap: 12 }}>
                 {s && <MatchLine s={s} />}
-                <StatTabs tabs={TABS} tab={v.tab} onPick={v.setTab} counts={v.counts} tones={TONES} compact columns={3} />
+                <StatTabs tabs={TABS} tab={v.tab} onPick={v.setTab} counts={v.counts} tones={TONES} compact columns={4} />
                 {v.courier && (
                   <button onClick={() => v.setCourier(null)} className="os-btn" style={{ ...btn("ghostOrange", "sm"), alignSelf: "flex-start", minHeight: 36 }}>🚚 {v.courier} · all couriers ✕</button>
                 )}
@@ -501,7 +537,7 @@ function DesktopDesk({ desk, businesses, onScopeChanged, multi }) {
         <div>
           <h1 style={{ fontSize: 22, fontWeight: 800, color: C.gray900, margin: 0 }}>Return scan</h1>
           <p style={{ fontSize: 13, color: C.gray500, marginTop: 3 }}>
-            Scan every returned parcel — the day must match the Delivered sheet uploaded on Returns &amp; Claims.
+            Scan every returned parcel — the day must match Meesho's delivered list. Upcoming returns can be scanned too, to verify them before Meesho marks them delivered.
           </p>
         </div>
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
@@ -511,6 +547,7 @@ function DesktopDesk({ desk, businesses, onScopeChanged, multi }) {
       </div>
       <DamageDialog desk={desk} />
       <DamagedBanner n={s?.damaged_unreported} onOpen={() => v.setTab("damaged")} />
+      <UpcomingBanner s={s} onOpen={() => { v.setTab("upcoming"); refocus(); }} />
       <MissingBanner n={s?.missing} onOpen={() => { v.setTab("missing"); refocus(); }} />
       <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(360px, 420px)", gap: 20, alignItems: "start" }}>
         <div style={{ display: "flex", flexDirection: "column", gap: 16, minWidth: 0 }}>
@@ -557,7 +594,9 @@ function DesktopDesk({ desk, businesses, onScopeChanged, multi }) {
               <div style={{ fontSize: 12.5, color: C.gray500, lineHeight: 1.6 }}>
                 Received today: <b style={{ color: C.gray800 }}>{s.received_today}</b>{s.extra ? <> · extra <b style={{ color: "#2563EB" }}>{s.extra}</b></> : null}
                 {s.damaged ? <> · damaged <b style={{ color: "#B45309" }}>{s.damaged}</b>{s.damaged_unreported ? ` (${s.damaged_unreported} to raise with delivery boys)` : ""}</> : null}
-                <br />In transit (due): <b style={{ color: C.gray800 }}>{s.in_transit}</b> · missing earlier: <b style={{ color: s.missing ? C.red : C.gray800 }}>{s.missing}</b>
+                <br />Upcoming: <b style={{ color: C.gray800 }}>{s.upcoming}</b>{s.out_for_delivery ? <> (<b>{s.out_for_delivery}</b> out for delivery)</> : null}
+                {" "}· verified, awaiting delivered: <b style={{ color: "#7C3AED" }}>{s.verified}</b>
+                <br />Missing earlier: <b style={{ color: s.missing ? C.red : C.gray800 }}>{s.missing}</b>
               </div>
             )}
           </div>

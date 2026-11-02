@@ -7,10 +7,11 @@ returned parcel as it is unpacked and it is ticked off, so the desk can check
 every return the sheet says came back really did — courier by courier, against
 the sheet's own count.
 
-Returns the In-transit sheet lists are tracked alongside, by their expected
-date, so a parcel that arrives before the Delivered sheet shows it is still
-recognised. A return delivered on an earlier day but never scanned is flagged
-as missing — the ones to raise a claim for.
+Upcoming returns (still in transit on Meesho — out for delivery first, then by
+expected date) can be scanned too, as the delivery boy hands them over: each is
+then "verified", and waits there until Meesho marks it delivered, when it is
+ticked off that day's list as received early. A return delivered on an earlier
+day but never scanned is flagged as missing — the ones to raise a claim for.
 
 Returns use calendar days: the sheet's Delivered Date is a calendar date.
 """
@@ -31,6 +32,10 @@ API_PATH = "return-scan/"
 MISSING_DAYS = 15
 # How long a damaged packet not yet raised with the delivery boy stays on the list.
 DAMAGED_DAYS = 7
+# How long a verified upcoming return waits for Meesho to mark it delivered.
+VERIFIED_DAYS = 30
+UPCOMING_LIMIT = 1000
+OUT_FOR_DELIVERY = "out for delivery"
 # How far back a code read short is matched by its AWB.
 PARTIAL_DAYS = 60
 MIN_PARTIAL = 8
@@ -120,6 +125,20 @@ def _item(r, names, image_map, scan=None, bucket="pending"):
     }
 
 
+def _due(r, day):
+    """Where an upcoming return stands: out for delivery, overdue, due today, or later."""
+    if (r.transit_status or "").strip().lower() == OUT_FOR_DELIVERY:
+        return "out_for_delivery"
+    if not r.expected_delivery_date:
+        return "later"
+    if r.expected_delivery_date < day:
+        return "overdue"
+    return "today" if r.expected_delivery_date == day else "later"
+
+
+DUE_ORDER = {"out_for_delivery": 0, "overdue": 1, "today": 2, "later": 3}
+
+
 def _damage(scan):
     """A scan's damaged / reported-to-the-delivery-boy marks."""
     if not scan:
@@ -151,7 +170,10 @@ def return_scan_queue(request, business_id):
       extra      — parcels received that day that aren't on its list: early (the
                    sheet still has them in transit), from an earlier day's list,
                    or not recognised at all
-      in_transit — returns the In-transit sheet expects by that day, not received
+      upcoming   — every return still in transit on Meesho, not yet received:
+                   out for delivery first, then by expected date (`due`)
+      verified   — upcoming returns scanned before Meesho marked them delivered,
+                   waiting for it to (VERIFIED_DAYS)
       missing    — delivered on the sheet in the MISSING_DAYS before, never received
 
     Courier by courier: expected, received, left, and extra received.
@@ -170,23 +192,39 @@ def return_scan_queue(request, business_id):
     received = {s.return_delivery_id: s for s in
                 ReturnScan.objects.filter(return_delivery__in=expected)} if expected else {}
 
-    in_transit = list(ReturnDelivery.objects.filter(
-        business_id__in=ids, stage=ReturnDelivery.STAGE_IN_TRANSIT, expected_delivery_date__lte=day)
-        .exclude(desk_scans__isnull=False).order_by("expected_delivery_date")[:1000])
+    in_transit = list(ReturnDelivery.objects.filter(business_id__in=ids, stage=ReturnDelivery.STAGE_IN_TRANSIT)
+                      .exclude(desk_scans__isnull=False).order_by("expected_delivery_date")[:UPCOMING_LIMIT])
+    in_transit.sort(key=lambda r: (DUE_ORDER[_due(r, day)], r.expected_delivery_date or day, r.courier_partner or ""))
+    verified = list(ReturnScan.objects.filter(business_id__in=ids, return_delivery__stage=ReturnDelivery.STAGE_IN_TRANSIT,
+                                              scan_day__gte=day - timedelta(days=VERIFIED_DAYS), scan_day__lte=day)
+                    .select_related("return_delivery").order_by("-last_scanned_at")[:500])
     missing = list(ReturnDelivery.objects.filter(
         business_id__in=ids, delivered_date__lt=day, delivered_date__gte=day - timedelta(days=MISSING_DAYS))
         .exclude(desk_scans__isnull=False).order_by("-delivered_date")[:1000])
 
-    image_map = photo_map(expected + in_transit + missing
-                                   + [s.return_delivery for s in day_scans if s.return_delivery])
+    image_map = photo_map(expected + in_transit[:300] + missing
+                          + [s.return_delivery for s in day_scans + verified if s.return_delivery])
     items = [_item(r, names, image_map, received.get(r.pk), "received" if r.pk in received else "pending")
              for r in expected]
+    for i in items:                     # verified while still upcoming, before Meesho marked it delivered
+        i["received_early"] = bool(i["received_day"] and i["delivered_date"] and i["received_day"] < i["delivered_date"])
     expected_ids = {r.pk for r in expected}
 
+    couriers = {}
+
+    def tile(name):
+        return couriers.setdefault(name.casefold(), {"courier": name, "expected": 0, "received": 0, "left": 0, "extra": 0,
+                                                     "verified": 0})
+
     extra = []
+    verified_today = 0
     for s in day_scans:
         r = s.return_delivery
         if r and r.pk in expected_ids:
+            continue
+        if r and r.stage == ReturnDelivery.STAGE_IN_TRANSIT:
+            verified_today += 1             # an upcoming return, verified — on the Verified list, not extra
+            tile(_clean_courier(r.courier_partner))["verified"] += 1
             continue
         if r:
             why = ("early" if r.stage == ReturnDelivery.STAGE_IN_TRANSIT or not r.delivered_date
@@ -196,11 +234,6 @@ def return_scan_queue(request, business_id):
         else:
             row = _scan_row(s, names, image_map)
         extra.append(row)
-
-    couriers = {}
-
-    def tile(name):
-        return couriers.setdefault(name.casefold(), {"courier": name, "expected": 0, "received": 0, "left": 0, "extra": 0})
 
     for i in items:
         t = tile(i["courier"])
@@ -221,9 +254,14 @@ def return_scan_queue(request, business_id):
         "rto": sum(1 for i in items if i["rto"]),
         "customer": sum(1 for i in items if not i["rto"]),
         "in_transit": len(in_transit),
+        "upcoming": len(in_transit),
+        "out_for_delivery": sum(1 for r in in_transit if _due(r, day) == "out_for_delivery"),
+        "upcoming_due": sum(1 for r in in_transit if _due(r, day) != "later"),
+        "verified": len(verified),
+        "verified_today": verified_today,
         "missing": len(missing),
         "damaged_today": sum(1 for s in day_scans if s.damaged),
-        "by_courier": sorted(couriers.values(), key=lambda c: (-(c["expected"] + c["extra"]), c["courier"])),
+        "by_courier": sorted(couriers.values(), key=lambda c: (-(c["expected"] + c["extra"] + c["verified"]), c["courier"])),
     }
     # Damaged packets: the day's, and any earlier one not yet raised with the
     # delivery boy — grouped by courier on screen for the evening.
@@ -246,7 +284,8 @@ def return_scan_queue(request, business_id):
         "summary": summary,
         "items": items,
         "extra": extra,
-        "in_transit": [_item(r, names, image_map, None, "in_transit") for r in in_transit[:300]],
+        "upcoming": [{**_item(r, names, image_map, None, "upcoming"), "due": _due(r, day)} for r in in_transit[:300]],
+        "verified": [_item(s.return_delivery, names, image_map, s, "verified") for s in verified],
         "missing": [_item(r, names, image_map, None, "missing") for r in missing[:300]],
         "damaged": damaged_rows,
         "dates": [d.isoformat() for d in sorted((d for d in dates if d), reverse=True)],

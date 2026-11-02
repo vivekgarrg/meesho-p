@@ -46,7 +46,7 @@ class ReturnDeskTests(TestCase):
         self.assertEqual({c["courier"]: (c["expected"], c["left"]) for c in q["summary"]["by_courier"]},
                          {"Valmo": (2, 2), "Delhivery": (1, 1)})
         self.assertEqual((q["summary"]["rto"], q["summary"]["customer"]), (1, 2))
-        self.assertEqual([i["suborder_no"] for i in q["in_transit"]], ["T1_1"])
+        self.assertEqual([(i["suborder_no"], i["due"]) for i in q["upcoming"]], [("T1_1", "today")])
         self.assertEqual([i["suborder_no"] for i in q["missing"]], ["OLD_1"])
 
     def test_scanning_ticks_them_off_by_awb_suborder_or_forward_label(self):
@@ -70,10 +70,12 @@ class ReturnDeskTests(TestCase):
         r = self.scan("NOPE-12345")
         self.assertFalse(r.data["matched"])
         q = self.queue()
-        self.assertEqual(sorted(e["why"] for e in q["extra"]), ["earlier", "early", "unknown"])
-        self.assertEqual((q["summary"]["in_transit"], q["summary"]["missing"]), (0, 0))   # both arrived
+        self.assertEqual(sorted(e["why"] for e in q["extra"]), ["earlier", "unknown"])
+        self.assertEqual([v["suborder_no"] for v in q["verified"]], ["T1_1"])          # the early one is verified, not extra
+        self.assertEqual((q["summary"]["upcoming"], q["summary"]["missing"]), (0, 0))   # both arrived
         self.assertEqual({c["courier"]: c["extra"] for c in q["summary"]["by_courier"] if c["extra"]},
-                         {"Shadowfax": 1, "Valmo": 1, "Not recognised": 1})
+                         {"Valmo": 1, "Not recognised": 1})
+        self.assertEqual({c["courier"]: c["verified"] for c in q["summary"]["by_courier"] if c["verified"]}, {"Shadowfax": 1})
 
     def test_an_earlier_day_is_shown_as_is(self):
         q = self.queue(date=(self.today - timedelta(days=3)).isoformat())
@@ -121,3 +123,30 @@ class ReturnDeskTests(TestCase):
         sid = q["damaged"][0]["scan_id"]
         self.client.patch(f"{self.base}/{sid}/", {"reported": True}, format="json")
         self.assertEqual(self.queue()["damaged"], [])                      # raised: off today's list
+
+    def test_upcoming_returns_are_listed_verified_and_ticked_off_once_delivered(self):
+        d = self.today
+        mk = lambda sub, awb, **kw: ReturnDelivery.objects.create(business=self.a, suborder_no=sub, awb_number=awb, courier_partner="Valmo",
+                                                                   sku="SKU", stage=ReturnDelivery.STAGE_IN_TRANSIT, **kw)
+        mk("U1_1", "VLU1", expected_delivery_date=d + timedelta(days=3), transit_status="In transit")
+        mk("U2_1", "VLU2", expected_delivery_date=d + timedelta(days=2), transit_status="Out for delivery")
+        mk("U3_1", "VLU3", expected_delivery_date=d - timedelta(days=2))
+        q = self.queue()
+        self.assertEqual([(u["suborder_no"], u["due"]) for u in q["upcoming"]],
+                         [("U2_1", "out_for_delivery"), ("U3_1", "overdue"), ("T1_1", "today"), ("U1_1", "later")])
+        self.assertEqual((q["summary"]["upcoming"], q["summary"]["out_for_delivery"], q["summary"]["upcoming_due"]), (4, 1, 3))
+
+        r = self.scan("VLU1")
+        self.assertEqual(r.data["where"], "in_transit")
+        q = self.queue()
+        self.assertEqual([v["suborder_no"] for v in q["verified"]], ["U1_1"])
+        self.assertNotIn("U1_1", [u["suborder_no"] for u in q["upcoming"]])
+        self.assertEqual(q["summary"]["verified_today"], 1)
+
+        # Meesho marks it delivered two days later: it's on that day's list, already received.
+        later = d + timedelta(days=2)
+        ReturnDelivery.objects.filter(suborder_no="U1_1").update(stage=ReturnDelivery.STAGE_DELIVERED, delivered_date=later)
+        q = self.client.get(f"{self.base}/queue/", {"date": later.isoformat()}).data
+        u1 = next(i for i in q["items"] if i["suborder_no"] == "U1_1")
+        self.assertEqual((u1["bucket"], u1["received_early"]), ("received", True))
+        self.assertEqual(self.queue()["verified"], [])
