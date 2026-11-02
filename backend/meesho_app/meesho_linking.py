@@ -24,9 +24,12 @@ with the values put right.
 import json
 import os
 import re
+import threading
 import time
+from http.cookiejar import DefaultCookiePolicy
 
 import requests
+from requests.adapters import HTTPAdapter
 from django.db import transaction
 from django.db.models import Count, Q
 from django.utils import timezone
@@ -51,6 +54,33 @@ MEESHO_MESSAGES = {
     ALREADY_LINKED: "The AWB is already scanned and linked to this packet on Meesho — scan the next order.",
 }
 SHIPMENT_TABS = ("orders_ready_to_ship", "orders_shipped")
+
+# One kept-alive connection pool to Meesho for every link, so a link doesn't pay
+# a fresh TCP + TLS handshake each time. Its cookie jar takes nothing: each
+# request carries its own business's session in the cookie header, and a
+# Set-Cookie from one account must never ride along on another's request.
+_HTTP = requests.Session()
+_HTTP.cookies.set_policy(DefaultCookiePolicy(allowed_domains=[]))
+_HTTP.mount("https://", HTTPAdapter(pool_connections=4, pool_maxsize=16, max_retries=0))
+
+# Meesho's order lists, parsed once per sync rather than on every scan: keyed by
+# the snapshots' ids and fetch times, so a new read replaces them at once.
+_LISTS = {}
+_LISTS_LOCK = threading.Lock()
+
+
+def _cached(kind, accounts, endpoints, build):
+    key = (kind, tuple(sorted(MeeshoSyncSnapshot.objects.filter(account__in=accounts, endpoint__in=endpoints)
+                              .values_list("pk", "fetched_at"))))
+    with _LISTS_LOCK:
+        if key in _LISTS:
+            return _LISTS[key]
+    value = build([k for k, _ in key[1]])
+    with _LISTS_LOCK:
+        if len(_LISTS) > 32:
+            _LISTS.clear()
+        _LISTS[key] = value
+    return value
 LOGS_PER_PAGE = 50
 
 
@@ -74,8 +104,12 @@ def _desk(request, business):
 
 def _shipments(accounts):
     """What Meesho says about each shipment: {AWB: {business_id, packet_id, carrier_id, sub_order_num, sku}}."""
+    return _cached("ships", accounts, SHIPMENT_TABS, _build_shipments)
+
+
+def _build_shipments(snap_ids):
     by_awb = {}
-    for snap in MeeshoSyncSnapshot.objects.filter(account__in=accounts, endpoint__in=SHIPMENT_TABS).select_related("account"):
+    for snap in MeeshoSyncSnapshot.objects.filter(pk__in=snap_ids).select_related("account"):
         for r in snap.payload if isinstance(snap.payload, list) else []:
             awb = _clean(r.get("awb"))
             if not awb:
@@ -124,12 +158,21 @@ def _cancelled(business, accounts, sub_order):
     """Whether Meesho shows this order cancelled: its Cancelled list as last read,
     or the orders table's current status."""
     from .models import Order
-    for snap in MeeshoSyncSnapshot.objects.filter(account__in=[a for a in accounts if a.business_id == business.pk],
-                                                  endpoint="orders_cancelled"):
-        if any(isinstance(r, dict) and r.get("sub_order_num") == sub_order for r in snap.payload or []):
-            return True
+    if (business.pk, sub_order) in _cancelled_subs(accounts):
+        return True
     latest = Order.latest_per_order(Order.objects.filter(business=business, sub_order_no=sub_order)).first()
     return bool(latest and latest.reason_for_credit_entry == "CANCELLED")
+
+
+def _cancelled_subs(accounts):
+    """{(business_id, sub-order)} on Meesho's Cancelled lists, as last read."""
+    def build(ids):
+        out = set()
+        for snap in MeeshoSyncSnapshot.objects.filter(pk__in=ids).select_related("account"):
+            out |= {(snap.account.business_id, r.get("sub_order_num")) for r in snap.payload or []
+                    if isinstance(r, dict) and r.get("sub_order_num")}
+        return out
+    return _cached("cancelled", accounts, ("orders_cancelled",), build)
 
 
 def _courier_names():
@@ -208,7 +251,7 @@ def _meesho_submit(account, awb, packet, scan):
     if account.browser_id:
         headers["browser-id"] = account.browser_id
     try:
-        res = requests.post(MEESHO_BASE + SUBMIT_PATH, json=body, headers=headers, timeout=20)
+        res = _HTTP.post(MEESHO_BASE + SUBMIT_PATH, json=body, headers=headers, timeout=(5, 20))
     except requests.RequestException as exc:
         raise LinkRefused(f"Couldn't reach Meesho ({exc.__class__.__name__}) — try again.", "meesho_unreachable",
                           status.HTTP_502_BAD_GATEWAY)
@@ -355,7 +398,8 @@ def linking(request, business_id):
                         bool(d.get("override")), MeeshoLinkLog.ACTION_LINK, scan=_scan_info(d))
 
     desk, _ = _desk(request, business)
-    day = v._parse_day(request.GET.get("day") or "") or v._current_business_date()
+    # The packing day the Order Scan desk is on (it turns at 1 pm, once the new day has work).
+    day = v._parse_day(request.GET.get("day") or "") or v._following_day(request, [b.pk for b in desk])[0]
     qs = MeeshoPacketLink.objects.filter(business__in=desk, pack_day=day).select_related("business", "linked_by", "scanned_order")
     q = _clean(request.GET.get("q"))
     if q:
@@ -384,6 +428,7 @@ def linking(request, business_id):
                      for c in MeeshoCourier.objects.all()],
         "is_admin": v._is_admin(request.user),
         "syncing": _syncing(_),
+        "plan": _plan(request, desk, day, ships),
     })
 
 
@@ -432,6 +477,7 @@ def _scan_info(d):
 
 
 def _do_link(request, business, awb, packet, override, action, retry_of=None, scan=None):
+    started = time.monotonic()
     try:
         link, before, scan, meesho_code = _link(request, business, awb, packet, override, scan)
     except LinkRefused as e:
@@ -452,8 +498,73 @@ def _do_link(request, business, awb, packet, override, action, retry_of=None, sc
     if retry_of:
         MeeshoLinkLog.objects.filter(pk=retry_of).update(resolved=True)
     body = {"link": _link_json(link), "log_id": log.pk, "previous_packet": before, "meesho_code": meesho_code,
-            "already_scanned": bool(scan.get("already_scanned")), "stats": scan.get("stats")}
+            "already_scanned": bool(scan.get("already_scanned")), "stats": scan.get("stats"),
+            "product": _product(link), "ms": int((time.monotonic() - started) * 1000)}
     return Response(body, status=status.HTTP_201_CREATED)
+
+
+def _product(link):
+    """What is in the parcel just linked — its label's SKU, size and quantity, and a photo."""
+    from .meesho_images import photo_map
+    label = (LabelOrder.objects.filter(business_id=link.business_id, awb_number=link.awb_number).order_by("-uploaded_date").first()
+             or (LabelOrder.objects.filter(business_id=link.business_id, order_id=link.sub_order_no).order_by("-uploaded_date").first()
+                 if link.sub_order_no else None))
+    row = label or link
+    sub = label.order_id if label else link.sub_order_no
+    try:
+        photo, fallback = photo_map([row], sub_of=lambda _r: sub, own=lambda _r: "").get((link.business_id, sub), (None, None))
+    except Exception:                                              # noqa: BLE001 — a photo is never worth failing a link
+        photo, fallback = None, None
+    return {"sku": (label.sku if label else link.sku) or "", "size": label.size if label else "", "qty": (label.qty if label else None) or 1,
+            "sub_order_no": sub, "image_url": photo, "image_fallback_url": fallback}
+
+
+def _plan(request, desk, day, ships):
+    """
+    The day's Meesho parcels to link — every Meesho label downloaded for the
+    packing day — and where each stands: linked (here, or Meesho already has its
+    packet), cancelled before linking, or still to link. Counted per courier and
+    in total; the ones left are listed with their product.
+    """
+    from .meesho_images import photo_map
+    v = _views()
+    ids = [b.pk for b in desk]
+    names = {b.pk: b.name for b in desk}
+    labels = list(v._labels_on_day(LabelOrder.objects.filter(business_id__in=ids).exclude(platform="flipkart"), day)
+                  .order_by("courier_name", "sku", "order_id")[:4000])
+    linked = set(MeeshoPacketLink.objects.filter(business_id__in=ids, awb_number__in=[l.awb_number for l in labels if l.awb_number])
+                 .values_list("business_id", "awb_number"))
+    accounts = list(MeeshoAccount.objects.filter(business_id__in=ids))
+    cancelled = _cancelled_subs(accounts)
+    couriers, left = {}, []
+    for l in labels:
+        name = " ".join((l.courier_name or "").split()) or "No courier on label"
+        c = couriers.setdefault(name.casefold(), {"courier": name, "total": 0, "linked": 0, "left": 0, "cancelled": 0})
+        awb = _clean(l.awb_number)
+        if (l.business_id, awb) in linked or (ships.get(awb) or {}).get("packet_id"):
+            c["total"] += 1
+            c["linked"] += 1
+        elif (l.business_id, l.order_id) in cancelled:
+            c["cancelled"] += 1
+        else:
+            c["total"] += 1
+            c["left"] += 1
+            left.append(l)
+    photos = photo_map(left[:300], sub_of=lambda l: l.order_id, own=lambda l: "") if left else {}
+    by_courier = sorted(couriers.values(), key=lambda c: (-c["total"], c["courier"]))
+    return {
+        "day": day,
+        "total": sum(c["total"] for c in by_courier),
+        "linked": sum(c["linked"] for c in by_courier),
+        "left": sum(c["left"] for c in by_courier),
+        "cancelled": sum(c["cancelled"] for c in by_courier),
+        "by_courier": by_courier,
+        "left_orders": [{"business_name": names.get(l.business_id, ""), "sub_order_no": l.order_id, "awb": _clean(l.awb_number),
+                         "sku": l.sku, "size": l.size, "qty": l.qty or 1,
+                         "courier": " ".join((l.courier_name or "").split()) or "No courier on label",
+                         "image_url": photos.get((l.business_id, l.order_id), (None, None))[0],
+                         "image_fallback_url": photos.get((l.business_id, l.order_id), (None, None))[1]} for l in left[:300]],
+    }
 
 
 def _checked_at(accounts):

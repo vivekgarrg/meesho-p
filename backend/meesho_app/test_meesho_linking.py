@@ -73,9 +73,38 @@ class OrderLinkingTests(TestCase):
         self.link("DL2001", "KP9ZZZZ12345678")                                    # Meesho knows no packet for it yet
         r = self.link("VL1002", "KP9ZZZZ12345678", override=False)
         self.assertEqual(r.data["code"], "packet_mismatch")                        # Meesho has another packet for VL1002
-        MeeshoSyncSnapshot.objects.update(payload=[{"sub_order_num": "12_1", "awb": "VL1002", "carrier_id": 19}])
+        MeeshoSyncSnapshot.objects.update(payload=[{"sub_order_num": "12_1", "awb": "VL1002", "carrier_id": 19}],
+                                          fetched_at=timezone.now())                # as every sync writes it
         r = self.link("VL1002", "KP9ZZZZ12345678")
         self.assertEqual((r.status_code, r.data["code"], r.data["other_awb"]), (409, "packet_taken", "DL2001"))
+
+    def test_the_days_parcels_linked_and_left_per_courier(self):
+        plan = self.c.get(self.base).data["plan"]
+        # VL1001 / VL1002: Meesho already has their packets; DL2001 is still to link.
+        self.assertEqual((plan["total"], plan["linked"], plan["left"]), (3, 2, 1))
+        self.assertEqual({c["courier"]: (c["linked"], c["left"]) for c in plan["by_courier"]},
+                         {"Valmo": (2, 0), "Delhivery": (0, 1)})
+        self.assertEqual([(o["awb"], o["courier"]) for o in plan["left_orders"]], [("DL2001", "Delhivery")])
+        r = self.link("DL2001", "KP9ZZZZ12345678")
+        self.assertEqual(r.status_code, 201, r.data)
+        self.assertEqual((r.data["product"]["sku"], r.data["product"]["qty"], r.data["product"]["sub_order_no"]), ("x", 1, "13_1"))
+        self.assertIsInstance(r.data["ms"], int)
+        plan = self.c.get(self.base).data["plan"]
+        self.assertEqual((plan["linked"], plan["left"], plan["left_orders"]), (3, 0, []))
+
+    def test_a_cancelled_label_is_not_left_to_link(self):
+        acct = MeeshoAccount.objects.get()
+        MeeshoSyncSnapshot.objects.create(account=acct, endpoint="orders_cancelled", http_status=200, fetched_at=timezone.now(),
+                                          payload=[{"sub_order_num": "13_1"}])
+        plan = self.c.get(self.base).data["plan"]
+        self.assertEqual((plan["total"], plan["left"], plan["cancelled"]), (2, 0, 1))
+        self.assertEqual(self.link("DL2001", "KP9ZZZZ12345678").data["code"], "cancelled")
+
+    def test_the_kept_alive_connection_keeps_no_cookies(self):
+        # Each business's session goes in its own cookie header; nothing Meesho sets is carried to another.
+        self.assertTrue(meesho_linking._HTTP.cookies._policy.is_not_allowed(".meesho.com"))
+        meesho_linking._HTTP.cookies.clear()
+        self.assertEqual(len(meesho_linking._HTTP.cookies), 0)
 
     def test_bad_scans_are_refused_and_logged(self):
         for awb, packet, code in (("VL1001", "", "missing"), ("VL1001", "12345", "not_a_packet"),
@@ -148,14 +177,14 @@ class OrderLinkingTests(TestCase):
         self.assertEqual(MeeshoLinkLog.objects.get().details["request_id"], "req-3")
 
     def test_the_link_goes_to_meesho_as_its_scan_now_page_sends_it(self):
-        self.submit_patch.stop()                                                  # the real request, with requests.post faked
+        self.submit_patch.stop()                                                  # the real request, with the HTTP post faked
         acct = MeeshoAccount.objects.get()
         acct.supplier_id, acct.supplier_identifier, acct.browser_id = "3564327", "lffy4", "YnJ3"
         acct.cookies_enc = meesho_sync.encrypt(json.dumps({"connect.sid": "s%3Aabc", "_abck": "x"}))
         acct.save()
         answer = mock.Mock(status_code=200, text="{}")
         answer.json.return_value = {"request_id": "r9", "status_code": "SUCCESS"}
-        with mock.patch.object(meesho_linking.requests, "post", return_value=answer) as post:
+        with mock.patch.object(meesho_linking._HTTP, "post", return_value=answer) as post:
             r = self.c.post(self.base, {"awb": "VL1001", "packet_id": "KP4AUSE32034836", "awb_method": "SCAN",
                                         "awb_ts": 1793455169311, "packet_method": "SCAN", "packet_ts": 1793455171337}, format="json")
         self.assertEqual(r.status_code, 201, r.data)
@@ -172,11 +201,11 @@ class OrderLinkingTests(TestCase):
         self.assertEqual(MeeshoPacketLink.objects.get().meesho_status, "LINKED")
 
     def test_an_expired_session_is_said_plainly(self):
-        self.submit_patch.stop()                                                  # the real request, with requests.post faked
+        self.submit_patch.stop()                                                  # the real request, with the HTTP post faked
         acct = MeeshoAccount.objects.get()
         acct.cookies_enc = meesho_sync.encrypt(json.dumps({"connect.sid": "old"}))
         acct.save()
-        with mock.patch.object(meesho_linking.requests, "post", return_value=mock.Mock(status_code=401, text="{}", json=lambda: {})):
+        with mock.patch.object(meesho_linking._HTTP, "post", return_value=mock.Mock(status_code=401, text="{}", json=lambda: {})):
             r = self.link("VL1001", "KP4AUSE32034836")
         self.assertEqual(r.data["code"], "meesho_session")
         self.assertIn("session has expired", r.data["error"])
