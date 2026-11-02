@@ -39,7 +39,7 @@ UPLOAD_PATH = SUPPORT + "api/v1/upload/supplier-support/input-attachment"
 CATEGORY_ID = "1"                               # Support → Returns
 TIMEOUT = 60
 UPLOAD_TIMEOUT = 100                            # a 22 MB video; under gunicorn's 120 s
-MAX_UPLOAD = 22 * 1024 * 1024                   # Meesho's cap on one attachment
+MAX_UPLOAD = 24 * 1024 * 1024                   # up to 24 MB is sent as it is; Meesho itself may want ≤ 22 MB
 CACHE_SECONDS = 6 * 3600
 
 # The fields of "Items missing" (sub-category 2), as the panel sends them — used
@@ -438,7 +438,7 @@ def claim_upload(request, business_id):
     if not f:
         return Response({"error": "No file."}, status=status.HTTP_400_BAD_REQUEST)
     if f.size > MAX_UPLOAD:
-        return Response({"error": f"{f.name} is {f.size / 1048576:.1f} MB — Meesho takes at most 22 MB. Compress it first."},
+        return Response({"error": f"{f.name} is {f.size / 1048576:.1f} MB — over 24 MB has to be compressed first."},
                         status=status.HTTP_400_BAD_REQUEST)
     try:
         url = upload(account, f.name, f.read(), f.content_type or "application/octet-stream")

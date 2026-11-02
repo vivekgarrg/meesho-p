@@ -7,11 +7,16 @@
  * to ffmpeg.wasm, the same encoder the Claim Video Tool uses: slower, but works
  * everywhere.
  *
- * compressVideo(file, { target, onProgress(0..1), onStage(text) }) → File
- * A file already under the target comes back as it is.
+ * compressVideo(file, { target, skipUnder, onProgress(0..1), onStage(text) }) → File
+ * A file up to `skipUnder` (24 MB) comes back as it is — no compression at all.
+ *
+ * Tuned for speed over polish (a claim video only has to show the parcel):
+ * 720p, 24 fps, the hardware encoder, and the audio copied rather than
+ * re-encoded — a typical 30–60 s phone clip takes a few seconds.
  */
 
 export const MEESHO_VIDEO_TARGET = 21.5 * 1024 * 1024;   // headroom under 22 MB for container overhead
+export const SKIP_UNDER = 24 * 1024 * 1024;              // up to this, a video is sent as it is
 const AUDIO_BPS = 64_000;
 const MIN_VIDEO_BPS = 250_000;
 const MAX_VIDEO_BPS = 4_000_000;
@@ -34,16 +39,18 @@ async function withWebCodecs(file, target, onProgress, onStage) {
       if (!track) throw new Error("no video track");
       const seconds = await input.computeDuration();
       const bps = videoBitrate(target, seconds, scale);
-      // The long side to 1280 px (720 px when the budget is thin) — plenty for a claim.
-      const longSide = bps < 900_000 ? 720 : 1280;
+      // The long side to 1280 px (854 px when the budget is thin) — plenty for a claim, and quick to encode.
+      const longSide = bps < 900_000 ? 854 : 1280;
       const portrait = track.displayHeight > track.displayWidth;
       const big = Math.max(track.displayWidth, track.displayHeight) > longSide;
       const size = !big ? {} : portrait ? { height: longSide } : { width: longSide };
       const output = new mb.Output({ format: new mb.Mp4OutputFormat({ fastStart: "in-memory" }), target: new mb.BufferTarget() });
       const conversion = await mb.Conversion.init({
         input, output, tracks: "primary", showWarnings: false,
-        video: { ...size, codec: "avc", bitrate: bps, forceTranscode: true, hardwareAcceleration: "prefer-hardware" },
-        audio: { codec: "aac", bitrate: AUDIO_BPS, forceTranscode: true },
+        video: { ...size, codec: "avc", bitrate: bps, forceTranscode: true, hardwareAcceleration: "prefer-hardware",
+          frameRate: 24, keyFrameInterval: 4 },
+        // The phone's AAC audio is copied as it is; only other audio is re-encoded.
+        audio: { codec: "aac", bitrate: AUDIO_BPS },
       });
       if (!conversion.isValid) throw new Error("this video can't be converted here");
       onStage?.(attempt ? "Compressing again, a little smaller…" : "Compressing (fast)…");
@@ -78,7 +85,7 @@ async function withFfmpeg(file, target, onProgress, onStage) {
     for (let i = 0; i < 3; i++) {
       const out = `out${i}.mp4`;
       // eslint-disable-next-line no-await-in-loop
-      await ffmpeg.exec(["-i", inName, "-vf", "scale='min(1280,iw)':-2", "-c:v", "libx264", "-preset", "ultrafast",
+      await ffmpeg.exec(["-i", inName, "-vf", "scale='min(1280,iw)':-2", "-r", "24", "-c:v", "libx264", "-preset", "ultrafast",
         "-b:v", `${kbps}k`, "-maxrate", `${Math.floor(kbps * 1.2)}k`, "-bufsize", `${kbps * 2}k`,
         "-c:a", "aac", "-b:a", "64k", "-movflags", "+faststart", out]);
       // eslint-disable-next-line no-await-in-loop
@@ -104,8 +111,8 @@ export function durationOf(file) {
   });
 }
 
-export async function compressVideo(file, { target = MEESHO_VIDEO_TARGET, onProgress, onStage } = {}) {
-  if (file.size <= target) return file;
+export async function compressVideo(file, { target = MEESHO_VIDEO_TARGET, skipUnder = SKIP_UNDER, onProgress, onStage } = {}) {
+  if (file.size <= Math.max(target, skipUnder)) return file;
   try {
     return await withWebCodecs(file, target, onProgress, onStage);
   } catch (e) {

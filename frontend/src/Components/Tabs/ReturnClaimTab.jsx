@@ -4,7 +4,7 @@ import { API, C, S, btn, Tag, useIsMobile } from "../../App";
 import { CircularProgress } from "@mui/material";
 import { Photo } from "./OrderScanTab";
 import { readCodes } from "../../lib/readCodes";
-import { compressVideo } from "../../lib/videoCompress";
+import { compressVideo, MEESHO_VIDEO_TARGET } from "../../lib/videoCompress";
 
 /*
  * Raise Return Claim — a Meesho return claim (Support → Returns → e.g. "Items
@@ -32,7 +32,7 @@ const SLOTS = {
   waybill: { key: "product_reverse_way_bill_link", label: "Reverse waybill", hint: "The return label — its AWB is read off the photo", accept: "image/*" },
   packet: { key: "barcode_image_link", label: "Packet barcode", hint: "The packet's barcode — its id is read off the photo", accept: "image/*" },
   product: { key: "product_image_link", label: "Product received", hint: "What came back in the packet", accept: "image/*" },
-  video: { key: "product_openingvideo_link", label: "Unpacking video", hint: "Any size — compressed under 22 MB here", accept: "video/*" },
+  video: { key: "product_openingvideo_link", label: "Unpacking video", hint: "Any size — over 24 MB it's compressed here first", accept: "video/*" },
 };
 const SLOT_BY_KEY = Object.fromEntries(Object.entries(SLOTS).map(([slot, s]) => [s.key, slot]));
 const AUTO_KEYS = new Set(["sub_order_number", "awb_number", "barcode_id", "ticket_desc", "callback_number", ...Object.keys(SLOT_BY_KEY)]);
@@ -179,8 +179,20 @@ export function ReturnClaimTab() {
     fd.append("business_id", String(business));
     fd.append("file", file);
     const r = await api("upload/", { method: "POST", body: fd });
-    if (r.ok) setSlot(slot, { status: "uploaded", url: r.data.url, stage: null });
-    else setSlot(slot, { status: "error", error: r.data.error || "Upload failed.", stage: null });
+    if (r.ok) { setSlot(slot, { status: "uploaded", url: r.data.url, stage: null }); return; }
+    // A video sent as it was (22–24 MB) that Meesho turned down: shrink it under 22 MB and send that.
+    if (slot === "video" && file.size > MEESHO_VIDEO_TARGET && !file.name.endsWith("-small.mp4")) {
+      setSlot("video", { status: "compressing", progress: 0, stage: "Meesho wants it smaller — compressing…" });
+      try {
+        const small = await compressVideo(file, { skipUnder: 0, onProgress: (p) => setSlot("video", { progress: p }),
+          onStage: (t) => setSlot("video", { stage: t }) });
+        setSlot("video", { ready: small, status: "ready", stage: `Compressed to ${mb(small.size)}` });   // the effect sends it
+      } catch (e) {
+        setSlot("video", { status: "error", error: e.message || "Couldn't compress this video." });
+      }
+      return;
+    }
+    setSlot(slot, { status: "error", error: r.data.error || "Upload failed.", stage: null });
   }, [business]);
 
   // Anything ready and not sent yet goes to Meesho as soon as the business is known.
@@ -194,11 +206,14 @@ export function ReturnClaimTab() {
     setSlot(slot, { file, preview, url: null, error: null, ready: null, status: slot === "video" ? "compressing" : "reading", progress: 0, stage: null });
     if (slot === "video") {
       try {
+        const started = performance.now();
         const small = await compressVideo(file, {
           onProgress: (p) => setSlot("video", { progress: p }),
           onStage: (t) => setSlot("video", { stage: t }),
         });
-        setSlot("video", { ready: small, status: "ready", stage: small === file ? "Already under 22 MB" : `Compressed to ${mb(small.size)}` });
+        const secs = ((performance.now() - started) / 1000).toFixed(1);
+        setSlot("video", { ready: small, status: "ready",
+          stage: small === file ? "Under 24 MB — sent as it is, no compression" : `Compressed to ${mb(small.size)} in ${secs} s` });
       } catch (e) {
         setSlot("video", { status: "error", error: e.message || "Couldn't compress this video." });
       }
