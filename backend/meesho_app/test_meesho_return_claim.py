@@ -73,6 +73,19 @@ class ReturnClaimTests(TestCase):
         self.assertTrue(r.data["return"]["connected"])
         self.assertEqual(self.c.get(f"{self.api}lookup/", {"code": "NOPE"}).status_code, 404)
 
+    def test_a_return_is_found_as_returns_and_claims_finds_it(self):
+        from .models import OrderScanSetting
+        # Stored with stray characters, delivered long ago — Returns & Claims' search still finds it, so must this.
+        ReturnDelivery.objects.create(business=self.rudam, suborder_no="999_1", awb_number=" VLR083065118686 ",
+                                      delivered_date="2025-01-05", sku="LOTA")
+        # An admin whose Order Scan desk is narrowed to Cosmify — claims still cover the business on screen.
+        self.user.role = User.ROLE_SUPER_ADMIN if hasattr(User, "ROLE_SUPER_ADMIN") else self.user.role
+        self.user.save()
+        OrderScanSetting.objects.update_or_create(user=self.user, defaults={"business_ids": [self.cosmify.id]})
+        r = self.c.get(f"{self.api}lookup/", {"code": "VLR083065118686"})
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual((r.data["return"]["business_name"], r.data["return"]["sub_order_no"]), ("Rudam", "999_1"))
+
     def test_a_business_that_isnt_yours_is_never_used(self):
         other = Business.objects.create(name="Not mine")
         r = self.c.get(f"{self.api}options/", {"business_id": other.id})

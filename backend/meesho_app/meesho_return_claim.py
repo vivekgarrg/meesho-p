@@ -243,7 +243,34 @@ def create_ticket(account, sub_category_id, details, email):
 # ── The portal's side ────────────────────────────────────────────────────────
 
 def _desk(request, business):
-    return _views()._scan_desk_scope(request, business, api_path=API_PATH)
+    """
+    Every business this person may raise return claims for — the one on screen
+    always, and every other business of theirs that can reach returns. Not
+    narrowed to the Order Scan desk's chosen businesses: a claim can be for any
+    of them.
+    """
+    from accounts.access import api_access_denied
+    v = _views()
+    return [b for b in v.accessible_businesses(request, include=business)
+            if b.pk == business.pk or not api_access_denied(request.user, b, API_PATH)]
+
+
+def find_return(ids, code):
+    """
+    The return a code belongs to: as the desk resolves it (AWB, packet,
+    sub-order, order no., the outbound label's AWB), else — as Returns & Claims
+    searches — any return whose AWB, packet, sub-order or order number contains
+    it, however old (a stored value with spaces or extra characters still matches).
+    """
+    from .return_desk import _resolve
+    r = _resolve(ids, code)
+    if r or len(code) < 6:
+        return r
+    squeezed = "".join(code.split())
+    return (ReturnDelivery.objects.filter(business_id__in=ids)
+            .filter(Q(awb_number__icontains=squeezed) | Q(packet_id__icontains=squeezed)
+                    | Q(suborder_no__icontains=squeezed) | Q(order_no__icontains=squeezed))
+            .order_by("-delivered_date", "-return_created_date", "-pk").first())
 
 
 def _account_for(request, business, business_id):
@@ -303,14 +330,13 @@ def claim_lookup(request, business_id):
     code read off the waybill photo is tried, best first). AWB, packet id,
     sub-order or order number, across every business on this person's desk.
     """
-    from .return_desk import _resolve
     v = _views()
     business = v.get_authorized_business(request, business_id)
     desk = _desk(request, business)
     ids, names = [b.pk for b in desk], {b.pk: b.name for b in desk}
-    codes = [(v._order_scan_code(c) or "").upper() for c in request.GET.getlist("code")]
+    codes = [(v._order_scan_code(c) or "").strip().upper() for c in request.GET.getlist("code")]
     for code in [c for c in codes if c][:12]:
-        r = _resolve(ids, code)
+        r = find_return(ids, code)
         if r:
             return Response({"found": True, "matched_code": code, "return": _return_json(r, names)})
     return Response({"found": False, "error": "No return of your businesses matches that — check the code, or type the AWB."},
