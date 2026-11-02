@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { useNavigate } from "react-router-dom";
 import { API, C, S, btn, Tag, useIsMobile } from "../../App";
 import { BarcodeScanner } from "../shared/BarcodeScanner";
 import QrCodeScannerIcon from "@mui/icons-material/QrCodeScanner";
@@ -175,6 +176,7 @@ function rowsFor(queue, tab) {
 // ── Pieces ────────────────────────────────────────────────────────────────────
 
 function ReturnRow({ r, desk, compact, showBusiness }) {
+  const navigate = useNavigate();
   const t = courierTone(r.courier);
   let tag;
   if (r.bucket === "received") tag = <Tag variant="green">✓ {r.received_early ? "Verified early" : "Received"} {r.received_day ? fmtDay(r.received_day) : ""}</Tag>;
@@ -211,6 +213,14 @@ function ReturnRow({ r, desk, compact, showBusiness }) {
     actions.push(
       <button key="rcv" onClick={() => desk.receiveDamaged(r)} className="os-btn"
         style={{ ...btn("ghost", "sm"), ...small, color: "#B45309", borderColor: "#FCD34D" }}>⚠ Received damaged</button>,
+    );
+  }
+
+  // A return to claim for — damaged, missing, or anything received that's ours: straight to Raise Return Claim.
+  if (r.id && (r.awb || r.suborder_no) && (r.damaged || r.bucket === "missing" || r.bucket === "damaged" || r.bucket === "received")) {
+    actions.push(
+      <button key="claim" onClick={() => navigate(`/return-claim?code=${encodeURIComponent(r.awb || r.suborder_no)}`)} className="os-btn"
+        style={{ ...btn("ghost", "sm"), ...small, color: "#1D4ED8", borderColor: "#93C5FD" }}>📨 Raise claim</button>,
     );
   }
 

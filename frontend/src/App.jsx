@@ -48,6 +48,7 @@ import { OrderScanTab } from './Components/Tabs/OrderScanTab';
 import { ReturnDeskTab } from './Components/Tabs/ReturnDeskTab';
 import { MeeshoHubTab, MeeshoLegacyRedirect } from './Components/Tabs/MeeshoHubTab';
 import { MeeshoLinkingPage } from './Components/Tabs/MeeshoLinkingTab';
+import { ReturnClaimTab } from './Components/Tabs/ReturnClaimTab';
 import { ScanLookupTab } from './Components/Tabs/ScanLookupTab';
 import { ExtensionTab } from './Components/Tabs/ExtensionTab';
 import { BulkListingTab } from './Components/Tabs/BulkListingTab';
@@ -1218,7 +1219,7 @@ function AppShell() {
             business switches so it's never remounted, only its context value
             changes. Every tab reads the active range from useDateFilter(). */}
         {/* Order Scan is a live packing desk (its own noon-to-noon day), not a report — a period filter means nothing there. */}
-        {!['/order-scan', '/return-scan', '/scan-lookup', '/meesho-sync', '/meesho-orders', '/meesho-live-inventory', '/meesho', '/meesho-linking'].includes(loc.pathname)
+        {!['/order-scan', '/return-scan', '/scan-lookup', '/meesho-sync', '/meesho-orders', '/meesho-live-inventory', '/meesho', '/meesho-linking', '/return-claim'].includes(loc.pathname)
           && !loc.pathname.startsWith('/meesho/') && <GlobalDateFilterBar />}
         {/* key by active business + settlement mode so switching either remounts
             the routed view, forcing every tab (dashboard included) to refetch
@@ -1243,6 +1244,7 @@ function AppShell() {
                 <Route path="/orders" element={<OrdersTab />} />
                 <Route path="/order-scan" element={<OrderScanTab />} />
                 <Route path="/return-scan" element={<ReturnDeskTab />} />
+                <Route path="/return-claim" element={<ReturnClaimTab />} />
                 {/* Sync and Inventory are tabs of Meesho Orders now; old links land on the right tab. */}
                 {/* Meesho: one page per section, each in the sidebar's Meesho group. */}
                 <Route path="/meesho-linking" element={<MeeshoLinkingPage />} />

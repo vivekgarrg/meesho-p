@@ -4,6 +4,7 @@ from . import flipkart_views
 from . import api_cache
 from . import upload_cleanup
 from . import return_desk
+from . import meesho_return_claim
 from . import meesho_linking, meesho_returns, meesho_search, meesho_sync
 from . import bulk_listing_views
 from . import listing_images_views
@@ -195,6 +196,11 @@ urlpatterns = [
     path("meesho-orders/linking/",                      meesho_linking.linking,          name="meesho_linking"),
     path("meesho-orders/linking/<int:link_id>/",        meesho_linking.link_detail,      name="meesho_link_detail"),
     path("meesho-orders/linking/<int:link_id>/relink/", meesho_linking.link_relink,      name="meesho_link_relink"),
+    path("return-claim/",          meesho_return_claim.claims,        name="return_claims"),
+    path("return-claim/lookup/",   meesho_return_claim.claim_lookup,  name="return_claim_lookup"),
+    path("return-claim/options/",  meesho_return_claim.claim_options, name="return_claim_options"),
+    path("return-claim/validate/", meesho_return_claim.claim_validate, name="return_claim_validate"),
+    path("return-claim/upload/",   meesho_return_claim.claim_upload,  name="return_claim_upload"),
     path("meesho-orders/linking/check/",                meesho_linking.link_check,       name="meesho_link_check"),
     path("meesho-orders/linking/logs/",                 meesho_linking.link_logs,        name="meesho_link_logs"),
     path("meesho-orders/linking/logs/<int:log_id>/",    meesho_linking.link_log_detail,  name="meesho_link_log_detail"),

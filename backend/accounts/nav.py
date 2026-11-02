@@ -42,6 +42,7 @@ NAV_CATALOG = [
     {"path": "/bulk-labels",       "label": "Labels (Bulk)",     "group": "Operations"},
     {"path": "/returns",           "label": "Returns & Claims",  "group": "Operations"},
     {"path": "/return-scan",       "label": "Return Scan",       "group": "Operations"},
+    {"path": "/return-claim",      "label": "Raise Return Claim", "group": "Operations"},
     {"path": "/claims",            "label": "Claim Sheet",       "group": "Operations"},
     {"path": "/tasks",             "label": "Team Tasks",        "group": "Operations"},
     {"path": "/employees",         "label": "Employees",         "group": "Operations"},
@@ -100,6 +101,8 @@ API_OWNERSHIP = {
     "meesho-orders/":        ["/meesho-orders"],
     # Order linking marks parcels packed, so the scanning desk may use it too.
     "meesho-orders/linking/": ["/meesho-orders", "/meesho-linking", "/order-scan"],
+    # Return claims raised on Meesho — from their own page, or from the returns screens.
+    "return-claim/":         ["/return-claim", "/return-scan", "/returns"],
     "meesho-live-inventory/": ["/meesho-orders"],
     # Meesho Stock's "Sync now" queues the same inventory pull.
     "meesho-live-inventory/refresh/": ["/meesho-orders", "/meesho-inventory"],

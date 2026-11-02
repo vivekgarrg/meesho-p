@@ -78,3 +78,6 @@ backend/frontend_build/
 
 # Redis snapshot from a local redis-server
 dump.rdb
+
+# Pasted Meesho requests carry live session cookies — never commit them.
+return_claim.py

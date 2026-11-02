@@ -65,6 +65,7 @@ export const NAV_GROUPS = [
       { path: '/bulk-labels', label: 'Labels', icon: '⊟' },
       { path: '/returns', label: 'Returns & Claims', icon: '⟲' },
       { path: '/return-scan', label: 'Return Scan', icon: '⇲' },
+      { path: '/return-claim', label: 'Raise Return Claim', icon: '📨' },
       { path: '/claims', label: 'Claim Sheet', icon: '₹' },
       { path: '/tasks', label: 'Team Tasks', icon: '☑' },
       { path: '/employees', label: 'Employees', icon: '🧑‍💼' },

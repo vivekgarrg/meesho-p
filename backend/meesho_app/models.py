@@ -3602,3 +3602,40 @@ class MeeshoListing(models.Model):
     class Meta:
         db_table = "meesho_inventory_listings"
         unique_together = [("account", "product_id", "variation_id")]
+
+
+class MeeshoReturnClaim(models.Model):
+    """
+    A return claim raised on Meesho from the portal (Support → Returns → e.g.
+    "Items missing"): the sheet of fields Meesho asks for, the photos and the
+    unpacking video uploaded to it, and the ticket Meesho answered with — or
+    why it refused. Raised on the return's own business's Meesho account.
+    """
+    STATUS_SENDING = "SENDING"
+    STATUS_OK      = "OK"
+    STATUS_FAILED  = "FAILED"
+    STATUS_CHOICES = [(STATUS_SENDING, "Sending"), (STATUS_OK, "Raised"), (STATUS_FAILED, "Refused")]
+
+    business = models.ForeignKey("accounts.Business", on_delete=models.CASCADE, related_name="meesho_return_claims")
+    return_delivery = models.ForeignKey(ReturnDelivery, on_delete=models.SET_NULL, null=True, blank=True,
+                                        related_name="meesho_claims")
+    sub_order_no = models.CharField(max_length=100, db_index=True)
+    awb_number = models.CharField(max_length=100, blank=True, db_index=True)
+    packet_id = models.CharField(max_length=150, blank=True)
+    sub_category_id = models.CharField(max_length=20)
+    sub_category = models.CharField(max_length=200, blank=True)
+    description = models.TextField(blank=True)
+    details = models.JSONField(default=list, blank=True, help_text="The ticket_details sent to Meesho")
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default=STATUS_SENDING, db_index=True)
+    ticket = models.CharField(max_length=100, blank=True)
+    message = models.TextField(blank=True)
+    answer = models.JSONField(null=True, blank=True)
+    created_by = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True, blank=True,
+                                   related_name="meesho_return_claims")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.sub_order_no} · {self.sub_category} · {self.status}"
