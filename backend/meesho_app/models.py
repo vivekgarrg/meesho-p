@@ -3195,6 +3195,14 @@ class ReturnScan(models.Model):
     last_scanned_at  = models.DateTimeField()
     scanned_by = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True, blank=True,
                                    related_name="return_scans")
+    # A packet that came back damaged / tampered: listed in the evening, per
+    # courier, to raise with the delivery boy — then marked reported.
+    damaged     = models.BooleanField(default=False, db_index=True)
+    damage_note = models.CharField(max_length=200, blank=True)
+    damaged_at  = models.DateTimeField(null=True, blank=True)
+    damaged_by  = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    reported_at = models.DateTimeField(null=True, blank=True, help_text="When it was marked with the delivery boy")
+    reported_by = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
 
     class Meta:
         db_table = "return_scans"

@@ -27,8 +27,9 @@ const TABS = [
   { key: "extra",      label: "Extra" },
   { key: "in_transit", label: "In transit" },
   { key: "missing",    label: "Missing" },
+  { key: "damaged",    label: "Damaged" },
 ];
-const TONES = { pending: C.orange, received: C.green, extra: "#2563EB", in_transit: "#0891B2", missing: C.red };
+const TONES = { pending: C.orange, received: C.green, extra: "#2563EB", in_transit: "#0891B2", missing: C.red, damaged: "#B45309" };
 const WHY = {
   early: "Arrived early — sheet still shows it in transit",
   earlier: "From an earlier day's list",
@@ -80,7 +81,8 @@ function useReturnDesk() {
       if (!res.ok) {
         out = { kind: "err", title: "Not recorded", lines: [d.error || "Could not record that scan."] };
       } else if (!d.matched) {
-        out = { kind: "err", title: "NOT RECOGNISED — keep aside", lines: [code, "No return matches this code. Upload the latest Delivered and In-transit sheets on Returns & Claims."] };
+        out = { kind: "err", title: "NOT RECOGNISED — keep aside", lines: [code, "No return of any business here matches this code — it may not be ours."],
+          scanId: d.item?.scan_id, damaged: d.item?.damaged };
         navigator.vibrate?.([120, 80, 120]);
       } else {
         const i = d.item;
@@ -91,7 +93,7 @@ function useReturnDesk() {
         else if (d.where === "in_transit") { kind = "warn"; title = "Received · arrived early"; lines.push(`Sheet still shows it in transit${i.expected_date ? ` (expected ${fmtDay(i.expected_date)})` : ""}.`); }
         else if (d.where === "earlier") { kind = "warn"; title = `Received · from ${fmtDay(i.delivered_date)}'s list`; }
         else if (d.where === "later") { kind = "warn"; title = "Received · not on this day's list"; lines.push(`Sheet says delivered ${fmtDay(i.delivered_date)}.`); }
-        out = { kind, title, lines, image_url: i.image_url, image_fallback_url: i.image_fallback_url };
+        out = { kind, title, lines, image_url: i.image_url, image_fallback_url: i.image_fallback_url, scanId: i.scan_id, damaged: i.damaged };
         setQueue((q) => q && { ...q, items: q.items.map((x) => (x.id === i.id ? { ...x, bucket: "received", scan_id: i.scan_id, received_day: i.received_day } : x)) });
       }
       if (my === seq.current) setLatest(out);
@@ -104,6 +106,25 @@ function useReturnDesk() {
     } finally { setBusy(false); }
   };
 
+  // Damaged / tampered packet, and whether it was raised with the delivery boy.
+  const mark = async (scanId, patch) => {
+    const res = await fetch(`${API}/return-scan/${scanId}/`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch),
+    }).catch(() => null);
+    if (!res?.ok) { window.alert("Couldn't save that — try again."); return; }
+    const d = await res.json();
+    const upd = (r) => (r.scan_id === scanId ? { ...r, ...d } : r);
+    setQueue((q) => q && { ...q, items: q.items.map(upd), extra: (q.extra || []).map(upd), damaged: (q.damaged || []).map(upd) });
+    setLatest((l) => (l && l.scanId === scanId ? { ...l, damaged: d.damaged } : l));
+    load();
+  };
+  const markDamaged = (scanId, on = true) => {
+    if (!on) return mark(scanId, { damaged: false });
+    const note = window.prompt("Packet damaged / tampered — a note for the delivery boy (optional):", "");
+    if (note === null) return null;
+    return mark(scanId, { damaged: true, note });
+  };
+
   const undo = async (scanId) => {
     if (!window.confirm("Undo this scan? The return goes back to “to receive”.")) return;
     await fetch(`${API}/return-scan/${scanId}/`, { method: "DELETE" });
@@ -111,7 +132,7 @@ function useReturnDesk() {
   };
 
   const today = queue?.today || todayISO();
-  return { date, setDate: (d) => setPicked(d === today ? "" : d), today, queue, loading, latest, busy, record, undo, reload: load };
+  return { date, setDate: (d) => setPicked(d === today ? "" : d), today, queue, loading, latest, busy, record, undo, reload: load, mark, markDamaged };
 }
 
 function rowsFor(queue, tab) {
@@ -119,18 +140,20 @@ function rowsFor(queue, tab) {
   if (tab === "extra") return queue.extra || [];
   if (tab === "in_transit") return queue.in_transit || [];
   if (tab === "missing") return queue.missing || [];
+  if (tab === "damaged") return queue.damaged || [];
   return (queue.items || []).filter((i) => i.bucket === tab);
 }
 
 // ── Pieces ────────────────────────────────────────────────────────────────────
 
-function ReturnRow({ r, onUndo, compact, showBusiness }) {
+function ReturnRow({ r, onUndo, onDamage, onReport, compact, showBusiness }) {
   const t = courierTone(r.courier);
   let tag;
   if (r.bucket === "received") tag = <Tag variant="green">✓ Received {r.received_day ? fmtDay(r.received_day) : ""}</Tag>;
   else if (r.bucket === "extra") tag = <Tag variant={r.why === "unknown" ? "red" : "blue"}>{WHY[r.why] || "Extra"}</Tag>;
   else if (r.bucket === "in_transit") tag = <Tag variant="blue">🚚 {r.transit_status || "In transit"}{r.expected_date ? ` · exp. ${fmtDay(r.expected_date)}` : ""}</Tag>;
   else if (r.bucket === "missing") tag = <Tag variant="red">Not received · delivered {fmtDay(r.delivered_date)}</Tag>;
+  else if (r.bucket === "damaged") tag = <Tag variant="amber">⚠ Damaged · received {r.received_day ? fmtDay(r.received_day) : ""}</Tag>;
   else tag = <Tag variant="gray">To receive</Tag>;
   return (
     <div style={{ display: "flex", gap: 12, alignItems: "center", padding: compact ? "11px 12px" : "12px 16px", borderBottom: `1px solid ${C.gray100}`,
@@ -148,10 +171,23 @@ function ReturnRow({ r, onUndo, compact, showBusiness }) {
           {[showBusiness && r.business_name, r.awb, r.suborder_no !== r.sku ? r.suborder_no : null].filter(Boolean).join(" · ")}
         </div>
         {r.return_reason && !compact && <div style={{ fontSize: 12, color: C.gray500, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.return_reason}</div>}
+        {r.damaged && r.damage_note && <div style={{ fontSize: 12, color: "#92400E", marginTop: 2 }}>⚠ {r.damage_note}</div>}
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 4, alignItems: "flex-end", flexShrink: 0 }}>
         {tag}
-        {r.scan_id && onUndo && (
+        {r.damaged && r.bucket !== "damaged" && <Tag variant="amber">⚠ Damaged</Tag>}
+        {r.bucket === "damaged" && onReport && (
+          <button onClick={() => onReport(r.scan_id, { reported: !r.reported_at })} className="os-btn"
+            style={{ ...btn(r.reported_at ? "ghost" : "primary", "sm"), ...(r.reported_at ? { color: "#15803D" } : {}) }}>
+            {r.reported_at ? `✓ Marked with delivery boy · ${fmtTime(r.reported_at)}` : "Mark with delivery boy"}
+          </button>
+        )}
+        {r.scan_id && onDamage && r.bucket !== "damaged" && (
+          <button onClick={() => onDamage(r.scan_id, !r.damaged)} className="os-btn"
+            style={{ border: "none", background: "none", padding: 0, fontSize: 11.5, fontWeight: 700, color: "#B45309", cursor: "pointer", textDecoration: "underline" }}>
+            {r.damaged ? "Not damaged" : "⚠ Damaged"}</button>
+        )}
+        {r.scan_id && onUndo && r.bucket !== "damaged" && (
           <button onClick={() => onUndo(r.scan_id)} className="os-btn"
             style={{ border: "none", background: "none", padding: 0, fontSize: 11.5, fontWeight: 700, color: C.gray500, cursor: "pointer", textDecoration: "underline" }}>Undo scan</button>
         )}
@@ -254,7 +290,21 @@ const EMPTY = {
   extra: "No extra parcels.",
   in_transit: "Nothing due from the In-transit sheet.",
   missing: "No returns missing. 🎉",
+  damaged: "No damaged packets.",
 };
+
+/** Under the latest scan: flag the packet just scanned as damaged / tampered. */
+function DamageLatest({ desk }) {
+  const l = desk.latest;
+  if (!l?.scanId) return null;
+  return l.damaged ? (
+    <button onClick={() => desk.markDamaged(l.scanId, false)} className="os-btn"
+      style={{ ...btn("ghost", "sm"), color: "#B45309", alignSelf: "flex-start" }}>⚠ Marked damaged — undo</button>
+  ) : (
+    <button onClick={() => desk.markDamaged(l.scanId)} className="os-btn"
+      style={{ ...btn("ghost", "md"), color: "#B45309", borderColor: "#FCD34D", alignSelf: "flex-start" }}>⚠ Packet damaged / tampered</button>
+  );
+}
 
 // ── Phone ─────────────────────────────────────────────────────────────────────
 
@@ -293,6 +343,7 @@ function MobileDesk({ desk, businesses, onScopeChanged, multi }) {
       </div>
       <div style={{ padding: "8px 10px", background: C.white, borderBottom: `1px solid ${C.gray200}`, flexShrink: 0 }}>
         <LatestPanel latest={latest} busy={busy} minHeight={76} idle="Scan a returned parcel — the result shows here." />
+        <div style={{ marginTop: 6 }}><DamageLatest desk={desk} /></div>
       </div>
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
         <div style={{ padding: 10, display: "flex", flexDirection: "column", gap: 10 }}>
@@ -317,7 +368,8 @@ function MobileDesk({ desk, businesses, onScopeChanged, multi }) {
         <div style={{ background: C.white, borderTop: `1px solid ${C.gray200}` }}>
           {v.shown.length === 0
             ? <div style={{ textAlign: "center", padding: 36, color: C.gray500, fontSize: 14 }}>{(queue?.summary?.expected || v.tab !== "pending") ? EMPTY[v.tab] : "No returns on the Delivered sheet for this day — upload it on Returns & Claims."}</div>
-            : v.shown.map((r) => <ReturnRow key={`${r.id}-${r.scan_id}`} r={r} compact showBusiness={multi} onUndo={desk.undo} />)}
+            : v.shown.map((r) => <ReturnRow key={`${r.id}-${r.scan_id}`} r={r} compact showBusiness={multi} onUndo={desk.undo}
+                onDamage={desk.markDamaged} onReport={desk.mark} />)}
         </div>
       </div>
       <div style={{ flexShrink: 0, padding: "8px 10px calc(8px + env(safe-area-inset-bottom))", borderTop: `1px solid ${C.gray200}`, background: C.white, display: "flex", flexDirection: "column", gap: 8 }}>
@@ -385,7 +437,8 @@ function DesktopDesk({ desk, businesses, onScopeChanged, multi }) {
               ? <div style={{ display: "flex", justifyContent: "center", padding: 44 }}><CircularProgress style={{ color: C.orange }} /></div>
               : v.shown.length === 0
                 ? <div style={{ textAlign: "center", padding: 44, color: C.gray500, fontSize: 14 }}>{EMPTY[v.tab]}</div>
-                : v.shown.map((r) => <ReturnRow key={`${r.id}-${r.scan_id}`} r={r} showBusiness={multi} onUndo={desk.undo} />)}
+                : v.shown.map((r) => <ReturnRow key={`${r.id}-${r.scan_id}`} r={r} showBusiness={multi} onUndo={desk.undo}
+                  onDamage={desk.markDamaged} onReport={desk.mark} />)}
           </div>
         </div>
         <div style={{ position: "sticky", top: 12 }}>
@@ -400,9 +453,11 @@ function DesktopDesk({ desk, businesses, onScopeChanged, multi }) {
                   padding: "16px 16px 16px 52px", background: C.orangeLight, borderColor: C.orangeBorder }} />
             </div>
             <LatestPanel latest={latest} busy={busy} minHeight={150} idle="Scan a returned parcel — whether it's on the day's sheet shows here." />
+            <DamageLatest desk={desk} />
             {s && (
               <div style={{ fontSize: 12.5, color: C.gray500, lineHeight: 1.6 }}>
                 Received today: <b style={{ color: C.gray800 }}>{s.received_today}</b>{s.extra ? <> · extra <b style={{ color: "#2563EB" }}>{s.extra}</b></> : null}
+                {s.damaged ? <> · damaged <b style={{ color: "#B45309" }}>{s.damaged}</b>{s.damaged_unreported ? ` (${s.damaged_unreported} to raise with delivery boys)` : ""}</> : null}
                 <br />In transit (due): <b style={{ color: C.gray800 }}>{s.in_transit}</b> · missing earlier: <b style={{ color: s.missing ? C.red : C.gray800 }}>{s.missing}</b>
               </div>
             )}

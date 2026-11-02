@@ -29,6 +29,8 @@ from .models import LabelOrder, ReturnDelivery, ReturnScan
 API_PATH = "return-scan/"
 # How far back a delivered-but-never-received return is still flagged.
 MISSING_DAYS = 15
+# How long a damaged packet not yet raised with the delivery boy stays on the list.
+DAMAGED_DAYS = 7
 # How far back a code read short is matched by its AWB.
 PARTIAL_DAYS = 60
 MIN_PARTIAL = 8
@@ -114,7 +116,29 @@ def _item(r, names, image_map, scan=None, bucket="pending"):
         "received_at": scan.last_scanned_at.isoformat() if scan else None,
         "scan_count": scan.scan_count if scan else 0,
         "bucket": bucket,
+        **_damage(scan),
     }
+
+
+def _damage(scan):
+    """A scan's damaged / reported-to-the-delivery-boy marks."""
+    if not scan:
+        return {"damaged": False}
+    return {"damaged": scan.damaged, "damage_note": scan.damage_note,
+            "damaged_at": scan.damaged_at.isoformat() if scan.damaged_at else None,
+            "reported_at": scan.reported_at.isoformat() if scan.reported_at else None}
+
+
+def _scan_row(s, names, image_map):
+    """A scan as a row — its return's details when it matched one, else what was scanned."""
+    r = s.return_delivery
+    if r:
+        return _item(r, names, image_map, s, "received")
+    return {"id": None, "scan_id": s.pk, "business_id": s.business_id, "business_name": names.get(s.business_id, ""),
+            "suborder_no": s.suborder_no or s.scanned_code, "awb": s.awb_number or s.scanned_code, "sku": s.sku,
+            "qty": s.qty, "courier": _clean_courier(s.courier_name) if s.courier_name else "Not recognised",
+            "rto": False, "bucket": "extra", "why": "unknown", "received_day": s.scan_day.isoformat(),
+            "received_at": s.last_scanned_at.isoformat(), "scan_count": s.scan_count, "image_url": None, **_damage(s)}
 
 
 @api_view(["GET"])
@@ -170,11 +194,7 @@ def return_scan_queue(request, business_id):
             row = _item(r, names, image_map, s, "extra")
             row["why"] = why
         else:
-            row = {"id": None, "scan_id": s.pk, "business_id": s.business_id, "business_name": names.get(s.business_id, ""),
-                   "suborder_no": s.suborder_no or s.scanned_code, "awb": s.awb_number or s.scanned_code, "sku": s.sku,
-                   "qty": s.qty, "courier": _clean_courier(s.courier_name) if s.courier_name else "Not recognised",
-                   "rto": False, "bucket": "extra", "why": "unknown", "received_day": s.scan_day.isoformat(),
-                   "received_at": s.last_scanned_at.isoformat(), "scan_count": s.scan_count, "image_url": None}
+            row = _scan_row(s, names, image_map)
         extra.append(row)
 
     couriers = {}
@@ -202,8 +222,19 @@ def return_scan_queue(request, business_id):
         "customer": sum(1 for i in items if not i["rto"]),
         "in_transit": len(in_transit),
         "missing": len(missing),
+        "damaged_today": sum(1 for s in day_scans if s.damaged),
         "by_courier": sorted(couriers.values(), key=lambda c: (-(c["expected"] + c["extra"]), c["courier"])),
     }
+    # Damaged packets: the day's, and any earlier one not yet raised with the
+    # delivery boy — grouped by courier on screen for the evening.
+    damaged = list(ReturnScan.objects.filter(business_id__in=ids, damaged=True)
+                   .filter(DQ(scan_day=day) | DQ(reported_at__isnull=True, scan_day__gte=day - timedelta(days=DAMAGED_DAYS),
+                                                 scan_day__lte=day))
+                   .select_related("return_delivery").order_by("courier_name", "-last_scanned_at")[:300])
+    damaged_rows = [{**_scan_row(s, names, photo_map([s.return_delivery]) if s.return_delivery else {}), "bucket": "damaged"}
+                    for s in damaged]
+    summary["damaged"] = len(damaged_rows)
+    summary["damaged_unreported"] = sum(1 for d in damaged_rows if not d["reported_at"])
     dates = set(ReturnDelivery.objects.filter(business_id__in=ids, delivered_date__lte=today)
                 .values_list("delivered_date", flat=True).distinct().order_by("-delivered_date")[:14])
     dates |= {today, today - timedelta(days=1)}
@@ -217,6 +248,7 @@ def return_scan_queue(request, business_id):
         "extra": extra,
         "in_transit": [_item(r, names, image_map, None, "in_transit") for r in in_transit[:300]],
         "missing": [_item(r, names, image_map, None, "missing") for r in missing[:300]],
+        "damaged": damaged_rows,
         "dates": [d.isoformat() for d in sorted((d for d in dates if d), reverse=True)],
     })
 
@@ -277,6 +309,8 @@ def return_scan_record(request, business_id):
             where = "earlier"
         else:
             where = "later"
+        if "damaged" in data:                       # flagged damaged as it was scanned
+            _mark(scan, data, request.user)
         item = _item(r, names, photo_map([r]), scan, "received" if where == "on_list" else "extra")
         return Response({"matched": True, "already_scanned": again, "where": where, "item": item},
                         status=status.HTTP_200_OK if again else status.HTTP_201_CREATED)
@@ -289,18 +323,53 @@ def return_scan_record(request, business_id):
     else:
         scan = ReturnScan.objects.create(business=business, scanned_code=code, suborder_no=code, scan_day=day,
                                          last_scanned_at=now, scanned_by=request.user)
+    if "damaged" in data:
+        _mark(scan, data, request.user)
     return Response({"matched": False, "already_scanned": scan.scan_count > 1, "where": "unknown",
                      "item": {"scan_id": scan.pk, "suborder_no": code, "awb": code, "courier": "Not recognised",
                               "bucket": "extra", "why": "unknown", "received_day": scan.scan_day.isoformat(),
-                              "scan_count": scan.scan_count}}, status=status.HTTP_201_CREATED)
+                              "scan_count": scan.scan_count, **_damage(scan)}}, status=status.HTTP_201_CREATED)
 
 
-@api_view(["DELETE"])
+def _mark(scan, data, user):
+    """Apply {damaged?, note?, reported?} to a scan."""
+    now = timezone.now()
+    fields = []
+    if "damaged" in data:
+        on = bool(data.get("damaged"))
+        if on and not scan.damaged:
+            scan.damaged, scan.damaged_at, scan.damaged_by = True, now, user
+        elif not on:
+            scan.damaged, scan.damaged_at, scan.damaged_by, scan.reported_at, scan.reported_by = False, None, None, None, None
+        fields += ["damaged", "damaged_at", "damaged_by", "reported_at", "reported_by"]
+    if "note" in data:
+        scan.damage_note = str(data.get("note") or "").strip()[:200]
+        fields.append("damage_note")
+    if "reported" in data and scan.damaged:
+        on = bool(data.get("reported"))
+        scan.reported_at, scan.reported_by = (now, user) if on else (None, None)
+        fields += ["reported_at", "reported_by"]
+    if fields:
+        scan.save(update_fields=list(dict.fromkeys(fields)))
+
+
+@api_view(["PATCH", "DELETE"])
 def return_scan_delete(request, business_id, pk):
-    """Undo a mis-scan: the parcel goes back to "to receive". The return itself is untouched."""
+    """
+    PATCH {damaged?, note?, reported?} — mark a received packet damaged /
+    tampered (with a note), or as raised with the delivery boy.
+    DELETE — undo a mis-scan: the parcel goes back to "to receive" (the return
+    itself is untouched).
+    """
     v = _views()
     business = v.get_authorized_business(request, business_id)
     ids = [b.pk for b in _desk(request, business)]
+    if request.method == "PATCH":
+        scan = ReturnScan.objects.filter(pk=pk, business_id__in=ids).select_related("return_delivery").first()
+        if not scan:
+            return Response({"error": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+        _mark(scan, request.data if isinstance(request.data, dict) else {}, request.user)
+        return Response({"scan_id": scan.pk, **_damage(scan)})
     n, _ = ReturnScan.objects.filter(pk=pk, business_id__in=ids).delete()
     if not n:
         return Response({"error": "Not found."}, status=status.HTTP_404_NOT_FOUND)

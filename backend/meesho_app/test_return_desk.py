@@ -91,3 +91,33 @@ class ReturnDeskTests(TestCase):
     def test_no_future_day(self):
         r = self.scan("VLR1", day=(self.today + timedelta(days=1)).isoformat())
         self.assertEqual(r.status_code, 400)
+
+    def test_a_packet_can_be_marked_damaged_and_then_raised_with_the_delivery_boy(self):
+        sid = self.scan("VLR1").data["item"]["scan_id"]
+        r = self.client.patch(f"{self.base}/{sid}/", {"damaged": True, "note": "tape cut"}, format="json")
+        self.assertEqual(r.status_code, 200, r.data)
+        q = self.queue()
+        self.assertEqual((q["summary"]["damaged_today"], q["summary"]["damaged"], q["summary"]["damaged_unreported"]), (1, 1, 1))
+        self.assertEqual([(d["suborder_no"], d["damage_note"]) for d in q["damaged"]], [("A1_1", "tape cut")])
+        self.client.patch(f"{self.base}/{sid}/", {"reported": True}, format="json")
+        q = self.queue()
+        self.assertEqual((q["summary"]["damaged"], q["summary"]["damaged_unreported"]), (1, 0))   # still today's, now raised
+        self.assertIsNotNone(q["damaged"][0]["reported_at"])
+        self.client.patch(f"{self.base}/{sid}/", {"damaged": False}, format="json")
+        self.assertEqual(self.queue()["summary"]["damaged"], 0)
+
+    def test_damaged_as_it_is_scanned(self):
+        self.scan("DLR1", damaged=True, note="wet")
+        s = ReturnScan.objects.get()
+        self.assertTrue(s.damaged)
+        self.assertEqual(s.damage_note, "wet")
+
+    def test_an_earlier_unraised_damaged_packet_stays_on_the_list_a_week(self):
+        old = self.today - timedelta(days=3)
+        self.scan("VLOLD", day=old.isoformat(), damaged=True)
+        self.scan("VLR1", day=(self.today - timedelta(days=10)).isoformat(), damaged=True)   # too old
+        q = self.queue()
+        self.assertEqual([d["suborder_no"] for d in q["damaged"]], ["OLD_1"])
+        sid = q["damaged"][0]["scan_id"]
+        self.client.patch(f"{self.base}/{sid}/", {"reported": True}, format="json")
+        self.assertEqual(self.queue()["damaged"], [])                      # raised: off today's list
