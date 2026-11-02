@@ -55,6 +55,7 @@ export const ORDER_STATUSES = [
   { key: "cancelled", slug: "cancelled", label: "Cancelled", icon: "✕" },
 ];
 export const meeshoPath = (key) => {
+  if (key === "linking") return "/meesho-linking";      // its own page, with its own permission
   const status = ORDER_STATUSES.find((x) => x.key === key);
   if (status) return `/meesho/orders/${status.slug}`;
   const sec = MEESHO_SECTIONS.find((x) => x.key === key);
@@ -166,6 +167,7 @@ export function MeeshoHubTab() {
   };
 
   if (oldStatus) return <Navigate to={meeshoPath(oldStatus.key)} replace />;
+  if (tab === "linking") return <Navigate to="/meesho-linking" replace />;
   if (!overview) return <div style={{ display: "flex", justifyContent: "center", padding: 80 }}><CircularProgress style={{ color: C.orange }} /></div>;
 
   return (

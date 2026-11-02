@@ -34,8 +34,8 @@ from rest_framework import status
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
-from .models import (LabelOrder, MeeshoAccount, MeeshoCourier, MeeshoLinkLog, MeeshoPacketLink, MeeshoSyncSnapshot,
-                     ScannedOrder)
+from .models import (LabelOrder, MeeshoAccount, MeeshoCourier, MeeshoLinkLog, MeeshoPacketLink, MeeshoSyncRun,
+                     MeeshoSyncSnapshot, ScannedOrder)
 
 PACKET_RE = re.compile(r"^KP[A-Z0-9]{6,}$")
 
@@ -383,7 +383,37 @@ def linking(request, business_id):
         "couriers": [{"carrier_id": c.carrier_id, "name": c.name, "source": c.source, "shipments": c.shipments_seen}
                      for c in MeeshoCourier.objects.all()],
         "is_admin": v._is_admin(request.user),
+        "syncing": _syncing(_),
     })
+
+
+def _syncing(accounts):
+    """Whether a read of Meesho's lists is queued or running for these accounts."""
+    from .meesho_sync import STUCK_AFTER
+    return MeeshoSyncRun.objects.filter(account__in=accounts, status__in=[MeeshoSyncRun.STATUS_QUEUED, MeeshoSyncRun.STATUS_RUNNING],
+                                        queued_at__gte=timezone.now() - STUCK_AFTER).exists()
+
+
+@api_view(["POST"])
+def link_check(request, business_id):
+    """
+    "Check with Meesho" — read the desk's Meesho lists again, so each link's
+    state is fresh. Linking's own, so a person with only Order Linking can use it.
+    """
+    from . import meesho_sync
+    business = _views().get_authorized_business(request, business_id)
+    _desk_biz, accounts = _desk(request, business)
+    live = [a for a in accounts if a.status != MeeshoAccount.STATUS_DISABLED]
+    if not live:
+        return Response({"error": "Connect a Meesho account first."}, status=status.HTTP_400_BAD_REQUEST)
+    queued = 0
+    try:
+        for a in live:
+            _, q = meesho_sync._queue_run(a, MeeshoSyncRun.KIND_SYNC, MeeshoSyncRun.TRIGGER_MANUAL)
+            queued += int(q)
+    except meesho_sync.SyncNotConfigured as exc:
+        return Response({"error": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+    return Response({"queued": queued, "accounts": len(live)})
 
 
 def _scan_info(d):

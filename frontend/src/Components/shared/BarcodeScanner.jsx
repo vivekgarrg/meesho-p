@@ -122,6 +122,9 @@ export function BarcodeScanner({
   // scrolls, so the screen never jumps. Passing `latest` (even null) selects it.
   progress,
   latest,
+  // Optional buttons under the latest-scan panel (e.g. "Packet damaged") — so a
+  // scan can be acted on without closing the camera.
+  latestAction,
 }) {
   const videoRef    = useRef(null);
   const controlsRef = useRef(null);   // ZXing IScannerControls
@@ -481,7 +484,9 @@ export function BarcodeScanner({
               <div style={{ fontSize: 14, opacity: 0.75, fontWeight: 600 }}>Scan the first parcel — the result shows here.</div>
             )}
           </div>
-        ) : results.length > 0 ? (
+        ) : null}
+        {latest !== undefined && latestAction ? latestAction : null}
+        {latest !== undefined ? null : results.length > 0 ? (
           <div style={{
             display: "flex", flexDirection: "column", gap: 6,
             maxHeight: 168, overflowY: "auto",

@@ -1,7 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { useAuth } from "./AuthContext";
 import { useBusiness } from "./BusinessContext";
-import { NAV_GROUPS, ALWAYS_VISIBLE_PATHS, accessOf } from "../navConfig";
+import { NAV_GROUPS, ALWAYS_VISIBLE_PATHS, itemVisible } from "../navConfig";
 
 const AccessContext = createContext(null);
 
@@ -62,7 +62,7 @@ export function AccessProvider({ children }) {
 
     // Where to send someone who lands on a page they can't see. Falls back to
     // the first area they *can* see, in sidebar order.
-    const visiblePathsInOrder = ALL_ITEMS.filter((i) => isPathVisible(accessOf(i))).map((i) => i.path);
+    const visiblePathsInOrder = ALL_ITEMS.filter((i) => itemVisible(i, isPathVisible)).map((i) => i.path);
     const landingPath = visiblePathsInOrder[0] ?? null;
 
     return {

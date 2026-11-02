@@ -1180,10 +1180,10 @@ export const DESK_CSS = `
  * The status tabs. The big number IS the tab: one control that both reports the
  * count and switches the list, instead of a row of tiles repeating a row of tabs.
  */
-export function StatTabs({ tabs, tab, onPick, counts, compact, tones = TAB_TONE }) {
+export function StatTabs({ tabs, tab, onPick, counts, compact, tones = TAB_TONE, columns }) {
   return (
     <div role="tablist" aria-label="Orders by status"
-      style={{ display: "grid", gridTemplateColumns: `repeat(${tabs.length}, minmax(0, 1fr))`, gap: compact ? 6 : 8 }}>
+      style={{ display: "grid", gridTemplateColumns: `repeat(${columns || tabs.length}, minmax(0, 1fr))`, gap: compact ? 6 : 8 }}>
       {tabs.map((f) => {
         const on = tab === f.key;
         const tone = tones[f.key] || C.gray700;

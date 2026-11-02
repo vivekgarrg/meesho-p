@@ -9,7 +9,9 @@
  * truth for access control and rejects paths it doesn't recognise — except
  * where an item names its permission in `access`: then that path decides who
  * sees it (the Meesho pages all go by "/meesho-orders", one permission for the
- * whole Meesho group), and `path` is only the page's address.
+ * whole Meesho group), and `path` is only the page's address. `alsoBy` names a
+ * second permission that shows the item too (Order Linking has its own, and
+ * comes with the whole-Meesho one).
  */
 const MEESHO = '/meesho-orders';
 export const NAV_GROUPS = [
@@ -21,7 +23,8 @@ export const NAV_GROUPS = [
       { path: '/meesho', label: 'Meesho Overview', icon: '◧', end: true, access: MEESHO, accessLabel: 'Meesho (every page in this group)' },
       // Pending, Ready to ship, Shipped and Cancelled — tabs of one page.
       { path: '/meesho/orders', label: 'Meesho Orders', icon: '📦', access: MEESHO },
-      { path: '/meesho/linking', label: 'Order Linking', icon: '🔗', access: MEESHO },
+      // Its own permission, so it can be given alone; the whole-Meesho permission shows it too.
+      { path: '/meesho-linking', label: 'Order Linking', icon: '🔗', alsoBy: MEESHO },
       { path: '/meesho/returns', label: 'Meesho Returns', icon: '↩', access: MEESHO },
       { path: '/meesho/otps', label: 'Delivery OTPs', icon: '🔑', access: MEESHO },
       { path: '/meesho/inventory', label: 'Meesho Inventory', icon: '▤', access: MEESHO },
@@ -110,6 +113,10 @@ export const ALL_NAV = NAV_GROUPS.flatMap((g) => g.items);
 
 /** The permission that decides whether an item shows (see `access` above). */
 export const accessOf = (item) => item.access || item.path;
+
+/** Whether an item shows, given isPathVisible(permission). */
+export const itemVisible = (item, isPathVisible) =>
+  isPathVisible(accessOf(item)) || (!!item.alsoBy && isPathVisible(item.alsoBy));
 
 /** The distinct permissions, in sidebar order — what an access rule can grant. */
 export const ALL_PERMISSIONS = [...new Set(ALL_NAV.map(accessOf))];

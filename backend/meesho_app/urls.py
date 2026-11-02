@@ -195,6 +195,7 @@ urlpatterns = [
     path("meesho-orders/linking/",                      meesho_linking.linking,          name="meesho_linking"),
     path("meesho-orders/linking/<int:link_id>/",        meesho_linking.link_detail,      name="meesho_link_detail"),
     path("meesho-orders/linking/<int:link_id>/relink/", meesho_linking.link_relink,      name="meesho_link_relink"),
+    path("meesho-orders/linking/check/",                meesho_linking.link_check,       name="meesho_link_check"),
     path("meesho-orders/linking/logs/",                 meesho_linking.link_logs,        name="meesho_link_logs"),
     path("meesho-orders/linking/logs/<int:log_id>/",    meesho_linking.link_log_detail,  name="meesho_link_log_detail"),
     path("meesho-orders/linking/couriers/refresh/",     meesho_linking.couriers_refresh, name="meesho_couriers_refresh"),

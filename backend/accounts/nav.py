@@ -18,6 +18,8 @@ NAV_CATALOG = [
     # Every page of the sidebar's Meesho group (orders, linking, returns, OTPs,
     # inventory, payments, settings) goes by this one permission.
     {"path": "/meesho-orders",     "label": "Meesho (every page in this group)", "group": "Meesho"},
+    # Order linking alone, for a packing-desk person who needs nothing else of Meesho.
+    {"path": "/meesho-linking",    "label": "Order Linking",     "group": "Meesho"},
     {"path": "/",                  "label": "Overview",          "group": "Analytics"},
     {"path": "/combined-dashboard", "label": "Combined Dashboard", "group": "Analytics"},
     {"path": "/sku-analysis",      "label": "SKU Analysis",      "group": "Analytics"},
@@ -97,7 +99,7 @@ API_OWNERSHIP = {
     "meesho-sync/":          ["/meesho-orders"],
     "meesho-orders/":        ["/meesho-orders"],
     # Order linking marks parcels packed, so the scanning desk may use it too.
-    "meesho-orders/linking/": ["/meesho-orders", "/order-scan"],
+    "meesho-orders/linking/": ["/meesho-orders", "/meesho-linking", "/order-scan"],
     "meesho-live-inventory/": ["/meesho-orders"],
     # Meesho Stock's "Sync now" queues the same inventory pull.
     "meesho-live-inventory/refresh/": ["/meesho-orders", "/meesho-inventory"],

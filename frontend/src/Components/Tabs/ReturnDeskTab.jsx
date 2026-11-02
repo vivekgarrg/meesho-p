@@ -66,7 +66,7 @@ function useReturnDesk() {
   const reloadSoon = useCallback(() => { clearTimeout(timer.current); timer.current = setTimeout(load, 1200); }, [load]);
   useEffect(() => () => clearTimeout(timer.current), []);
 
-  const record = async (raw) => {
+  const record = async (raw, extra = {}) => {
     const code = (raw ?? "").trim();
     if (!code) return null;
     setBusy(true);
@@ -74,7 +74,7 @@ function useReturnDesk() {
     try {
       const res = await fetch(`${API}/return-scan/`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code, day: picked || undefined }),
+        body: JSON.stringify({ code, day: picked || undefined, ...extra }),
       });
       const d = await res.json().catch(() => ({}));
       let out;
@@ -82,7 +82,7 @@ function useReturnDesk() {
         out = { kind: "err", title: "Not recorded", lines: [d.error || "Could not record that scan."] };
       } else if (!d.matched) {
         out = { kind: "err", title: "NOT RECOGNISED — keep aside", lines: [code, "No return of any business here matches this code — it may not be ours."],
-          scanId: d.item?.scan_id, damaged: d.item?.damaged };
+          scanId: d.item?.scan_id, damaged: d.item?.damaged, label: code };
         navigator.vibrate?.([120, 80, 120]);
       } else {
         const i = d.item;
@@ -93,7 +93,8 @@ function useReturnDesk() {
         else if (d.where === "in_transit") { kind = "warn"; title = "Received · arrived early"; lines.push(`Sheet still shows it in transit${i.expected_date ? ` (expected ${fmtDay(i.expected_date)})` : ""}.`); }
         else if (d.where === "earlier") { kind = "warn"; title = `Received · from ${fmtDay(i.delivered_date)}'s list`; }
         else if (d.where === "later") { kind = "warn"; title = "Received · not on this day's list"; lines.push(`Sheet says delivered ${fmtDay(i.delivered_date)}.`); }
-        out = { kind, title, lines, image_url: i.image_url, image_fallback_url: i.image_fallback_url, scanId: i.scan_id, damaged: i.damaged };
+        out = { kind, title, lines, image_url: i.image_url, image_fallback_url: i.image_fallback_url, scanId: i.scan_id, damaged: i.damaged,
+          label: [i.sku || i.suborder_no, i.awb].filter(Boolean).join(" · ") };
         setQueue((q) => q && { ...q, items: q.items.map((x) => (x.id === i.id ? { ...x, bucket: "received", scan_id: i.scan_id, received_day: i.received_day } : x)) });
       }
       if (my === seq.current) setLatest(out);
@@ -118,11 +119,23 @@ function useReturnDesk() {
     setLatest((l) => (l && l.scanId === scanId ? { ...l, damaged: d.damaged } : l));
     load();
   };
-  const markDamaged = (scanId, on = true) => {
-    if (!on) return mark(scanId, { damaged: false });
-    const note = window.prompt("Packet damaged / tampered — a note for the delivery boy (optional):", "");
-    if (note === null) return null;
-    return mark(scanId, { damaged: true, note });
+  // {scanId?, code?, label} — the packet the Damaged dialog is open for.
+  const [damageFor, setDamageFor] = useState(null);
+  const markDamaged = (scanId, on = true, label = "") => {
+    if (!on) {
+      if (!window.confirm("Take the damaged mark off this packet?")) return null;
+      return mark(scanId, { damaged: false });
+    }
+    setDamageFor({ scanId, label });
+    return null;
+  };
+  // A packet on the list that arrived damaged: receive it and mark it in one go.
+  const receiveDamaged = (row) => setDamageFor({ code: row.awb || row.suborder_no, label: [row.sku || row.suborder_no, row.awb].filter(Boolean).join(" · ") });
+  const saveDamage = async (note) => {
+    const f = damageFor;
+    setDamageFor(null);
+    if (f?.scanId) await mark(f.scanId, { damaged: true, note });
+    else if (f?.code) await record(f.code, { damaged: true, note });
   };
 
   const undo = async (scanId) => {
@@ -132,7 +145,8 @@ function useReturnDesk() {
   };
 
   const today = queue?.today || todayISO();
-  return { date, setDate: (d) => setPicked(d === today ? "" : d), today, queue, loading, latest, busy, record, undo, reload: load, mark, markDamaged };
+  return { date, setDate: (d) => setPicked(d === today ? "" : d), today, queue, loading, latest, busy, record, undo, reload: load, mark, markDamaged,
+    receiveDamaged, damageFor, closeDamage: () => setDamageFor(null), saveDamage };
 }
 
 function rowsFor(queue, tab) {
@@ -146,7 +160,7 @@ function rowsFor(queue, tab) {
 
 // ── Pieces ────────────────────────────────────────────────────────────────────
 
-function ReturnRow({ r, onUndo, onDamage, onReport, compact, showBusiness }) {
+function ReturnRow({ r, desk, compact, showBusiness }) {
   const t = courierTone(r.courier);
   let tag;
   if (r.bucket === "received") tag = <Tag variant="green">✓ Received {r.received_day ? fmtDay(r.received_day) : ""}</Tag>;
@@ -155,42 +169,111 @@ function ReturnRow({ r, onUndo, onDamage, onReport, compact, showBusiness }) {
   else if (r.bucket === "missing") tag = <Tag variant="red">Not received · delivered {fmtDay(r.delivered_date)}</Tag>;
   else if (r.bucket === "damaged") tag = <Tag variant="amber">⚠ Damaged · received {r.received_day ? fmtDay(r.received_day) : ""}</Tag>;
   else tag = <Tag variant="gray">To receive</Tag>;
+  const label = [r.sku || r.suborder_no, r.awb].filter(Boolean).join(" · ");
+  const small = { minHeight: 36, fontSize: 12.5, padding: "6px 12px", borderRadius: 10 };
+
+  const actions = [];
+  if (r.bucket === "damaged") {
+    actions.push(
+      <button key="rep" onClick={() => desk.mark(r.scan_id, { reported: !r.reported_at })} className="os-btn"
+        style={{ ...btn(r.reported_at ? "ghost" : "primary", "sm"), ...small, ...(r.reported_at ? { color: "#15803D", borderColor: "#86EFAC" } : {}) }}>
+        {r.reported_at ? `✓ Marked tampered with delivery boy · ${fmtTime(r.reported_at)}` : "🚩 Mark tampered with delivery boy"}
+      </button>,
+      <button key="off" onClick={() => desk.markDamaged(r.scan_id, false)} className="os-btn" style={{ ...btn("ghost", "sm"), ...small }}>Not damaged</button>,
+    );
+  } else if (r.scan_id) {
+    actions.push(
+      <button key="dmg" onClick={() => desk.markDamaged(r.scan_id, !r.damaged, label)} className="os-btn"
+        style={{ ...btn("ghost", "sm"), ...small, color: "#B45309", borderColor: "#FCD34D", background: r.damaged ? "#FFFBEB" : C.white }}>
+        {r.damaged ? "✕ Not damaged" : "⚠ Damaged / tampered"}
+      </button>,
+      <button key="undo" onClick={() => desk.undo(r.scan_id)} className="os-btn" style={{ ...btn("ghost", "sm"), ...small, color: C.gray500 }}>Undo scan</button>,
+    );
+  } else if ((r.bucket === "pending" || r.bucket === "missing" || r.bucket === "in_transit") && (r.awb || r.suborder_no)) {
+    actions.push(
+      <button key="rcv" onClick={() => desk.receiveDamaged(r)} className="os-btn"
+        style={{ ...btn("ghost", "sm"), ...small, color: "#B45309", borderColor: "#FCD34D" }}>⚠ Received damaged</button>,
+    );
+  }
+
   return (
-    <div style={{ display: "flex", gap: 12, alignItems: "center", padding: compact ? "11px 12px" : "12px 16px", borderBottom: `1px solid ${C.gray100}`,
-      background: r.bucket === "missing" ? C.redLight : C.white }}>
-      <Photo url={r.image_url} fallback={r.image_fallback_url} size={compact ? 46 : 52} />
-      <div style={{ minWidth: 0, flex: 1 }}>
-        <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-          <span style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 14.5, color: C.gray900, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.sku || r.suborder_no || "—"}</span>
-          {r.qty ? <span style={{ fontFamily: "monospace", fontWeight: 900, fontSize: 12.5, color: C.orange, background: C.orangeLight, borderRadius: 6, padding: "1px 6px", flexShrink: 0 }}>×{r.qty}</span> : null}
-          {r.id && <span style={{ fontSize: 10.5, fontWeight: 900, borderRadius: 6, padding: "0 5px", flexShrink: 0,
-            color: r.rto ? "#B91C1C" : "#7C2D12", background: r.rto ? "#FEF2F2" : "#FFF7ED", border: `1px solid ${r.rto ? "#FCA5A5" : "#FDBA74"}` }}>{r.rto ? "RTO" : "Customer"}</span>}
+    <div style={{ padding: compact ? "11px 12px" : "12px 16px", borderBottom: `1px solid ${C.gray100}`,
+      background: r.bucket === "missing" ? C.redLight : r.damaged && r.bucket !== "damaged" ? "#FFFBEB" : C.white }}>
+      <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+        <Photo url={r.image_url} fallback={r.image_fallback_url} size={compact ? 46 : 52} />
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+            <span style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 14.5, color: C.gray900, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.sku || r.suborder_no || "—"}</span>
+            {r.qty ? <span style={{ fontFamily: "monospace", fontWeight: 900, fontSize: 12.5, color: C.orange, background: C.orangeLight, borderRadius: 6, padding: "1px 6px", flexShrink: 0 }}>×{r.qty}</span> : null}
+            {r.id && <span style={{ fontSize: 10.5, fontWeight: 900, borderRadius: 6, padding: "0 5px", flexShrink: 0,
+              color: r.rto ? "#B91C1C" : "#7C2D12", background: r.rto ? "#FEF2F2" : "#FFF7ED", border: `1px solid ${r.rto ? "#FCA5A5" : "#FDBA74"}` }}>{r.rto ? "RTO" : "Customer"}</span>}
+          </div>
+          <div style={{ fontSize: 12.5, color: C.gray600, marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            <span style={{ fontWeight: 800, color: t.fg, background: t.bg, border: `1px solid ${t.border}`, borderRadius: 6, padding: "0 6px", marginRight: 6 }}>{cleanCourier(r.courier)}</span>
+            {[showBusiness && r.business_name, r.awb, r.suborder_no !== r.sku ? r.suborder_no : null].filter(Boolean).join(" · ")}
+          </div>
+          {r.return_reason && !compact && <div style={{ fontSize: 12, color: C.gray500, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.return_reason}</div>}
+          {r.damaged && r.damage_note && <div style={{ fontSize: 12.5, color: "#92400E", marginTop: 3, fontWeight: 700 }}>⚠ {r.damage_note}</div>}
+          {compact && <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 5 }}>{tag}{r.damaged && r.bucket !== "damaged" && <Tag variant="amber">⚠ Damaged</Tag>}</div>}
         </div>
-        <div style={{ fontSize: 12.5, color: C.gray600, marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-          <span style={{ fontWeight: 800, color: t.fg, background: t.bg, border: `1px solid ${t.border}`, borderRadius: 6, padding: "0 6px", marginRight: 6 }}>{cleanCourier(r.courier)}</span>
-          {[showBusiness && r.business_name, r.awb, r.suborder_no !== r.sku ? r.suborder_no : null].filter(Boolean).join(" · ")}
-        </div>
-        {r.return_reason && !compact && <div style={{ fontSize: 12, color: C.gray500, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.return_reason}</div>}
-        {r.damaged && r.damage_note && <div style={{ fontSize: 12, color: "#92400E", marginTop: 2 }}>⚠ {r.damage_note}</div>}
+        {!compact && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, alignItems: "flex-end", flexShrink: 0 }}>
+            {tag}
+            {r.damaged && r.bucket !== "damaged" && <Tag variant="amber">⚠ Damaged</Tag>}
+            {actions.length > 0 && <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>{actions}</div>}
+          </div>
+        )}
       </div>
-      <div style={{ display: "flex", flexDirection: "column", gap: 4, alignItems: "flex-end", flexShrink: 0 }}>
-        {tag}
-        {r.damaged && r.bucket !== "damaged" && <Tag variant="amber">⚠ Damaged</Tag>}
-        {r.bucket === "damaged" && onReport && (
-          <button onClick={() => onReport(r.scan_id, { reported: !r.reported_at })} className="os-btn"
-            style={{ ...btn(r.reported_at ? "ghost" : "primary", "sm"), ...(r.reported_at ? { color: "#15803D" } : {}) }}>
-            {r.reported_at ? `✓ Marked with delivery boy · ${fmtTime(r.reported_at)}` : "Mark with delivery boy"}
+      {compact && actions.length > 0 && <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8, paddingLeft: 58 }}>{actions}</div>}
+    </div>
+  );
+}
+
+const NOTES = ["Tape cut / resealed", "Packet torn", "Opened / tampered", "Wet", "Item missing", "Wrong item inside", "Crushed"];
+
+/** Mark a packet damaged / tampered — quick reasons, or a note of one's own. */
+function DamageDialog({ desk }) {
+  const f = desk.damageFor;
+  const [picked, setPicked] = useState([]);
+  const [text, setText] = useState("");
+  const [saving, setSaving] = useState(false);
+  useEffect(() => { setPicked([]); setText(""); setSaving(false); }, [f]);
+  if (!f) return null;
+  const note = [...picked, text.trim()].filter(Boolean).join(", ");
+  const save = async () => { setSaving(true); await desk.saveDamage(note); };
+  const toggle = (n) => setPicked((p) => (p.includes(n) ? p.filter((x) => x !== n) : [...p, n]));
+  return (
+    <div role="dialog" aria-modal="true" aria-label="Packet damaged or tampered" onClick={saving ? undefined : desk.closeDamage}
+      style={{ position: "fixed", inset: 0, zIndex: 5000, background: "rgba(15,23,42,.55)", display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+      <div onClick={(e) => e.stopPropagation()}
+        style={{ background: C.white, width: "100%", maxWidth: 520, borderRadius: "18px 18px 0 0", padding: "18px 16px calc(16px + env(safe-area-inset-bottom))",
+          display: "flex", flexDirection: "column", gap: 12, borderTop: "6px solid #F59E0B", maxHeight: "90dvh", overflowY: "auto", boxSizing: "border-box" }}>
+        <div style={{ fontSize: 18, fontWeight: 900, color: "#92400E" }}>⚠ Packet damaged / tampered</div>
+        {f.label && <div style={{ fontFamily: "monospace", fontSize: 13.5, fontWeight: 700, color: C.gray700, wordBreak: "break-all" }}>{f.label}</div>}
+        <div style={{ fontSize: 13, color: C.gray600 }}>
+          {f.scanId ? "" : "It is received now and marked damaged. "}It shows on the <b>Damaged</b> tab, to raise with the delivery boy in the evening.
+        </div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+          {NOTES.map((n) => {
+            const on = picked.includes(n);
+            return (
+              <button key={n} onClick={() => toggle(n)} aria-pressed={on} className="os-btn"
+                style={{ minHeight: 40, padding: "8px 12px", borderRadius: 999, fontFamily: "inherit", fontSize: 13.5, fontWeight: 700, cursor: "pointer",
+                  border: `1.5px solid ${on ? "#D97706" : C.gray200}`, background: on ? "#FEF3C7" : C.white, color: on ? "#92400E" : C.gray700 }}>
+                {on ? "✓ " : ""}{n}
+              </button>
+            );
+          })}
+        </div>
+        <input value={text} onChange={(e) => setText(e.target.value)} placeholder="Anything else (optional)" aria-label="Note"
+          onKeyDown={(e) => { if (e.key === "Enter") save(); }} className="os-in" style={{ ...S.inp, minHeight: 46, fontSize: 15 }} />
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={desk.closeDamage} disabled={saving} className="os-btn" style={{ ...btn("ghost", "md"), flex: 1, minHeight: 50 }}>Cancel</button>
+          <button onClick={save} disabled={saving} className="os-btn"
+            style={{ ...btn("primary", "md"), flex: 2, minHeight: 50, background: "#D97706", borderColor: "#D97706", fontSize: 15.5 }}>
+            {saving ? "Saving…" : "⚠ Mark damaged"}
           </button>
-        )}
-        {r.scan_id && onDamage && r.bucket !== "damaged" && (
-          <button onClick={() => onDamage(r.scan_id, !r.damaged)} className="os-btn"
-            style={{ border: "none", background: "none", padding: 0, fontSize: 11.5, fontWeight: 700, color: "#B45309", cursor: "pointer", textDecoration: "underline" }}>
-            {r.damaged ? "Not damaged" : "⚠ Damaged"}</button>
-        )}
-        {r.scan_id && onUndo && r.bucket !== "damaged" && (
-          <button onClick={() => onUndo(r.scan_id)} className="os-btn"
-            style={{ border: "none", background: "none", padding: 0, fontSize: 11.5, fontWeight: 700, color: C.gray500, cursor: "pointer", textDecoration: "underline" }}>Undo scan</button>
-        )}
+        </div>
       </div>
     </div>
   );
@@ -294,15 +377,30 @@ const EMPTY = {
 };
 
 /** Under the latest scan: flag the packet just scanned as damaged / tampered. */
-function DamageLatest({ desk }) {
+function DamageLatest({ desk, dark }) {
   const l = desk.latest;
-  if (!l?.scanId) return null;
+  if (!l?.scanId || desk.busy) return null;
+  const base = { width: "100%", minHeight: 50, borderRadius: 12, fontFamily: "inherit", fontSize: 15.5, fontWeight: 800, cursor: "pointer" };
   return l.damaged ? (
     <button onClick={() => desk.markDamaged(l.scanId, false)} className="os-btn"
-      style={{ ...btn("ghost", "sm"), color: "#B45309", alignSelf: "flex-start" }}>⚠ Marked damaged — undo</button>
+      style={{ ...base, background: dark ? "rgba(245,158,11,.18)" : "#FFFBEB", color: dark ? "#FCD34D" : "#92400E", border: "2px solid #F59E0B" }}>
+      ⚠ Marked damaged — tap to undo</button>
   ) : (
-    <button onClick={() => desk.markDamaged(l.scanId)} className="os-btn"
-      style={{ ...btn("ghost", "md"), color: "#B45309", borderColor: "#FCD34D", alignSelf: "flex-start" }}>⚠ Packet damaged / tampered</button>
+    <button onClick={() => desk.markDamaged(l.scanId, true, l.label)} className="os-btn"
+      style={{ ...base, background: "#F59E0B", color: "#1F1300", border: "2px solid #D97706" }}>⚠ Packet damaged / tampered</button>
+  );
+}
+
+/** Damaged packets not yet raised with the delivery boy — the evening's list. */
+function DamagedBanner({ n, onOpen, compact }) {
+  if (!n) return null;
+  return (
+    <button onClick={onOpen} className="os-btn" style={{ textAlign: "left", cursor: "pointer", fontFamily: "inherit", background: "#FFFBEB",
+      border: "1.5px solid #FCD34D", borderRadius: 12, padding: compact ? "8px 12px" : "10px 14px", color: "#92400E", display: "flex", gap: 10, alignItems: "center" }}>
+      <span style={{ fontSize: 18 }}>🚩</span>
+      <span style={{ flex: 1, fontSize: 13, fontWeight: 800 }}>{n} damaged packet{n === 1 ? "" : "s"} to mark tampered with the delivery boy</span>
+      <span style={{ fontSize: 12.5, fontWeight: 800 }}>View →</span>
+    </button>
   );
 }
 
@@ -325,10 +423,12 @@ function MobileDesk({ desk, businesses, onScopeChanged, multi }) {
     <div className="os-desk" style={{ position: "fixed", inset: 0, zIndex: 3000, background: C.gray50, display: "flex", flexDirection: "column",
       height: "100dvh", paddingTop: "env(safe-area-inset-top)" }}>
       <style>{DESK_CSS}</style>
+      <DamageDialog desk={desk} />
       {camera && (
         <BarcodeScanner continuous title="Receive returns" hint="Scan the label on each returned parcel — keep scanning"
           progress={{ done: s?.received ?? 0, total: s?.expected ?? 0, label: "Received" }}
-          latest={latest} busy={busy} onDetected={(code) => record(code)} onClose={() => setCamera(false)} />
+          latest={latest} busy={busy} onDetected={(code) => record(code)} onClose={() => setCamera(false)}
+          latestAction={<DamageLatest desk={desk} dark />} />
       )}
       <div style={{ padding: "6px 10px", display: "flex", alignItems: "center", gap: 6, background: C.white, borderBottom: `1px solid ${C.gray200}`, flexShrink: 0 }}>
         <button onClick={() => window.dispatchEvent(new Event("app:open-menu"))} aria-label="Menu — other tabs" className="os-btn"
@@ -343,7 +443,7 @@ function MobileDesk({ desk, businesses, onScopeChanged, multi }) {
       </div>
       <div style={{ padding: "8px 10px", background: C.white, borderBottom: `1px solid ${C.gray200}`, flexShrink: 0 }}>
         <LatestPanel latest={latest} busy={busy} minHeight={76} idle="Scan a returned parcel — the result shows here." />
-        <div style={{ marginTop: 6 }}><DamageLatest desk={desk} /></div>
+        {latest?.scanId && !busy && <div style={{ marginTop: 8 }}><DamageLatest desk={desk} /></div>}
       </div>
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
         <div style={{ padding: 10, display: "flex", flexDirection: "column", gap: 10 }}>
@@ -351,13 +451,12 @@ function MobileDesk({ desk, businesses, onScopeChanged, multi }) {
             <div style={{ display: "flex", justifyContent: "center", padding: 24 }}><CircularProgress style={{ color: C.orange }} /></div>
           ) : (
             <>
+              <DamagedBanner n={s?.damaged_unreported} onOpen={() => v.setTab("damaged")} compact />
               <MissingBanner n={s?.missing} onOpen={() => v.setTab("missing")} compact />
               <CourierCards couriers={s?.by_courier} active={v.courier} onPick={v.setCourier} compact />
               <div style={{ background: C.white, border: `1px solid ${C.gray200}`, borderRadius: 16, padding: 12, display: "flex", flexDirection: "column", gap: 12 }}>
                 {s && <MatchLine s={s} />}
-                <div style={{ overflowX: "auto" }}>
-                  <div style={{ minWidth: 420 }}><StatTabs tabs={TABS} tab={v.tab} onPick={v.setTab} counts={v.counts} tones={TONES} compact /></div>
-                </div>
+                <StatTabs tabs={TABS} tab={v.tab} onPick={v.setTab} counts={v.counts} tones={TONES} compact columns={3} />
                 {v.courier && (
                   <button onClick={() => v.setCourier(null)} className="os-btn" style={{ ...btn("ghostOrange", "sm"), alignSelf: "flex-start", minHeight: 36 }}>🚚 {v.courier} · all couriers ✕</button>
                 )}
@@ -368,8 +467,7 @@ function MobileDesk({ desk, businesses, onScopeChanged, multi }) {
         <div style={{ background: C.white, borderTop: `1px solid ${C.gray200}` }}>
           {v.shown.length === 0
             ? <div style={{ textAlign: "center", padding: 36, color: C.gray500, fontSize: 14 }}>{(queue?.summary?.expected || v.tab !== "pending") ? EMPTY[v.tab] : "No returns on the Delivered sheet for this day — upload it on Returns & Claims."}</div>
-            : v.shown.map((r) => <ReturnRow key={`${r.id}-${r.scan_id}`} r={r} compact showBusiness={multi} onUndo={desk.undo}
-                onDamage={desk.markDamaged} onReport={desk.mark} />)}
+            : v.shown.map((r) => <ReturnRow key={`${r.id}-${r.scan_id}`} r={r} compact showBusiness={multi} desk={desk} />)}
         </div>
       </div>
       <div style={{ flexShrink: 0, padding: "8px 10px calc(8px + env(safe-area-inset-bottom))", borderTop: `1px solid ${C.gray200}`, background: C.white, display: "flex", flexDirection: "column", gap: 8 }}>
@@ -411,6 +509,8 @@ function DesktopDesk({ desk, businesses, onScopeChanged, multi }) {
           <DaySelect desk={desk} style={{ ...S.inp, width: "auto", fontWeight: 700 }} />
         </div>
       </div>
+      <DamageDialog desk={desk} />
+      <DamagedBanner n={s?.damaged_unreported} onOpen={() => v.setTab("damaged")} />
       <MissingBanner n={s?.missing} onOpen={() => { v.setTab("missing"); refocus(); }} />
       <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(360px, 420px)", gap: 20, alignItems: "start" }}>
         <div style={{ display: "flex", flexDirection: "column", gap: 16, minWidth: 0 }}>
@@ -437,8 +537,7 @@ function DesktopDesk({ desk, businesses, onScopeChanged, multi }) {
               ? <div style={{ display: "flex", justifyContent: "center", padding: 44 }}><CircularProgress style={{ color: C.orange }} /></div>
               : v.shown.length === 0
                 ? <div style={{ textAlign: "center", padding: 44, color: C.gray500, fontSize: 14 }}>{EMPTY[v.tab]}</div>
-                : v.shown.map((r) => <ReturnRow key={`${r.id}-${r.scan_id}`} r={r} showBusiness={multi} onUndo={desk.undo}
-                  onDamage={desk.markDamaged} onReport={desk.mark} />)}
+                : v.shown.map((r) => <ReturnRow key={`${r.id}-${r.scan_id}`} r={r} showBusiness={multi} desk={desk} />)}
           </div>
         </div>
         <div style={{ position: "sticky", top: 12 }}>

@@ -294,10 +294,10 @@ export function MeeshoLinkingTab() {
   // Read Meesho's lists again, then show each link's state from them.
   const checkMeesho = async () => {
     setChecking(true);
-    await fetch(`${API}/meesho-orders/refresh/`, { method: "POST" }).catch(() => null);
+    await call("check/", "POST");
     for (let i = 0; i < 20; i++) {
       await new Promise((ok) => setTimeout(ok, 3000));
-      const st = await fetch(`${API}/meesho-orders/`).then((x) => x.json()).catch(() => null);
+      const st = await fetch(`${API}/meesho-orders/linking/`).then((x) => x.json()).catch(() => null);
       if (st && !st.syncing) break;
     }
     await load();
@@ -459,6 +459,21 @@ export function MeeshoLinkingTab() {
       </div>
 
       <Logs key={logKey} onChanged={load} />
+    </div>
+  );
+}
+
+/**
+ * Order Linking as a page of its own (/meesho-linking), so it can be given to a
+ * packing-desk person on its own — without the rest of Meesho.
+ */
+export function MeeshoLinkingPage() {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12, maxWidth: 1440 }}>
+      <h1 style={{ fontSize: 22, fontWeight: 900, color: C.gray900, margin: 0, letterSpacing: "-0.02em" }}>
+        <span aria-hidden>🔗 </span>Order linking
+      </h1>
+      <MeeshoLinkingTab />
     </div>
   );
 }

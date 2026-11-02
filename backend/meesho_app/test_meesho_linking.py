@@ -232,3 +232,29 @@ class OrderLinkingTests(TestCase):
         self.assertEqual(rts["11_1"]["link_state"], "linked")
         self.assertEqual((rts["13_1"]["link_state"], rts["13_1"]["link"]["packet_id"]), ("linked_here_only", "KP9ZZZZ12345678"))
         self.assertEqual(next(t for t in d["tabs"] if t["key"] == "ready_to_ship")["link_states"], {"linked": 2, "linked_here_only": 1})
+
+
+@mock.patch.dict(os.environ, {"MEESHO_SYNC_KEY": KEY})
+class LinkingOnlyAccessTests(TestCase):
+    """Order Linking has its own permission: a person given only it can link and check with Meesho, nothing else of Meesho."""
+
+    def setUp(self):
+        from accounts.models import BusinessProfile
+        self.biz = Business.objects.create(name="Cosmify")
+        self.user = User.objects.create_user(username="packer", password="pw", role=User.ROLE_BUSINESS_USER)
+        Membership.objects.create(user=self.user, business=self.biz)
+        MeeshoAccount.objects.create(business=self.biz, phone_number="9000000001", password_enc="v1:x", status="ACTIVE")
+        BusinessProfile.objects.update_or_create(business=self.biz, defaults={"visible_paths": ["/meesho-linking"]})
+        self.c = APIClient()
+        self.c.force_authenticate(self.user)
+        self.api = f"/api/business/{self.biz.id}"
+
+    def test_linking_and_check_work_the_rest_of_meesho_does_not(self):
+        r = self.c.get(f"{self.api}/meesho-orders/linking/")
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertIn("syncing", r.data)
+        with mock.patch.object(meesho_sync, "_queue_run", return_value=(None, True)) as queued:
+            r = self.c.post(f"{self.api}/meesho-orders/linking/check/")
+        self.assertEqual((r.status_code, r.data["queued"]), (200, 1))
+        self.assertEqual(queued.call_count, 1)
+        self.assertEqual(self.c.get(f"{self.api}/meesho-orders/overview/").status_code, 403)
