@@ -185,3 +185,37 @@ class ReturnClaimTests(TestCase):
         answer = {"is_valid": False, "errors": [{"error_message": "Ticket {{ticket_id}} has already been raised for this issue.",
                                                  "ticket_id": {"link": "SUPPORT/TICKET_DETAILS", "label": 793641126954}, "field_name": "awb_number"}]}
         self.assertEqual(rc._errors(answer), ("Ticket 793641126954 has already been raised for this issue.", "793641126954"))
+
+    def test_a_video_goes_up_in_pieces_and_on_to_meesho_in_the_background(self):
+        data = b"v" * 2500
+        r = self.c.post(f"{self.api}upload/start/", {"business_id": self.cosmify.id, "name": "unbox.mp4", "size": len(data),
+                                                     "content_type": "video/mp4"}, format="json")
+        self.assertEqual(r.status_code, 200, r.data)
+        uid = r.data["upload_id"]
+        for i in range(3):
+            piece = SimpleUploadedFile("blob", data[i * 1000:(i + 1) * 1000], content_type="application/octet-stream")
+            self.assertEqual(self.c.post(f"{self.api}upload/{uid}/chunk/", {"index": i, "file": piece}, format="multipart").status_code, 200)
+        sent = {}
+
+        def fake_upload(account, name, blob, content_type):
+            sent.update(account=account.business.name, name=name, blob=blob, type=content_type)
+            return GCS
+        with mock.patch.object(rc, "_in_background", side_effect=lambda fn, *a: fn(*a)), mock.patch.object(rc, "upload", side_effect=fake_upload):
+            r = self.c.post(f"{self.api}upload/{uid}/finish/", {"parts": 3}, format="json")
+        self.assertEqual(r.status_code, 202)
+        self.assertEqual((sent["account"], sent["name"], sent["blob"], sent["type"]), ("Cosmify", "unbox.mp4", data, "video/mp4"))
+        st = self.c.get(f"{self.api}upload/{uid}/").data
+        self.assertEqual((st["state"], st["url"]), ("done", GCS))
+
+    def test_a_missing_piece_or_someone_elses_upload_is_refused(self):
+        r = self.c.post(f"{self.api}upload/start/", {"business_id": self.cosmify.id, "name": "v.mp4", "size": 10}, format="json")
+        uid = r.data["upload_id"]
+        self.assertEqual(self.c.post(f"{self.api}upload/{uid}/finish/", {"parts": 1}, format="json").status_code, 400)
+        stranger = User.objects.create_user(username="x", password="pw", role=User.ROLE_BUSINESS_USER)
+        Membership.objects.create(user=stranger, business=self.rudam)
+        other = APIClient()
+        other.force_authenticate(stranger)
+        self.assertEqual(other.get(f"{self.api}upload/{uid}/").status_code, 404)
+        self.assertEqual(self.c.get(f"{self.api}upload/../../etc/").status_code, 404)
+        too_big = self.c.post(f"{self.api}upload/start/", {"business_id": self.cosmify.id, "name": "v.mp4", "size": 30 * 1048576}, format="json")
+        self.assertEqual(too_big.status_code, 400)

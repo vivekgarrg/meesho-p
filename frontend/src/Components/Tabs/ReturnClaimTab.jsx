@@ -39,10 +39,73 @@ const AUTO_KEYS = new Set(["sub_order_number", "awb_number", "barcode_id", "tick
 const FILE_TYPES = ["img_file", "action_img_file", "video_file", "file"];
 
 async function api(path, opts = {}) {
-  const res = await fetch(`${API}/return-claim/${path}`, opts).catch(() => null);
-  if (!res) return { ok: false, data: { error: "Couldn't reach the server — check the internet connection." } };
+  let res;
+  try {
+    res = await fetch(`${API}/return-claim/${path}`, opts);
+  } catch {
+    return { ok: false, status: 0, data: { error: navigator.onLine === false
+      ? "This phone is offline — reconnect and try again."
+      : "The connection dropped before the server answered — try again." } };
+  }
   const data = await res.json().catch(() => ({}));
-  return { ok: res.ok, status: res.status, data };
+  if (!res.ok && !data.error && !data.detail) {
+    data.error = res.status === 413 ? "The server refused a file that big."
+      : res.status === 524 || res.status === 504 ? "The server took too long to answer — try again."
+        : `The server answered HTTP ${res.status} — try again.`;
+  }
+  return { ok: res.ok, status: res.status, data: { ...data, error: data.error || data.detail } };
+}
+
+const sleep = (ms) => new Promise((ok) => setTimeout(ok, ms));
+
+/**
+ * Send one photo / the video to Meesho through the server, in small pieces —
+ * each retried on its own, so a slow or patchy phone connection still gets it
+ * there — then wait while the server passes it on to Meesho.
+ * onProgress(0..1, text). Returns the stored file's link; throws Error(message).
+ */
+async function sendFile(business, file, onProgress) {
+  const start = await postJson("upload/start/", { business_id: business, name: file.name, size: file.size,
+    content_type: file.type || "application/octet-stream" });
+  if (!start.ok) throw new Error(start.data.error || "Couldn't start the upload.");
+  const { upload_id: id, chunk_size: size } = start.data;
+  const parts = Math.max(1, Math.ceil(file.size / size));
+  for (let i = 0; i < parts; i++) {
+    let r;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const fd = new FormData();
+      fd.append("index", String(i));
+      fd.append("file", file.slice(i * size, (i + 1) * size), "blob");
+      // eslint-disable-next-line no-await-in-loop
+      r = await api(`upload/${id}/chunk/`, { method: "POST", body: fd });
+      if (r.ok || (r.status >= 400 && r.status < 500 && r.status !== 408 && r.status !== 429)) break;
+      // eslint-disable-next-line no-await-in-loop
+      await sleep(1000 * 2 ** attempt);
+    }
+    if (!r.ok) throw new Error(r.data.error || "Part of the file didn't get through — try again.");
+    onProgress?.((i + 1) / parts, `Sending… ${Math.round(((i + 1) / parts) * 100)}%`);
+  }
+  let fin;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    // eslint-disable-next-line no-await-in-loop
+    fin = await postJson(`upload/${id}/finish/`, { parts });
+    if (fin.ok || fin.status === 400) break;
+    // eslint-disable-next-line no-await-in-loop
+    await sleep(1500);
+  }
+  if (!fin.ok) throw new Error(fin.data.error || "Couldn't hand the file to Meesho.");
+  onProgress?.(1, "Handing it to Meesho…");
+  const until = Date.now() + 5 * 60 * 1000;
+  while (Date.now() < until) {
+    // eslint-disable-next-line no-await-in-loop
+    await sleep(1500);
+    // eslint-disable-next-line no-await-in-loop
+    const st = await api(`upload/${id}/`);
+    if (st.ok && st.data.state === "done") return st.data.url;
+    if (st.ok && st.data.state === "error") throw new Error(st.data.error || "Meesho didn't take it.");
+    if (!st.ok && st.status === 404) throw new Error("The upload was lost on the server — add the file again.");
+  }
+  throw new Error("Meesho is taking too long to store it — try again.");
 }
 const postJson = (path, body) => api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 
@@ -79,7 +142,7 @@ function Slot({ slot, state, onPick, onRetry, isMobile }) {
         <div style={{ fontWeight: 800, fontSize: 14, color: C.gray900 }}>{s.label} <span style={{ color: C.red }}>*</span></div>
         <div style={{ fontSize: 12, color: C.gray500 }}>{st.file ? `${st.file.name} · ${mb(st.file.size)}` : s.hint}</div>
         {st.stage && <div style={{ fontSize: 12, fontWeight: 700, color: C.gray600, marginTop: 2 }}>{st.stage}</div>}
-        {st.progress != null && st.status === "compressing" && (
+        {st.progress != null && (st.status === "compressing" || st.status === "uploading") && (
           <div style={{ height: 6, borderRadius: 99, background: C.gray100, overflow: "hidden", marginTop: 4 }}>
             <div style={{ height: "100%", width: `${Math.round(st.progress * 100)}%`, background: C.orange, transition: "width .2s" }} />
           </div>
@@ -174,11 +237,14 @@ export function ReturnClaimTab() {
 
   // ── Photos and the video ────────────────────────────────────────────────
   const upload = useCallback(async (slot, file) => {
-    setSlot(slot, { status: "uploading", stage: "Sending to Meesho…", error: null });
-    const fd = new FormData();
-    fd.append("business_id", String(business));
-    fd.append("file", file);
-    const r = await api("upload/", { method: "POST", body: fd });
+    setSlot(slot, { status: "uploading", stage: "Sending…", error: null, progress: 0 });
+    let r;
+    try {
+      const url = await sendFile(business, file, (p, text) => setSlot(slot, { progress: p, stage: text }));
+      r = { ok: true, data: { url } };
+    } catch (e) {
+      r = { ok: false, data: { error: e.message } };
+    }
     if (r.ok) { setSlot(slot, { status: "uploaded", url: r.data.url, stage: null }); return; }
     // A video sent as it was (22–24 MB) that Meesho turned down: shrink it under 22 MB and send that.
     if (slot === "video" && file.size > MEESHO_VIDEO_TARGET && !file.name.endsWith("-small.mp4")) {
@@ -485,12 +551,12 @@ function ExtraFiles({ business, urls, onChange }) {
     setBusy(true); setErr(null);
     const got = [];
     for (const f of files) {
-      const fd = new FormData();
-      fd.append("business_id", String(business));
-      fd.append("file", f);
-      // eslint-disable-next-line no-await-in-loop
-      const r = await api("upload/", { method: "POST", body: fd });
-      if (r.ok) got.push(r.data.url); else setErr(r.data.error || "Upload failed.");
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        got.push(await sendFile(business, f));
+      } catch (e) {
+        setErr(e.message || "Upload failed.");
+      }
     }
     setBusy(false);
     onChange([...urls, ...got]);

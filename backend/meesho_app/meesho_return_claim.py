@@ -19,6 +19,12 @@ Every attempt is kept (MeeshoReturnClaim); one Meesho took marks the return
 """
 
 import json
+import os
+import shutil
+import tempfile
+import threading
+import time
+import uuid
 
 import requests
 from django.core.cache import cache
@@ -445,6 +451,172 @@ def claim_upload(request, business_id):
     except TicketRefused as e:
         return _refused(e)
     return Response({"url": url, "name": f.name, "size": f.size})
+
+
+# ── Uploads in pieces ────────────────────────────────────────────────────────
+# A 20 MB video in one request from a phone, through Cloudflare (which cuts a
+# request at ~100 s) and gunicorn (120 s), then on to Meesho, fails on a slow
+# line. So the browser sends it in small pieces (each retried on its own); the
+# server joins them and sends the file to Meesho in the background; the page
+# asks until it's there. Kept on disk, where every gunicorn worker sees it.
+
+CHUNK_MAX = 4 * 1024 * 1024
+UPLOAD_ROOT = os.path.join(tempfile.gettempdir(), "meesho-claim-uploads")
+UPLOAD_KEEP_SECONDS = 24 * 3600
+
+
+def _upload_dir(upload_id):
+    if not upload_id or not all(c in "0123456789abcdef" for c in str(upload_id)) or len(str(upload_id)) != 32:
+        return None
+    return os.path.join(UPLOAD_ROOT, str(upload_id))
+
+
+def _read_json(path, default=None):
+    try:
+        with open(path) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return default
+
+
+def _write_json(path, data):
+    tmp = f"{path}.{uuid.uuid4().hex}.tmp"
+    with open(tmp, "w") as fh:
+        json.dump(data, fh)
+    os.replace(tmp, path)
+
+
+def _sweep_uploads():
+    """Uploads left over from a day ago — gone."""
+    try:
+        for name in os.listdir(UPLOAD_ROOT):
+            path = os.path.join(UPLOAD_ROOT, name)
+            if time.time() - os.path.getmtime(path) > UPLOAD_KEEP_SECONDS:
+                shutil.rmtree(path, ignore_errors=True)
+    except OSError:
+        pass
+
+
+def _own_upload(request, upload_id):
+    """(folder, meta) of an upload this person started, or (None, Response)."""
+    folder = _upload_dir(upload_id)
+    meta = _read_json(os.path.join(folder, "meta.json")) if folder else None
+    if not meta or meta.get("user_id") != request.user.pk:
+        return None, Response({"error": "That upload isn't here any more — add the file again."}, status=status.HTTP_404_NOT_FOUND)
+    return folder, meta
+
+
+@api_view(["POST"])
+def claim_upload_start(request, business_id):
+    """{business_id, name, size, content_type} → {upload_id, chunk_size}."""
+    business = _views().get_authorized_business(request, business_id)
+    d = request.data if isinstance(request.data, dict) else {}
+    account, err = _account_for(request, business, d.get("business_id"))
+    if err:
+        return err
+    try:
+        size = int(d.get("size") or 0)
+    except (TypeError, ValueError):
+        size = 0
+    name = os.path.basename(str(d.get("name") or "file"))[:150] or "file"
+    if size <= 0:
+        return Response({"error": "That file is empty."}, status=status.HTTP_400_BAD_REQUEST)
+    if size > MAX_UPLOAD:
+        return Response({"error": f"{name} is {size / 1048576:.1f} MB — over 24 MB has to be compressed first."},
+                        status=status.HTTP_400_BAD_REQUEST)
+    _sweep_uploads()
+    upload_id = uuid.uuid4().hex
+    folder = os.path.join(UPLOAD_ROOT, upload_id)
+    os.makedirs(folder, exist_ok=True)
+    _write_json(os.path.join(folder, "meta.json"), {
+        "user_id": request.user.pk, "account_id": account.pk, "name": name, "size": size,
+        "content_type": str(d.get("content_type") or "application/octet-stream")[:100]})
+    return Response({"upload_id": upload_id, "chunk_size": CHUNK_MAX // 2})
+
+
+@api_view(["POST"])
+@parser_classes([MultiPartParser, FormParser])
+def claim_upload_chunk(request, business_id, upload_id):
+    """multipart {index, file} — one piece of the file."""
+    _views().get_authorized_business(request, business_id)
+    folder, meta = _own_upload(request, upload_id)
+    if not folder:
+        return meta
+    try:
+        index = int(request.data.get("index"))
+    except (TypeError, ValueError):
+        return Response({"error": "Which piece is this?"}, status=status.HTTP_400_BAD_REQUEST)
+    piece = request.FILES.get("file")
+    if not piece or index < 0 or index > 10_000 or piece.size > CHUNK_MAX:
+        return Response({"error": "That piece is missing or too big."}, status=status.HTTP_400_BAD_REQUEST)
+    path = os.path.join(folder, f"part-{index:05d}")
+    with open(path + ".tmp", "wb") as fh:
+        for block in piece.chunks():
+            fh.write(block)
+    os.replace(path + ".tmp", path)
+    return Response({"index": index, "size": piece.size})
+
+
+def _send_upload(folder, meta, parts):
+    """In the background: join the pieces and store the file with Meesho."""
+    from django.db import connection
+    status_path = os.path.join(folder, "status.json")
+    try:
+        data = b"".join(open(os.path.join(folder, f"part-{i:05d}"), "rb").read() for i in range(parts))
+        if len(data) != meta["size"]:
+            raise TicketRefused(f"Only {len(data)} of {meta['size']} bytes arrived — add the file again.", "incomplete")
+        account = MeeshoAccount.objects.select_related("business").get(pk=meta["account_id"])
+        url = upload(account, meta["name"], data, meta["content_type"])
+        _write_json(status_path, {"state": "done", "url": url, "name": meta["name"], "size": meta["size"]})
+    except TicketRefused as e:
+        _write_json(status_path, {"state": "error", "error": str(e)})
+    except Exception as e:                                         # noqa: BLE001 — told to the page, never lost
+        _write_json(status_path, {"state": "error", "error": f"Sending it to Meesho failed ({e.__class__.__name__}) — try again."})
+    finally:
+        for i in range(parts):
+            try:
+                os.remove(os.path.join(folder, f"part-{i:05d}"))
+            except OSError:
+                pass
+        if threading.current_thread() is not threading.main_thread():
+            connection.close()                                     # this thread's own connection
+
+
+def _in_background(fn, *args):
+    threading.Thread(target=fn, args=args, daemon=True).start()
+
+
+@api_view(["POST"])
+def claim_upload_finish(request, business_id, upload_id):
+    """{parts} — every piece is here: send the file to Meesho (in the background). → {state}."""
+    _views().get_authorized_business(request, business_id)
+    folder, meta = _own_upload(request, upload_id)
+    if not folder:
+        return meta
+    try:
+        parts = int((request.data or {}).get("parts"))
+    except (TypeError, ValueError):
+        return Response({"error": "How many pieces?"}, status=status.HTTP_400_BAD_REQUEST)
+    missing = [i for i in range(parts) if not os.path.exists(os.path.join(folder, f"part-{i:05d}"))]
+    if parts <= 0 or missing:
+        return Response({"error": f"{len(missing)} piece(s) didn't arrive — try again.", "missing": missing[:50]},
+                        status=status.HTTP_400_BAD_REQUEST)
+    status_path = os.path.join(folder, "status.json")
+    if (_read_json(status_path) or {}).get("state") in ("sending", "done"):
+        return Response(_read_json(status_path), status=status.HTTP_202_ACCEPTED)
+    _write_json(status_path, {"state": "sending"})
+    _in_background(_send_upload, folder, meta, parts)
+    return Response({"state": "sending"}, status=status.HTTP_202_ACCEPTED)
+
+
+@api_view(["GET"])
+def claim_upload_status(request, business_id, upload_id):
+    """{state: sending | done (url) | error (error)}."""
+    _views().get_authorized_business(request, business_id)
+    folder, meta = _own_upload(request, upload_id)
+    if not folder:
+        return meta
+    return Response(_read_json(os.path.join(folder, "status.json")) or {"state": "waiting"})
 
 
 @api_view(["GET", "POST"])
