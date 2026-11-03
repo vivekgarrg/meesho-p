@@ -747,6 +747,7 @@ MAX_ATTEMPTS = 6
 RETRY_IN = [60, 300, 900, 1800, 3600]           # after each failed try that may pass
 FILES_WAIT = 30                                  # the page is still sending files
 FILES_GIVE_UP = 6 * 3600                         # …for this long, at most
+FILES_STALLED = 20 * 60                          # no new piece for this long: the page stopped sending
 MEESHO_VIDEO_MAX = 22 * 1024 * 1024              # Meesho's own cap
 VIDEO_TARGET = int(21.5 * 1024 * 1024)
 POD_MAX = 15 * 1024 * 1024
@@ -795,6 +796,15 @@ def _joined(upload_id):
     if not meta:
         raise TicketRefused("A file of this claim was lost on the server — raise the claim again with it.", "file_lost")
     if not st or st.get("state") != "complete":
+        # Still arriving — unless nothing has come for a while: the page was closed (or the phone slept) mid-way.
+        try:
+            last = max(os.path.getmtime(os.path.join(folder, n)) for n in os.listdir(folder))
+        except (OSError, ValueError):
+            last = time.time()
+        if time.time() - last > FILES_STALLED:
+            raise TicketRefused(f"{meta['name']} stopped arriving {int((time.time() - last) // 60)} minutes ago — the page was "
+                                f"closed (or the phone slept) before it finished. Raise the claim again with the file.",
+                                "files_stalled")
         raise _Wait()
     parts = int(st.get("parts") or 0)
     data = b"".join(open(os.path.join(folder, f"part-{i:05d}"), "rb").read() for i in range(parts))

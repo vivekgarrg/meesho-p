@@ -311,3 +311,18 @@ class ReturnClaimTests(TestCase):
                 mock.patch.object(rc.requests, "post", return_value=Res(200, SCHEMA)):
             self.assertEqual(rc.process_claim(claim_id, 1)["next"], "retry")
         self.assertEqual(MeeshoReturnClaim.objects.get().status, "RETRYING")
+
+    def test_a_file_that_stopped_arriving_fails_the_claim_instead_of_waiting_hours(self):
+        import time as _t
+        video = self.upload_file("unbox.mp4", b"v" * 100, "video/mp4", finish=False)
+        folder = rc._upload_dir(video)
+        old = _t.time() - rc.FILES_STALLED - 60
+        for name in os.listdir(folder):
+            os.utime(os.path.join(folder, name), (old, old))
+        values = {"sub_order_number": "341668276271146947_1", "packet_state": "intact", "ticket_desc": "x"}
+        with mock.patch.object(rc.requests, "post", return_value=Res(200, SCHEMA)):
+            r, done = self.raise_claim(values, files={"product_openingvideo_link": [video]})
+        self.assertEqual(done, {"next": "failed"})
+        claim = MeeshoReturnClaim.objects.get()
+        self.assertEqual((claim.status, claim.error_code), ("FAILED", "files_stalled"))
+        self.assertIn("stopped arriving", claim.message)
