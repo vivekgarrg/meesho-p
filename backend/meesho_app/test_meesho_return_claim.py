@@ -60,6 +60,22 @@ class ReturnClaimTests(TestCase):
         self.c = APIClient()
         self.c.force_authenticate(self.user)
         self.api = f"/api/business/{self.rudam.id}/return-claim/"
+        import tempfile
+        root = mock.patch.object(rc, "UPLOAD_ROOT", tempfile.mkdtemp())
+        root.start()
+        self.addCleanup(root.stop)
+        q = mock.patch("meesho_app.meesho_sync.enqueue")
+        self.enqueue = q.start()
+        self.addCleanup(q.stop)
+
+    def raise_claim(self, values, files=None, **extra):
+        """Queue a claim from the page, then let the worker raise it."""
+        r = self.c.post(self.api, {"business_id": self.cosmify.id, "return_id": self.ret.id, "sub_category_id": "2",
+                                   "sub_category": "Items missing", "values": values, "files": files or {}, "email": "a@b.co",
+                                   **extra}, format="json")
+        if r.status_code != 202:
+            return r, None
+        return r, rc.process_claim(r.data["claim"]["id"])
 
     def test_the_schema_is_read_leniently(self):
         f = rc.parse_fields(SCHEMA)
@@ -114,9 +130,10 @@ class ReturnClaimTests(TestCase):
         values = {"sub_order_number": "341668276271146947_1", "packet_state": "tampered",
                   "product_openingvideo_link": [GCS], "ticket_desc": "items missing from this return"}
         with mock.patch.object(rc.requests, "post", side_effect=post):
-            r = self.c.post(self.api, {"business_id": self.cosmify.id, "return_id": self.ret.id, "sub_category_id": "2",
-                                       "sub_category": "Items missing", "values": values, "email": "a@b.co"}, format="json")
-        self.assertEqual(r.status_code, 201, r.data)
+            r, done = self.raise_claim(values)
+        self.assertEqual((r.status_code, r.data["claim"]["status"]), (202, "QUEUED"), r.data)   # back at once: the worker raises it
+        self.assertEqual(self.enqueue.call_args.args, ("MeeshoClaimJob", [r.data["claim"]["id"], 1]))
+        self.assertEqual(done, {"next": "done"})
         url, headers, body = sent[-1]
         self.assertTrue(url.endswith("/api/experience/support/createTicket"))
         self.assertEqual(headers["identifier"], "cosm1")                                   # Cosmify's account, not Rudam's
@@ -131,7 +148,10 @@ class ReturnClaimTests(TestCase):
         self.assertEqual(by_key["attachments"]["value"], [])                                  # every field the form has
         self.assertNotIn("issue", by_key)                                                     # the type picker isn't a field
         self.assertNotIn("description_text_2", by_key)                                        # nor is a note
-        self.assertEqual(r.data["claim"]["ticket"], "TKT-77")
+        claim = MeeshoReturnClaim.objects.get()
+        self.assertEqual((claim.status, claim.ticket, claim.values["packet_state"], claim.email), ("OK", "TKT-77", "tampered", "a@b.co"))
+        self.assertEqual(claim.return_snapshot["awb_number"], "R2718300838FPL")                  # kept for analytics
+        self.assertEqual([e["step"] for e in claim.events], ["queued", "raised"])
         self.ret.refresh_from_db()
         self.assertEqual((self.ret.claim_status, self.ret.claim_reference), ("RAISED", "TKT-77"))
 
@@ -148,12 +168,14 @@ class ReturnClaimTests(TestCase):
         def post(url, **kw):
             return Res(200, SCHEMA) if url.endswith("subcategorySchema") else Res(400, {"message": "Sub order not eligible"})
         values = {"sub_order_number": "341668276271146947_1", "packet_state": "intact", "product_openingvideo_link": [GCS], "ticket_desc": "x"}
-        with mock.patch.object(rc.requests, "post", side_effect=post):
-            r = self.c.post(self.api, {"business_id": self.cosmify.id, "return_id": self.ret.id, "sub_category_id": "2",
-                                       "values": values, "email": "a@b.co"}, format="json")
-        self.assertEqual(r.status_code, 502)
-        self.assertIn("Sub order not eligible", r.data["error"])
-        self.assertEqual(MeeshoReturnClaim.objects.get().status, "FAILED")
+        with mock.patch.object(rc.requests, "post", side_effect=post), mock.patch("meesho_app.notify.channels", return_value=["telegram"]), \
+                mock.patch("meesho_app.notify.send") as told:
+            r, done = self.raise_claim(values)
+        self.assertEqual(done, {"next": "failed"})                                             # Meesho said no: not tried again
+        claim = MeeshoReturnClaim.objects.get()
+        self.assertIn("Sub order not eligible", claim.message)
+        self.assertEqual(claim.status, "FAILED")
+        self.assertIn("341668276271146947_1", told.call_args.args[1])                         # and you're told
         self.ret.refresh_from_db()
         self.assertEqual(self.ret.claim_status, "UNREVIEWED")
 
@@ -219,3 +241,73 @@ class ReturnClaimTests(TestCase):
         self.assertEqual(self.c.get(f"{self.api}upload/../../etc/").status_code, 404)
         too_big = self.c.post(f"{self.api}upload/start/", {"business_id": self.cosmify.id, "name": "v.mp4", "size": 30 * 1048576}, format="json")
         self.assertEqual(too_big.status_code, 400)
+
+    def test_a_return_already_claimed_is_a_duplicate(self):
+        values = {"sub_order_number": "341668276271146947_1", "packet_state": "intact", "product_openingvideo_link": [GCS], "ticket_desc": "x"}
+        with mock.patch.object(rc.requests, "post", side_effect=lambda url, **kw: Res(200, SCHEMA) if url.endswith("subcategorySchema")
+                               else Res(200, {"data": {"ticket_id": "TKT-1"}})):
+            self.raise_claim(values)
+            r, _ = self.raise_claim(values)
+        self.assertEqual((r.status_code, r.data["code"]), (409, "duplicate"))
+        self.assertIn("TKT-1", r.data["error"])
+        found = self.c.get(f"{self.api}lookup/", {"code": "R2718300838FPL"}).data["return"]
+        self.assertIn("TKT-1", found["duplicate"]["why"])
+        # A claim raised on the panel and recorded on Returns & Claims counts too.
+        ReturnDelivery.objects.create(business=self.cosmify, suborder_no="9_1", awb_number="AWB9", claim_status="RAISED",
+                                      claim_reference="T-99")
+        self.assertIn("T-99", self.c.get(f"{self.api}lookup/", {"code": "AWB9"}).data["return"]["duplicate"]["why"])
+
+    def upload_file(self, name, data, ctype, finish=True):
+        r = self.c.post(f"{self.api}upload/start/", {"business_id": self.cosmify.id, "name": name, "size": len(data),
+                                                     "content_type": ctype}, format="json")
+        uid = r.data["upload_id"]
+        self.c.post(f"{self.api}upload/{uid}/chunk/", {"index": 0, "file": SimpleUploadedFile("b", data)}, format="multipart")
+        if finish:
+            self.assertEqual(self.c.post(f"{self.api}upload/{uid}/finish/", {"parts": 1, "send": False}, format="json").data["state"], "complete")
+        return uid
+
+    def test_files_go_up_compressed_with_the_pod_attached_in_the_background(self):
+        self.ret.proof_of_delivery = "https://pod.example.com/x.pdf"
+        self.ret.save()
+        video = self.upload_file("unbox.mp4", b"v" * 3000, "video/mp4")
+        photo = self.upload_file("waybill.jpg", b"\xff\xd8\xff photo", "image/jpeg")
+        sent, ticket = [], {}
+
+        def fake_upload(account, name, data, ctype):
+            sent.append((name, len(data), ctype))
+            return f"https://storage.googleapis.com/x/{name}"
+
+        def post(url, json=None, **kw):
+            if url.endswith("subcategorySchema"):
+                return Res(200, SCHEMA)
+            ticket.update(json)
+            return Res(200, {"data": {"ticket_id": "TKT-5"}})
+        pod = mock.Mock(status_code=200, headers={"content-type": "application/pdf"})
+        pod.raw.read.return_value = b"%PDF-1.4 pod"
+        values = {"sub_order_number": "341668276271146947_1", "packet_state": "intact", "ticket_desc": "2 items missing"}
+        with mock.patch.object(rc, "upload", side_effect=fake_upload), mock.patch.object(rc.requests, "post", side_effect=post), \
+                mock.patch.object(rc.requests, "get", return_value=pod), mock.patch.object(rc, "MEESHO_VIDEO_MAX", 1000), \
+                mock.patch.object(rc, "compress_video", return_value=(b"small", "unbox.mp4")) as squeeze:
+            r, done = self.raise_claim(values, files={"product_openingvideo_link": [video], "product_reverse_way_bill_link": [photo]})
+        self.assertEqual(done, {"next": "done"}, MeeshoReturnClaim.objects.get().message)
+        squeeze.assert_called_once()                                                          # over the cap: compressed
+        self.assertEqual(sent, [("unbox.mp4", 5, "video/mp4"), ("waybill.jpg", 9, "image/jpeg"), ("proof-of-delivery.pdf", 12, "application/pdf")])
+        by_key = {d["key"]: d["value"] for d in ticket["ticket_details"]}
+        self.assertEqual(by_key["attachments"], ["https://storage.googleapis.com/x/proof-of-delivery.pdf"])   # the POD, by itself
+        self.assertEqual(by_key["product_openingvideo_link"], ["https://storage.googleapis.com/x/unbox.mp4"])
+        claim = MeeshoReturnClaim.objects.get()
+        self.assertEqual((claim.files["product_openingvideo_link"][0]["size"], claim.files["product_openingvideo_link"][0]["sent_size"]), (3000, 5))
+        self.assertTrue(claim.pod_meesho_url.endswith("proof-of-delivery.pdf"))
+
+    def test_it_waits_for_files_still_on_their_way_and_retries_when_meesho_is_busy(self):
+        video = self.upload_file("unbox.mp4", b"v" * 100, "video/mp4", finish=False)
+        values = {"sub_order_number": "341668276271146947_1", "packet_state": "intact", "ticket_desc": "x"}
+        with mock.patch.object(rc.requests, "post", return_value=Res(200, SCHEMA)):
+            r, done = self.raise_claim(values, files={"product_openingvideo_link": [video]})
+        self.assertEqual(done, {"next": "wait", "in": rc.FILES_WAIT})
+        self.c.post(f"{self.api}upload/{video}/finish/", {"parts": 1, "send": False}, format="json")
+        claim_id = r.data["claim"]["id"]
+        with mock.patch.object(rc, "upload", side_effect=rc.TicketRefused("busy", "meesho_refused", meesho_http=503)), \
+                mock.patch.object(rc.requests, "post", return_value=Res(200, SCHEMA)):
+            self.assertEqual(rc.process_claim(claim_id, 1)["next"], "retry")
+        self.assertEqual(MeeshoReturnClaim.objects.get().status, "RETRYING")

@@ -3613,10 +3613,15 @@ class MeeshoReturnClaim(models.Model):
     unpacking video uploaded to it, and the ticket Meesho answered with — or
     why it refused. Raised on the return's own business's Meesho account.
     """
-    STATUS_SENDING = "SENDING"
-    STATUS_OK      = "OK"
-    STATUS_FAILED  = "FAILED"
-    STATUS_CHOICES = [(STATUS_SENDING, "Sending"), (STATUS_OK, "Raised"), (STATUS_FAILED, "Refused")]
+    STATUS_QUEUED   = "QUEUED"       # waiting for its files / for the worker
+    STATUS_WORKING  = "WORKING"      # the worker is compressing, uploading, raising
+    STATUS_RETRYING = "RETRYING"     # a try failed on something passing; tried again shortly
+    STATUS_SENDING  = "SENDING"      # (raised straight from the page — before the worker did it)
+    STATUS_OK       = "OK"
+    STATUS_FAILED   = "FAILED"
+    STATUS_CHOICES = [(STATUS_QUEUED, "Queued"), (STATUS_WORKING, "Working"), (STATUS_RETRYING, "Retrying"),
+                      (STATUS_SENDING, "Sending"), (STATUS_OK, "Raised"), (STATUS_FAILED, "Failed")]
+    ACTIVE_STATUSES = (STATUS_QUEUED, STATUS_WORKING, STATUS_RETRYING, STATUS_SENDING, STATUS_OK)
 
     business = models.ForeignKey("accounts.Business", on_delete=models.CASCADE, related_name="meesho_return_claims")
     return_delivery = models.ForeignKey(ReturnDelivery, on_delete=models.SET_NULL, null=True, blank=True,
@@ -3628,10 +3633,28 @@ class MeeshoReturnClaim(models.Model):
     sub_category = models.CharField(max_length=200, blank=True)
     description = models.TextField(blank=True)
     details = models.JSONField(default=list, blank=True, help_text="The ticket_details sent to Meesho")
-    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default=STATUS_SENDING, db_index=True)
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default=STATUS_QUEUED, db_index=True)
     ticket = models.CharField(max_length=100, blank=True)
     message = models.TextField(blank=True)
     answer = models.JSONField(null=True, blank=True)
+    # Everything about the claim, kept for analytics: what was filled in, every file
+    # (name, sizes before / after compressing, Meesho's link), the return as it was,
+    # the POD attached, and each step the worker took.
+    values = models.JSONField(default=dict, blank=True, help_text="The form's values, as filled in")
+    labels = models.JSONField(default=dict, blank=True, help_text="Drop-down choices' labels")
+    files = models.JSONField(default=dict, blank=True,
+                             help_text="{field key: [{upload_id, name, content_type, size, sent_size, url}]}")
+    return_snapshot = models.JSONField(default=dict, blank=True, help_text="The return's details when the claim was made")
+    email = models.CharField(max_length=200, blank=True)
+    callback_number = models.CharField(max_length=20, blank=True)
+    packet_state = models.CharField(max_length=40, blank=True)
+    pod_url = models.TextField(blank=True, help_text="The return's proof of delivery, as the courier gave it")
+    pod_meesho_url = models.TextField(blank=True, help_text="The POD as attached to the claim on Meesho")
+    attempts = models.PositiveIntegerField(default=0)
+    events = models.JSONField(default=list, blank=True, help_text="[{at, step, note}] — what the worker did")
+    error_code = models.CharField(max_length=40, blank=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
     created_by = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True, blank=True,
                                    related_name="meesho_return_claims")
     created_at = models.DateTimeField(auto_now_add=True)

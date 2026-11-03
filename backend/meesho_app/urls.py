@@ -200,6 +200,7 @@ urlpatterns = [
     path("meesho-orders/linking/<int:link_id>/relink/", meesho_linking.link_relink,      name="meesho_link_relink"),
     path("return-claim/",          meesho_return_claim.claims,        name="return_claims"),
     path("return-claim/lookup/",   meesho_return_claim.claim_lookup,  name="return_claim_lookup"),
+    path("return-claim/<int:claim_id>/retry/", meesho_return_claim.claim_retry, name="return_claim_retry"),
     path("return-claim/options/",  meesho_return_claim.claim_options, name="return_claim_options"),
     path("return-claim/validate/", meesho_return_claim.claim_validate, name="return_claim_validate"),
     path("return-claim/upload/",   meesho_return_claim.claim_upload,  name="return_claim_upload"),

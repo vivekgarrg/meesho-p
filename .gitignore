@@ -81,3 +81,6 @@ dump.rdb
 
 # Pasted Meesho requests carry live session cookies — never commit them.
 return_claim.py
+
+# Return-claim files on their way to Meesho
+backend/claim_uploads/

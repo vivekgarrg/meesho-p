@@ -27,6 +27,7 @@ import time
 import uuid
 
 import requests
+from django.conf import settings
 from django.core.cache import cache
 from django.db.models import Q
 from django.utils import timezone
@@ -344,8 +345,30 @@ def _refused(e):
 def _claim_json(c):
     return {"id": c.pk, "business_id": c.business_id, "business_name": c.business.name, "sub_order_no": c.sub_order_no,
             "awb": c.awb_number, "packet_id": c.packet_id, "sub_category": c.sub_category, "status": c.status,
-            "ticket": c.ticket, "message": c.message, "at": c.created_at,
+            "ticket": c.ticket, "message": c.message, "at": c.created_at, "attempts": c.attempts,
+            "finished_at": c.finished_at, "pod_attached": bool(c.pod_meesho_url),
             "by": c.created_by.username if c.created_by else None}
+
+
+def duplicate_of(business_id, sub_order, ret=None):
+    """
+    Why a claim for this return would be a duplicate: one raised (or on its way)
+    from here, or — as Returns & Claims records it — one raised on the panel.
+    Returns {"why", "claim"?} or None. A claim that failed doesn't count.
+    """
+    c = (MeeshoReturnClaim.objects.filter(business_id=business_id, sub_order_no=sub_order,
+                                          status__in=MeeshoReturnClaim.ACTIVE_STATUSES)
+         .select_related("business", "created_by").order_by("-created_at").first())
+    if c:
+        when = timezone.localtime(c.created_at).strftime("%-d %b")
+        what = "raised" if c.status == MeeshoReturnClaim.STATUS_OK else "already being raised"
+        return {"why": f"A claim for this return was {what} on {when}" + (f" — ticket {c.ticket}" if c.ticket else "")
+                       + (f" ({c.sub_category})" if c.sub_category else "") + ".", "claim": _claim_json(c)}
+    if ret is not None and ret.claim_status in (ReturnDelivery.CLAIM_RAISED, ReturnDelivery.CLAIM_APPROVED,
+                                                ReturnDelivery.CLAIM_REJECTED):
+        return {"why": f"Returns & Claims says a claim was already raised for this return"
+                       + (f" — {ret.claim_reference}" if ret.claim_reference else "") + "."}
+    return None
 
 
 def _return_json(r, names):
@@ -367,6 +390,8 @@ def _return_json(r, names):
         "claim_status": r.claim_status, "claim_reference": r.claim_reference,
         "image_url": photo, "image_fallback_url": fallback,
         "claims": [_claim_json(c) for c in claims[:10]],
+        "duplicate": duplicate_of(r.business_id, r.suborder_no, r),
+        "pod_url": r.proof_of_delivery or "",
         # Flagged damaged / tampered on Return Scan — the claim starts from that.
         "damaged": bool(scan), "damage_note": scan.damage_note if scan else "",
     }
@@ -461,8 +486,11 @@ def claim_upload(request, business_id):
 # asks until it's there. Kept on disk, where every gunicorn worker sees it.
 
 CHUNK_MAX = 4 * 1024 * 1024
-UPLOAD_ROOT = os.path.join(tempfile.gettempdir(), "meesho-claim-uploads")
-UPLOAD_KEEP_SECONDS = 24 * 3600
+# Kept beside the app (not /tmp), where the Sidekiq worker's Django command finds them too.
+UPLOAD_ROOT = os.environ.get("MEESHO_CLAIM_UPLOADS") or os.path.join(str(settings.BASE_DIR), "claim_uploads")
+UPLOAD_KEEP_SECONDS = 3 * 24 * 3600
+# A phone's unpacking video, before it is compressed on the server.
+MAX_RAW_VIDEO = 700 * 1024 * 1024
 
 
 def _upload_dir(upload_id):
@@ -521,8 +549,10 @@ def claim_upload_start(request, business_id):
     name = os.path.basename(str(d.get("name") or "file"))[:150] or "file"
     if size <= 0:
         return Response({"error": "That file is empty."}, status=status.HTTP_400_BAD_REQUEST)
-    if size > MAX_UPLOAD:
-        return Response({"error": f"{name} is {size / 1048576:.1f} MB — over 24 MB has to be compressed first."},
+    content_type = str(d.get("content_type") or "application/octet-stream")[:100]
+    limit = MAX_RAW_VIDEO if content_type.startswith("video/") else MAX_UPLOAD
+    if size > limit:
+        return Response({"error": f"{name} is {size / 1048576:.0f} MB — at most {limit // 1048576} MB."},
                         status=status.HTTP_400_BAD_REQUEST)
     _sweep_uploads()
     upload_id = uuid.uuid4().hex
@@ -530,7 +560,7 @@ def claim_upload_start(request, business_id):
     os.makedirs(folder, exist_ok=True)
     _write_json(os.path.join(folder, "meta.json"), {
         "user_id": request.user.pk, "account_id": account.pk, "name": name, "size": size,
-        "content_type": str(d.get("content_type") or "application/octet-stream")[:100]})
+        "content_type": content_type})
     return Response({"upload_id": upload_id, "chunk_size": CHUNK_MAX // 2})
 
 
@@ -602,8 +632,11 @@ def claim_upload_finish(request, business_id, upload_id):
         return Response({"error": f"{len(missing)} piece(s) didn't arrive — try again.", "missing": missing[:50]},
                         status=status.HTTP_400_BAD_REQUEST)
     status_path = os.path.join(folder, "status.json")
-    if (_read_json(status_path) or {}).get("state") in ("sending", "done"):
+    if (_read_json(status_path) or {}).get("state") in ("sending", "done", "complete"):
         return Response(_read_json(status_path), status=status.HTTP_202_ACCEPTED)
+    if (request.data or {}).get("send") is False:                  # for a queued claim: the worker sends it
+        _write_json(status_path, {"state": "complete", "parts": parts})
+        return Response({"state": "complete"}, status=status.HTTP_202_ACCEPTED)
     _write_json(status_path, {"state": "sending"})
     _in_background(_send_upload, folder, meta, parts)
     return Response({"state": "sending"}, status=status.HTTP_202_ACCEPTED)
@@ -644,6 +677,7 @@ def claims(request, business_id):
         return err
     sub = str(d.get("sub_category_id") or "").strip()
     values = d.get("values") if isinstance(d.get("values"), dict) else {}
+    files = d.get("files") if isinstance(d.get("files"), dict) else {}
     email = str(d.get("email") or "").strip()
     if not sub:
         return Response({"error": "Choose what the claim is for."}, status=status.HTTP_400_BAD_REQUEST)
@@ -653,34 +687,315 @@ def claims(request, business_id):
         fields = schema(account, sub) or KNOWN_FIELDS
     except TicketRefused as e:
         return _refused(e)
-    missing = [f["label"] for f in fields if f["required"] and not values.get(f["key"])]
+    # Files: links already with Meesho (in values), or uploads to this server (in files) the worker sends.
+    uploads = {}
+    for key, ids in files.items():
+        ids = [i for i in (ids if isinstance(ids, list) else [ids]) if _upload_dir(i)]
+        metas = [(i, _read_json(os.path.join(_upload_dir(i), "meta.json"))) for i in ids]
+        if any(not m or m.get("user_id") != request.user.pk for _, m in metas):
+            return Response({"error": "A file isn't here any more — add it again."}, status=status.HTTP_400_BAD_REQUEST)
+        uploads[str(key)] = [{"upload_id": i, "name": m["name"], "content_type": m["content_type"], "size": m["size"]} for i, m in metas]
+    missing = [f["label"] for f in fields if f["required"] and not f.get("info")
+               and not values.get(f["key"]) and not uploads.get(f["key"])]
     if missing:
         return Response({"error": "Fill in: " + ", ".join(missing) + ".", "code": "missing", "missing": missing},
                         status=status.HTTP_400_BAD_REQUEST)
     sub_order = str(values.get("sub_order_number") or "").strip()
     ret = ReturnDelivery.objects.filter(pk=d.get("return_id"), business=account.business).first() if d.get("return_id") else None
-    details = ticket_details(fields, values, d.get("labels") or {})
+    if ret is None and sub_order:
+        ret = ReturnDelivery.objects.filter(business=account.business, suborder_no=sub_order).first()
+    dup = duplicate_of(account.business_id, sub_order, ret)
+    if dup:
+        return Response({"error": dup["why"], "code": "duplicate", "duplicate": dup}, status=status.HTTP_409_CONFLICT)
     claim = MeeshoReturnClaim.objects.create(
         business=account.business, return_delivery=ret, sub_order_no=sub_order[:100],
         awb_number=str(values.get("awb_number") or "")[:100], packet_id=str(values.get("barcode_id") or "")[:150],
         sub_category_id=sub[:20], sub_category=str(d.get("sub_category") or "")[:200],
-        description=str(values.get("ticket_desc") or ""), details=details, created_by=request.user)
+        description=str(values.get("ticket_desc") or ""), created_by=request.user,
+        values=values, labels=d.get("labels") or {}, files=uploads, email=email[:200],
+        callback_number=str(values.get("callback_number") or "")[:20], packet_state=str(values.get("packet_state") or "")[:40],
+        return_snapshot=_snapshot(ret), pod_url=(ret.proof_of_delivery if ret else "") or "",
+        status=MeeshoReturnClaim.STATUS_QUEUED, message="Queued — raised in the background.",
+        events=[_event("queued", f"by {request.user.username}")])
+    queued = queue_claim(claim)
+    return Response({"claim": _claim_json(claim), "queued": queued}, status=status.HTTP_202_ACCEPTED)
+
+
+@api_view(["POST"])
+def claim_retry(request, business_id, claim_id):
+    """A claim that failed: try it again (its files, if any, are still here)."""
+    business = _views().get_authorized_business(request, business_id)
+    ids = [b.pk for b in _desk(request, business)]
+    c = MeeshoReturnClaim.objects.filter(pk=claim_id, business_id__in=ids).select_related("business", "created_by").first()
+    if not c:
+        return Response({"error": "No such claim."}, status=status.HTTP_404_NOT_FOUND)
+    if c.status != MeeshoReturnClaim.STATUS_FAILED:
+        return Response({"error": "Only a failed claim can be tried again."}, status=status.HTTP_400_BAD_REQUEST)
+    dup = duplicate_of(c.business_id, c.sub_order_no)
+    if dup:
+        return Response({"error": dup["why"], "code": "duplicate"}, status=status.HTTP_409_CONFLICT)
+    c.status, c.message, c.error_code, c.attempts = MeeshoReturnClaim.STATUS_QUEUED, "Queued again.", "", 0
+    c.events = (c.events or []) + [_event("retry", f"by {request.user.username}")]
+    c.save(update_fields=["status", "message", "error_code", "attempts", "events"])
+    return Response({"claim": _claim_json(c), "queued": queue_claim(c)}, status=status.HTTP_202_ACCEPTED)
+
+
+# ── The worker's side: raising a queued claim ───────────────────────────────
+
+CLAIM_JOB = "MeeshoClaimJob"
+MAX_ATTEMPTS = 6
+RETRY_IN = [60, 300, 900, 1800, 3600]           # after each failed try that may pass
+FILES_WAIT = 30                                  # the page is still sending files
+FILES_GIVE_UP = 6 * 3600                         # …for this long, at most
+MEESHO_VIDEO_MAX = 22 * 1024 * 1024              # Meesho's own cap
+VIDEO_TARGET = int(21.5 * 1024 * 1024)
+POD_MAX = 15 * 1024 * 1024
+
+
+def _event(step, note=""):
+    return {"at": timezone.now().isoformat(), "step": step, "note": str(note)[:500]}
+
+
+def _snapshot(ret):
+    if not ret:
+        return {}
+    keep = ("suborder_no", "order_no", "awb_number", "packet_id", "sku", "product_name", "variation", "qty", "category",
+            "dispatch_date", "return_created_date", "delivered_date", "type_of_return", "sub_type", "courier_partner",
+            "return_reason", "detailed_return_reason", "proof_of_delivery", "stage", "claim_status")
+    return {k: (str(getattr(ret, k)) if getattr(ret, k, None) is not None else None) for k in keep}
+
+
+def queue_claim(claim):
+    """Hand the claim to the Sidekiq worker. False when the job queue can't be reached (it stays queued; Retry)."""
+    from . import meesho_sync
     try:
-        answer = create_ticket(account, sub, details, email)
+        meesho_sync.enqueue(CLAIM_JOB, [claim.pk, 1])
+        return True
+    except Exception as exc:                                       # noqa: BLE001
+        claim.status, claim.error_code = MeeshoReturnClaim.STATUS_FAILED, "no_queue"
+        claim.message = f"The background worker's queue (Redis) can't be reached — press Retry once it's back. ({exc.__class__.__name__})"
+        claim.events = (claim.events or []) + [_event("failed", claim.message)]
+        claim.save(update_fields=["status", "error_code", "message", "events"])
+        return False
+
+
+class _Wait(Exception):
+    pass
+
+
+class _Passing(Exception):
+    """Something that may work next time (Meesho busy or unreachable, a network blip)."""
+
+
+def _joined(upload_id):
+    """(bytes, meta) of an upload whose every piece is here, or raise _Wait."""
+    folder = _upload_dir(upload_id)
+    meta = _read_json(os.path.join(folder, "meta.json")) if folder else None
+    st = _read_json(os.path.join(folder, "status.json")) if folder else None
+    if not meta:
+        raise TicketRefused("A file of this claim was lost on the server — raise the claim again with it.", "file_lost")
+    if not st or st.get("state") != "complete":
+        raise _Wait()
+    parts = int(st.get("parts") or 0)
+    data = b"".join(open(os.path.join(folder, f"part-{i:05d}"), "rb").read() for i in range(parts))
+    if len(data) != meta["size"]:
+        raise TicketRefused(f"{meta['name']}: only {len(data)} of {meta['size']} bytes arrived — raise the claim again.", "file_lost")
+    return data, meta
+
+
+def compress_video(data, name):
+    """Shrink a video under Meesho's 22 MB cap with ffmpeg: (bytes, new name)."""
+    import subprocess
+    ffmpeg, ffprobe = shutil.which("ffmpeg"), shutil.which("ffprobe")
+    if not ffmpeg:
+        raise TicketRefused("The video is over 22 MB and this server has no ffmpeg to compress it — install ffmpeg "
+                            "(apt-get install ffmpeg), then press Retry.", "no_ffmpeg")
+    with tempfile.TemporaryDirectory() as tmp:
+        src = os.path.join(tmp, "in" + (os.path.splitext(name)[1] or ".mp4"))
+        with open(src, "wb") as fh:
+            fh.write(data)
+        seconds = 60.0
+        if ffprobe:
+            out = subprocess.run([ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", src],
+                                 capture_output=True, text=True, timeout=60)
+            try:
+                seconds = max(1.0, float(out.stdout.strip()))
+            except ValueError:
+                pass
+        kbps = max(250, min(4000, int(VIDEO_TARGET * 8 * 0.92 / seconds / 1000) - 64))
+        for attempt in range(3):
+            dst = os.path.join(tmp, f"out{attempt}.mp4")
+            run = subprocess.run([ffmpeg, "-y", "-v", "error", "-i", src, "-vf", "scale='min(1280,iw)':-2", "-r", "24",
+                                  "-c:v", "libx264", "-preset", "veryfast", "-b:v", f"{kbps}k", "-maxrate", f"{int(kbps * 1.2)}k",
+                                  "-bufsize", f"{kbps * 2}k", "-c:a", "aac", "-b:a", "64k", "-movflags", "+faststart", dst],
+                                 capture_output=True, text=True, timeout=1800)
+            if run.returncode != 0:
+                raise TicketRefused(f"Couldn't compress the video: {(run.stderr or '').strip()[-300:]}", "bad_video")
+            size = os.path.getsize(dst)
+            if size <= VIDEO_TARGET:
+                with open(dst, "rb") as fh:
+                    return fh.read(), os.path.splitext(name)[0] + ".mp4"
+            kbps = max(150, int(kbps * VIDEO_TARGET / size * 0.9))
+    raise TicketRefused("Couldn't get the video under 22 MB — record a shorter one.", "bad_video")
+
+
+def _fetch_pod(url):
+    """The courier's proof of delivery: (bytes, file name, content type), or None."""
+    try:
+        res = requests.get(url, timeout=30, allow_redirects=True, stream=True, headers={"user-agent": "Mozilla/5.0"})
+        if res.status_code != 200:
+            return None
+        data = res.raw.read(POD_MAX + 1, decode_content=True)
+        if not data or len(data) > POD_MAX:
+            return None
+        ctype = (res.headers.get("content-type") or "").split(";")[0].strip().lower()
+        if data[:4] == b"%PDF":
+            ctype = "application/pdf"
+        elif data[:3] == b"\xff\xd8\xff":
+            ctype = "image/jpeg"
+        elif data[:8] == b"\x89PNG\r\n\x1a\n":
+            ctype = "image/png"
+        if ctype not in ("application/pdf", "image/jpeg", "image/png", "image/jpg", "image/webp"):
+            return None                                            # a tracking web page, not a document
+        ext = {"application/pdf": ".pdf", "image/png": ".png", "image/webp": ".webp"}.get(ctype, ".jpg")
+        return data, f"proof-of-delivery{ext}", ctype
+    except requests.RequestException:
+        return None
+
+
+def _passing(e):
+    """Whether a refusal may pass on its own (try again later) — or needs a person."""
+    return e.code in ("meesho_unreachable",) or (e.details.get("meesho_http") or 0) >= 500 or e.details.get("meesho_http") == 429
+
+
+def process_claim(claim_id, attempt=1):
+    """
+    Raise one queued claim: send its files (compressing a big video), attach the
+    return's POD, raise the ticket. Returns {"next": "done" | "wait" | "retry" | "failed", "in": seconds}.
+    Each file sent is remembered, so a retry picks up where the last try stopped.
+    """
+    claim = MeeshoReturnClaim.objects.select_related("business", "return_delivery").filter(pk=claim_id).first()
+    if not claim or claim.status in (MeeshoReturnClaim.STATUS_OK, MeeshoReturnClaim.STATUS_FAILED):
+        return {"next": "done"}
+    now = timezone.now()
+    claim.status, claim.attempts = MeeshoReturnClaim.STATUS_WORKING, max(claim.attempts, attempt)
+    claim.started_at = claim.started_at or now
+    claim.message = "Raising it on Meesho…"
+    claim.save(update_fields=["status", "attempts", "started_at", "message"])
+
+    def save(*fields):
+        claim.save(update_fields=list(fields))
+
+    def note(step, text=""):
+        claim.events = (claim.events or []) + [_event(step, text)]
+        save("events")
+
+    try:
+        account = MeeshoAccount.objects.select_related("business").filter(business=claim.business).first()
+        if not account or account.status != MeeshoAccount.STATUS_ACTIVE:
+            raise TicketRefused(f"{claim.business.name}'s Meesho account isn't connected — log in, then Retry.", "no_session")
+        fields = schema(account, claim.sub_category_id) or KNOWN_FIELDS
+
+        # 1. Every file to Meesho (a big video compressed first). Waits while the page is still sending.
+        values = dict(claim.values or {})
+        for key, items in (claim.files or {}).items():
+            for item in items:
+                if item.get("url"):
+                    continue
+                try:
+                    data, meta = _joined(item["upload_id"])
+                except _Wait:
+                    if (now - claim.created_at).total_seconds() > FILES_GIVE_UP:
+                        raise TicketRefused("The files never finished arriving from the phone — raise the claim again.", "files_missing")
+                    claim.status, claim.message = MeeshoReturnClaim.STATUS_QUEUED, "Waiting for the files to finish sending…"
+                    save("status", "message")
+                    return {"next": "wait", "in": FILES_WAIT}
+                name, ctype = meta["name"], meta["content_type"]
+                if ctype.startswith("video/") and len(data) > MEESHO_VIDEO_MAX:
+                    note("compressing", f"{name} {len(data) / 1048576:.1f} MB")
+                    data, name = compress_video(data, name)
+                    ctype = "video/mp4"
+                item["url"] = upload(account, name, data, ctype)
+                item["sent_size"] = len(data)
+                save("files")
+                note("file sent", f"{key}: {name} {len(data) / 1048576:.1f} MB")
+                shutil.rmtree(_upload_dir(item["upload_id"]), ignore_errors=True)
+        for key, items in (claim.files or {}).items():
+            urls = [i["url"] for i in items if i.get("url")]
+            if urls:
+                prior = values.get(key) if isinstance(values.get(key), list) else []
+                values[key] = prior + [u for u in urls if u not in prior]
+
+        # 2. The return's proof of delivery, in Attachments.
+        if claim.pod_url and not claim.pod_meesho_url and any(f["key"] == "attachments" for f in fields):
+            pod = _fetch_pod(claim.pod_url)
+            if pod:
+                claim.pod_meesho_url = upload(account, pod[1], pod[0], pod[2])
+                save("pod_meesho_url")
+                note("pod attached", claim.pod_meesho_url)
+            elif not any(e.get("step") == "pod skipped" for e in claim.events or []):
+                note("pod skipped", "the POD link isn't a downloadable file")
+        if claim.pod_meesho_url:
+            att = values.get("attachments") if isinstance(values.get("attachments"), list) else []
+            if claim.pod_meesho_url not in att:
+                values["attachments"] = att + [claim.pod_meesho_url]
+
+        # 3. The ticket.
+        details = ticket_details(fields, values, claim.labels or {})
+        claim.details = details
+        save("details")
+        answer = create_ticket(account, claim.sub_category_id, details, claim.email)
     except TicketRefused as e:
-        claim.status, claim.message, claim.answer = MeeshoReturnClaim.STATUS_FAILED, str(e)[:1000], e.details.get("meesho_answer")
-        claim.save(update_fields=["status", "message", "answer"])
-        return Response({"error": str(e), "code": e.code, "claim": _claim_json(claim)}, status=status.HTTP_502_BAD_GATEWAY)
+        retry = _passing(e) and attempt < MAX_ATTEMPTS
+        claim.message, claim.error_code = str(e)[:1000], e.code
+        claim.answer = e.details.get("meesho_answer") or claim.answer
+        claim.status = MeeshoReturnClaim.STATUS_RETRYING if retry else MeeshoReturnClaim.STATUS_FAILED
+        if not retry:
+            claim.finished_at = timezone.now()
+        claim.events = (claim.events or []) + [_event("retrying" if retry else "failed", str(e))]
+        save("message", "error_code", "answer", "status", "finished_at", "events")
+        if not retry:
+            _tell_failed(claim)
+            return {"next": "failed"}
+        return {"next": "retry", "in": RETRY_IN[min(attempt - 1, len(RETRY_IN) - 1)]}
+
     ticket = _ticket_id(answer) or ""
-    claim.status, claim.ticket, claim.answer = MeeshoReturnClaim.STATUS_OK, ticket[:100], _short(answer)
-    claim.message = f"Claim raised on Meesho for {account.business.name}{f' — ticket {ticket}' if ticket else ''}."
-    claim.save(update_fields=["status", "ticket", "answer", "message"])
+    claim.status, claim.ticket, claim.answer, claim.finished_at = MeeshoReturnClaim.STATUS_OK, ticket[:100], _short(answer), timezone.now()
+    claim.message = f"Claim raised on Meesho for {claim.business.name}{f' — ticket {ticket}' if ticket else ''}."
+    claim.events = (claim.events or []) + [_event("raised", ticket)]
+    save("status", "ticket", "answer", "finished_at", "message", "events")
+    ret = claim.return_delivery
     if ret:
         ret.claim_status, ret.claim_raised_at = ReturnDelivery.CLAIM_RAISED, timezone.now()
         ret.claim_reference = (ticket or ret.claim_reference)[:150]
         if not ret.packet_id and claim.packet_id:
             ret.packet_id = claim.packet_id
-        note = f"{timezone.localdate():%d %b}: {claim.sub_category or 'Claim'} raised from the portal" + (f" (ticket {ticket})" if ticket else "")
-        ret.claim_notes = f"{ret.claim_notes}\n{note}".strip()
+        line = f"{timezone.localdate():%d %b}: {claim.sub_category or 'Claim'} raised from the portal" + (f" (ticket {ticket})" if ticket else "")
+        ret.claim_notes = f"{ret.claim_notes}\n{line}".strip()
         ret.save(update_fields=["claim_status", "claim_raised_at", "claim_reference", "packet_id", "claim_notes", "updated_at"])
-    return Response({"claim": _claim_json(claim)}, status=status.HTTP_201_CREATED)
+    return {"next": "done"}
+
+
+def give_up(claim_id, why):
+    """The worker couldn't run the claim at all, time after time."""
+    claim = MeeshoReturnClaim.objects.select_related("business").filter(pk=claim_id).first()
+    if not claim or claim.status in (MeeshoReturnClaim.STATUS_OK, MeeshoReturnClaim.STATUS_FAILED):
+        return
+    claim.status, claim.error_code, claim.finished_at = MeeshoReturnClaim.STATUS_FAILED, "worker", timezone.now()
+    claim.message = f"The background worker couldn't raise it: {why}"[:1000]
+    claim.events = (claim.events or []) + [_event("failed", why)]
+    claim.save(update_fields=["status", "error_code", "finished_at", "message", "events"])
+    _tell_failed(claim)
+
+
+def _tell_failed(claim):
+    """A claim that failed for good: said on Telegram / email, where set up."""
+    from . import notify
+    if not notify.channels():
+        return
+    try:
+        notify.send(f"Return claim failed — {claim.business.name}",
+                    f"Sub-order {claim.sub_order_no} ({claim.sub_category or 'claim'}): {claim.message}\n"
+                    f"Open Raise Return Claim to fix it and press Retry.")
+    except Exception:                                              # noqa: BLE001 — the claim already says why
+        pass

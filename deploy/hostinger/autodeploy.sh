@@ -54,6 +54,15 @@ if [ "$AS_ROOT" -eq 1 ]; then
       echo "$(stamp) !!! sudoers-meesho doesn't parse — not installed"
     fi
   fi
+  # Return claims compress big unpacking videos on the server (MeeshoClaimJob → meesho_raise_claim).
+  if ! command -v ffmpeg >/dev/null 2>&1; then
+    if DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ffmpeg >/dev/null 2>&1 \
+       || { apt-get update -qq >/dev/null 2>&1 && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ffmpeg >/dev/null 2>&1; }; then
+      echo "$(stamp) installed ffmpeg"
+    else
+      echo "$(stamp) !!! could not install ffmpeg — big claim videos can't be compressed (apt-get install ffmpeg)"
+    fi
+  fi
 fi
 
 # Restart what runs the code, as root — every service that is installed.

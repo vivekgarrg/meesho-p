@@ -4,7 +4,6 @@ import { API, C, S, btn, Tag, useIsMobile } from "../../App";
 import { CircularProgress } from "@mui/material";
 import { Photo } from "./OrderScanTab";
 import { readCodes } from "../../lib/readCodes";
-import { compressVideo, MEESHO_VIDEO_TARGET } from "../../lib/videoCompress";
 
 /*
  * Raise Return Claim — a Meesho return claim (Support → Returns → e.g. "Items
@@ -19,8 +18,11 @@ import { compressVideo, MEESHO_VIDEO_TARGET } from "../../lib/videoCompress";
  *   4. Choose what the claim is for and describe it; Meesho checks each field as
  *      it's filled, as its own form does. Raise it — the ticket comes back here.
  *
- * Photos and the video are stored with Meesho as soon as the business is known,
- * so raising the claim at the end is quick.
+ * Photos and the video start going to the server as soon as they're picked (in
+ * small pieces) and keep going while the next return is filled in. "Raise
+ * claim" only queues it: the background worker compresses a big video, sends
+ * every file and the return's POD to Meesho, and raises the ticket — retrying
+ * if Meesho is busy, and saying so (here, and on Telegram) if it fails.
  */
 
 const REMEMBER = "meesho-return-claim";
@@ -58,55 +60,72 @@ async function api(path, opts = {}) {
 
 const sleep = (ms) => new Promise((ok) => setTimeout(ok, ms));
 
-/**
- * Send one photo / the video to Meesho through the server, in small pieces —
- * each retried on its own, so a slow or patchy phone connection still gets it
- * there — then wait while the server passes it on to Meesho.
- * onProgress(0..1, text). Returns the stored file's link; throws Error(message).
- */
-async function sendFile(business, file, onProgress) {
+// ── Uploads that carry on in the background ─────────────────────────────────
+// Each file goes to the server in small pieces (each retried on its own) and
+// keeps going after the claim is queued and the form is cleared for the next
+// return; the claim's worker picks the files up once they're all there.
+const uploads = new Map();                 // upload id → {id, name, size, progress, state: "sending" | "done" | "error", error}
+const watchers = new Set();
+const told = () => watchers.forEach((f) => f());
+const pendingUploads = () => [...uploads.values()].filter((u) => u.state === "sending");
+if (typeof window !== "undefined") {
+  window.addEventListener("beforeunload", (e) => {
+    if (pendingUploads().length) { e.preventDefault(); e.returnValue = ""; }
+  });
+}
+function useUploads() {
+  const [, tick] = useState(0);
+  useEffect(() => { const f = () => tick((n) => n + 1); watchers.add(f); return () => { watchers.delete(f); }; }, []);
+  return uploads;
+}
+
+/** Start sending a file. Resolves with its upload id once the server has said yes; the pieces follow in the background. */
+async function beginUpload(business, file) {
   const start = await postJson("upload/start/", { business_id: business, name: file.name, size: file.size,
     content_type: file.type || "application/octet-stream" });
-  if (!start.ok) throw new Error(start.data.error || "Couldn't start the upload.");
+  if (!start.ok) throw new Error(start.data.error || "Couldn't start sending the file.");
   const { upload_id: id, chunk_size: size } = start.data;
-  const parts = Math.max(1, Math.ceil(file.size / size));
-  for (let i = 0; i < parts; i++) {
-    let r;
-    for (let attempt = 0; attempt < 4; attempt++) {
-      const fd = new FormData();
-      fd.append("index", String(i));
-      fd.append("file", file.slice(i * size, (i + 1) * size), "blob");
-      // eslint-disable-next-line no-await-in-loop
-      r = await api(`upload/${id}/chunk/`, { method: "POST", body: fd });
-      if (r.ok || (r.status >= 400 && r.status < 500 && r.status !== 408 && r.status !== 429)) break;
-      // eslint-disable-next-line no-await-in-loop
-      await sleep(1000 * 2 ** attempt);
+  const u = { id, name: file.name, size: file.size, progress: 0, state: "sending", error: null };
+  uploads.set(id, u);
+  told();
+  (async () => {
+    const parts = Math.max(1, Math.ceil(file.size / size));
+    try {
+      for (let i = 0; i < parts; i++) {
+        let r;
+        for (let attempt = 0; attempt < 6; attempt++) {
+          const fd = new FormData();
+          fd.append("index", String(i));
+          fd.append("file", file.slice(i * size, (i + 1) * size), "blob");
+          // eslint-disable-next-line no-await-in-loop
+          r = await api(`upload/${id}/chunk/`, { method: "POST", body: fd });
+          if (r.ok || (r.status >= 400 && r.status < 500 && r.status !== 408 && r.status !== 429)) break;
+          // eslint-disable-next-line no-await-in-loop
+          await sleep(Math.min(30000, 1000 * 2 ** attempt));
+        }
+        if (!r.ok) throw new Error(r.data.error || "Part of the file didn't get through.");
+        u.progress = (i + 1) / parts;
+        told();
+      }
+      let fin;
+      for (let attempt = 0; attempt < 5; attempt++) {
+        // eslint-disable-next-line no-await-in-loop
+        fin = await postJson(`upload/${id}/finish/`, { parts, send: false });
+        if (fin.ok || fin.status === 400) break;
+        // eslint-disable-next-line no-await-in-loop
+        await sleep(2000 * (attempt + 1));
+      }
+      if (!fin.ok) throw new Error(fin.data.error || "Couldn't finish sending the file.");
+      u.state = "done";
+    } catch (e) {
+      u.state = "error";
+      u.error = e.message;
     }
-    if (!r.ok) throw new Error(r.data.error || "Part of the file didn't get through — try again.");
-    onProgress?.((i + 1) / parts, `Sending… ${Math.round(((i + 1) / parts) * 100)}%`);
-  }
-  let fin;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    // eslint-disable-next-line no-await-in-loop
-    fin = await postJson(`upload/${id}/finish/`, { parts });
-    if (fin.ok || fin.status === 400) break;
-    // eslint-disable-next-line no-await-in-loop
-    await sleep(1500);
-  }
-  if (!fin.ok) throw new Error(fin.data.error || "Couldn't hand the file to Meesho.");
-  onProgress?.(1, "Handing it to Meesho…");
-  const until = Date.now() + 5 * 60 * 1000;
-  while (Date.now() < until) {
-    // eslint-disable-next-line no-await-in-loop
-    await sleep(1500);
-    // eslint-disable-next-line no-await-in-loop
-    const st = await api(`upload/${id}/`);
-    if (st.ok && st.data.state === "done") return st.data.url;
-    if (st.ok && st.data.state === "error") throw new Error(st.data.error || "Meesho didn't take it.");
-    if (!st.ok && st.status === 404) throw new Error("The upload was lost on the server — add the file again.");
-  }
-  throw new Error("Meesho is taking too long to store it — try again.");
+    told();
+  })();
+  return id;
 }
+
 const postJson = (path, body) => api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 
 function Field({ label, required, children, check, hint }) {
@@ -124,11 +143,13 @@ function Field({ label, required, children, check, hint }) {
 }
 
 /** One photo / the video: pick or take it, see it, and where its upload stands. */
-function Slot({ slot, state, onPick, onRetry, isMobile }) {
+function Slot({ slot, state, onPick, onRetry, isMobile, up }) {
   const s = SLOTS[slot];
   const input = useRef(null);
   const st = state || {};
-  const tone = st.status === "uploaded" ? C.green : st.status === "error" ? C.red : st.file ? C.orange : C.gray300;
+  const failed = st.status === "error" || up?.state === "error";
+  const done = up?.state === "done";
+  const tone = done ? C.green : failed ? C.red : st.file ? C.orange : C.gray300;
   return (
     <div style={{ border: `2px ${st.file ? "solid" : "dashed"} ${tone}`, borderRadius: 14, padding: 10, display: "flex", gap: 10,
       alignItems: "center", background: C.white, minWidth: 0 }}>
@@ -142,14 +163,17 @@ function Slot({ slot, state, onPick, onRetry, isMobile }) {
         <div style={{ fontWeight: 800, fontSize: 14, color: C.gray900 }}>{s.label} <span style={{ color: C.red }}>*</span></div>
         <div style={{ fontSize: 12, color: C.gray500 }}>{st.file ? `${st.file.name} · ${mb(st.file.size)}` : s.hint}</div>
         {st.stage && <div style={{ fontSize: 12, fontWeight: 700, color: C.gray600, marginTop: 2 }}>{st.stage}</div>}
-        {st.progress != null && (st.status === "compressing" || st.status === "uploading") && (
-          <div style={{ height: 6, borderRadius: 99, background: C.gray100, overflow: "hidden", marginTop: 4 }}>
-            <div style={{ height: "100%", width: `${Math.round(st.progress * 100)}%`, background: C.orange, transition: "width .2s" }} />
-          </div>
+        {up?.state === "sending" && (
+          <>
+            <div style={{ fontSize: 12, fontWeight: 700, color: C.gray600, marginTop: 2 }}>Sending to the server… {Math.round(up.progress * 100)}% — you can fill in the rest</div>
+            <div style={{ height: 6, borderRadius: 99, background: C.gray100, overflow: "hidden", marginTop: 4 }}>
+              <div style={{ height: "100%", width: `${Math.round(up.progress * 100)}%`, background: C.orange, transition: "width .2s" }} />
+            </div>
+          </>
         )}
-        {st.status === "uploaded" && <div style={{ fontSize: 12, fontWeight: 800, color: "#15803D" }}>✓ With Meesho</div>}
-        {st.status === "error" && (
-          <div style={{ fontSize: 12, fontWeight: 700, color: C.red }}>✕ {st.error}{" "}
+        {done && <div style={{ fontSize: 12, fontWeight: 800, color: "#15803D" }}>✓ On the server — sent to Meesho with the claim</div>}
+        {failed && (
+          <div style={{ fontSize: 12, fontWeight: 700, color: C.red }}>✕ {st.error || up?.error}{" "}
             <button type="button" onClick={onRetry} style={{ ...btn("ghost", "sm"), padding: "1px 8px" }}>Try again</button></div>
         )}
       </div>
@@ -161,6 +185,7 @@ function Slot({ slot, state, onPick, onRetry, isMobile }) {
 
 export function ReturnClaimTab() {
   const isMobile = useIsMobile();
+  const live = useUploads();
   const [params] = useSearchParams();
   const mem = remembered();
 
@@ -183,12 +208,25 @@ export function ReturnClaimTab() {
   const [sending, setSending] = useState(false);
   const [result, setResult] = useState(null);
   const [claims, setClaims] = useState([]);
+  const [extraFiles, setExtraFiles] = useState({});      // {field key: [upload ids]} — further photos a claim type asks for
+  const [queuedNote, setQueuedNote] = useState(null);
   const slotsRef = useRef(slots);
   slotsRef.current = slots;
   const business = ret?.business_id;
 
   const loadClaims = useCallback(() => { api("").then((r) => r.ok && setClaims(r.data.claims || [])); }, []);
   useEffect(() => { loadClaims(); }, [loadClaims]);
+  const inFlight = claims.some((c) => ["QUEUED", "WORKING", "RETRYING", "SENDING"].includes(c.status));
+  useEffect(() => {
+    if (!inFlight) return undefined;
+    const t = setInterval(loadClaims, 8000);
+    return () => clearInterval(t);
+  }, [inFlight, loadClaims]);
+  const retry = async (c) => {
+    const r = await postJson(`${c.id}/retry/`, {});
+    if (!r.ok) window.alert(r.data.error || "Couldn't queue it again.");
+    loadClaims();
+  };
 
   const setSlot = (slot, patch) => setSlots((s) => ({ ...s, [slot]: { ...(s[slot] || {}), ...patch } }));
 
@@ -236,32 +274,17 @@ export function ReturnClaimTab() {
   }, [business, sub]);
 
   // ── Photos and the video ────────────────────────────────────────────────
+  // Each starts going to the server as soon as the business is known; the claim's worker sends it on to Meesho.
   const upload = useCallback(async (slot, file) => {
-    setSlot(slot, { status: "uploading", stage: "Sending…", error: null, progress: 0 });
-    let r;
+    setSlot(slot, { status: "uploading", error: null, uploadId: null });
     try {
-      const url = await sendFile(business, file, (p, text) => setSlot(slot, { progress: p, stage: text }));
-      r = { ok: true, data: { url } };
+      const id = await beginUpload(business, file);
+      setSlot(slot, { uploadId: id });
     } catch (e) {
-      r = { ok: false, data: { error: e.message } };
+      setSlot(slot, { status: "error", error: e.message });
     }
-    if (r.ok) { setSlot(slot, { status: "uploaded", url: r.data.url, stage: null }); return; }
-    // A video sent as it was (22–24 MB) that Meesho turned down: shrink it under 22 MB and send that.
-    if (slot === "video" && file.size > MEESHO_VIDEO_TARGET && !file.name.endsWith("-small.mp4")) {
-      setSlot("video", { status: "compressing", progress: 0, stage: "Meesho wants it smaller — compressing…" });
-      try {
-        const small = await compressVideo(file, { skipUnder: 0, onProgress: (p) => setSlot("video", { progress: p }),
-          onStage: (t) => setSlot("video", { stage: t }) });
-        setSlot("video", { ready: small, status: "ready", stage: `Compressed to ${mb(small.size)}` });   // the effect sends it
-      } catch (e) {
-        setSlot("video", { status: "error", error: e.message || "Couldn't compress this video." });
-      }
-      return;
-    }
-    setSlot(slot, { status: "error", error: r.data.error || "Upload failed.", stage: null });
   }, [business]);
 
-  // Anything ready and not sent yet goes to Meesho as soon as the business is known.
   useEffect(() => {
     if (!business) return;
     Object.entries(slots).forEach(([slot, st]) => { if (st.status === "ready" && st.ready) upload(slot, st.ready); });
@@ -269,20 +292,9 @@ export function ReturnClaimTab() {
 
   const pick = async (slot, file) => {
     const preview = slot === "video" ? null : URL.createObjectURL(file);
-    setSlot(slot, { file, preview, url: null, error: null, ready: null, status: slot === "video" ? "compressing" : "reading", progress: 0, stage: null });
+    setSlot(slot, { file, preview, error: null, ready: null, uploadId: null, status: slot === "video" ? "ready" : "reading", stage: null });
     if (slot === "video") {
-      try {
-        const started = performance.now();
-        const small = await compressVideo(file, {
-          onProgress: (p) => setSlot("video", { progress: p }),
-          onStage: (t) => setSlot("video", { stage: t }),
-        });
-        const secs = ((performance.now() - started) / 1000).toFixed(1);
-        setSlot("video", { ready: small, status: "ready",
-          stage: small === file ? "Under 24 MB — sent as it is, no compression" : `Compressed to ${mb(small.size)} in ${secs} s` });
-      } catch (e) {
-        setSlot("video", { status: "error", error: e.message || "Couldn't compress this video." });
-      }
+      setSlot("video", { ready: file, stage: file.size > 22 * 1048576 ? "Compressed on the server, in the background" : null });
       return;
     }
     if (slot === "waybill" || slot === "packet") {
@@ -326,32 +338,48 @@ export function ReturnClaimTab() {
   // ── Raising it ──────────────────────────────────────────────────────────
   const allValues = () => {
     const v = { ...values, ...info, barcode_id: packet, ticket_desc: desc, callback_number: contact.callback.replace(/\D/g, "").slice(-10) };
-    Object.entries(SLOTS).forEach(([slot, s]) => { if (slots[slot]?.url) v[s.key] = [slots[slot].url]; });
+    Object.keys(SLOT_BY_KEY).forEach((k) => { delete v[k]; });
+    if (Array.isArray(v.attachments) && !v.attachments.length) delete v.attachments;
     return v;
+  };
+  const filesOf = () => {
+    const f = {};
+    Object.entries(SLOTS).forEach(([slot, sd]) => { if (slots[slot]?.uploadId) f[sd.key] = [slots[slot].uploadId]; });
+    Object.entries(extraFiles).forEach(([key, ids]) => { if (ids.length) f[key] = ids; });
+    return f;
   };
   const shown = fields || [];
   const vals = allValues();
-  const missing = shown.filter((f) => f.required && (Array.isArray(vals[f.key]) ? !vals[f.key].length : !vals[f.key])).map((f) => f.label);
-  const busyUploads = Object.values(slots).some((s) => ["reading", "compressing", "uploading"].includes(s.status));
+  const files = filesOf();
+  const missing = shown.filter((f) => f.required && !f.info && !files[f.key]
+    && (Array.isArray(vals[f.key]) ? !vals[f.key].length : !vals[f.key])).map((f) => f.label);
+  const failedUpload = Object.values(slots).some((st) => st.status === "error" || (st.uploadId && live.get(st.uploadId)?.state === "error"));
+  const busyUploads = Object.values(slots).some((st) => st.status === "reading" || (st.status === "uploading" && !st.uploadId));
   const okContact = /\S+@\S+\.\S+/.test(contact.email) && /^\d{10}$/.test(contact.callback.replace(/\D/g, "").slice(-10));
   // A field Meesho has flagged (e.g. "Ticket … has already been raised for this issue") — Meesho would refuse the claim.
   const flagged = Object.values(checks).filter((c) => c && !c.busy && c.ok === false);
-  const ready = ret?.connected && sub && fields && !missing.length && !busyUploads && okContact && !sending && !flagged.length;
+  const duplicate = ret?.duplicate;
+  const ready = ret?.connected && sub && fields && !missing.length && !busyUploads && !failedUpload && okContact && !sending
+    && !flagged.length && !duplicate;
   const subLabel = opts?.sub_categories?.find((s) => s.id === sub)?.label || "";
 
   const raise = async () => {
     setSending(true); setResult(null);
     try { localStorage.setItem(REMEMBER, JSON.stringify({ email: contact.email, callback: contact.callback })); } catch { /* fine */ }
     const r = await postJson("", { business_id: business, return_id: ret.id, sub_category_id: sub, sub_category: subLabel,
-      values: allValues(), labels, email: contact.email });
+      values: allValues(), files: filesOf(), labels, email: contact.email });
     setSending(false);
-    setResult(r.ok ? { ok: true, ...r.data.claim } : { ok: false, error: r.data.error || "Meesho refused it." });
     loadClaims();
+    if (!r.ok) { setResult({ ok: false, error: r.data.error || "Couldn't queue the claim." }); return; }
+    // Queued: the worker raises it. Straight on to the next return.
+    setQueuedNote(`Queued ${ret.business_name}'s claim for ${ret.sub_order_no} — it's raised in the background; follow it below.`);
+    reset();
   };
   const reset = () => {
     Object.values(slotsRef.current).forEach((s) => s.preview && URL.revokeObjectURL(s.preview));
     setRet(null); setCode(""); setInfo({ sub_order_number: "", awb_number: "" }); setPacket(""); setSlots({});
     setValues({}); setLabels({}); setDesc(""); setChecks({}); setResult(null); setFindMsg(null); setSub(""); setFields(null);
+    setExtraFiles({});
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
@@ -368,10 +396,25 @@ export function ReturnClaimTab() {
         </p>
       </div>
 
+      {queuedNote && (
+        <div role="status" style={{ background: C.greenLight, border: `1.5px solid ${C.greenBorder}`, borderRadius: 12, padding: "10px 14px", color: "#166534",
+          fontSize: 13.5, fontWeight: 700, display: "flex", gap: 8, alignItems: "center" }}>
+          <span style={{ flex: 1 }}>✓ {queuedNote}</span>
+          <button onClick={() => setQueuedNote(null)} aria-label="Dismiss" style={{ ...btn("ghost", "sm"), padding: "2px 8px" }}>✕</button>
+        </div>
+      )}
+      {pendingUploads().length > 0 && (
+        <div role="status" style={{ background: "#EFF6FF", border: "1.5px solid #BFDBFE", borderRadius: 12, padding: "8px 14px", color: "#1E3A8A", fontSize: 13, fontWeight: 700 }}>
+          ⏫ Sending {pendingUploads().length} file{pendingUploads().length === 1 ? "" : "s"} to the server
+          ({Math.round(pendingUploads().reduce((n, u) => n + u.progress * u.size, 0) / Math.max(1, pendingUploads().reduce((n, u) => n + u.size, 0)) * 100)}%)
+          — keep this page open; carry on with the next return.
+        </div>
+      )}
+
       {/* 1 · The return */}
       <div style={card}>
         <div style={{ fontWeight: 900, fontSize: 15 }}>1 · The return</div>
-        <Slot slot="waybill" state={slots.waybill} isMobile={isMobile} onPick={(f) => pick("waybill", f)} onRetry={() => slots.waybill?.ready && upload("waybill", slots.waybill.ready)} />
+        <Slot slot="waybill" state={slots.waybill} up={live.get(slots.waybill?.uploadId)} isMobile={isMobile} onPick={(f) => pick("waybill", f)} onRetry={() => slots.waybill?.ready && upload("waybill", slots.waybill.ready)} />
         <form onSubmit={(e) => { e.preventDefault(); find(code); }} style={{ display: "flex", gap: 8 }}>
           <input value={code} onChange={(e) => setCode(e.target.value.toUpperCase())} placeholder="…or type the AWB / sub-order / packet id"
             aria-label="AWB, sub-order or packet id" style={{ ...inp, fontFamily: "monospace", flex: 1 }} />
@@ -390,9 +433,9 @@ export function ReturnClaimTab() {
               <span>{[ret.courier, ret.delivered_date && `delivered ${ret.delivered_date}`].filter(Boolean).join(" · ")}</span>
               {ret.return_reason && <span style={{ color: C.gray500 }}>{ret.return_reason}{ret.detailed_return_reason ? ` — ${ret.detailed_return_reason}` : ""}</span>}
               {!ret.connected && <span style={{ color: C.red, fontWeight: 700 }}>✕ {ret.business_name}'s Meesho account isn't connected — connect it under Meesho → Settings.</span>}
-              {ret.claims?.some((c) => c.status === "OK") && (
-                <span style={{ color: "#B45309", fontWeight: 700 }}>⚠ A claim was already raised for this order: {ret.claims.filter((c) => c.status === "OK")
-                  .map((c) => `${c.sub_category || "claim"}${c.ticket ? ` (${c.ticket})` : ""}`).join(", ")}</span>
+              {ret.duplicate && (
+                <span role="alert" style={{ color: "#fff", background: C.red, borderRadius: 8, padding: "6px 10px", fontWeight: 800, marginTop: 4 }}>
+                  ⛔ Duplicate — {ret.duplicate.why} No new claim can be raised for it.</span>
               )}
             </div>
           </div>
@@ -414,7 +457,7 @@ export function ReturnClaimTab() {
         <div style={{ fontWeight: 900, fontSize: 15 }}>2 · Photos and the unpacking video</div>
         <div style={grid}>
           {["packet", "product", "video"].map((slot) => (
-            <Slot key={slot} slot={slot} state={slots[slot]} isMobile={isMobile} onPick={(f) => pick(slot, f)}
+            <Slot key={slot} slot={slot} state={slots[slot]} up={live.get(slots[slot]?.uploadId)} isMobile={isMobile} onPick={(f) => pick(slot, f)}
               onRetry={() => (slots[slot]?.ready ? upload(slot, slots[slot].ready) : null)} />
           ))}
         </div>
@@ -452,7 +495,8 @@ export function ReturnClaimTab() {
                         {f.options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
                       </select>
                     ) : FILE_TYPES.includes(f.type) ? (
-                      <ExtraFiles business={business} urls={values[f.key] || []} onChange={(urls) => setValues((v) => ({ ...v, [f.key]: urls }))} />
+                      <ExtraFiles business={business} ids={extraFiles[f.key] || []} live={live}
+                        onChange={(ids) => setExtraFiles((x) => ({ ...x, [f.key]: ids }))} hint={f.key === "attachments" && ret?.pod_url ? "The return's proof of delivery is attached here by itself." : ""} />
                     ) : f.type === "text_area" ? (
                       <textarea rows={3} value={values[f.key] || ""} onChange={(e) => setValues({ ...values, [f.key]: e.target.value })} style={{ ...inp, resize: "vertical" }} />
                     ) : (
@@ -478,26 +522,22 @@ export function ReturnClaimTab() {
         )}
       </div>
 
-      {result && (result.ok ? (
-        <div role="status" style={{ background: C.greenLight, border: `2px solid ${C.greenBorder}`, borderRadius: 14, padding: 14, color: "#166534" }}>
-          <div style={{ fontSize: 17, fontWeight: 900 }}>✓ Claim raised on Meesho for {result.business_name}</div>
-          <div style={{ marginTop: 4 }}>{result.message}</div>
-          <button onClick={reset} style={{ ...btn("primary", "md"), marginTop: 10 }}>Next return</button>
-        </div>
-      ) : (
+      {result && !result.ok && (
         <div role="alert" style={{ background: C.redLight, border: `2px solid ${C.redBorder}`, borderRadius: 14, padding: 14, color: C.red, fontWeight: 700 }}>
           ✕ {result.error}
         </div>
-      ))}
+      )}
 
       {!result?.ok && ret && (
         <div style={{ position: isMobile ? "sticky" : "static", bottom: 0, background: isMobile ? C.gray50 : "transparent",
           padding: isMobile ? "8px 0 calc(8px + env(safe-area-inset-bottom))" : 0, display: "flex", flexDirection: "column", gap: 6 }}>
           {missing.length > 0 && fields && <div style={{ fontSize: 12.5, color: C.gray600 }}>Still needed: {missing.join(", ")}</div>}
-          {busyUploads && <div style={{ fontSize: 12.5, color: C.gray600 }}>Waiting for the photos / video to finish…</div>}
+          {busyUploads && <div style={{ fontSize: 12.5, color: C.gray600 }}>Reading the photos…</div>}
+          {failedUpload && <div style={{ fontSize: 12.5, color: C.red, fontWeight: 700 }}>A file didn't get through — press Try again on it.</div>}
+          {duplicate && <div style={{ fontSize: 12.5, color: C.red, fontWeight: 700 }}>Duplicate — a claim already exists for this return.</div>}
           {flagged.length > 0 && <div style={{ fontSize: 12.5, color: C.red, fontWeight: 700 }}>Meesho won't take it yet: {flagged.map((c) => c.message).filter(Boolean).join(" ")}</div>}
           <button onClick={raise} disabled={!ready} style={{ ...btn("primary", "lg"), minHeight: 52, fontSize: 16, opacity: ready ? 1 : 0.5 }}>
-            {sending ? <><CircularProgress size={16} style={{ color: "#fff", marginRight: 8, verticalAlign: "-3px" }} />Raising the claim…</>
+            {sending ? <><CircularProgress size={16} style={{ color: "#fff", marginRight: 8, verticalAlign: "-3px" }} />Queuing the claim…</>
               : `📨 Raise claim on ${ret.business_name}'s Meesho`}
           </button>
         </div>
@@ -505,14 +545,20 @@ export function ReturnClaimTab() {
 
       {claims.length > 0 && (
         <div style={{ ...S.card, padding: 0, overflow: "hidden" }}>
-          <div style={{ padding: "10px 14px", fontWeight: 800, fontSize: 14, borderBottom: `1px solid ${C.gray100}` }}>Claims raised lately</div>
-          {claims.slice(0, 30).map((c) => (
-            <div key={c.id} style={{ padding: "8px 14px", borderBottom: `1px solid ${C.gray100}`, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", fontSize: 12.5 }}>
-              <Tag variant={c.status === "OK" ? "green" : c.status === "FAILED" ? "red" : "blue"}>{c.status === "OK" ? (c.ticket ? `Ticket ${c.ticket}` : "Raised") : c.status === "FAILED" ? "Refused" : "Sending"}</Tag>
+          <div style={{ padding: "10px 14px", fontWeight: 800, fontSize: 14, borderBottom: `1px solid ${C.gray100}` }}>Claims</div>
+          {claims.slice(0, 50).map((c) => (
+            <div key={c.id} style={{ padding: "8px 14px", borderBottom: `1px solid ${C.gray100}`, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", fontSize: 12.5,
+              background: c.status === "FAILED" ? C.redLight : C.white }}>
+              <Tag variant={{ OK: "green", FAILED: "red", RETRYING: "amber" }[c.status] || "blue"}>
+                {{ OK: c.ticket ? `✓ Ticket ${c.ticket}` : "✓ Raised", FAILED: "✕ Failed", QUEUED: "Queued", WORKING: "Raising…",
+                  RETRYING: `Retrying (try ${c.attempts + 1})`, SENDING: "Sending" }[c.status] || c.status}
+              </Tag>
               <b>{c.business_name}</b>
               <span style={{ fontFamily: "monospace" }}>{c.sub_order_no}</span>
               <span style={{ color: C.gray600 }}>{c.sub_category}</span>
-              {c.status === "FAILED" && <span style={{ color: C.red, flexBasis: "100%" }}>{c.message}</span>}
+              {c.pod_attached && <Tag variant="gray">POD attached</Tag>}
+              {c.status !== "OK" && c.message && <span style={{ color: c.status === "FAILED" ? C.red : C.gray600, flexBasis: "100%" }}>{c.message}</span>}
+              {c.status === "FAILED" && <button onClick={() => retry(c)} style={{ ...btn("ghostOrange", "sm"), padding: "2px 10px" }}>↻ Retry</button>}
               <span style={{ color: C.gray400, marginLeft: "auto" }}>{new Date(c.at).toLocaleString("en-IN", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}{c.by ? ` · ${c.by}` : ""}</span>
             </div>
           ))}
@@ -544,31 +590,33 @@ function Note({ html }) {
 }
 
 /** Any further photos a claim type asks for — each sent to Meesho as it's chosen. */
-function ExtraFiles({ business, urls, onChange }) {
-  const [busy, setBusy] = useState(false);
+function ExtraFiles({ business, ids, onChange, live, hint }) {
   const [err, setErr] = useState(null);
   const add = async (files) => {
-    setBusy(true); setErr(null);
+    setErr(null);
     const got = [];
     for (const f of files) {
       try {
         // eslint-disable-next-line no-await-in-loop
-        got.push(await sendFile(business, f));
+        got.push(await beginUpload(business, f));
       } catch (e) {
-        setErr(e.message || "Upload failed.");
+        setErr(e.message || "Couldn't send it.");
       }
     }
-    setBusy(false);
-    onChange([...urls, ...got]);
+    onChange([...ids, ...got]);
   };
+  const sending = ids.filter((id) => live.get(id)?.state === "sending").length;
+  const failed = ids.filter((id) => live.get(id)?.state === "error").length;
   return (
     <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
       <label style={{ ...btn("ghost", "sm"), cursor: "pointer", minHeight: 36, display: "inline-flex", alignItems: "center" }}>
-        {busy ? "Sending…" : "＋ Add photos"}
+        ＋ Add photos
         <input type="file" accept="image/*" multiple hidden onChange={(e) => { const f = [...(e.target.files || [])]; e.target.value = ""; if (f.length) add(f); }} />
       </label>
-      {urls.length > 0 && <span style={{ fontSize: 12.5, color: "#15803D", fontWeight: 700 }}>✓ {urls.length} with Meesho</span>}
-      {urls.length > 0 && <button type="button" onClick={() => onChange([])} style={{ ...btn("ghost", "sm"), padding: "2px 8px" }}>Clear</button>}
+      {ids.length > 0 && <span style={{ fontSize: 12.5, color: failed ? C.red : "#15803D", fontWeight: 700 }}>
+        {ids.length} photo{ids.length === 1 ? "" : "s"}{sending ? ` · ${sending} sending` : ""}{failed ? ` · ${failed} failed` : ""}</span>}
+      {ids.length > 0 && <button type="button" onClick={() => onChange([])} style={{ ...btn("ghost", "sm"), padding: "2px 8px" }}>Clear</button>}
+      {hint && <span style={{ fontSize: 12, color: C.gray500 }}>📎 {hint}</span>}
       {err && <span style={{ fontSize: 12, color: C.red }}>{err}</span>}
     </div>
   );
