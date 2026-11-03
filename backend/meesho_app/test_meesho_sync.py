@@ -988,6 +988,48 @@ class AutoLabelsSendTests(TestCase):
             call_command("meesho_save_labels", batch="auto-1", trigger="MANUAL", stdout=StringIO())
         self.assertEqual(MeeshoLabelFile.objects.get().trigger, "MANUAL")           # a Generate from Meesho Orders
 
+    def test_a_labels_file_lists_its_items_to_pack(self):
+        from .models import LabelOrder, MeeshoLabelFile, ScannedOrder
+        from .test_label_engine import make_labels_pdf
+        Membership.objects.create(user=self.admin, business=self.biz)
+        MeeshoSyncRun.objects.create(account=self.acct, kind="LABELS", status="OK", records=3,
+                                     result={"batch": "auto-9", "label_url": "https://storage.googleapis.com/a.pdf", "success": 3})
+        pdf = make_labels_pdf([("lota-b", "342118874307078144_1", "X"), ("lota-a", "342118874307078145_1", "Y"),
+                               ("lota-a", "342118874307078146_1", "Z")])
+        with mock.patch.object(meesho_sync, "_fetch_label_pdf", return_value=pdf):
+            self.save(batch="auto-9")
+        f = MeeshoLabelFile.objects.get()
+        self.assertEqual(sorted(f.order_ids), ["342118874307078144_1", "342118874307078145_1", "342118874307078146_1"])
+        lo = LabelOrder.objects.get(order_id="342118874307078145_1")
+        ScannedOrder.objects.create(business=lo.business, sub_order_no=lo.order_id, status="PACKED", scan_day=lo.uploaded_date,
+                                    last_scanned_at=__import__("django.utils.timezone", fromlist=["now"]).now())
+        c = APIClient()
+        c.force_authenticate(self.admin)
+        d = c.get(f"/api/business/{self.biz.id}/meesho-orders/label-files/{f.pk}/items/").data
+        self.assertEqual((d["summary"]["orders"], d["summary"]["skus"], d["summary"]["packed"]), (3, 2, 1))
+        top = d["skus"][0]
+        self.assertEqual((top["sku"], top["qty"], top["orders"], top["packed_qty"]), ("lota-a", 2, 2, 1))   # most pieces first
+        self.assertEqual({o["order_id"]: o["packed"] for o in d["orders"]}["342118874307078145_1"], True)
+
+    def test_an_older_file_has_its_orders_read_off_the_pdf(self):
+        from .models import MeeshoLabelFile
+        from .test_label_engine import make_labels_pdf
+        from django.core.management import call_command
+        from io import StringIO
+        Membership.objects.create(user=self.admin, business=self.biz)
+        MeeshoSyncRun.objects.create(account=self.acct, kind="LABELS", status="OK", records=1,
+                                     result={"batch": "auto-old", "label_url": "https://storage.googleapis.com/a.pdf", "success": 1})
+        pdf = make_labels_pdf([("lota-c", "342118874307078199_1", "X")])
+        with mock.patch.object(meesho_sync, "_fetch_label_pdf", return_value=pdf):
+            call_command("meesho_save_labels", batch="auto-old", stdout=StringIO())
+        f = MeeshoLabelFile.objects.get()
+        MeeshoLabelFile.objects.filter(pk=f.pk).update(order_ids=[])                  # as files kept before this change
+        c = APIClient()
+        c.force_authenticate(self.admin)
+        d = c.get(f"/api/business/{self.biz.id}/meesho-orders/label-files/{f.pk}/items/").data
+        self.assertEqual([o["order_id"] for o in d["orders"]], ["342118874307078199_1"])
+        self.assertEqual(MeeshoLabelFile.objects.get().order_ids, ["342118874307078199_1"])   # remembered
+
     def test_the_automation_setting(self):
         c = APIClient()
         c.force_authenticate(self.admin)

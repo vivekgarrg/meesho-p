@@ -62,7 +62,7 @@ class Command(BaseCommand):
         # Sorted by parent SKU and saved to the labels table, as the Labels tab
         # does — run as an admin, since the sort decides which business owns
         # each SKU across every business.
-        pdf, pages, note = None, 0, ""
+        pdf, pages, note, order_ids = None, 0, "", []
         admin = User.objects.filter(role=User.ROLE_SUPER_ADMIN, is_active=True).order_by("pk").first()
         if admin:
             try:
@@ -73,13 +73,14 @@ class Command(BaseCommand):
                     pdf = base64.b64decode(res.data["cropped_pdf_b64"])
                     pages = res.data.get("total_pages") or 0
                     out["saved"] = res.data.get("db_saved")
+                    order_ids = meesho_sync.label_order_ids(res.data)
             except Exception as exc:               # noqa: BLE001
                 note = f"Not sorted — {exc}."
         if pdf is None:
             pdf, note = merged, note or "Not sorted by parent SKU this time."
 
         f = meesho_sync._save_label_file(batch, trigger, runs, pdf, sorted_ok=not note,
-                                         pages=pages, summary="\n".join(x for x in (note, summary) if x))
+                                         pages=pages, summary="\n".join(x for x in (note, summary) if x), order_ids=order_ids)
         out.update(file_id=f.pk, pages=pages, sorted=not note)
         if send:
             caption = (f"{out['labels']} label{'' if out['labels'] == 1 else 's'} from {', '.join(f.business_names)}"

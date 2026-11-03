@@ -212,6 +212,7 @@ export function LatestLabels({ emptyHint = false }) {
   const [busy, setBusy] = useState(null);
   const [error, setError] = useState(null);
   const [showAll, setShowAll] = useState(false);
+  const [itemsOf, setItemsOf] = useState(null);       // the file whose items table is open
 
   const load = useCallback(async () => {
     const res = await fetch(`${API}/meesho-orders/label-files/`).catch(() => null);
@@ -292,6 +293,9 @@ export function LatestLabels({ emptyHint = false }) {
       <button onClick={() => print(f)} disabled={!!busy} style={{ ...btn(big ? "primary" : "ghost", big ? "md" : "sm"), minWidth: big ? 110 : 0 }}>
         {busy === `p${f.id}` ? <CircularProgress size={13} style={{ color: big ? "#fff" : C.orange }} /> : "🖨 Print"}
       </button>
+      <button onClick={() => setItemsOf(f)} title="What's on these labels — to pack from" style={btn(big ? "ghostOrange" : "ghost", big ? "md" : "sm")}>
+        📋 Items
+      </button>
       <button onClick={() => download(f)} disabled={!!busy} style={btn("ghost", big ? "md" : "sm")}>
         {busy === `d${f.id}` ? <CircularProgress size={13} style={{ color: C.orange }} /> : "⬇ Download"}
       </button>
@@ -317,6 +321,170 @@ export function LatestLabels({ emptyHint = false }) {
           {showAll && older.map((f) => <Row key={f.id} f={f} />)}
         </>
       )}
+      {itemsOf && <LabelItems file={itemsOf} onClose={() => setItemsOf(null)} />}
+    </div>
+  );
+}
+
+// ── What's on a labels PDF ──────────────────────────────────────────────────
+
+const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+function Thumb({ url, fallback, size = 44 }) {
+  const [src, setSrc] = useState(url || fallback || "");
+  useEffect(() => { setSrc(url || fallback || ""); }, [url, fallback]);
+  if (!src) return <span style={{ width: size, height: size, borderRadius: 8, background: C.gray100, flexShrink: 0, display: "inline-block" }} />;
+  return <img src={src} alt="" loading="lazy" onError={() => setSrc(src === url && fallback ? fallback : "")}
+    style={{ width: size, height: size, borderRadius: 8, objectFit: "cover", flexShrink: 0, background: C.gray100 }} />;
+}
+
+/**
+ * Every item on one labels PDF, to pack from: a pick list (each SKU and size
+ * with how many pieces, over how many orders, and how many are packed) or the
+ * orders one by one, in the PDF's order. Filter by courier, show only what's
+ * left, search; print it or take it as CSV.
+ */
+function LabelItems({ file, onClose }) {
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState(null);
+  const [view, setView] = useState("skus");
+  const [courier, setCourier] = useState("");
+  const [left, setLeft] = useState(false);
+  const [q, setQ] = useState("");
+
+  useEffect(() => {
+    fetch(`${API}/meesho-orders/label-files/${file.id}/items/`)
+      .then(async (r) => { const d = await r.json().catch(() => ({})); if (r.ok) setData(d); else setErr(d.error || "Couldn't read the labels."); })
+      .catch(() => setErr("Network error."));
+  }, [file.id]);
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const couriers = data ? [...new Set(data.orders.map((o) => o.courier))].sort() : [];
+  const needle = q.trim().toLowerCase();
+  const orders = (data?.orders || []).filter((o) => (!courier || o.courier === courier) && (!left || !o.packed)
+    && (!needle || [o.sku, o.order_id, o.awb, o.size].some((v) => String(v || "").toLowerCase().includes(needle))));
+  // The pick list follows the same filters, from the orders that pass them.
+  const skus = Object.values(orders.reduce((acc, o) => {
+    const k = `${(o.sku || "").toLowerCase()}|${(o.size || "").toLowerCase()}`;
+    const g = acc[k] || (acc[k] = { sku: o.sku, size: o.size, qty: 0, orders: 0, packed_qty: 0, image_url: o.image_url, image_fallback_url: o.image_fallback_url, couriers: {} });
+    g.qty += o.qty; g.orders += 1; g.packed_qty += o.packed ? o.qty : 0;
+    g.couriers[o.courier] = (g.couriers[o.courier] || 0) + 1;
+    return acc;
+  }, {})).sort((a, b) => b.qty - a.qty || String(a.sku).localeCompare(String(b.sku)));
+  const pieces = orders.reduce((n, o) => n + o.qty, 0);
+  const title = `Labels ${new Date(file.created_at).toLocaleString("en-IN", { day: "2-digit", month: "short", hour: "numeric", minute: "2-digit" })}`;
+
+  const csv = () => {
+    const rows = view === "skus"
+      ? [["SKU", "Size", "Pieces", "Orders", "Packed pieces", "Couriers"], ...skus.map((g) => [g.sku, g.size, g.qty, g.orders, g.packed_qty,
+        Object.entries(g.couriers).map(([c, n]) => `${c} ${n}`).join("; ")])]
+      : [["#", "Sub-order", "SKU", "Size", "Qty", "Courier", "AWB", "Business", "Packed"], ...orders.map((o, i) => [i + 1, o.order_id, o.sku, o.size, o.qty,
+        o.courier, o.awb, o.business_name, o.packed ? "yes" : "no"])];
+    const text = rows.map((r) => r.map((v) => `"${String(v ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([text], { type: "text/csv" }));
+    a.download = `${title.replace(/[^A-Za-z0-9]+/g, "-")}-${view}.csv`;
+    document.body.appendChild(a); a.click(); a.remove();
+  };
+  const print = () => {
+    const head = view === "skus" ? ["", "SKU", "Size", "Pieces", "Orders", "Couriers", "✓"] : ["#", "", "SKU", "Size", "Qty", "Courier", "AWB", "✓"];
+    const img = (u) => (u ? `<img src="${esc(u)}" style="width:40px;height:40px;object-fit:cover;border-radius:4px">` : "");
+    const body = view === "skus"
+      ? skus.map((g) => `<tr><td>${img(g.image_url || g.image_fallback_url)}</td><td><b>${esc(g.sku)}</b></td><td>${esc(g.size)}</td><td style="font-size:18px"><b>${g.qty}</b></td><td>${g.orders}</td><td>${esc(Object.entries(g.couriers).map(([c, n]) => `${c} ${n}`).join(", "))}</td><td>☐</td></tr>`).join("")
+      : orders.map((o, i) => `<tr><td>${i + 1}</td><td>${img(o.image_url || o.image_fallback_url)}</td><td><b>${esc(o.sku)}</b></td><td>${esc(o.size)}</td><td><b>${o.qty}</b></td><td>${esc(o.courier)}</td><td>${esc(o.awb)}</td><td>${o.packed ? "✔" : "☐"}</td></tr>`).join("");
+    const w = window.open("", "_blank");
+    if (!w) return;
+    w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${esc(title)}</title><style>
+      body{font-family:system-ui,sans-serif;margin:16px;color:#111} h1{font-size:16px;margin:0 0 4px} p{margin:0 0 10px;font-size:12px;color:#555}
+      table{border-collapse:collapse;width:100%;font-size:12px} th,td{border:1px solid #ccc;padding:4px 6px;text-align:left;vertical-align:middle}
+      th{background:#f3f4f6} tr{page-break-inside:avoid}</style></head><body>
+      <h1>${esc(title)} — ${view === "skus" ? "pick list" : "orders"}</h1>
+      <p>${esc((file.businesses || []).join(", "))} · ${orders.length} orders · ${pieces} pieces${courier ? ` · ${esc(courier)}` : ""}${left ? " · left to pack" : ""}</p>
+      <table><thead><tr>${head.map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>${body}</tbody></table></body></html>`);
+    w.document.close();
+    w.onload = () => w.print();
+    setTimeout(() => { try { w.print(); } catch { /* the window was closed */ } }, 800);
+  };
+
+  const pill = (on) => ({ border: `1.5px solid ${on ? C.orange : C.gray200}`, background: on ? C.orangeLight : C.white, color: on ? C.orange : C.gray700,
+    borderRadius: 999, padding: "6px 12px", fontSize: 13, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", minHeight: 36 });
+
+  return (
+    <div role="dialog" aria-modal="true" aria-label={`${title} — items`} onClick={onClose}
+      style={{ position: "fixed", inset: 0, zIndex: 3500, background: "rgba(15,23,42,.5)", display: "flex", alignItems: "center", justifyContent: "center", padding: 12 }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ ...S.card, width: "100%", maxWidth: 1000, maxHeight: "94dvh", display: "flex", flexDirection: "column",
+        padding: 0, overflow: "hidden", borderTop: `5px solid ${C.orange}` }}>
+        <div style={{ padding: "12px 14px", borderBottom: `1px solid ${C.gray100}`, display: "flex", flexDirection: "column", gap: 10 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            <div style={{ flex: 1, minWidth: 200 }}>
+              <div style={{ fontSize: 17, fontWeight: 900, color: C.gray900 }}>📋 {title}</div>
+              <div style={{ fontSize: 12.5, color: C.gray500 }}>
+                {(file.businesses || []).join(", ")}{data ? ` · ${data.summary.orders} orders · ${data.summary.pieces} pieces · ${data.summary.skus} SKUs · ${data.summary.packed} packed` : ""}
+              </div>
+            </div>
+            <button onClick={print} disabled={!data} style={btn("ghost", "sm")}>🖨 Print</button>
+            <button onClick={csv} disabled={!data} style={btn("ghost", "sm")}>⬇ CSV</button>
+            <button onClick={onClose} aria-label="Close" style={{ ...btn("ghost", "sm"), minWidth: 36 }}>✕</button>
+          </div>
+          {data && (
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+              <button onClick={() => setView("skus")} style={pill(view === "skus")}>By SKU ({skus.length})</button>
+              <button onClick={() => setView("orders")} style={pill(view === "orders")}>Every order ({orders.length})</button>
+              <select value={courier} onChange={(e) => setCourier(e.target.value)} aria-label="Courier" style={{ ...S.inp, width: "auto", minHeight: 36 }}>
+                <option value="">All couriers</option>
+                {couriers.map((c) => <option key={c} value={c}>{c}</option>)}
+              </select>
+              <label style={{ display: "inline-flex", gap: 6, alignItems: "center", fontSize: 13, fontWeight: 700 }}>
+                <input type="checkbox" checked={left} onChange={(e) => setLeft(e.target.checked)} /> Left to pack only
+              </label>
+              <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search SKU, sub-order, AWB…" aria-label="Search"
+                style={{ ...S.inp, flex: 1, minWidth: 160, minHeight: 36 }} />
+            </div>
+          )}
+        </div>
+        <div style={{ overflowY: "auto", flex: 1 }}>
+          {err ? <div style={{ padding: 20, color: C.red, fontWeight: 700 }}>✕ {err}</div>
+            : !data ? <div style={{ display: "flex", justifyContent: "center", padding: 40 }}><CircularProgress style={{ color: C.orange }} /></div>
+              : data.orders.length === 0 ? <div style={{ padding: 20, color: C.gray500 }}>No orders could be read off these labels.</div>
+                : view === "skus" ? skus.map((g) => {
+                  const done = g.packed_qty >= g.qty;
+                  return (
+                    <div key={`${g.sku}|${g.size}`} style={{ display: "flex", gap: 10, alignItems: "center", padding: "8px 14px", borderBottom: `1px solid ${C.gray100}`,
+                      background: done ? C.greenLight : C.white }}>
+                      <Thumb url={g.image_url} fallback={g.image_fallback_url} />
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 14, color: C.gray900, wordBreak: "break-all" }}>{g.sku || "—"}
+                          {g.size && <span style={{ fontFamily: "inherit", fontWeight: 700, fontSize: 12, color: C.gray500 }}> · {g.size}</span>}</div>
+                        <div style={{ fontSize: 12, color: C.gray500 }}>{g.orders} order{g.orders === 1 ? "" : "s"} · {Object.entries(g.couriers).map(([c, n]) => `${c} ${n}`).join(", ")}</div>
+                      </div>
+                      <div style={{ textAlign: "right", flexShrink: 0 }}>
+                        <div style={{ fontFamily: "monospace", fontWeight: 900, fontSize: 22, color: C.gray900, lineHeight: 1 }}>×{g.qty}</div>
+                        <div style={{ fontSize: 11.5, fontWeight: 800, color: done ? "#15803D" : g.packed_qty ? C.orange : C.gray400 }}>
+                          {done ? "✓ packed" : g.packed_qty ? `${g.packed_qty} packed` : "to pack"}</div>
+                      </div>
+                    </div>
+                  );
+                }) : orders.map((o, i) => (
+                  <div key={o.order_id} style={{ display: "flex", gap: 10, alignItems: "center", padding: "8px 14px", borderBottom: `1px solid ${C.gray100}`,
+                    background: o.packed ? C.greenLight : C.white }}>
+                    <span style={{ width: 26, fontSize: 12, color: C.gray400, textAlign: "right", flexShrink: 0 }}>{i + 1}</span>
+                    <Thumb url={o.image_url} fallback={o.image_fallback_url} size={40} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 13.5, color: C.gray900, wordBreak: "break-all" }}>{o.sku || "—"}
+                        {o.size && <span style={{ fontFamily: "inherit", fontWeight: 700, fontSize: 12, color: C.gray500 }}> · {o.size}</span>}
+                        {o.qty > 1 && <span style={{ marginLeft: 6, color: "#fff", background: C.red, borderRadius: 6, padding: "0 6px" }}>×{o.qty}</span>}</div>
+                      <div style={{ fontSize: 12, color: C.gray500, wordBreak: "break-all" }}>{[o.courier, o.awb, o.order_id, o.business_name].filter(Boolean).join(" · ")}</div>
+                    </div>
+                    <Tag variant={o.packed ? "green" : "gray"}>{o.packed ? "✓ Packed" : "To pack"}</Tag>
+                  </div>
+                ))}
+          {data?.summary.not_found > 0 && <div style={{ padding: "8px 14px", fontSize: 12, color: C.gray500 }}>{data.summary.not_found} label(s) on the PDF aren't in the labels table.</div>}
+        </div>
+      </div>
     </div>
   );
 }

@@ -845,15 +845,27 @@ def _sorted_labels_response(request, business, runs, file_name, batch):
         response.data["businesses"] = sorted({r.account.business.name for r in runs})
         if response.data["sorted_pdf_b64"]:
             _save_label_file(batch, MeeshoLabelFile.TRIGGER_MANUAL, runs, base64.b64decode(response.data["sorted_pdf_b64"]),
-                             sorted_ok=True, pages=response.data.get("total_pages") or 0)
+                             sorted_ok=True, pages=response.data.get("total_pages") or 0,
+                             order_ids=label_order_ids(response.data))
     return response
 
 
-def _save_label_file(batch, trigger, runs, pdf, sorted_ok, pages=0, summary=""):
+def label_order_ids(parsed):
+    """The sub-order numbers on a parsed labels PDF (_process_labels_upload's answer), in page order."""
+    out = []
+    for pd in (parsed or {}).get("page_details") or []:
+        oid = str((pd or {}).get("order_id") or "").strip()
+        if oid and oid not in out:
+            out.append(oid)
+    return out
+
+
+def _save_label_file(batch, trigger, runs, pdf, sorted_ok, pages=0, summary="", order_ids=None):
     """Keep a labels PDF ready to print (the newest MeeshoLabelFile.KEEP of them)."""
     labels = sum(int((r.result or {}).get("success") or r.records or 0) for r in runs)
     f, _ = MeeshoLabelFile.objects.update_or_create(batch=batch, defaults={
         "trigger": trigger, "labels": labels, "pages": pages or 0, "sorted": sorted_ok, "summary": summary, "pdf": pdf,
+        "order_ids": order_ids or [],
         "business_ids": sorted({r.account.business_id for r in runs}),
         "business_names": sorted({r.account.business.name for r in runs}),
     })
@@ -1353,6 +1365,84 @@ def meesho_label_files(request, business_id):
         "sorted": f.sorted, "businesses": f.business_names, "summary": f.summary,
         "file_name": f"meesho-labels-{timezone.localtime(f.created_at):%Y-%m-%d-%H%M}.pdf",
     } for f in _label_files_for(accounts)[:10]]})
+
+
+def _order_ids_from_pdf(pdf):
+    """A kept file from before its orders were recorded: the sub-order numbers read off its pages."""
+    import io
+    import re
+    from pypdf import PdfReader
+    found = []
+    try:
+        for page in PdfReader(io.BytesIO(pdf)).pages:
+            for oid in re.findall(r"\b(\d{12,22}_\d{1,3})\b", page.extract_text() or ""):
+                if oid not in found:
+                    found.append(oid)
+    except Exception:                                              # noqa: BLE001 — an unreadable file just has no table
+        return []
+    return found
+
+
+@api_view(["GET"])
+def meesho_label_file_items(request, business_id, file_id):
+    """
+    What's on one labels PDF, to pack from: every order on it (product photo,
+    SKU, size, qty, courier, AWB, business) with whether it's packed yet — and
+    the same totalled per SKU and size, a pick list. In the PDF's own order
+    (sorted by parent SKU).
+    """
+    from .meesho_images import photo_map
+    from .models import LabelOrder, ScannedOrder
+    v = _views()
+    business = v.get_authorized_business(request, business_id)
+    _desk, accounts = _desk_accounts(request, business)
+    f = MeeshoLabelFile.objects.filter(pk=file_id).first()
+    mine = {a.business_id for a in accounts}
+    if not f or not (mine & set(f.business_ids or [])):
+        return Response({"error": "No such labels file."}, status=status.HTTP_404_NOT_FOUND)
+    ids = list(f.order_ids or [])
+    if not ids:
+        ids = _order_ids_from_pdf(bytes(f.pdf))
+        if ids:
+            MeeshoLabelFile.objects.filter(pk=f.pk).update(order_ids=ids)
+    labels = {l.order_id: l for l in LabelOrder.objects.filter(order_id__in=ids, business_id__in=mine)}
+    rows = [labels[i] for i in ids if i in labels]
+    names = {a.business_id: a.business.name for a in accounts}
+    photos = photo_map(rows, sub_of=lambda l: l.order_id, own=lambda l: "")
+    scans = {}
+    for s in ScannedOrder.objects.filter(business_id__in=mine, sub_order_no__in=[l.order_id for l in rows]):
+        scans[(s.business_id, s.sub_order_no)] = s
+    packed_states = (ScannedOrder.STATUS_PACKED, ScannedOrder.STATUS_DISPATCHED, ScannedOrder.STATUS_SCANNED,
+                     ScannedOrder.STATUS_CANCELLED)
+    orders, skus = [], {}
+    for l in rows:
+        sc = scans.get((l.business_id, l.order_id))
+        packed = bool(sc and sc.status in packed_states)
+        photo, fallback = photos.get((l.business_id, l.order_id), (None, None))
+        courier = " ".join((l.courier_name or "").split()) or "No courier on label"
+        orders.append({"order_id": l.order_id, "business_id": l.business_id, "business_name": names.get(l.business_id, ""),
+                       "sku": l.sku, "size": l.size, "qty": l.qty or 1, "courier": courier, "awb": l.awb_number,
+                       "payment": l.payment_type, "image_url": photo, "image_fallback_url": fallback,
+                       "packed": packed, "state": sc.status if sc else "PENDING"})
+        key = (l.sku or "").strip().casefold(), (l.size or "").strip().casefold()
+        g = skus.setdefault(key, {"sku": l.sku, "size": l.size, "qty": 0, "orders": 0, "packed_qty": 0,
+                                  "image_url": photo, "image_fallback_url": fallback, "couriers": {}, "businesses": set()})
+        g["qty"] += l.qty or 1
+        g["orders"] += 1
+        g["packed_qty"] += (l.qty or 1) if packed else 0
+        g["couriers"][courier] = g["couriers"].get(courier, 0) + 1
+        g["businesses"].add(names.get(l.business_id, ""))
+        g["image_url"] = g["image_url"] or photo
+    by_sku = [{**g, "businesses": sorted(g["businesses"]),
+               "couriers": [{"courier": k, "orders": n} for k, n in sorted(g["couriers"].items(), key=lambda x: -x[1])]}
+              for g in skus.values()]
+    by_sku.sort(key=lambda g: (-g["qty"], g["sku"] or ""))
+    return Response({
+        "file": {"id": f.pk, "created_at": f.created_at, "trigger": f.trigger, "labels": f.labels, "businesses": f.business_names},
+        "summary": {"orders": len(orders), "pieces": sum(o["qty"] for o in orders), "skus": len(by_sku),
+                    "packed": sum(1 for o in orders if o["packed"]), "not_found": len(ids) - len(rows)},
+        "skus": by_sku, "orders": orders,
+    })
 
 
 @api_view(["POST"])

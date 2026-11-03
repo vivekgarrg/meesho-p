@@ -212,6 +212,7 @@ urlpatterns = [
     path("meesho-orders/label-files/",      meesho_sync.meesho_label_files,      name="meesho_label_files"),
     path("meesho-orders/label-files/<int:file_id>/pdf/", meesho_sync.meesho_label_file_pdf, name="meesho_label_file_pdf"),
     path("meesho-orders/label-files/<int:file_id>/send/", meesho_sync.meesho_label_file_send, name="meesho_label_file_send"),
+    path("meesho-orders/label-files/<int:file_id>/items/", meesho_sync.meesho_label_file_items, name="meesho_label_file_items"),
     path("meesho-orders/labels/batch/<str:batch>/redo/", meesho_sync.meesho_orders_labels_batch_redo, name="meesho_orders_labels_batch_redo"),
     path("meesho-orders/payments/",         meesho_sync.meesho_payments,         name="meesho_payments"),
     path("meesho-orders/payments/refresh/", meesho_sync.meesho_payments_refresh, name="meesho_payments_refresh"),

@@ -3423,6 +3423,8 @@ class MeeshoLabelFile(models.Model):
     pages = models.PositiveIntegerField(default=0)
     sorted = models.BooleanField(default=True)
     summary = models.TextField(blank=True)
+    # The orders (sub-order numbers) on the labels, in the PDF's order — for its items table.
+    order_ids = models.JSONField(default=list, blank=True)
     pdf = models.BinaryField()
     created_at = models.DateTimeField(auto_now_add=True)
 
