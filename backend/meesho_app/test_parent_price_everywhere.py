@@ -69,3 +69,38 @@ class EverywhereTests(TestCase):
             r = self.c.post(self.api + "everywhere/sync/")
         self.assertEqual((r.status_code, r.data["queued"]), (202, 1))                 # Cosmify's account only — "Not mine" isn't
         self.assertEqual(q.call_args.args[0].business, self.cosmify)
+
+
+class GluedVariationTests(TestCase):
+    """Meesho spells many SKUs with the variation glued on: "long-carving-lota-001Free Size" is our "long-carving-lota-001"."""
+
+    def setUp(self):
+        self.rudam = Business.objects.create(name="Rudam")
+        self.user = User.objects.create_user(username="p2", password="pw", role=User.ROLE_BUSINESS_USER)
+        Membership.objects.create(user=self.user, business=self.rudam)
+        p = ParentItemPrice.objects.create(business=self.rudam, item_id="Long Carving Lota", item_price=D("300"), tax_percent=0,
+                                           packaging_cost=D("0"), final_price=D("300"))
+        FinalPrice.objects.create(business=self.rudam, sku_id="long-carving-lota-001", parent=p, final_price=D("300"))
+        acct = MeeshoAccount.objects.create(business=self.rudam, phone_number="9111", password_enc="x", status="ACTIVE")
+        cat = MeeshoCatalog.objects.create(account=acct, catalog_id=528323303, name="Lota", seen_at=timezone.now())
+        MeeshoListing.objects.create(account=acct, catalog=cat, product_id=1, variation_id=167, sku_id="long-carving-lota-001Free Size",
+                                     variation="Free Size", selling_price=D("799"), inventory=5, seen_at=timezone.now())
+        self.c = APIClient()
+        self.c.force_authenticate(self.user)
+
+    def test_the_spelling(self):
+        from .views import meesho_sku
+        self.assertEqual(meesho_sku("long-carving-lota-001Free Size", "Free Size"), "long-carving-lota-001")
+        self.assertEqual(meesho_sku("frock-006", "0-6 Months"), "frock-006")              # nothing glued: as it is
+        self.assertEqual(meesho_sku("Free Size", "Free Size"), "Free Size")               # never down to nothing
+
+    def test_it_is_found_as_ours(self):
+        r = self.c.get(f"/api/business/{self.rudam.id}/parent-prices/Long Carving Lota/everywhere/")
+        row = r.data["businesses"][0]["rows"][0]
+        self.assertEqual((row["sku_id"], row["meesho"][0]["catalog_id"], row["meesho"][0]["selling_price"]),
+                         ("long-carving-lota-001", 528323303, 799.0))
+
+    def test_no_glued_twin_is_added_to_sku_pricing(self):
+        from .views import sync_meesho_skus
+        self.assertEqual(sync_meesho_skus(self.rudam), 0)
+        self.assertFalse(FinalPrice.objects.filter(sku_id__icontains="Free Size").exists())

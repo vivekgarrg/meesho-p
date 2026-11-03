@@ -5093,6 +5093,19 @@ def _sku_key(sku_id):
     return (sku_id or "").strip().casefold()
 
 
+def meesho_sku(sku_id, variation=""):
+    """
+    A SKU as Meesho's inventory spells it, back to ours. For many listings
+    Meesho glues the variation onto the SKU — "long-carving-lota-001Free Size"
+    for our "long-carving-lota-001" (variation "Free Size") — so the variation
+    is taken off the end when it's there.
+    """
+    sku, variation = (sku_id or "").strip(), (variation or "").strip()
+    if variation and len(sku) > len(variation) and sku.casefold().endswith(variation.casefold()):
+        return sku[: -len(variation)].strip()
+    return sku
+
+
 class _SkuMap(dict):
     """
     A dict keyed by SKU id that matches keys the way the database does.
@@ -18287,17 +18300,19 @@ def _meesho_ids(business):
             .values_list("sku_id", "catalog__catalog_id", "product_id", "variation", "variation_id",
                          "selling_price", "inventory", "archived", "name", "image_url", "seen_at")):
         seen.add((pid, vid))
-        out.setdefault(_sku_key(sku), []).append(
-            SimpleNamespace(catalog_id=cid, product_id=pid, variation=variation or "Free Size", variation_id=vid, sku=sku,
-                            selling_price=price, inventory=stock, archived=archived, name=name or "", image_url=image or "",
-                            seen_at=seen_at))
+        item = SimpleNamespace(catalog_id=cid, product_id=pid, variation=variation or "Free Size", variation_id=vid,
+                               sku=meesho_sku(sku, variation), selling_price=price, inventory=stock, archived=archived,
+                               name=name or "", image_url=image or "", seen_at=seen_at)
+        for key in {_sku_key(item.sku), _sku_key(sku)}:
+            out.setdefault(key, []).append(item)
     for inv in MeeshoInventory.objects.filter(business=business).exclude(style_id=""):
         if (inv.product_id, inv.variation_id) in seen:
             continue
-        out.setdefault(_sku_key(inv.style_id), []).append(
-            SimpleNamespace(catalog_id=inv.catalog_id, product_id=inv.product_id, variation=inv.variation or "Free Size",
-                            variation_id=inv.variation_id, sku=inv.style_id, selling_price=None, inventory=inv.system_stock_count,
-                            archived=False, name=inv.product_name or "", image_url="", seen_at=None))
+        item = SimpleNamespace(catalog_id=inv.catalog_id, product_id=inv.product_id, variation=inv.variation or "Free Size",
+                               variation_id=inv.variation_id, sku=meesho_sku(inv.style_id, inv.variation), selling_price=None,
+                               inventory=inv.system_stock_count, archived=False, name=inv.product_name or "", image_url="", seen_at=None)
+        for key in {_sku_key(item.sku), _sku_key(inv.style_id)}:
+            out.setdefault(key, []).append(item)
     return out
 
 
@@ -18310,10 +18325,11 @@ def sync_meesho_skus(business):
     from .models import MeeshoListing
     have = {_sku_key(s) for s in FinalPrice.objects.filter(business=business).values_list("sku_id", flat=True)}
     new = {}
-    for sku in MeeshoListing.objects.filter(account__business=business).exclude(sku_id="").values_list("sku_id", flat=True):
-        sku = str(sku).strip()[:200]
+    for raw, variation in (MeeshoListing.objects.filter(account__business=business).exclude(sku_id="")
+                           .values_list("sku_id", "variation")):
+        sku = meesho_sku(raw, variation)[:200]
         key = _sku_key(sku)
-        if sku and key not in have and key not in new:
+        if sku and key not in have and _sku_key(raw) not in have and key not in new:
             new[key] = sku
     if new:
         from .api_cache import deferred_bumps

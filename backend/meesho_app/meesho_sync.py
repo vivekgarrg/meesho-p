@@ -937,19 +937,21 @@ def meesho_live_inventory(request, business_id):
 
     listings = list(MeeshoListing.objects.filter(account__in=accounts).select_related("catalog")
                     .order_by("sku_id", "catalog__catalog_id"))
+    # Our SKU for each listing — Meesho glues the variation onto some ("…-001Free Size").
+    ours = {l.pk: _views().meesho_sku(l.sku_id, l.variation) for l in listings}
     skus_by_biz = {}
     for l in listings:
-        skus_by_biz.setdefault(by_id[l.account_id].business_id, set()).add(l.sku_id)
+        skus_by_biz.setdefault(by_id[l.account_id].business_id, set()).add(ours[l.pk])
     parents = _parents_of(skus_by_biz)
 
     groups = {}
     for l in listings:
         a = by_id[l.account_id]
-        parent, image = parents.get((a.business_id, l.sku_id), (None, ""))
+        parent, image = parents.get((a.business_id, ours[l.pk]), (None, ""))
         key = f"{a.business_id}:{parent or ''}"
         g = groups.setdefault(key, {"key": key, "business_id": a.business_id, "business_name": a.business.name,
                                     "parent": parent, "image": image, "skus": {}})
-        sku = g["skus"].setdefault(l.sku_id, {"sku_id": l.sku_id, "listings": []})
+        sku = g["skus"].setdefault(ours[l.pk], {"sku_id": ours[l.pk], "listings": []})
         sku["listings"].append({
             "id": l.pk, "catalog_id": l.catalog.catalog_id, "catalog_name": l.catalog.name, "category": l.catalog.category,
             "product_id": l.product_id, "variation_id": l.variation_id, "name": l.name, "variation": l.variation,
