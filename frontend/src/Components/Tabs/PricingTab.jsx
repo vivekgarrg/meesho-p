@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import useSWR, { mutate as globalMutate } from "swr";
-import { API, btn, C, S, fmt, useIsMobile } from "../../App";
+import { API, btn, C, S, Tag, fmt, useIsMobile } from "../../App";
 import { PriceTicketDialog } from "./MeeshoPriceTicket";
 import { useBusiness } from "../../contexts/BusinessContext";
 import { useSearchParams } from "react-router-dom";
@@ -369,6 +369,9 @@ function ParentCard({ parent, notify, onLink, dragging, unlinked = [], onOptOut,
   const { data: historyData, isLoading: historyLoading } = useSWR(
     open ? `${API}/parent-prices/${idPath}/price-history/` : null
   );
+  // The price panel: this product in every business of yours, with Meesho's ids and price beside our cost.
+  const everywhereKey = open && panel === "sheet" ? `${API}/parent-prices/${idPath}/everywhere/` : null;
+  const { data: everywhere, mutate: reloadEverywhere } = useSWR(everywhereKey);
   const { data: suggestData, isLoading: suggestLoading } = useSWR(
     panel === "suggest" ? `${API}/parent-prices/${idPath}/suggestions/` : null
   );
@@ -541,41 +544,37 @@ function ParentCard({ parent, notify, onLink, dragging, unlinked = [], onOptOut,
    * Sent as a POST because the prices are per SKU; the response is the xlsx
    * itself, so it is read as a blob rather than JSON.
    */
-  // Send to Meesho: the same sheet, for the business chosen in the dialog.
-  const [ticketRows, setTicketRows] = useState(null);
-  const sheetRows = () => (children || [])
-    .filter((ch) => sheetPick[ch.sku_id] && ch.meesho?.length)
-    .map((ch) => ({ sku_id: ch.sku_id, msp: sheetPrice.msp, wdrp: sheetPrice.wdrp || undefined, mrp: sheetPrice.mrp || undefined }));
-  const openTicket = () => {
-    const rows = sheetRows();
-    if (!rows.length) { notify("err", "Tick at least one SKU that has a Meesho catalog row."); return; }
-    if (!String(sheetPrice.msp).trim()) { notify("err", "Enter the new selling price."); return; }
-    setTicketRows(rows);
+  // Send to Meesho / download: per business, each with its own Meesho ids. Picks are "businessId|sku".
+  const [ticketFor, setTicketFor] = useState(null);     // {business: {id, name}, rows}
+  const [syncing, setSyncing] = useState(false);
+  const rowsFor = (b) => b.rows
+    .filter((r) => sheetPick[`${b.business_id}|${r.sku_id}`] && r.meesho.length)
+    .map((r) => ({ sku_id: r.sku_id, msp: sheetPrice.msp, wdrp: sheetPrice.wdrp || undefined, mrp: sheetPrice.mrp || undefined }));
+  const readyFor = (b) => {
+    const rows = rowsFor(b);
+    if (!rows.length) { notify("err", `Tick at least one of ${b.business_name}'s SKUs that Meesho lists.`); return null; }
+    if (!String(sheetPrice.msp).trim()) { notify("err", "Enter the new selling price."); return null; }
+    return rows;
+  };
+  const openTicket = (b) => {
+    const rows = readyFor(b);
+    if (rows) setTicketFor({ business: { id: b.business_id, name: b.business_name }, rows });
   };
   const sendTicket = async (fields) => {
     const res = await fetch(`${API}/parent-prices/${idPath}/price-ticket/`, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...fields, rows: ticketRows }),
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...fields, target_business: ticketFor.business.id, rows: ticketFor.rows }),
     });
     return { ok: res.ok, data: await res.json().catch(() => ({})) };
   };
-
-  const downloadSheet = async () => {
-    const rows = (children || [])
-      .filter((ch) => sheetPick[ch.sku_id] && ch.meesho?.length)
-      .map((ch) => ({
-        sku_id: ch.sku_id,
-        msp: sheetPrice.msp,
-        wdrp: sheetPrice.wdrp || undefined,
-        mrp: sheetPrice.mrp || undefined,
-      }));
-    if (!rows.length) { notify("err", "Tick at least one SKU that has a Meesho catalog row."); return; }
-    if (!String(sheetPrice.msp).trim()) { notify("err", "Enter the new selling price."); return; }
-
+  const downloadSheet = async (b) => {
+    const rows = readyFor(b);
+    if (!rows) return;
     setSheetBusy(true);
     try {
       const res = await fetch(`${API}/parent-prices/${idPath}/price-sheet/`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rows }),
+        body: JSON.stringify({ rows, target_business: b.business_id }),
       });
       if (!res.ok) {
         const d = await res.json().catch(() => ({}));
@@ -588,12 +587,29 @@ function ParentCard({ parent, notify, onLink, dragging, unlinked = [], onOptOut,
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `msp_${parent.item_id.replace(/[^A-Za-z0-9._-]+/g, "_")}.xlsx`;
+      a.download = `msp_${b.business_name.replace(/[^A-Za-z0-9]+/g, "_")}_${parent.item_id.replace(/[^A-Za-z0-9._-]+/g, "_")}.xlsx`;
       document.body.appendChild(a); a.click(); a.remove();
       URL.revokeObjectURL(url);
-      notify("ok", `Sheet ready — ${written} row(s)` + (skipped ? `, ${skipped} skipped.` : "."));
+      notify("ok", `${b.business_name}'s sheet ready — ${written} row(s)` + (skipped ? `, ${skipped} skipped.` : "."));
     } catch { notify("err", "Could not build the sheet."); }
     finally { setSheetBusy(false); }
+  };
+  // Read every business's Meesho inventory again (ids, prices, stock), then show it.
+  const syncMeesho = async () => {
+    setSyncing(true);
+    try {
+      const res = await fetch(`${API}/parent-prices/${idPath}/everywhere/sync/`, { method: "POST" });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) { notify("err", d.error || "Couldn't start the sync."); return; }
+      notify("ok", "Reading Meesho's inventory — prices and ids update in a minute or two.");
+      for (let i = 0; i < 36; i++) {
+        // eslint-disable-next-line no-await-in-loop
+        await new Promise((ok) => setTimeout(ok, 5000));
+        // eslint-disable-next-line no-await-in-loop
+        const fresh = await reloadEverywhere();
+        if (fresh && !fresh.businesses.some((b) => b.syncing)) break;
+      }
+    } finally { setSyncing(false); }
   };
 
   /**
@@ -1083,11 +1099,11 @@ function ParentCard({ parent, notify, onLink, dragging, unlinked = [], onOptOut,
                 </ActionPanel>
               )}
               {panel === "sheet" && (
-                <ActionPanel accent={C.blue} icon="📄" title="Price Sheet">
+                <ActionPanel accent={C.blue} icon="📄" title="Price change — every business">
                   <p style={{ fontSize: 11.5, color: C.gray600, marginBottom: 10, lineHeight: 1.6 }}>
-                    Tick the SKUs, set the new price, and download a sheet you can upload
-                    straight to Meesho. Catalog id, product id and variation are filled in
-                    from your inventory — you only type the price.
+                    This product in every business of yours: what Meesho sells each SKU for now beside what it costs us.
+                    Tick SKUs, set the new price, then download each business's sheet or send it to that business's Meesho —
+                    catalog, product and variation ids are filled in from its own Meesho inventory.
                   </p>
 
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 8, marginBottom: 10 }}>
@@ -1101,54 +1117,92 @@ function ParentCard({ parent, notify, onLink, dragging, unlinked = [], onOptOut,
                     ))}
                   </div>
 
-                  {children === null ? (
-                    <p style={{ fontSize: 12, color: C.gray400 }}>Loading SKUs…</p>
-                  ) : (
-                    <div style={{ border: `1px solid ${C.border}`, borderRadius: 8, overflow: "hidden", marginBottom: 10 }}>
-                      {children.map((ch, i) => {
-                        const ready = !!ch.meesho?.length;
-                        return (
-                          <label key={ch.sku_id} style={{
-                            display: "flex", alignItems: "center", gap: 8, padding: "7px 10px",
-                            background: i % 2 ? C.gray50 : C.white, borderBottom: `1px solid ${C.gray100}`,
-                            cursor: ready ? "pointer" : "not-allowed", opacity: ready ? 1 : 0.55 }}>
-                            <input type="checkbox" disabled={!ready}
-                              checked={!!sheetPick[ch.sku_id]}
-                              onChange={() => setSheetPick((p) => ({ ...p, [ch.sku_id]: !p[ch.sku_id] }))} />
-                            <span style={{ flex: 1, minWidth: 0, fontFamily: "monospace", fontSize: 11.5,
-                              fontWeight: 700, color: C.gray800, wordBreak: "break-all" }}>
-                              {ch.sku_id}
-                            </span>
-                            {ready ? (
-                              <span style={{ fontSize: 10.5, color: C.gray400, whiteSpace: "nowrap" }}>
-                                catalog {ch.meesho[0].catalog_id}
-                                {ch.meesho.length > 1 ? ` · ${ch.meesho.length} variations` : ""}
-                              </span>
-                            ) : (
-                              <span style={{ fontSize: 10.5, color: C.amber, fontWeight: 700, whiteSpace: "nowrap" }}>
-                                not in Meesho inventory
-                              </span>
-                            )}
-                          </label>
-                        );
-                      })}
-                    </div>
-                  )}
-
-                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                    <button onClick={downloadSheet} disabled={sheetBusy} style={btn("primary", "sm")}>
-                      {sheetBusy ? "Building…" : "⬇ Download price sheet"}
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
+                    <button onClick={syncMeesho} disabled={syncing} style={{ ...btn("ghost", "sm"), opacity: syncing ? 0.6 : 1 }}>
+                      {syncing ? "Syncing with Meesho…" : "↻ Sync with Meesho"}
                     </button>
-                    <button onClick={openTicket} disabled={sheetBusy} style={btn("ghostOrange", "sm")}>📨 Send to Meesho…</button>
-                    {ticketRows && (
-                      <PriceTicketDialog base={API} what={`Parent ${parent.item_id}`} rows={ticketRows.length}
-                        send={sendTicket} onClose={() => setTicketRows(null)} />
-                    )}
                     <button onClick={() => setSheetPick({})} style={btn("ghost", "sm")}>Clear</button>
-                    <span style={{ fontSize: 11, color: C.gray400 }}>
-                      {Object.values(sheetPick).filter(Boolean).length} selected
-                    </span>
+                    <span style={{ fontSize: 11, color: C.gray400 }}>{Object.values(sheetPick).filter(Boolean).length} selected</span>
                   </div>
+
+                  {!everywhere ? (
+                    <p style={{ fontSize: 12, color: C.gray400 }}>Loading every business's SKUs…</p>
+                  ) : everywhere.businesses.length === 0 ? (
+                    <p style={{ fontSize: 12, color: C.gray500 }}>No SKUs under this parent in any business yet.</p>
+                  ) : everywhere.businesses.map((b) => {
+                    const listed = b.rows.filter((r) => r.meesho.length);
+                    const picked = listed.filter((r) => sheetPick[`${b.business_id}|${r.sku_id}`]).length;
+                    const msp = Number(sheetPrice.msp) || null;
+                    return (
+                      <div key={b.business_id} style={{ border: `1px solid ${C.border}`, borderRadius: 10, overflow: "hidden", marginBottom: 12 }}>
+                        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", padding: "8px 10px", background: C.gray50,
+                          borderBottom: `1px solid ${C.border}` }}>
+                          <input type="checkbox" aria-label={`All of ${b.business_name}'s listed SKUs`}
+                            checked={listed.length > 0 && picked === listed.length} disabled={!listed.length}
+                            onChange={(e) => setSheetPick((p) => {
+                              const n = { ...p };
+                              listed.forEach((r) => { n[`${b.business_id}|${r.sku_id}`] = e.target.checked; });
+                              return n;
+                            })} />
+                          <b style={{ fontSize: 13, color: C.gray900 }}>{b.business_name}</b>
+                          {b.connected ? <Tag variant="green">Meesho connected</Tag> : <Tag variant="gray">Meesho not connected</Tag>}
+                          {!b.has_parent && <Tag variant="amber">no parent "{parent.item_id}" here</Tag>}
+                          <span style={{ fontSize: 10.5, color: C.gray500 }}>
+                            {b.syncing ? "syncing…" : b.meesho_read_at ? `Meesho read ${new Date(b.meesho_read_at).toLocaleString("en-IN", { day: "2-digit", month: "short", hour: "numeric", minute: "2-digit" })}` : "Meesho inventory not read yet"}
+                          </span>
+                          <span style={{ flex: 1 }} />
+                          <button onClick={() => downloadSheet(b)} disabled={sheetBusy || !picked} style={{ ...btn("ghost", "sm"), opacity: picked ? 1 : 0.5 }}>
+                            ⬇ Sheet ({picked})
+                          </button>
+                          <button onClick={() => openTicket(b)} disabled={!picked || !b.connected}
+                            title={b.connected ? "" : "Connect this business's Meesho account first"}
+                            style={{ ...btn("ghostOrange", "sm"), opacity: picked && b.connected ? 1 : 0.5 }}>📨 Send to {b.business_name}…</button>
+                        </div>
+                        {b.rows.map((r, i) => {
+                          const key = `${b.business_id}|${r.sku_id}`;
+                          const ready = r.meesho.length > 0;
+                          return (
+                            <label key={key} style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: "7px 10px",
+                              background: i % 2 ? C.gray50 : C.white, borderBottom: `1px solid ${C.gray100}`,
+                              cursor: ready ? "pointer" : "not-allowed", opacity: ready ? 1 : 0.6 }}>
+                              <input type="checkbox" disabled={!ready} checked={!!sheetPick[key]} style={{ marginTop: 3 }}
+                                onChange={() => setSheetPick((p) => ({ ...p, [key]: !p[key] }))} />
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={{ display: "flex", gap: 6, alignItems: "baseline", flexWrap: "wrap" }}>
+                                  <span style={{ fontFamily: "monospace", fontSize: 11.5, fontWeight: 800, color: C.gray800, wordBreak: "break-all" }}>{r.sku_id}</span>
+                                  {!r.linked && <Tag variant="amber">not linked to this parent in {b.business_name}</Tag>}
+                                  <span style={{ fontSize: 11, color: C.gray600 }}>cost <b>{r.cost != null ? `₹${r.cost.toLocaleString("en-IN")}` : "—"}</b></span>
+                                </div>
+                                {!ready ? (
+                                  <div style={{ fontSize: 10.5, color: C.amber, fontWeight: 700 }}>not in {b.business_name}'s Meesho inventory — sync, or it isn't listed there</div>
+                                ) : r.meesho.map((m) => {
+                                  const gap = m.selling_price != null && r.cost != null ? m.selling_price - r.cost : null;
+                                  const newGap = msp != null && r.cost != null ? msp - r.cost : null;
+                                  return (
+                                    <div key={`${m.product_id}-${m.variation_id}`} style={{ display: "flex", gap: 10, flexWrap: "wrap", fontSize: 10.5, color: C.gray500, marginTop: 2 }}>
+                                      <span>catalog <b style={{ color: C.gray700 }}>{m.catalog_id}</b> · product {m.product_id} · {m.variation} · variation {m.variation_id ?? "—"}</span>
+                                      <span>Meesho <b style={{ color: C.gray900 }}>{m.selling_price != null ? `₹${m.selling_price.toLocaleString("en-IN")}` : "—"}</b></span>
+                                      {gap != null && <span style={{ fontWeight: 800, color: gap >= 0 ? "#15803D" : C.red }}>{gap >= 0 ? "+" : "−"}₹{Math.abs(gap).toFixed(0)} over cost</span>}
+                                      {newGap != null && <span style={{ fontWeight: 800, color: newGap >= 0 ? "#1D4ED8" : C.red }}>new: {newGap >= 0 ? "+" : "−"}₹{Math.abs(newGap).toFixed(0)}</span>}
+                                      <span>stock {m.inventory ?? "—"}</span>
+                                      {m.archived && <Tag variant="gray">paused</Tag>}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    );
+                  })}
+                  <p style={{ fontSize: 10.5, color: C.gray400, margin: 0 }}>
+                    "Over cost" is Meesho's selling price minus our cost — before Meesho's commission and shipping, so the real margin is lower.
+                  </p>
+                  {ticketFor && (
+                    <PriceTicketDialog base={API} what={`Parent ${parent.item_id} · ${ticketFor.business.name}`} rows={ticketFor.rows.length}
+                      lockBusiness={ticketFor.business} send={sendTicket} onClose={() => setTicketFor(null)} />
+                  )}
                 </ActionPanel>
               )}
               {panel === "stock" && (() => {

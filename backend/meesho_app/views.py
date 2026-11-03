@@ -18274,23 +18274,30 @@ def _meesho_ids(business):
     lists each SKU under, as the sync last read its Inventory page (live and
     paused alike; kept up to date by itself), else as Meesho Stock holds it
     (an uploaded inventory sheet). Each item has catalog_id, product_id,
-    variation, variation_id.
+    variation, variation_id — and, from the sync, what Meesho shows now:
+    selling_price, inventory, archived (paused), name, image_url, seen_at;
+    sku is the SKU as Meesho spells it.
     """
     from types import SimpleNamespace
     from .models import MeeshoListing
     out, seen = {}, set()
-    for sku, cid, pid, variation, vid in (MeeshoListing.objects.filter(account__business=business).exclude(sku_id="")
-                                          .order_by("catalog__catalog_id", "product_id")
-                                          .values_list("sku_id", "catalog__catalog_id", "product_id", "variation", "variation_id")):
+    for sku, cid, pid, variation, vid, price, stock, archived, name, image, seen_at in (
+            MeeshoListing.objects.filter(account__business=business).exclude(sku_id="")
+            .order_by("catalog__catalog_id", "product_id")
+            .values_list("sku_id", "catalog__catalog_id", "product_id", "variation", "variation_id",
+                         "selling_price", "inventory", "archived", "name", "image_url", "seen_at")):
         seen.add((pid, vid))
         out.setdefault(_sku_key(sku), []).append(
-            SimpleNamespace(catalog_id=cid, product_id=pid, variation=variation or "Free Size", variation_id=vid))
+            SimpleNamespace(catalog_id=cid, product_id=pid, variation=variation or "Free Size", variation_id=vid, sku=sku,
+                            selling_price=price, inventory=stock, archived=archived, name=name or "", image_url=image or "",
+                            seen_at=seen_at))
     for inv in MeeshoInventory.objects.filter(business=business).exclude(style_id=""):
         if (inv.product_id, inv.variation_id) in seen:
             continue
         out.setdefault(_sku_key(inv.style_id), []).append(
             SimpleNamespace(catalog_id=inv.catalog_id, product_id=inv.product_id, variation=inv.variation or "Free Size",
-                            variation_id=inv.variation_id))
+                            variation_id=inv.variation_id, sku=inv.style_id, selling_price=None, inventory=inv.system_stock_count,
+                            archived=False, name=inv.product_name or "", image_url="", seen_at=None))
     return out
 
 
@@ -18323,9 +18330,12 @@ def _parent_msp_sheet(business, parent, rows, inventory_business):
     """
     # Only SKUs actually under this parent — the sheet is per parent, and a
     # typo'd SKU silently repricing something else would be the worst outcome.
+    # Under this parent here, or under the same parent (same id) in the business
+    # the change is for — so each business's SKUs go out with its own ids.
     own = {
         _sku_key(sku): sku for sku in
-        FinalPrice.objects.filter(business=business, parent=parent)
+        FinalPrice.objects.filter(DQ(business=business, parent=parent)
+                                  | DQ(business=inventory_business, parent__item_id=parent.item_id))
         .values_list("sku_id", flat=True)
     }
 
@@ -18400,6 +18410,92 @@ def _send_price_ticket(request, account, wb, filename, written, skipped, what):
     if run.status != "OK":
         return Response({**body, "error": run.message}, status=status.HTTP_502_BAD_GATEWAY)
     return Response(body, status=status.HTTP_201_CREATED)
+
+
+def _num(v):
+    return float(v) if v is not None else None
+
+
+@api_view(["GET"])
+def parent_price_everywhere(request, business_id, item_id):
+    """
+    One product (parent) in every business this person has: each business's
+    SKUs under that parent id — and any SKU of the same name it lists on Meesho
+    but hasn't linked — with what Meesho shows now (catalog / product /
+    variation ids, selling price, stock, paused) and our cost, so a price
+    change is made knowing both. Grouped by business, with when its Meesho
+    inventory was last read.
+    """
+    from .meesho_sync import KIND_INVENTORY, STUCK_AFTER
+    from .models import MeeshoAccount, MeeshoListing, MeeshoSyncRun
+    business = get_authorized_business(request, business_id)
+    try:
+        here = ParentItemPrice.objects.get(business=business, item_id=item_id)
+    except ParentItemPrice.DoesNotExist:
+        return Response({"error": "Parent not found."}, status=status.HTTP_404_NOT_FOUND)
+    businesses = accessible_businesses(request, include=business)
+    parents = {p.business_id: p for p in ParentItemPrice.objects.filter(business__in=businesses, item_id=item_id)}
+    linked = list(FinalPrice.objects.filter(business__in=businesses, parent__item_id=item_id)
+                  .values("business_id", "sku_id", "final_price"))
+    keys = {_sku_key(r["sku_id"]) for r in linked}
+    accounts = {a.business_id: a for a in MeeshoAccount.objects.filter(business__in=businesses)}
+    busy = [MeeshoSyncRun.STATUS_QUEUED, MeeshoSyncRun.STATUS_RUNNING]
+    out = []
+    for b in sorted(businesses, key=lambda x: (x.pk != business.pk, x.name)):
+        parent = parents.get(b.pk)
+        ids = _meesho_ids(b)
+        prices = {_sku_key(fp.sku_id): fp for fp in FinalPrice.objects.filter(business=b).only("sku_id", "final_price", "parent_id")
+                  if _sku_key(fp.sku_id) in keys}
+        rows = []
+        for key in sorted(keys):
+            fp, listings = prices.get(key), ids.get(key, [])
+            if not fp and not listings:
+                continue
+            cost = (fp.final_price if fp and fp.final_price else None) or (parent.final_price if parent else None) or here.final_price
+            rows.append({
+                "sku_id": fp.sku_id if fp else listings[0].sku,
+                "linked": bool(fp and parent and fp.parent_id == parent.pk),
+                "cost": _num(cost),
+                "meesho": [{"catalog_id": m.catalog_id, "product_id": m.product_id, "variation": m.variation,
+                            "variation_id": m.variation_id, "selling_price": _num(m.selling_price), "inventory": m.inventory,
+                            "archived": m.archived, "name": m.name, "image_url": m.image_url} for m in listings],
+            })
+        if not rows:
+            continue
+        account = accounts.get(b.pk)
+        read = (MeeshoListing.objects.filter(account=account).order_by("-seen_at").values_list("seen_at", flat=True).first()
+                if account else None)
+        out.append({
+            "business_id": b.pk, "business_name": b.name,
+            "connected": bool(account and account.status == MeeshoAccount.STATUS_ACTIVE),
+            "parent_cost": _num(parent.final_price if parent else None), "has_parent": bool(parent),
+            "meesho_read_at": read,
+            "syncing": bool(account) and MeeshoSyncRun.objects.filter(
+                account=account, kind=KIND_INVENTORY, status__in=busy, queued_at__gte=timezone.now() - STUCK_AFTER).exists(),
+            "rows": rows,
+        })
+    return Response({"parent": item_id, "cost": _num(here.final_price), "businesses": out})
+
+
+@api_view(["POST"])
+def parent_price_everywhere_sync(request, business_id, item_id):
+    """Read the Meesho inventory of every business of this person again (ids, prices, stock)."""
+    from . import meesho_sync
+    from .models import MeeshoAccount, MeeshoSyncRun
+    business = get_authorized_business(request, business_id)
+    businesses = accessible_businesses(request, include=business)
+    live = list(MeeshoAccount.objects.filter(business__in=businesses, status=MeeshoAccount.STATUS_ACTIVE))
+    if not live:
+        return Response({"error": "No connected Meesho account — connect one under Meesho → Settings."},
+                        status=status.HTTP_400_BAD_REQUEST)
+    queued = 0
+    try:
+        for a in live:
+            _, fresh = meesho_sync._queue_run(a, meesho_sync.KIND_INVENTORY, MeeshoSyncRun.TRIGGER_MANUAL)
+            queued += int(fresh)
+    except meesho_sync.SyncNotConfigured as exc:
+        return Response({"error": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+    return Response({"queued": queued, "accounts": len(live)}, status=status.HTTP_202_ACCEPTED)
 
 
 @api_view(["POST"])
@@ -18506,7 +18602,14 @@ def parent_price_sheet(request, business_id, item_id):
     if not isinstance(rows, list) or not rows:
         return Response({"error": "Pick at least one SKU."}, status=status.HTTP_400_BAD_REQUEST)
 
-    wb, written, skipped = _parent_msp_sheet(business, parent, rows, business)
+    # For the business chosen (its own Meesho ids) — this one unless said otherwise.
+    target = business
+    if payload.get("target_business") not in (None, "", business.pk, str(business.pk)):
+        target = next((b for b in accessible_businesses(request, include=business)
+                       if str(b.pk) == str(payload.get("target_business"))), None)
+        if not target:
+            return Response({"error": "That business isn't one of yours."}, status=status.HTTP_403_FORBIDDEN)
+    wb, written, skipped = _parent_msp_sheet(business, parent, rows, target)
     if not written:
         return Response(
             {"error": "Nothing to write.", "skipped": skipped},
