@@ -340,3 +340,22 @@ class ReturnClaimTests(TestCase):
         self.assertEqual((forced.forced, forced.force_reason, forced.status), (True, "Meesho closed the first ticket without looking", "OK"))
         self.assertIn("forced", [e["step"] for e in forced.events])
         self.assertEqual(MeeshoReturnClaim.objects.count(), 2)
+
+    def test_an_unwritable_upload_folder_falls_back_to_one_that_works(self):
+        import tempfile
+        home = tempfile.mkdtemp()
+        with mock.patch.object(rc, "UPLOAD_ROOT", "/proc/not-writable/claim_uploads"), mock.patch.object(rc, "UPLOAD_FALLBACK", home):
+            r = self.c.post(f"{self.api}upload/start/", {"business_id": self.cosmify.id, "name": "a.jpg", "size": 3,
+                                                         "content_type": "image/jpeg"}, format="json")
+            self.assertEqual(r.status_code, 200, r.data)
+            self.assertTrue(os.path.isdir(os.path.join(home, r.data["upload_id"])))
+            self.assertEqual(rc._upload_dir(r.data["upload_id"]), os.path.join(home, r.data["upload_id"]))
+
+    def test_an_unexpected_error_says_what_it_is(self):
+        with mock.patch.object(rc, "duplicate_of", side_effect=RuntimeError("boom")), \
+                mock.patch.object(rc.requests, "post", return_value=Res(200, SCHEMA)):
+            r = self.c.post(self.api, {"business_id": self.cosmify.id, "sub_category_id": "2", "email": "a@b.co",
+                                       "values": {"sub_order_number": "1_1", "packet_state": "intact", "ticket_desc": "x",
+                                                  "product_openingvideo_link": [GCS]}}, format="json")
+        self.assertEqual(r.status_code, 500)
+        self.assertIn("RuntimeError: boom", r.data["error"])

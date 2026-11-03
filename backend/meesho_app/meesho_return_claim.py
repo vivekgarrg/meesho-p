@@ -18,7 +18,9 @@ Every attempt is kept (MeeshoReturnClaim); one Meesho took marks the return
 "Claim raised" with its ticket.
 """
 
+import functools
 import json
+import logging
 import os
 import shutil
 import tempfile
@@ -30,8 +32,11 @@ import requests
 from django.conf import settings
 from django.core.cache import cache
 from django.db.models import Q
+from django.core.exceptions import PermissionDenied
+from django.http import Http404
 from django.utils import timezone
 from rest_framework import status
+from rest_framework.exceptions import APIException
 from rest_framework.decorators import api_view, parser_classes
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
@@ -69,9 +74,27 @@ KNOWN_BY_KEY = {f["key"]: f for f in KNOWN_FIELDS}
 FILE_TYPES = ("img_file", "action_img_file", "video_file", "file")
 
 
+log = logging.getLogger(__name__)
+
+
 def _views():
     from . import views
     return views
+
+
+def reported(view):
+    """An unexpected error on these screens: logged in full, and its real reason shown — never a bare 500."""
+    @functools.wraps(view)
+    def wrapper(request, *args, **kwargs):
+        try:
+            return view(request, *args, **kwargs)
+        except (Http404, APIException, PermissionDenied):
+            raise
+        except Exception as exc:                                   # noqa: BLE001
+            log.exception("return claim: %s failed", view.__name__)
+            return Response({"error": f"Server error ({exc.__class__.__name__}: {str(exc)[:300]}) — it's in the server log.",
+                             "code": "server_error"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    return wrapper
 
 
 def _headers(account, sub_category_id=""):
@@ -399,6 +422,7 @@ def _return_json(r, names):
 
 
 @api_view(["GET"])
+@reported
 def claim_lookup(request, business_id):
     """
     The return a scanned / typed code belongs to — ?code= (repeatable: every
@@ -423,6 +447,7 @@ def claim_lookup(request, business_id):
 
 
 @api_view(["GET"])
+@reported
 def claim_options(request, business_id):
     """?business_id= — that business's claim types, and (with &sub=) the fields of one."""
     business = _views().get_authorized_business(request, business_id)
@@ -442,6 +467,7 @@ def claim_options(request, business_id):
 
 
 @api_view(["POST"])
+@reported
 def claim_validate(request, business_id):
     """{business_id, sub_category_id, values: {key: value}, keys: [the keys to check]} → Meesho's check."""
     business = _views().get_authorized_business(request, business_id)
@@ -460,6 +486,7 @@ def claim_validate(request, business_id):
 
 @api_view(["POST"])
 @parser_classes([MultiPartParser, FormParser])
+@reported
 def claim_upload(request, business_id):
     """multipart {business_id, file} — store a photo or the video with Meesho. Returns {url}."""
     business = _views().get_authorized_business(request, business_id)
@@ -487,8 +514,35 @@ def claim_upload(request, business_id):
 # asks until it's there. Kept on disk, where every gunicorn worker sees it.
 
 CHUNK_MAX = 4 * 1024 * 1024
-# Kept beside the app (not /tmp), where the Sidekiq worker's Django command finds them too.
+# Kept beside the app (not /tmp), where the Sidekiq worker's Django command finds them too — both run
+# as the same user. If that folder can't be written (left owned by root by a deploy run as root), the
+# user's home is used instead.
 UPLOAD_ROOT = os.environ.get("MEESHO_CLAIM_UPLOADS") or os.path.join(str(settings.BASE_DIR), "claim_uploads")
+UPLOAD_FALLBACK = os.path.join(os.path.expanduser("~"), "meesho-claim-uploads")
+
+
+def _writable(path):
+    try:
+        os.makedirs(path, exist_ok=True)
+        probe = os.path.join(path, f".probe-{uuid.uuid4().hex}")
+        with open(probe, "w") as fh:
+            fh.write("ok")
+        os.remove(probe)
+        return True
+    except OSError:
+        return False
+
+
+def _roots():
+    """Where uploads go (first writable) and every place one may already be."""
+    return [r for r in dict.fromkeys([UPLOAD_ROOT, UPLOAD_FALLBACK]) if r]
+
+
+def _new_root():
+    for r in _roots():
+        if _writable(r):
+            return r
+    raise OSError(f"no writable folder for claim files (tried {', '.join(_roots())})")
 UPLOAD_KEEP_SECONDS = 3 * 24 * 3600
 # A phone's unpacking video, before it is compressed on the server.
 MAX_RAW_VIDEO = 700 * 1024 * 1024
@@ -497,7 +551,11 @@ MAX_RAW_VIDEO = 700 * 1024 * 1024
 def _upload_dir(upload_id):
     if not upload_id or not all(c in "0123456789abcdef" for c in str(upload_id)) or len(str(upload_id)) != 32:
         return None
-    return os.path.join(UPLOAD_ROOT, str(upload_id))
+    for root in _roots():
+        path = os.path.join(root, str(upload_id))
+        if os.path.isdir(path):
+            return path
+    return os.path.join(_roots()[0], str(upload_id))
 
 
 def _read_json(path, default=None):
@@ -516,14 +574,15 @@ def _write_json(path, data):
 
 
 def _sweep_uploads():
-    """Uploads left over from a day ago — gone."""
-    try:
-        for name in os.listdir(UPLOAD_ROOT):
-            path = os.path.join(UPLOAD_ROOT, name)
-            if time.time() - os.path.getmtime(path) > UPLOAD_KEEP_SECONDS:
-                shutil.rmtree(path, ignore_errors=True)
-    except OSError:
-        pass
+    """Uploads left over from days ago — gone."""
+    for root in _roots():
+        try:
+            for name in os.listdir(root):
+                path = os.path.join(root, name)
+                if time.time() - os.path.getmtime(path) > UPLOAD_KEEP_SECONDS:
+                    shutil.rmtree(path, ignore_errors=True)
+        except OSError:
+            pass
 
 
 def _own_upload(request, upload_id):
@@ -536,6 +595,7 @@ def _own_upload(request, upload_id):
 
 
 @api_view(["POST"])
+@reported
 def claim_upload_start(request, business_id):
     """{business_id, name, size, content_type} → {upload_id, chunk_size}."""
     business = _views().get_authorized_business(request, business_id)
@@ -557,7 +617,7 @@ def claim_upload_start(request, business_id):
                         status=status.HTTP_400_BAD_REQUEST)
     _sweep_uploads()
     upload_id = uuid.uuid4().hex
-    folder = os.path.join(UPLOAD_ROOT, upload_id)
+    folder = os.path.join(_new_root(), upload_id)
     os.makedirs(folder, exist_ok=True)
     _write_json(os.path.join(folder, "meta.json"), {
         "user_id": request.user.pk, "account_id": account.pk, "name": name, "size": size,
@@ -567,6 +627,7 @@ def claim_upload_start(request, business_id):
 
 @api_view(["POST"])
 @parser_classes([MultiPartParser, FormParser])
+@reported
 def claim_upload_chunk(request, business_id, upload_id):
     """multipart {index, file} — one piece of the file."""
     _views().get_authorized_business(request, business_id)
@@ -618,6 +679,7 @@ def _in_background(fn, *args):
 
 
 @api_view(["POST"])
+@reported
 def claim_upload_finish(request, business_id, upload_id):
     """{parts} — every piece is here: send the file to Meesho (in the background). → {state}."""
     _views().get_authorized_business(request, business_id)
@@ -644,6 +706,7 @@ def claim_upload_finish(request, business_id, upload_id):
 
 
 @api_view(["GET"])
+@reported
 def claim_upload_status(request, business_id, upload_id):
     """{state: sending | done (url) | error (error)}."""
     _views().get_authorized_business(request, business_id)
@@ -655,6 +718,7 @@ def claim_upload_status(request, business_id, upload_id):
 
 @api_view(["GET", "POST"])
 @parser_classes([JSONParser])
+@reported
 def claims(request, business_id):
     """
     GET  — the claims raised lately, on every business of this desk (?q= sub-order / AWB).
@@ -730,6 +794,7 @@ def claims(request, business_id):
 
 
 @api_view(["POST"])
+@reported
 def claim_retry(request, business_id, claim_id):
     """A claim that failed: try it again (its files, if any, are still here)."""
     business = _views().get_authorized_business(request, business_id)
