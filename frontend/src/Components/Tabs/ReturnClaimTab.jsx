@@ -210,6 +210,7 @@ export function ReturnClaimTab() {
   const [claims, setClaims] = useState([]);
   const [extraFiles, setExtraFiles] = useState({});      // {field key: [upload ids]} — further photos a claim type asks for
   const [queuedNote, setQueuedNote] = useState(null);
+  const [force, setForce] = useState({ on: false, reason: "" });   // raise although a claim already exists
   const slotsRef = useRef(slots);
   slotsRef.current = slots;
   const business = ret?.business_id;
@@ -359,15 +360,18 @@ export function ReturnClaimTab() {
   // A field Meesho has flagged (e.g. "Ticket … has already been raised for this issue") — Meesho would refuse the claim.
   const flagged = Object.values(checks).filter((c) => c && !c.busy && c.ok === false);
   const duplicate = ret?.duplicate;
+  // Raise anyway: past a duplicate (and Meesho's own "already raised" check), with a reason that stays on the claim.
+  const forcing = force.on && force.reason.trim().length >= 3;
   const ready = ret?.connected && sub && fields && !missing.length && !busyUploads && !failedUpload && okContact && !sending
-    && !flagged.length && !duplicate;
+    && (!flagged.length || forcing) && (!duplicate || forcing);
   const subLabel = opts?.sub_categories?.find((s) => s.id === sub)?.label || "";
 
   const raise = async () => {
     setSending(true); setResult(null);
     try { localStorage.setItem(REMEMBER, JSON.stringify({ email: contact.email, callback: contact.callback })); } catch { /* fine */ }
     const r = await postJson("", { business_id: business, return_id: ret.id, sub_category_id: sub, sub_category: subLabel,
-      values: allValues(), files: filesOf(), labels, email: contact.email });
+      values: allValues(), files: filesOf(), labels, email: contact.email,
+      ...(forcing && (duplicate || flagged.length) ? { force: true, force_reason: force.reason.trim() } : {}) });
     setSending(false);
     loadClaims();
     if (!r.ok) { setResult({ ok: false, error: r.data.error || "Couldn't queue the claim." }); return; }
@@ -380,6 +384,7 @@ export function ReturnClaimTab() {
     setRet(null); setCode(""); setInfo({ sub_order_number: "", awb_number: "" }); setPacket(""); setSlots({});
     setValues({}); setLabels({}); setDesc(""); setChecks({}); setResult(null); setFindMsg(null); setSub(""); setFields(null);
     setExtraFiles({});
+    setForce({ on: false, reason: "" });
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
@@ -435,7 +440,7 @@ export function ReturnClaimTab() {
               {!ret.connected && <span style={{ color: C.red, fontWeight: 700 }}>✕ {ret.business_name}'s Meesho account isn't connected — connect it under Meesho → Settings.</span>}
               {ret.duplicate && (
                 <span role="alert" style={{ color: "#fff", background: C.red, borderRadius: 8, padding: "6px 10px", fontWeight: 800, marginTop: 4 }}>
-                  ⛔ Duplicate — {ret.duplicate.why} No new claim can be raised for it.</span>
+                  ⛔ Duplicate — {ret.duplicate.why} To raise it again, tick "Raise anyway" below and say why.</span>
               )}
             </div>
           </div>
@@ -534,11 +539,25 @@ export function ReturnClaimTab() {
           {missing.length > 0 && fields && <div style={{ fontSize: 12.5, color: C.gray600 }}>Still needed: {missing.join(", ")}</div>}
           {busyUploads && <div style={{ fontSize: 12.5, color: C.gray600 }}>Reading the photos…</div>}
           {failedUpload && <div style={{ fontSize: 12.5, color: C.red, fontWeight: 700 }}>A file didn't get through — press Try again on it.</div>}
-          {duplicate && <div style={{ fontSize: 12.5, color: C.red, fontWeight: 700 }}>Duplicate — a claim already exists for this return.</div>}
+          {(duplicate || flagged.length > 0) && (
+            <div style={{ border: `1.5px solid ${force.on ? C.red : C.gray200}`, background: force.on ? C.redLight : C.white, borderRadius: 12,
+              padding: "8px 12px", display: "flex", flexDirection: "column", gap: 6 }}>
+              <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13.5, fontWeight: 800, color: force.on ? C.red : C.gray700, cursor: "pointer" }}>
+                <input type="checkbox" checked={force.on} onChange={(e) => setForce((f) => ({ ...f, on: e.target.checked }))} style={{ width: 18, height: 18 }} />
+                Raise anyway — {duplicate ? "a claim already exists for this return" : "Meesho flagged a field"}
+              </label>
+              {force.on && (
+                <input value={force.reason} onChange={(e) => setForce((f) => ({ ...f, reason: e.target.value }))} autoFocus
+                  placeholder="Why raise it again? (kept with the claim)" aria-label="Why raise it again"
+                  style={{ ...inp, borderColor: forcing ? C.gray200 : C.red }} />
+              )}
+              {force.on && <span style={{ fontSize: 12, color: C.gray600 }}>Meesho may still refuse a second ticket for the same issue.</span>}
+            </div>
+          )}
           {flagged.length > 0 && <div style={{ fontSize: 12.5, color: C.red, fontWeight: 700 }}>Meesho won't take it yet: {flagged.map((c) => c.message).filter(Boolean).join(" ")}</div>}
           <button onClick={raise} disabled={!ready} style={{ ...btn("primary", "lg"), minHeight: 52, fontSize: 16, opacity: ready ? 1 : 0.5 }}>
             {sending ? <><CircularProgress size={16} style={{ color: "#fff", marginRight: 8, verticalAlign: "-3px" }} />Queuing the claim…</>
-              : `📨 Raise claim on ${ret.business_name}'s Meesho`}
+              : forcing && (duplicate || flagged.length) ? `⚠ Raise anyway on ${ret.business_name}'s Meesho` : `📨 Raise claim on ${ret.business_name}'s Meesho`}
           </button>
         </div>
       )}
@@ -557,6 +576,7 @@ export function ReturnClaimTab() {
               <span style={{ fontFamily: "monospace" }}>{c.sub_order_no}</span>
               <span style={{ color: C.gray600 }}>{c.sub_category}</span>
               {c.pod_attached && <Tag variant="gray">POD attached</Tag>}
+              {c.forced && <span title={c.force_reason}><Tag variant="amber">Raised anyway</Tag></span>}
               {c.status !== "OK" && c.message && <span style={{ color: c.status === "FAILED" ? C.red : C.gray600, flexBasis: "100%" }}>{c.message}</span>}
               {c.status === "FAILED" && <button onClick={() => retry(c)} style={{ ...btn("ghostOrange", "sm"), padding: "2px 10px" }}>↻ Retry</button>}
               <span style={{ color: C.gray400, marginLeft: "auto" }}>{new Date(c.at).toLocaleString("en-IN", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}{c.by ? ` · ${c.by}` : ""}</span>

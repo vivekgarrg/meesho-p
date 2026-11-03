@@ -326,3 +326,17 @@ class ReturnClaimTests(TestCase):
         claim = MeeshoReturnClaim.objects.get()
         self.assertEqual((claim.status, claim.error_code), ("FAILED", "files_stalled"))
         self.assertIn("stopped arriving", claim.message)
+
+    def test_a_duplicate_can_be_raised_anyway_with_a_reason(self):
+        values = {"sub_order_number": "341668276271146947_1", "packet_state": "intact", "product_openingvideo_link": [GCS], "ticket_desc": "x"}
+        with mock.patch.object(rc.requests, "post", side_effect=lambda url, **kw: Res(200, SCHEMA) if url.endswith("subcategorySchema")
+                               else Res(200, {"data": {"ticket_id": "TKT-1"}})):
+            self.raise_claim(values)
+            r, _ = self.raise_claim(values, force=True)
+            self.assertEqual((r.status_code, r.data["code"]), (400, "force_reason"))            # a reason is needed
+            r, done = self.raise_claim(values, force=True, force_reason="Meesho closed the first ticket without looking")
+        self.assertEqual((r.status_code, done), (202, {"next": "done"}))
+        forced = MeeshoReturnClaim.objects.order_by("-pk").first()
+        self.assertEqual((forced.forced, forced.force_reason, forced.status), (True, "Meesho closed the first ticket without looking", "OK"))
+        self.assertIn("forced", [e["step"] for e in forced.events])
+        self.assertEqual(MeeshoReturnClaim.objects.count(), 2)

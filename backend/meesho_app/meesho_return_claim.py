@@ -347,6 +347,7 @@ def _claim_json(c):
             "awb": c.awb_number, "packet_id": c.packet_id, "sub_category": c.sub_category, "status": c.status,
             "ticket": c.ticket, "message": c.message, "at": c.created_at, "attempts": c.attempts,
             "finished_at": c.finished_at, "pod_attached": bool(c.pod_meesho_url),
+            "forced": c.forced, "force_reason": c.force_reason,
             "by": c.created_by.username if c.created_by else None}
 
 
@@ -705,8 +706,13 @@ def claims(request, business_id):
     if ret is None and sub_order:
         ret = ReturnDelivery.objects.filter(business=account.business, suborder_no=sub_order).first()
     dup = duplicate_of(account.business_id, sub_order, ret)
-    if dup:
+    force_reason = str(d.get("force_reason") or "").strip()[:300]
+    forced = bool(dup) and bool(d.get("force"))
+    if dup and not forced:
         return Response({"error": dup["why"], "code": "duplicate", "duplicate": dup}, status=status.HTTP_409_CONFLICT)
+    if forced and len(force_reason) < 3:
+        return Response({"error": "Say why it's raised again — it's kept with the claim.", "code": "force_reason"},
+                        status=status.HTTP_400_BAD_REQUEST)
     claim = MeeshoReturnClaim.objects.create(
         business=account.business, return_delivery=ret, sub_order_no=sub_order[:100],
         awb_number=str(values.get("awb_number") or "")[:100], packet_id=str(values.get("barcode_id") or "")[:150],
@@ -716,7 +722,9 @@ def claims(request, business_id):
         callback_number=str(values.get("callback_number") or "")[:20], packet_state=str(values.get("packet_state") or "")[:40],
         return_snapshot=_snapshot(ret), pod_url=(ret.proof_of_delivery if ret else "") or "",
         status=MeeshoReturnClaim.STATUS_QUEUED, message="Queued — raised in the background.",
-        events=[_event("queued", f"by {request.user.username}")])
+        forced=forced, force_reason=force_reason if forced else "",
+        events=[_event("queued", f"by {request.user.username}")]
+               + ([_event("forced", f"by {request.user.username} — {dup['why']} Reason: {force_reason}")] if forced else []))
     queued = queue_claim(claim)
     return Response({"claim": _claim_json(claim), "queued": queued}, status=status.HTTP_202_ACCEPTED)
 
@@ -732,7 +740,7 @@ def claim_retry(request, business_id, claim_id):
     if c.status != MeeshoReturnClaim.STATUS_FAILED:
         return Response({"error": "Only a failed claim can be tried again."}, status=status.HTTP_400_BAD_REQUEST)
     dup = duplicate_of(c.business_id, c.sub_order_no)
-    if dup:
+    if dup and not c.forced and not (request.data or {}).get("force"):
         return Response({"error": dup["why"], "code": "duplicate"}, status=status.HTTP_409_CONFLICT)
     c.status, c.message, c.error_code, c.attempts = MeeshoReturnClaim.STATUS_QUEUED, "Queued again.", "", 0
     c.events = (c.events or []) + [_event("retry", f"by {request.user.username}")]

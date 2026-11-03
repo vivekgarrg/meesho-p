@@ -3651,6 +3651,9 @@ class MeeshoReturnClaim(models.Model):
     pod_url = models.TextField(blank=True, help_text="The return's proof of delivery, as the courier gave it")
     pod_meesho_url = models.TextField(blank=True, help_text="The POD as attached to the claim on Meesho")
     attempts = models.PositiveIntegerField(default=0)
+    # Raised although a claim for the return already existed — by whom it's in events.
+    forced = models.BooleanField(default=False, db_index=True)
+    force_reason = models.CharField(max_length=300, blank=True)
     events = models.JSONField(default=list, blank=True, help_text="[{at, step, note}] — what the worker did")
     error_code = models.CharField(max_length=40, blank=True)
     started_at = models.DateTimeField(null=True, blank=True)
