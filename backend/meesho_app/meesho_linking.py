@@ -26,6 +26,7 @@ import os
 import re
 import threading
 import time
+from datetime import timedelta
 from http.cookiejar import DefaultCookiePolicy
 
 import requests
@@ -162,6 +163,91 @@ def _cancelled(business, accounts, sub_order):
         return True
     latest = Order.latest_per_order(Order.objects.filter(business=business, sub_order_no=sub_order)).first()
     return bool(latest and latest.reason_for_credit_entry == "CANCELLED")
+
+
+def _awbs_in(accounts, endpoint):
+    """{AWB} on one of Meesho's order lists (as last read)."""
+    def build(ids):
+        out = set()
+        for snap in MeeshoSyncSnapshot.objects.filter(pk__in=ids):
+            out |= {_clean(r.get("awb")) for r in snap.payload or [] if isinstance(r, dict) and r.get("awb")}
+        return out
+    return _cached(f"awbs:{endpoint}", accounts, (endpoint,), build)
+
+
+def mark_shipped(accounts, links=None):
+    """
+    Linked parcels Meesho has moved from Ready to ship to Shipped: their Order Scan
+    record says so — shipped, and dispatched if it was only packed. Returns how many changed.
+    """
+    shipped = _awbs_in(accounts, "orders_shipped")
+    if not shipped:
+        return 0
+    qs = links if links is not None else (MeeshoPacketLink.objects.filter(business__in={a.business_id for a in accounts},
+                                                                          awb_number__in=list(shipped)[:20000])
+                                          .select_related("scanned_order"))
+    changed = 0
+    for l in qs:
+        so = l.scanned_order
+        if l.awb_number not in shipped or not so:
+            continue
+        fields = []
+        if so.ship_status != ScannedOrder.SHIP_SHIPPED:
+            so.ship_status, so.ship_status_raw = ScannedOrder.SHIP_SHIPPED, "SHIPPED (Meesho)"
+            fields += ["ship_status", "ship_status_raw"]
+        if so.status in (ScannedOrder.STATUS_PACKED, ScannedOrder.STATUS_SCANNED):
+            so.status, so.status_updated_at = ScannedOrder.STATUS_DISPATCHED, timezone.now()
+            fields += ["status", "status_updated_at"]
+        if fields:
+            so.save(update_fields=fields + ["updated_at"])
+            changed += 1
+    return changed
+
+
+LINKED_DAYS = 10
+
+
+@api_view(["GET"])
+def linked_orders(request, business_id):
+    """
+    Order Scan's "Linked" view: every parcel linked to a packet, and where it is
+    on Meesho now — still in Ready to ship, Shipped (marked so here as it moves),
+    or on neither list (cancelled, or not read yet). ?state=ready_to_ship|shipped|other.
+    Linked in the last LINKED_DAYS days, or still waiting in Ready to ship.
+    """
+    from .meesho_images import photo_map
+    v = _views()
+    business = v.get_authorized_business(request, business_id)
+    desk = v._scan_desk_scope(request, business)
+    accounts = list(MeeshoAccount.objects.filter(business__in=desk))
+    rts, shipped = _awbs_in(accounts, "orders_ready_to_ship"), _awbs_in(accounts, "orders_shipped")
+    since = timezone.now() - timedelta(days=LINKED_DAYS)
+    links = list(MeeshoPacketLink.objects.filter(business__in=desk)
+                 .filter(Q(linked_at__gte=since) | Q(awb_number__in=list(rts)[:5000]))
+                 .select_related("business", "scanned_order", "linked_by").order_by("-linked_at")[:3000])
+    mark_shipped(accounts, links)
+    couriers = _courier_names()
+    labels = {l.awb_number: l for l in LabelOrder.objects.filter(business__in=desk, awb_number__in=[x.awb_number for x in links])}
+    photos = photo_map([labels[x.awb_number] for x in links if x.awb_number in labels], sub_of=lambda l: l.order_id, own=lambda l: "")
+    rows, summary, by_courier = [], {"ready_to_ship": 0, "shipped": 0, "other": 0}, {}
+    for l in links:
+        state = "ready_to_ship" if l.awb_number in rts else "shipped" if l.awb_number in shipped else "other"
+        summary[state] += 1
+        courier = l.courier_name or couriers.get(l.carrier_id, "") or "Courier not known"
+        c = by_courier.setdefault(courier, {"courier": courier, "ready_to_ship": 0, "shipped": 0, "other": 0})
+        c[state] += 1
+        lab = labels.get(l.awb_number)
+        photo, fallback = photos.get((lab.business_id, lab.order_id), (None, None)) if lab else (None, None)
+        rows.append({"id": l.pk, "business_name": l.business.name, "awb": l.awb_number, "packet_id": l.packet_id,
+                     "sub_order_no": l.sub_order_no, "sku": l.sku or (lab.sku if lab else ""), "size": lab.size if lab else "",
+                     "qty": lab.qty if lab else 1, "courier": courier, "state": state, "linked_at": l.linked_at,
+                     "linked_by": l.linked_by.username if l.linked_by else None,
+                     "image_url": photo, "image_fallback_url": fallback})
+    want = request.GET.get("state")
+    if want in summary:
+        rows = [r for r in rows if r["state"] == want]
+    return Response({"summary": summary, "by_courier": sorted(by_courier.values(), key=lambda c: -(c["ready_to_ship"] + c["shipped"])),
+                     "checked_at": _checked_at(accounts), "rows": rows})
 
 
 def _cancelled_subs(accounts):
@@ -427,7 +513,16 @@ def linking(request, business_id):
     desk, _ = _desk(request, business)
     # The packing day the Order Scan desk is on (it turns at 1 pm, once the new day has work).
     day = v._parse_day(request.GET.get("day") or "") or v._following_day(request, [b.pk for b in desk])[0]
-    qs = MeeshoPacketLink.objects.filter(business__in=desk, pack_day=day).select_related("business", "linked_by", "scanned_order")
+    # Every link made in this packing day's window (1 pm to 1 pm) — and any filed under it. A scan can
+    # be counted toward the previous day's list (its label is on it) while the next scan starts the new
+    # day, so going by pack_day alone split one evening's links across two days ("scanned 4, shows 1").
+    start, end = v._packing_day_window(day)
+    if not request.GET.get("day"):
+        start = min(start, v._packing_day_window(v._current_business_date())[0])
+        end = max(end, v._packing_day_window(v._current_business_date())[1])
+    qs = (MeeshoPacketLink.objects.filter(business__in=desk)
+          .filter(Q(pack_day=day) | Q(linked_at__gte=start, linked_at__lt=end))
+          .select_related("business", "linked_by", "scanned_order").order_by("-linked_at"))
     q = _clean(request.GET.get("q"))
     if q:
         qs = qs.filter(Q(awb_number__icontains=q) | Q(packet_id__icontains=q) | Q(sub_order_no__icontains=q) | Q(sku__icontains=q))

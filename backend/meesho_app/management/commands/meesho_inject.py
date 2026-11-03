@@ -41,4 +41,8 @@ class Command(BaseCommand):
         # what Meesho's returns and payments say.
         settled = orders.settle_account(a).counts
         out.update({k: v for k, v in settled.items() if k != "still_shipped"}, still_shipped=settled["still_shipped"])
+        if kind == "orders":
+            # Linked parcels Meesho has moved on to Shipped: Order Scan shows them shipped.
+            from meesho_app.meesho_linking import mark_shipped
+            out["marked_shipped"] = mark_shipped([a])
         self.stdout.write(json.dumps(out, default=str))

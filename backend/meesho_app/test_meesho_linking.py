@@ -136,6 +136,30 @@ class OrderLinkingTests(TestCase):
         self.assertEqual(r.data["code"], "meesho_refused")
         self.assertEqual(self.submit.call_count, 1)
 
+    def test_links_filed_under_two_days_in_one_evening_all_show(self):
+        from datetime import timedelta
+        self.link("VL1001", "KP4AUSE32034836")
+        self.link("DL2001", "KP9ZZZZ12345678")
+        # The first scan counted toward the previous day's list (its label was on it); the next started the new day.
+        MeeshoPacketLink.objects.filter(awb_number="VL1001").update(pack_day=views._current_business_date() - timedelta(days=1))
+        d = self.c.get(self.base).data
+        self.assertEqual((d["count"], sorted(l["awb"] for l in d["links"])), (2, ["DL2001", "VL1001"]))
+
+    def test_linked_orders_ready_to_ship_then_shipped(self):
+        self.link("VL1001", "KP4AUSE32034836")
+        url = f"/api/business/{self.biz.id}/order-scan/linked/"
+        d = self.c.get(url).data
+        self.assertEqual((d["summary"]["ready_to_ship"], d["rows"][0]["awb"], d["rows"][0]["state"]), (1, "VL1001", "ready_to_ship"))
+        # Meesho moves it from Ready to ship to Shipped.
+        acct = MeeshoAccount.objects.get()
+        MeeshoSyncSnapshot.objects.filter(endpoint="orders_ready_to_ship").update(payload=[], fetched_at=timezone.now())
+        MeeshoSyncSnapshot.objects.create(account=acct, endpoint="orders_shipped", http_status=200, fetched_at=timezone.now(),
+                                          payload=[{"sub_order_num": "11_1", "awb": "VL1001", "packet_id": "KP4AUSE32034836"}])
+        d = self.c.get(url, {"state": "shipped"}).data
+        self.assertEqual((d["summary"]["shipped"], d["summary"]["ready_to_ship"], [r["awb"] for r in d["rows"]]), (1, 0, ["VL1001"]))
+        so = ScannedOrder.objects.get(awb_number="VL1001")
+        self.assertEqual((so.status, so.ship_status), ("DISPATCHED", "SHIPPED"))
+
     def test_bad_scans_are_refused_and_logged(self):
         for awb, packet, code in (("VL1001", "", "missing"), ("VL1001", "12345", "not_a_packet"),
                                   ("KP4AUSE32034836", "KP2SECT43976500", "two_packets"), ("NOPE999", "KP1AAAAAA11", "unknown_awb")):

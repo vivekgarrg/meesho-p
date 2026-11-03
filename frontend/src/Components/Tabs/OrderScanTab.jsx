@@ -1281,7 +1281,7 @@ function NoticeChips({ desk, alerts, onAlerts, onUnsent, onUnrec, onMovedBack })
   );
 }
 
-function MobilePack({ desk, platform, businesses, onScopeChanged, scopeTick, multi }) {
+function MobilePack({ desk, platform, businesses, onScopeChanged, scopeTick, multi, setShow }) {
   const { queue, loading, mode, setMode, latest, busy, date, setDate, record } = desk;
   const [camera, setCamera] = useState(false);
   const [showSummary, setShowSummary] = useState(false);
@@ -1365,6 +1365,7 @@ function MobilePack({ desk, platform, businesses, onScopeChanged, scopeTick, mul
         <button onClick={() => setShowSummary(true)} aria-label="Courier summary and print" className="os-btn"
           style={{ ...btn("ghost", "sm"), minHeight: 40, minWidth: 44, flexShrink: 0, fontSize: 18, padding: "4px 8px" }}>🖨</button>
       </div>
+      {setShow && <div style={{ padding: "6px 10px", background: C.white, borderBottom: `1px solid ${C.gray200}`, flexShrink: 0 }}><ModeToggle mode="scanned" setMode={setShow} /></div>}
       {showSummary && (
         <div style={{ position: "fixed", inset: 0, zIndex: 3200, background: C.white, overflowY: "auto",
           padding: "calc(12px + env(safe-area-inset-top)) 14px calc(16px + env(safe-area-inset-bottom))" }}>
@@ -1575,7 +1576,7 @@ function ScanRecord({ platform, multi }) {
   );
 }
 
-function DesktopPack({ desk, platform, setPlatform, businesses, onScopeChanged, scopeTick, multi }) {
+function DesktopPack({ desk, platform, setPlatform, businesses, onScopeChanged, scopeTick, multi, setShow }) {
   const { queue, loading, mode, setMode, latest, busy, date, setDate, record, reload } = desk;
   const [view, setView] = useState("queue");          // queue | record | summary
   const [tab, setTab] = useState("pending");
@@ -1614,6 +1615,7 @@ function DesktopPack({ desk, platform, setPlatform, businesses, onScopeChanged, 
         <div>
           <h1 style={{ fontSize: 22, fontWeight: 800, color: C.gray900, margin: 0 }}>Order scan</h1>
           <p style={{ fontSize: 13, color: C.gray500, marginTop: 3 }}>Meesho and Flipkart together — scan each parcel to tick it off the day's list.</p>
+          {setShow && <div style={{ marginTop: 8 }}><ModeToggle mode="scanned" setMode={setShow} /></div>}
         </div>
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
           <DeskBusinesses desk={businesses} onChanged={onScopeChanged} />
@@ -1724,7 +1726,152 @@ export function OrderScanTab() {
   // Bumped when the combined businesses change, so everything re-reads.
   const [scopeTick, setScopeTick] = useState(0);
   const onScopeChanged = () => { setScopeTick((t) => t + 1); desk.reload(); };
-  const props = { desk, platform, setPlatform, businesses, onScopeChanged, scopeTick,
+  // Scanned (the day's desk) or Linked (parcels linked to a packet, by where they are on Meesho now).
+  const [show, setShowState] = useState(() => { try { return localStorage.getItem("order-scan-show") || "scanned"; } catch { return "scanned"; } });
+  const setShow = (m) => { setShowState(m); try { localStorage.setItem("order-scan-show", m); } catch { /* fine */ } };
+  const props = { desk, platform, setPlatform, businesses, onScopeChanged, scopeTick, setShow,
     multi: (businesses.info?.selected?.length || 0) > 1 };
+  if (show === "linked") return <LinkedOrders isMobile={isMobile} setMode={setShow} businesses={businesses} onScopeChanged={onScopeChanged} />;
   return isMobile ? <MobilePack {...props} /> : <DesktopPack {...props} />;
+}
+
+/** Scanned (the day's packing desk) or Linked (parcels linked to their packet, ready to ship or shipped). */
+function ModeToggle({ mode, setMode }) {
+  const opt = (key, label) => (
+    <button key={key} role="tab" aria-selected={mode === key} onClick={() => setMode(key)} className="os-btn"
+      style={{ flex: 1, border: "none", borderRadius: 8, padding: "8px 14px", minHeight: 38, fontSize: 13.5, fontWeight: 800, fontFamily: "inherit", cursor: "pointer",
+        background: mode === key ? C.white : "transparent", color: mode === key ? C.orange : C.gray600,
+        boxShadow: mode === key ? "0 1px 3px rgba(15,23,42,.12)" : "none", whiteSpace: "nowrap" }}>{label}</button>
+  );
+  return (
+    <div role="tablist" aria-label="Show" style={{ display: "flex", background: C.gray100, borderRadius: 10, padding: 3, maxWidth: 420 }}>
+      {opt("scanned", "📦 Scanned")}
+      {opt("linked", "🔗 Linked")}
+    </div>
+  );
+}
+
+const LINK_STATES = [
+  { key: "ready_to_ship", label: "Ready to ship", tone: C.orange, tag: "amber" },
+  { key: "shipped", label: "Shipped", tone: C.green, tag: "green" },
+  { key: "other", label: "Not on Meesho's lists", tone: C.gray500, tag: "gray" },
+];
+
+/**
+ * Every parcel linked to a packet (on Order linking, or as it was packed) and
+ * where it is on Meesho now: still waiting in Ready to ship, or Shipped — the
+ * server marks those shipped in Order Scan as Meesho moves them. Per courier.
+ */
+function LinkedOrders({ isMobile, setMode, businesses, onScopeChanged }) {
+  const [data, setData] = useState(null);
+  const [state, setState] = useState("ready_to_ship");
+  const [courier, setCourier] = useState("");
+  const [q, setQ] = useState("");
+  const load = useCallback(async () => {
+    const res = await fetch(`${API}/order-scan/linked/`).catch(() => null);
+    if (res?.ok) setData(await res.json());
+  }, []);
+  useEffect(() => { load(); const t = setInterval(load, 60000); return () => clearInterval(t); }, [load]);
+
+  const needle = q.trim().toLowerCase();
+  const rows = (data?.rows || []).filter((r) => r.state === state && (!courier || r.courier === courier)
+    && (!needle || [r.sku, r.awb, r.packet_id, r.sub_order_no].some((v) => String(v || "").toLowerCase().includes(needle))));
+  const couriers = [...new Set((data?.rows || []).map((r) => r.courier))].sort();
+
+  const body = (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12, padding: isMobile ? 10 : 0 }}>
+      {!data ? <div style={{ display: "flex", justifyContent: "center", padding: 40 }}><CircularProgress style={{ color: C.orange }} /></div> : (
+        <>
+          <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(3, minmax(0, 1fr))" }}>
+            {LINK_STATES.map((st) => (
+              <button key={st.key} onClick={() => setState(st.key)} aria-pressed={state === st.key} className="os-btn"
+                style={{ textAlign: "left", cursor: "pointer", fontFamily: "inherit", borderRadius: 14, padding: "10px 12px", minWidth: 0,
+                  border: `2px solid ${state === st.key ? st.tone : C.gray200}`, background: state === st.key ? C.white : C.gray50 }}>
+                <div style={{ fontFamily: "monospace", fontWeight: 900, fontSize: isMobile ? 24 : 28, color: C.gray900, lineHeight: 1 }}>{data.summary[st.key]}</div>
+                <div style={{ fontSize: 12, fontWeight: 800, color: st.tone, marginTop: 4 }}>{st.label}</div>
+              </button>
+            ))}
+          </div>
+          {data.by_courier.length > 0 && (
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              <button onClick={() => setCourier("")} className="os-btn" style={{ ...btn(courier ? "ghost" : "ghostOrange", "sm"), minHeight: 34 }}>All couriers</button>
+              {data.by_courier.map((c) => {
+                const t = courierTone(c.courier);
+                return (
+                  <button key={c.courier} onClick={() => setCourier(courier === c.courier ? "" : c.courier)} className="os-btn"
+                    style={{ minHeight: 34, borderRadius: 999, padding: "4px 12px", fontFamily: "inherit", fontSize: 12.5, fontWeight: 800, cursor: "pointer",
+                      border: `1.5px solid ${courier === c.courier ? t.solid : t.border}`, background: courier === c.courier ? t.bg : C.white, color: t.fg }}>
+                    {c.courier} · {c[state]}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search SKU, AWB, packet, sub-order…" aria-label="Search" className="os-in"
+            style={{ ...S.inp, minHeight: 42 }} />
+          <div style={{ ...S.card, padding: 0, overflow: "hidden" }}>
+            {rows.length === 0 ? <div style={{ padding: 24, textAlign: "center", color: C.gray500, fontSize: 13.5 }}>
+              {state === "ready_to_ship" ? "Nothing linked is waiting in Ready to ship." : state === "shipped" ? "Nothing linked has shipped yet." : "Every linked parcel is on Meesho's lists."}</div>
+              : rows.map((r) => {
+                const st = LINK_STATES.find((x) => x.key === r.state);
+                const t = courierTone(r.courier);
+                return (
+                  <div key={r.id} style={{ display: "flex", gap: 10, alignItems: "center", padding: "9px 12px", borderBottom: `1px solid ${C.gray100}` }}>
+                    <Photo url={r.image_url} fallback={r.image_fallback_url} size={44} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 13.5, color: C.gray900, wordBreak: "break-all" }}>
+                        {r.sku || r.sub_order_no || "—"}{r.size ? <span style={{ fontWeight: 700, color: C.gray500, fontSize: 12 }}> · {r.size}</span> : null}
+                        {r.qty > 1 && <span style={{ marginLeft: 6, color: "#fff", background: C.red, borderRadius: 6, padding: "0 6px" }}>×{r.qty}</span>}
+                      </div>
+                      <div style={{ fontSize: 12, color: C.gray600, marginTop: 2, wordBreak: "break-all" }}>
+                        <span style={{ fontWeight: 800, color: t.fg, background: t.bg, border: `1px solid ${t.border}`, borderRadius: 6, padding: "0 6px", marginRight: 6 }}>{r.courier}</span>
+                        {[r.awb, r.packet_id, r.business_name].filter(Boolean).join(" · ")}
+                      </div>
+                      <div style={{ fontSize: 11.5, color: C.gray400 }}>linked {fmtTime(r.linked_at)}{r.linked_by ? ` · ${r.linked_by}` : ""}</div>
+                    </div>
+                    <Tag variant={st.tag}>{st.label}</Tag>
+                  </div>
+                );
+              })}
+          </div>
+          {data.checked_at && <div style={{ fontSize: 11.5, color: C.gray400 }}>Meesho's lists read {fmtDay(String(data.checked_at).slice(0, 10))} {fmtTime(data.checked_at)} — updated by the sync every few minutes.</div>}
+        </>
+      )}
+    </div>
+  );
+
+  if (!isMobile) {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+          <div>
+            <h1 style={{ fontSize: 22, fontWeight: 800, color: C.gray900, margin: 0 }}>Order scan · linked</h1>
+            <p style={{ fontSize: 13, color: C.gray500, marginTop: 3 }}>Parcels linked to their packet — waiting in Ready to ship, or shipped.</p>
+            <div style={{ marginTop: 8 }}><ModeToggle mode="linked" setMode={setMode} /></div>
+          </div>
+          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+            <DeskBusinesses desk={businesses} onChanged={() => { onScopeChanged(); load(); }} />
+            <button onClick={load} className="os-btn" style={btn("ghost", "sm")}>↻ Refresh</button>
+          </div>
+        </div>
+        {body}
+      </div>
+    );
+  }
+  return (
+    <div className="os-desk" style={{ position: "fixed", inset: 0, zIndex: 3000, background: C.gray50, display: "flex", flexDirection: "column", height: "100dvh", paddingTop: "env(safe-area-inset-top)" }}>
+      <style>{DESK_CSS}</style>
+      <div style={{ padding: "6px 10px", display: "flex", alignItems: "center", gap: 6, background: C.white, borderBottom: `1px solid ${C.gray200}`, flexShrink: 0 }}>
+        <button onClick={() => window.dispatchEvent(new Event("app:open-menu"))} aria-label="Menu — other tabs" className="os-btn"
+          style={{ background: "none", border: "none", width: 44, height: 44, cursor: "pointer", lineHeight: 0, color: C.gray700, flexShrink: 0 }}>
+          <MenuIcon />
+        </button>
+        <div style={{ flex: 1, fontSize: 17, fontWeight: 900, color: C.gray900 }}>Linked parcels</div>
+        <DeskBusinesses desk={businesses} onChanged={() => { onScopeChanged(); load(); }} compact />
+        <button onClick={load} aria-label="Refresh" className="os-btn" style={{ ...btn("ghost", "sm"), minHeight: 40, minWidth: 44 }}>↻</button>
+      </div>
+      <div style={{ padding: "6px 10px", background: C.white, borderBottom: `1px solid ${C.gray200}`, flexShrink: 0 }}><ModeToggle mode="linked" setMode={setMode} /></div>
+      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", paddingBottom: "env(safe-area-inset-bottom)" }}>{body}</div>
+    </div>
+  );
 }
