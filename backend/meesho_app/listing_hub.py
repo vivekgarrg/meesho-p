@@ -243,19 +243,24 @@ def _meesho_model(business, skus):
 
 
 def _flipkart_model(business, skus):
+    from types import SimpleNamespace
+    from .views import flipkart_outcome, flipkart_report_statuses
     rows = list(FlipkartOrderPayment.objects.filter(business=business, sale_amount__gt=0)
                 .values_list("order_item_id", "seller_sku", "sale_amount", "settlement_value", "return_type", "quantity")[:20000])
     groups = defaultdict(list)
     for r in rows:
         groups[r[0]].append(r)
+    statuses = flipkart_report_statuses(business)
     pairs, ret_settle, outcomes_all, outcomes_own = [], [], Counter(), Counter()
     sku_set = {s.lower() for s in skus}
     for g in groups.values():
-        rt = next((x[4] for x in g if x[4] and x[4].upper() != "NA"), None)
         settle = sum(float(x[3] or 0) for x in g)
-        if not rt and settle == 0:
-            continue                  # cancelled before delivery (settled at 0): neither a sale nor a return
-        kind = "rto" if rt and "courier" in rt.lower() else "return" if rt else "delivered"
+        # The Orders report decides what happened (flipkart_outcome); cancelled is neither a sale nor a return.
+        outcome, _ = flipkart_outcome([SimpleNamespace(return_type=x[4], settlement_value=Decimal(str(x[3] or 0))) for x in g],
+                                      statuses.get(g[0][0]))
+        if outcome == "cancelled":
+            continue
+        kind = {"rto": "rto", "return": "return"}.get(outcome, "delivered")
         outcomes_all[kind] += 1
         if any(str(x[1] or "").lower() in sku_set for x in g):
             outcomes_own[kind] += 1

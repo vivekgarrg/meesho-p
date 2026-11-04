@@ -16,7 +16,7 @@ from .models import FinalPrice, FlipkartOrder, FlipkartOrderPayment, ParentItemP
 from .views import _compute_flipkart_profit_summary
 
 
-class FlipkartCancelledTests(TestCase):
+class FlipkartBase(TestCase):
     def setUp(self):
         user = User.objects.create_user(username="o", password="pw", role=User.ROLE_SUPER_ADMIN)
         self.biz = Business.objects.create(name="Rudam")
@@ -48,6 +48,8 @@ class FlipkartCancelledTests(TestCase):
         FlipkartOrder.objects.create(business=self.biz, order_item_id=item, order_id=f"O{item}", order_date=date(2026, 10, 5),
                                      order_item_status=status, sku="LOTA-1")
 
+
+class FlipkartCancelledTests(FlipkartBase):
     def test_the_payments_screen_says_cancelled_with_no_loss(self):
         d = self.c.get(f"/api/business/{self.biz.id}/flipkart-payments/grouped/").data
         by = {g["order_id"]: g for g in d["groups"]}
@@ -71,3 +73,32 @@ class FlipkartCancelledTests(TestCase):
         orders = {o["order_item_id"]: o for o in d.data["orders"]}
         self.assertEqual((orders["C1"]["is_cancelled"], orders["C1"]["excluded_reason"], orders["C1"]["cost"]), (True, "cancelled", 0.0))
         self.assertEqual((orders["D1"]["is_cancelled"], orders["D1"]["net_profit"]), (False, 200.0))
+
+
+class OrdersReportDecidesTests(FlipkartBase):
+    """The Orders report's status decides what an item counts as; its payments are counted by that."""
+
+    def setUp(self):
+        super().setUp()
+        # Delivered on the Orders report, though a payment row says return: delivered, costed.
+        self.pay("R1", "300")
+        self.pay("R1", "-50", sale="0", rt="Customer Return")
+        self.order("R1", "DELIVERED")
+        # Return requested on the report, Flipkart hasn't clawed the 300 back yet: a return — not a sale.
+        self.pay("R2", "300")
+        self.order("R2", "RETURN_REQUESTED")
+        # Undelivered on the report: RTO; its shipping charge counts, no item cost.
+        self.pay("R3", "-60")
+        self.order("R3", "UNDELIVERED")
+
+    def test_the_orders_report_wins(self):
+        d = self.c.get(f"/api/business/{self.biz.id}/flipkart-payments/grouped/").data
+        by = {g["order_id"]: g for g in d["groups"]}
+        self.assertEqual((by["OR1"]["status"], by["OR1"]["net_profit"]), ("DELIVERED", 150.0))     # 300 − 50 − cost 100
+        self.assertEqual((by["OR2"]["status"], by["OR2"]["net_profit"], by["OR2"]["cost"]), ("RETURN", 0.0, 0.0))
+        self.assertEqual((by["OR3"]["status"], by["OR3"]["net_profit"]), ("RTO", -60.0))
+        self.assertEqual(by["OR2"]["items"][0]["outcome_from"], "orders")
+        self.assertEqual(by["OC2"]["items"][0]["outcome_from"], "payments")                     # not in the report
+        s = _compute_flipkart_profit_summary(self.biz)
+        self.assertEqual(s["totals"]["net_profit"], d["kpi"]["total_profit"])                  # the P&L agrees
+        self.assertEqual(d["kpi"]["total_profit"], 175.0 + 150.0 - 60.0)
