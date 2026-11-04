@@ -1482,7 +1482,10 @@ def meesho_label_file_items(request, business_id, file_id):
 
 @api_view(["POST"])
 def meesho_label_file_send(request, business_id, file_id):
-    """Admin: send one kept labels PDF now, on the channels set up (Telegram / email / WhatsApp)."""
+    """
+    Admin: send one kept labels file now, on the channels set up (Telegram / email / WhatsApp).
+    Body {what}: "both" (the PDF, then its list of items — the default), "pdf", or "items" (only the list).
+    """
     business = _views().get_authorized_business(request, business_id)
     if not _views()._is_admin(request.user):
         return Response({"error": "Only an admin can send labels."}, status=status.HTTP_403_FORBIDDEN)
@@ -1493,13 +1496,29 @@ def meesho_label_file_send(request, business_id, file_id):
     if not notify.channels():
         return Response({"error": "No channel is set up — add the Telegram (or email / WhatsApp) settings to the server's .env."},
                         status=status.HTTP_400_BAD_REQUEST)
+    what = str((request.data or {}).get("what") or "both")
+    if what not in ("both", "pdf", "items"):
+        return Response({"error": "Send what — both, pdf or items?"}, status=status.HTTP_400_BAD_REQUEST)
     when = timezone.localtime(f.created_at)
-    caption = (f"{f.labels} label{'' if f.labels == 1 else 's'} from {', '.join(f.business_names or [])}"
-               f"{', sorted by parent SKU' if f.sorted else ''}.")
-    sent = notify.send(f"Meesho labels — {when:%-I:%M %p, %-d %b}", caption,
-                       filename=f"meesho-labels-{when:%Y-%m-%d-%H%M}.pdf", data=bytes(f.pdf))
+    title = f"Meesho labels — {when:%-I:%M %p, %-d %b}"
+    sent, out = {}, {}
+    if what in ("both", "pdf"):
+        caption = (f"{f.labels} label{'' if f.labels == 1 else 's'} from {', '.join(f.business_names or [])}"
+                   f"{', sorted by parent SKU' if f.sorted else ''}.")
+        sent = notify.send(title, caption, filename=f"meesho-labels-{when:%Y-%m-%d-%H%M}.pdf", data=bytes(f.pdf))
+        out["pdf"] = sent
+    if what in ("both", "items"):
+        picks = pick_list_text(f)
+        if not picks:
+            if what == "items":
+                return Response({"error": "No items could be read off these labels."}, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            items = notify.send(f"{title} — items", picks)
+            out["items"] = items
+            sent = {**items, **sent} if sent else items
     failed = {k: v for k, v in sent.items() if v != "sent"}
-    return Response({"sent": sent}, status=status.HTTP_502_BAD_GATEWAY if failed and len(failed) == len(sent) else status.HTTP_200_OK)
+    return Response({"sent": sent, **out},
+                    status=status.HTTP_502_BAD_GATEWAY if failed and len(failed) == len(sent) else status.HTTP_200_OK)
 
 
 @api_view(["POST"])

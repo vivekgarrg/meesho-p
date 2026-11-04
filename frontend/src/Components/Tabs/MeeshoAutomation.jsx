@@ -263,7 +263,7 @@ export function LatestLabels({ emptyHint = false }) {
       const res = await fetch(`${API}/meesho-orders/label-files/${f.id}/send/`, { method: "POST" });
       const d = await res.json().catch(() => ({}));
       if (!res.ok) { setError(d.error || Object.values(d.sent || {}).join("; ") || "Couldn't send it."); return; }
-      setSent(`Sent ${f.labels} labels — ${Object.entries(d.sent).map(([k, v]) => `${k}: ${v}`).join(", ")}`);
+      setSent(`Sent ${f.labels} labels and their list of items — ${Object.entries(d.sent).map(([k, v]) => `${k}: ${v}`).join(", ")}`);
     } catch { setError("Network error."); }
     finally { setBusy(null); }
   };

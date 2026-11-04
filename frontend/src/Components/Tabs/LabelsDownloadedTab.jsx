@@ -20,6 +20,8 @@ export function LabelsDownloadedTab() {
   const [err, setErr] = useState(null);
   const [open, setOpen] = useState(null);         // the file whose items are shown
   const [busy, setBusy] = useState(null);
+  const [meta, setMeta] = useState({ channels: [], admin: false });
+  const [note, setNote] = useState(null);
 
   const load = useCallback(async () => {
     const res = await fetch(`${API}/meesho-orders/label-files/`).catch(() => null);
@@ -28,6 +30,7 @@ export function LabelsDownloadedTab() {
     if (!res.ok) { setErr(d.error || d.detail || "Couldn't read the labels."); return; }
     setErr(null);
     setFiles(d.files || []);
+    setMeta({ channels: d.send_channels || [], admin: !!d.is_admin });
     setOpen((o) => o ?? (d.files?.[0]?.id || null));
   }, []);
   useEffect(() => { load(); const t = setInterval(load, 60000); return () => clearInterval(t); }, [load]);
@@ -48,6 +51,22 @@ export function LabelsDownloadedTab() {
     finally { setBusy(null); }
   };
 
+  // Send now — the PDF and its list of items, or only the list (to check it).
+  const send = async (f, what) => {
+    setBusy(`s${what}${f.id}`); setNote(null);
+    try {
+      const res = await fetch(`${API}/meesho-orders/label-files/${f.id}/send/`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ what }) });
+      const d = await res.json().catch(() => ({}));
+      const how = Object.entries(d.sent || {}).map(([k, v]) => `${k}: ${v}`).join(", ");
+      setNote(res.ok ? { ok: true, text: `Sent ${what === "items" ? "the list of items" : "the PDF and its list of items"} — ${how}` }
+        : { ok: false, text: d.error || how || "Couldn't send it." });
+    } catch { setNote({ ok: false, text: "Network error." }); }
+    finally { setBusy(null); }
+  };
+  const canSend = meta.admin && meta.channels.length > 0;
+  const where = meta.channels.includes("telegram") ? "Telegram" : meta.channels.map((c) => c[0].toUpperCase() + c.slice(1)).join(" / ");
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14, maxWidth: 1100 }}>
       <div>
@@ -57,6 +76,10 @@ export function LabelsDownloadedTab() {
         </p>
       </div>
       {err && <div role="alert" style={{ color: C.red, fontWeight: 700, fontSize: 13.5 }}>✕ {err}</div>}
+      {note && <div role="status" style={{ color: note.ok ? "#15803D" : C.red, fontWeight: 700, fontSize: 13.5 }}>{note.ok ? "✓ " : "✕ "}{note.text}</div>}
+      {meta.admin && !meta.channels.length && files?.length > 0 && (
+        <div style={{ fontSize: 12.5, color: C.gray500 }}>To send these to Telegram, add TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID to the server's .env.</div>
+      )}
       {!files ? <div style={{ display: "flex", justifyContent: "center", padding: 40 }}><CircularProgress style={{ color: C.orange }} /></div>
         : files.length === 0 ? (
           <div style={{ ...S.card, padding: 20, color: C.gray500, fontSize: 13.5 }}>
@@ -83,6 +106,14 @@ export function LabelsDownloadedTab() {
                 <button onClick={() => pdf(f, true)} disabled={!!busy} style={btn("ghost", "sm")}>
                   {busy === `d${f.id}` ? <CircularProgress size={13} style={{ color: C.orange }} /> : "⬇ Download"}</button>
                 {!isOpen && <button onClick={() => setOpen(f.id)} style={btn("ghostOrange", "sm")}>📋 Items</button>}
+                {canSend && (
+                  <>
+                    <button onClick={() => send(f, "both")} disabled={!!busy} title={`The PDF, then its list of items, to ${where}`} style={btn("ghost", "sm")}>
+                      {busy === `sboth${f.id}` ? <CircularProgress size={13} style={{ color: C.orange }} /> : `📨 PDF + items to ${where}`}</button>
+                    <button onClick={() => send(f, "items")} disabled={!!busy} title={`Only the list of items, to ${where}`} style={btn("ghost", "sm")}>
+                      {busy === `sitems${f.id}` ? <CircularProgress size={13} style={{ color: C.orange }} /> : `📋 Items only to ${where}`}</button>
+                  </>
+                )}
               </div>
               {isOpen && <LabelItems file={f} inline />}
             </div>

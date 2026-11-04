@@ -1054,6 +1054,29 @@ class AutoLabelsSendTests(TestCase):
         self.assertEqual(c.get(f"{base}/label-files/{files[0]['id']}/items/").data["summary"]["pieces"], 2)
         self.assertEqual(c.get(f"{base}/").status_code, 403)                          # the rest of Meesho stays closed
 
+    def test_a_labels_file_or_just_its_items_can_be_sent_by_hand(self):
+        from .models import MeeshoLabelFile
+        from .test_label_engine import make_labels_pdf
+        Membership.objects.create(user=self.admin, business=self.biz)
+        MeeshoSyncRun.objects.create(account=self.acct, kind="LABELS", status="OK", records=1,
+                                     result={"batch": "auto-8", "label_url": "https://storage.googleapis.com/a.pdf", "success": 1})
+        with mock.patch.object(meesho_sync, "_fetch_label_pdf", return_value=make_labels_pdf([("diya-1", "342118874307078181_1", "X")])):
+            self.save(batch="auto-8")
+        f = MeeshoLabelFile.objects.get()
+        c = APIClient()
+        c.force_authenticate(self.admin)
+        url = f"/api/business/{self.biz.id}/meesho-orders/label-files/{f.pk}/send/"
+        with mock.patch("meesho_app.notify.channels", return_value=["telegram"]), \
+                mock.patch("meesho_app.notify.send", return_value={"telegram": "sent"}) as send:
+            self.assertEqual(c.post(url, {"what": "items"}, format="json").status_code, 200)
+            self.assertEqual(len(send.call_args_list), 1)                                # only the list, no PDF
+            self.assertIn("1 × diya-1", send.call_args.args[1])
+            self.assertIsNone(send.call_args.kwargs.get("data"))
+            send.reset_mock()
+            c.post(url, {}, format="json")                                                 # by default: the PDF, then the list
+            self.assertTrue(send.call_args_list[0].kwargs["data"].startswith(b"%PDF"))
+            self.assertIn("1 × diya-1", send.call_args_list[1].args[1])
+
     def test_the_automation_setting(self):
         c = APIClient()
         c.force_authenticate(self.admin)
