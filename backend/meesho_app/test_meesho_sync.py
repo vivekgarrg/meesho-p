@@ -980,7 +980,7 @@ class AutoLabelsSendTests(TestCase):
         notify_send.assert_not_called()                                              # sending is off unless asked
         with mock.patch.object(meesho_sync, "_fetch_label_pdf", return_value=pdf):
             _, notify_send = self.save(send=True)
-        self.assertTrue(notify_send.call_args.kwargs["data"].startswith(b"%PDF"))
+        self.assertTrue(notify_send.call_args_list[0].kwargs["data"].startswith(b"%PDF"))           # the PDF first, then its pick list
         self.assertEqual(MeeshoLabelFile.objects.count(), 1)                         # same batch: kept once
         from io import StringIO
         from django.core.management import call_command
@@ -1029,6 +1029,30 @@ class AutoLabelsSendTests(TestCase):
         d = c.get(f"/api/business/{self.biz.id}/meesho-orders/label-files/{f.pk}/items/").data
         self.assertEqual([o["order_id"] for o in d["orders"]], ["342118874307078199_1"])
         self.assertEqual(MeeshoLabelFile.objects.get().order_ids, ["342118874307078199_1"])   # remembered
+
+    def test_the_packing_desk_sees_the_labels_and_their_items_and_telegram_gets_the_pick_list(self):
+        from accounts.models import BusinessProfile
+        from .models import MeeshoLabelFile
+        from .test_label_engine import make_labels_pdf
+        MeeshoSyncRun.objects.create(account=self.acct, kind="LABELS", status="OK", records=2,
+                                     result={"batch": "auto-7", "label_url": "https://storage.googleapis.com/a.pdf", "success": 2})
+        pdf = make_labels_pdf([("lota-a", "342118874307078171_1", "X"), ("lota-a", "342118874307078172_1", "Y")])
+        with mock.patch.object(meesho_sync, "_fetch_label_pdf", return_value=pdf):
+            out, notify_send = self.save(batch="auto-7", send=True)
+        picks = notify_send.call_args_list[-1].args                                    # after the PDF: what's on it
+        self.assertIn("2 orders, 2 pieces, 1 SKUs", picks[1])
+        self.assertIn("2 × lota-a", picks[1])
+        # Someone with only Order Scan (no Meesho) — the packing desk.
+        packer = User.objects.create_user(username="packer", password="pw", role=User.ROLE_BUSINESS_USER)
+        Membership.objects.create(user=packer, business=self.biz)
+        BusinessProfile.objects.update_or_create(business=self.biz, defaults={"visible_paths": ["/order-scan"]})
+        c = APIClient()
+        c.force_authenticate(packer)
+        base = f"/api/business/{self.biz.id}/meesho-orders"
+        files = c.get(f"{base}/label-files/").data["files"]
+        self.assertEqual(len(files), 1)
+        self.assertEqual(c.get(f"{base}/label-files/{files[0]['id']}/items/").data["summary"]["pieces"], 2)
+        self.assertEqual(c.get(f"{base}/").status_code, 403)                          # the rest of Meesho stays closed
 
     def test_the_automation_setting(self):
         c = APIClient()
@@ -1251,8 +1275,9 @@ class WhatsAppLabelsTests(TestCase):
         s.send_labels = True
         s.save()
         send = run()
-        self.assertTrue(send.call_args.kwargs["data"].startswith(b"%PDF"))
-        self.assertIn("1 label from Rudam", send.call_args.args[1])
+        pdf_msg = send.call_args_list[0]                                       # the PDF first, then its pick list
+        self.assertTrue(pdf_msg.kwargs["data"].startswith(b"%PDF"))
+        self.assertIn("1 label from Rudam", pdf_msg.args[1])
         self.assertFalse(run(trigger="MANUAL").called)                       # a Generate by hand isn't sent
 
     def test_the_switch_needs_a_channel(self):

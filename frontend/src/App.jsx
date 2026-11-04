@@ -49,6 +49,7 @@ import { ReturnDeskTab } from './Components/Tabs/ReturnDeskTab';
 import { MeeshoHubTab, MeeshoLegacyRedirect } from './Components/Tabs/MeeshoHubTab';
 import { MeeshoLinkingPage } from './Components/Tabs/MeeshoLinkingTab';
 import { ReturnClaimTab } from './Components/Tabs/ReturnClaimTab';
+import { LabelsDownloadedTab } from './Components/Tabs/LabelsDownloadedTab';
 import { ScanLookupTab } from './Components/Tabs/ScanLookupTab';
 import { ExtensionTab } from './Components/Tabs/ExtensionTab';
 import { BulkListingTab } from './Components/Tabs/BulkListingTab';
@@ -1245,6 +1246,7 @@ function AppShell() {
                 <Route path="/order-scan" element={<OrderScanTab />} />
                 <Route path="/return-scan" element={<ReturnDeskTab />} />
                 <Route path="/return-claim" element={<ReturnClaimTab />} />
+                <Route path="/label-items" element={<LabelsDownloadedTab />} />
                 {/* Sync and Inventory are tabs of Meesho Orders now; old links land on the right tab. */}
                 {/* Meesho: one page per section, each in the sidebar's Meesho group. */}
                 <Route path="/meesho-linking" element={<MeeshoLinkingPage />} />

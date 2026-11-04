@@ -199,7 +199,7 @@ export function AutomationCard() {
   );
 }
 
-async function fetchPdf(file, download) {
+export async function fetchPdf(file, download) {
   const res = await fetch(`${API}/meesho-orders/label-files/${file.id}/pdf/${download ? "?download=1" : ""}`);
   if (!res.ok) throw new Error("Couldn't get the labels.");
   return URL.createObjectURL(await res.blob());
@@ -344,7 +344,7 @@ function Thumb({ url, fallback, size = 44 }) {
  * orders one by one, in the PDF's order. Filter by courier, show only what's
  * left, search; print it or take it as CSV.
  */
-function LabelItems({ file, onClose }) {
+export function LabelItems({ file, onClose, inline = false }) {
   const [data, setData] = useState(null);
   const [err, setErr] = useState(null);
   const [view, setView] = useState("skus");
@@ -358,10 +358,11 @@ function LabelItems({ file, onClose }) {
       .catch(() => setErr("Network error."));
   }, [file.id]);
   useEffect(() => {
+    if (inline || !onClose) return undefined;
     const onKey = (e) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [onClose, inline]);
 
   const couriers = data ? [...new Set(data.orders.map((o) => o.courier))].sort() : [];
   const needle = q.trim().toLowerCase();
@@ -413,11 +414,17 @@ function LabelItems({ file, onClose }) {
   const pill = (on) => ({ border: `1.5px solid ${on ? C.orange : C.gray200}`, background: on ? C.orangeLight : C.white, color: on ? C.orange : C.gray700,
     borderRadius: 999, padding: "6px 12px", fontSize: 13, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", minHeight: 36 });
 
-  return (
+  // A pop-up from Latest labels, or part of the Labels Downloaded page.
+  const wrap = (content) => (inline ? content : (
     <div role="dialog" aria-modal="true" aria-label={`${title} — items`} onClick={onClose}
       style={{ position: "fixed", inset: 0, zIndex: 3500, background: "rgba(15,23,42,.5)", display: "flex", alignItems: "center", justifyContent: "center", padding: 12 }}>
-      <div onClick={(e) => e.stopPropagation()} style={{ ...S.card, width: "100%", maxWidth: 1000, maxHeight: "94dvh", display: "flex", flexDirection: "column",
-        padding: 0, overflow: "hidden", borderTop: `5px solid ${C.orange}` }}>
+      {content}
+    </div>
+  ));
+  return wrap(
+      <div onClick={(e) => e.stopPropagation()} style={{ ...(inline ? {} : S.card), width: "100%", maxWidth: inline ? "none" : 1000,
+        maxHeight: inline ? "75vh" : "94dvh", display: "flex", flexDirection: "column",
+        padding: 0, overflow: "hidden", borderTop: inline ? `1px solid ${C.gray100}` : `5px solid ${C.orange}` }}>
         <div style={{ padding: "12px 14px", borderBottom: `1px solid ${C.gray100}`, display: "flex", flexDirection: "column", gap: 10 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
             <div style={{ flex: 1, minWidth: 200 }}>
@@ -428,7 +435,7 @@ function LabelItems({ file, onClose }) {
             </div>
             <button onClick={print} disabled={!data} style={btn("ghost", "sm")}>🖨 Print</button>
             <button onClick={csv} disabled={!data} style={btn("ghost", "sm")}>⬇ CSV</button>
-            <button onClick={onClose} aria-label="Close" style={{ ...btn("ghost", "sm"), minWidth: 36 }}>✕</button>
+            {onClose && <button onClick={onClose} aria-label="Close" style={{ ...btn("ghost", "sm"), minWidth: 36 }}>✕</button>}
           </div>
           {data && (
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
@@ -485,6 +492,5 @@ function LabelItems({ file, onClose }) {
           {data?.summary.not_found > 0 && <div style={{ padding: "8px 14px", fontSize: 12, color: C.gray500 }}>{data.summary.not_found} label(s) on the PDF aren't in the labels table.</div>}
         </div>
       </div>
-    </div>
   );
 }

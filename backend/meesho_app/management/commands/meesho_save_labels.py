@@ -87,4 +87,11 @@ class Command(BaseCommand):
                        f"{', sorted by parent SKU' if not note else ''}. {note}\n\n{summary}").strip()
             out["sent"] = notify.send(f"Meesho labels — {when}", caption,
                                       filename=f"meesho-labels-{timezone.localtime():%Y-%m-%d-%H%M}.pdf", data=pdf)
+            # Then what's on them — the pick list, so the desk sees the items without opening the PDF.
+            try:
+                picks = meesho_sync.pick_list_text(f)
+                if picks:
+                    out["pick_list_sent"] = notify.send(f"Meesho labels — {when} — items", picks)
+            except Exception as exc:               # noqa: BLE001 — the PDF itself went out
+                out["pick_list_error"] = str(exc)[:200]
         self.stdout.write(json.dumps(out, default=str))

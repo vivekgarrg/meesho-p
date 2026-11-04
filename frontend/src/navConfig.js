@@ -66,6 +66,8 @@ export const NAV_GROUPS = [
       { path: '/returns', label: 'Returns & Claims', icon: '⟲' },
       { path: '/return-scan', label: 'Return Scan', icon: '⇲' },
       { path: '/return-claim', label: 'Raise Return Claim', icon: '📨' },
+      // What's on each labels PDF (automatic or generated) — also for anyone with Order Scan.
+      { path: '/label-items', label: 'Labels Downloaded', icon: '📋', alsoBy: '/order-scan' },
       { path: '/claims', label: 'Claim Sheet', icon: '₹' },
       { path: '/tasks', label: 'Team Tasks', icon: '☑' },
       { path: '/employees', label: 'Employees', icon: '🧑‍💼' },

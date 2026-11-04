@@ -465,9 +465,13 @@ LABELS_MAX = 500
 LABEL_HOSTS = tuple(h.strip() for h in os.environ.get("MEESHO_LABEL_HOSTS", "storage.googleapis.com").split(",") if h.strip())
 
 
-def _desk_accounts(request, business):
+# The labels PDFs and what's on them: also for the packing desk (Order Scan) and the Labels Downloaded page.
+LABEL_FILES_PATH = "meesho-orders/label-files/"
+
+
+def _desk_accounts(request, business, api_path=DESK_PATH):
     """The businesses this desk combines, and the Meesho accounts among them."""
-    desk = _views()._scan_desk_scope(request, business, api_path=DESK_PATH)
+    desk = _views()._scan_desk_scope(request, business, api_path=api_path)
     accounts = list(MeeshoAccount.objects.filter(business__in=desk).select_related("business"))
     return desk, accounts
 
@@ -1359,7 +1363,7 @@ def _label_files_for(accounts):
 def meesho_label_files(request, business_id):
     """The newest labels PDFs (automatic and generated), ready to print — for the businesses on this desk."""
     business = _views().get_authorized_business(request, business_id)
-    _desk, accounts = _desk_accounts(request, business)
+    _desk, accounts = _desk_accounts(request, business, LABEL_FILES_PATH)
     return Response({"send_channels": notify.channels(), "is_admin": _views()._is_admin(request.user), "files": [{
         "id": f.pk, "created_at": f.created_at, "trigger": f.trigger, "labels": f.labels, "pages": f.pages,
         "sorted": f.sorted, "businesses": f.business_names, "summary": f.summary,
@@ -1383,23 +1387,10 @@ def _order_ids_from_pdf(pdf):
     return found
 
 
-@api_view(["GET"])
-def meesho_label_file_items(request, business_id, file_id):
-    """
-    What's on one labels PDF, to pack from: every order on it (product photo,
-    SKU, size, qty, courier, AWB, business) with whether it's packed yet — and
-    the same totalled per SKU and size, a pick list. In the PDF's own order
-    (sorted by parent SKU).
-    """
+def label_items(f, mine, names):
+    """What's on one labels file: (orders, pick list by SKU and size, how many ids aren't in the labels table)."""
     from .meesho_images import photo_map
     from .models import LabelOrder, ScannedOrder
-    v = _views()
-    business = v.get_authorized_business(request, business_id)
-    _desk, accounts = _desk_accounts(request, business)
-    f = MeeshoLabelFile.objects.filter(pk=file_id).first()
-    mine = {a.business_id for a in accounts}
-    if not f or not (mine & set(f.business_ids or [])):
-        return Response({"error": "No such labels file."}, status=status.HTTP_404_NOT_FOUND)
     ids = list(f.order_ids or [])
     if not ids:
         ids = _order_ids_from_pdf(bytes(f.pdf))
@@ -1407,11 +1398,9 @@ def meesho_label_file_items(request, business_id, file_id):
             MeeshoLabelFile.objects.filter(pk=f.pk).update(order_ids=ids)
     labels = {l.order_id: l for l in LabelOrder.objects.filter(order_id__in=ids, business_id__in=mine)}
     rows = [labels[i] for i in ids if i in labels]
-    names = {a.business_id: a.business.name for a in accounts}
     photos = photo_map(rows, sub_of=lambda l: l.order_id, own=lambda l: "")
-    scans = {}
-    for s in ScannedOrder.objects.filter(business_id__in=mine, sub_order_no__in=[l.order_id for l in rows]):
-        scans[(s.business_id, s.sub_order_no)] = s
+    scans = {(s.business_id, s.sub_order_no): s for s in
+             ScannedOrder.objects.filter(business_id__in=mine, sub_order_no__in=[l.order_id for l in rows])}
     packed_states = (ScannedOrder.STATUS_PACKED, ScannedOrder.STATUS_DISPATCHED, ScannedOrder.STATUS_SCANNED,
                      ScannedOrder.STATUS_CANCELLED)
     orders, skus = [], {}
@@ -1437,10 +1426,56 @@ def meesho_label_file_items(request, business_id, file_id):
                "couriers": [{"courier": k, "orders": n} for k, n in sorted(g["couriers"].items(), key=lambda x: -x[1])]}
               for g in skus.values()]
     by_sku.sort(key=lambda g: (-g["qty"], g["sku"] or ""))
+    return orders, by_sku, len(ids) - len(rows)
+
+
+def pick_list_text(f, limit=3800):
+    """A labels file's pick list as plain text (Telegram / email): pieces per SKU and size, most first, then per courier."""
+    from accounts.models import Business
+    mine = set(f.business_ids or [])
+    names = dict(Business.objects.filter(pk__in=mine).values_list("pk", "name"))
+    orders, by_sku, _ = label_items(f, mine, names)
+    if not orders:
+        return ""
+    head = f"📋 On these labels — {len(orders)} orders, {sum(o['qty'] for o in orders)} pieces, {len(by_sku)} SKUs\n"
+    lines, used = [], len(head)
+    for g in by_sku:
+        size = f" ({g['size']})" if g["size"] and g["size"] != "Free Size" else ""
+        line = f"{g['qty']} × {g['sku'] or '—'}{size}"
+        if used + len(line) + 1 > limit:
+            lines.append(f"… and {len(by_sku) - len(lines)} more SKUs — see Labels Downloaded")
+            break
+        lines.append(line)
+        used += len(line) + 1
+    couriers = {}
+    for o in orders:
+        couriers[o["courier"]] = couriers.get(o["courier"], 0) + 1
+    return head + "\n".join(lines) + "\nBy courier: " + ", ".join(f"{c} {n}" for c, n in sorted(couriers.items(), key=lambda x: -x[1]))
+
+
+@api_view(["GET"])
+def meesho_label_file_items(request, business_id, file_id):
+    """
+    What's on one labels PDF, to pack from: every order on it (product photo,
+    SKU, size, qty, courier, AWB, business) with whether it's packed yet — and
+    the same totalled per SKU and size, a pick list. In the PDF's own order
+    (sorted by parent SKU).
+    """
+    from .meesho_images import photo_map
+    from .models import LabelOrder, ScannedOrder
+    v = _views()
+    business = v.get_authorized_business(request, business_id)
+    _desk, accounts = _desk_accounts(request, business, LABEL_FILES_PATH)
+    f = MeeshoLabelFile.objects.filter(pk=file_id).first()
+    mine = {a.business_id for a in accounts}
+    if not f or not (mine & set(f.business_ids or [])):
+        return Response({"error": "No such labels file."}, status=status.HTTP_404_NOT_FOUND)
+    names = {a.business_id: a.business.name for a in accounts}
+    orders, by_sku, not_found = label_items(f, mine, names)
     return Response({
         "file": {"id": f.pk, "created_at": f.created_at, "trigger": f.trigger, "labels": f.labels, "businesses": f.business_names},
         "summary": {"orders": len(orders), "pieces": sum(o["qty"] for o in orders), "skus": len(by_sku),
-                    "packed": sum(1 for o in orders if o["packed"]), "not_found": len(ids) - len(rows)},
+                    "packed": sum(1 for o in orders if o["packed"]), "not_found": not_found},
         "skus": by_sku, "orders": orders,
     })
 
@@ -1451,7 +1486,7 @@ def meesho_label_file_send(request, business_id, file_id):
     business = _views().get_authorized_business(request, business_id)
     if not _views()._is_admin(request.user):
         return Response({"error": "Only an admin can send labels."}, status=status.HTTP_403_FORBIDDEN)
-    _desk, accounts = _desk_accounts(request, business)
+    _desk, accounts = _desk_accounts(request, business, LABEL_FILES_PATH)
     f = MeeshoLabelFile.objects.filter(pk=file_id).first()
     if not f or not ({a.business_id for a in accounts} & set(f.business_ids or [])):
         return Response({"error": "No such labels file."}, status=status.HTTP_404_NOT_FOUND)
@@ -1497,7 +1532,7 @@ def meesho_label_file_pdf(request, business_id, file_id):
     """One kept labels PDF — inline to print, or ?download=1 to save."""
     from django.http import HttpResponse
     business = _views().get_authorized_business(request, business_id)
-    _desk, accounts = _desk_accounts(request, business)
+    _desk, accounts = _desk_accounts(request, business, LABEL_FILES_PATH)
     f = MeeshoLabelFile.objects.filter(pk=file_id).first()
     if not f or not ({a.business_id for a in accounts} & set(f.business_ids or [])):
         return Response({"error": "No such labels file."}, status=status.HTTP_404_NOT_FOUND)
