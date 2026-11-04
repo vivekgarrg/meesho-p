@@ -253,6 +253,8 @@ def _flipkart_model(business, skus):
     for g in groups.values():
         rt = next((x[4] for x in g if x[4] and x[4].upper() != "NA"), None)
         settle = sum(float(x[3] or 0) for x in g)
+        if not rt and settle == 0:
+            continue                  # cancelled before delivery (settled at 0): neither a sale nor a return
         kind = "rto" if rt and "courier" in rt.lower() else "return" if rt else "delivered"
         outcomes_all[kind] += 1
         if any(str(x[1] or "").lower() in sku_set for x in g):

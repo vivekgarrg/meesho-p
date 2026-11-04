@@ -110,6 +110,8 @@ export const GROUP_STATUS_META = {
   DELIVERED: ORDER_STATUS_META.DELIVERED,
   RETURN: { label: 'Customer return', color: '#E11D48', light: '#FFF1F2', border: '#FECDD3' },
   RTO: { label: 'RTO (courier return)', color: '#7C3AED', light: '#F5F3FF', border: '#DDD6FE' },
+  // Cancelled before delivery (Orders report, or settled at exactly 0): no item cost.
+  CANCELLED: { label: 'Cancelled', color: '#64748B', light: '#F1F5F9', border: '#CBD5E1' },
 };
 
 const FALLBACK_META = { label: 'Unknown', color: '#94A3B8', light: '#F8FAFC', border: '#E2E8F0' };

@@ -38,7 +38,8 @@ from .permissions import get_authorized_business
 from .views import (
     _FLIPKART_PAYMENT_COMPONENTS, _compute_flipkart_profit_summary, _cost_setting,
     _estimated_profit_pricing_lookup, _flipkart_parent_link_map, _has_unit_price,
-    _packaging_charge, _scan_ship_check, _sku_key, _to_num, safe_date, safe_decimal, safe_str,
+    _packaging_charge, _scan_ship_check, _sku_key, _to_num, flipkart_cancelled, flipkart_report_statuses,
+    safe_date, safe_decimal, safe_str,
 )
 
 ZERO = Decimal("0")
@@ -345,13 +346,16 @@ class FlipkartPricing:
         self.get_price, self.known_skus, self.canonical_sku = _estimated_profit_pricing_lookup(business)
         self.cost_setting = _cost_setting(business)
 
-    def item_pnl(self, rows):
+    def item_pnl(self, rows, report_status=None):
         """
         P&L of one order item from all its settlement rows (the sale and, later,
         its return reversal are separate rows of the same order_item_id — they
         are instalments of one unit and are costed once, never once per row).
 
         Same rules as _compute_flipkart_profit_summary:
+          * cancelled (Orders report, or
+            settled at exactly 0, no return) -> no item cost; net = what was
+                                               settled ("cancelled" when 0)
           * no unit price on the order date -> left out ("missing_price")
           * returned, settlement >= 0       -> left out ("non_loss_return")
           * returned, settlement <  0       -> counts at the settlement, no cost
@@ -365,8 +369,12 @@ class FlipkartPricing:
         order_date = primary.order_date or next((r.order_date for r in rows if r.order_date), None)
         quantity = primary.quantity or next((r.quantity for r in rows if r.quantity), 1)
 
+        cancelled = flipkart_cancelled(rows, report_status)
         cost, net, excluded = ZERO, settlement, None
-        if _sku_key(sku) not in self.known_skus or not _has_unit_price(self.get_price(sku, order_date)[0]):
+        if cancelled:
+            if settlement == 0:
+                excluded = "cancelled"
+        elif _sku_key(sku) not in self.known_skus or not _has_unit_price(self.get_price(sku, order_date)[0]):
             excluded, net = "missing_price", None
         elif returned:
             if settlement >= 0:
@@ -381,7 +389,7 @@ class FlipkartPricing:
             net = settlement - cost
 
         return {
-            "sku": sku, "quantity": quantity, "order_date": order_date, "returned": returned,
+            "sku": sku, "quantity": quantity, "order_date": order_date, "returned": returned, "cancelled": cancelled,
             "return_type": next((r.return_type for r in rows if _is_return(r.return_type)), "NA"),
             "settlement": settlement, "cost": cost, "net": net, "excluded_reason": excluded,
             "primary": primary,
@@ -397,7 +405,9 @@ def _payment_row(r):
 
 
 def _group_status(item_pnls):
-    """DELIVERED / RETURN (customer) / RTO (courier brought it back) for a whole order."""
+    """DELIVERED / RETURN (customer) / RTO (courier brought it back) / CANCELLED for a whole order."""
+    if item_pnls and all(p["cancelled"] for p in item_pnls):
+        return "CANCELLED"
     types = {p["return_type"].strip().upper() for p in item_pnls if p["returned"]}
     if RETURN_LOGISTICS in types:
         return "RTO"
@@ -443,6 +453,7 @@ def flipkart_payments_grouped(request, business_id):
     report = {o.order_item_id: o for o in FlipkartOrder.objects.filter(
         business=business, order_item_id__in={r.order_item_id for r in rows})}
     pricing = FlipkartPricing(business)
+    statuses = flipkart_report_statuses(business)
 
     by_order = defaultdict(lambda: defaultdict(list))
     for r in rows:
@@ -450,7 +461,7 @@ def flipkart_payments_grouped(request, business_id):
 
     groups = []
     for order_id, items in by_order.items():
-        pnls = [pricing.item_pnl(item_rows) for item_rows in items.values()]
+        pnls = [pricing.item_pnl(item_rows, statuses.get(item_id)) for item_id, item_rows in items.items()]
         counted = [p for p in pnls if p["net"] is not None]
         group_dates = [p["order_date"] for p in pnls if p["order_date"]]
         groups.append({
@@ -481,7 +492,7 @@ def flipkart_payments_grouped(request, business_id):
         "by_status": [
             {"status": s, "count": status_counts[s], "settlement": round(status_totals[s]["settlement"], 2),
              "profit": round(status_totals[s]["profit"], 2)}
-            for s in ("DELIVERED", "RETURN", "RTO") if status_counts.get(s)
+            for s in ("DELIVERED", "RETURN", "RTO", "CANCELLED") if status_counts.get(s)
         ],
     }
 
@@ -503,6 +514,7 @@ def flipkart_payments_grouped(request, business_id):
                 "order_report_status": ordered.order_item_status if ordered else None,
                 "quantity": p["quantity"],
                 "is_return": p["returned"],
+                "is_cancelled": p["cancelled"],
                 "return_type": p["return_type"],
                 "settlement": _to_num(p["settlement"]),
                 "cost": _to_num(p["cost"]),
@@ -557,6 +569,11 @@ def _payment_analytics(business, date_from, date_to):
         if st != "Delivered":
             e["status"] = st      # any return row decides the item's outcome
         e["total"] += value or Decimal("0")
+    statuses = flipkart_report_statuses(business)
+    for item_id, e in per_item.items():
+        # Not returned, and cancelled on the Orders report or settled at exactly 0: never delivered.
+        if e["status"] == "Delivered" and ((statuses.get(item_id) or "").upper() == STATUS_CANCELLED or e["total"] == 0):
+            e["status"] = "Cancelled"
     by = defaultdict(lambda: {"count": 0, "total_settlement": Decimal("0")})
     for e in per_item.values():
         by[e["status"]]["count"] += 1

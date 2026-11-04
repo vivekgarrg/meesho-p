@@ -3332,6 +3332,30 @@ _FLIPKART_PAYMENT_COMPONENTS = [
 ]
 
 
+def flipkart_report_statuses(business):
+    """{order_item_id: order_item_status} from the uploaded Flipkart Orders report."""
+    return dict(FlipkartOrder.objects.filter(business=business).values_list("order_item_id", "order_item_status"))
+
+
+def flipkart_returned(rows):
+    """Whether any settlement row of an order item is a return (return_type not "NA")."""
+    return any(bool(r.return_type) and r.return_type.strip().upper() != "NA" for r in rows)
+
+
+def flipkart_cancelled(rows, report_status=None):
+    """
+    Whether an order item was cancelled — never delivered, so it carries no
+    item cost. Not a return, and either the Orders report says CANCELLED, or
+    Flipkart settled exactly nothing for it (a delivered item is always paid
+    something; a cancelled one comes through as a sale row settled at 0).
+    """
+    if flipkart_returned(rows):
+        return False
+    if (report_status or "").strip().upper() == "CANCELLED":
+        return True
+    return sum((r.settlement_value or Decimal("0") for r in rows), Decimal("0")) == 0
+
+
 def _compute_flipkart_profit_summary(business, date_from=None, date_to=None, sku=None):
     """
     Live P&L over every saved FlipkartOrderPayment row, using the same SKU
@@ -3351,6 +3375,9 @@ def _compute_flipkart_profit_summary(business, date_from=None, date_to=None, sku
     get_price, known_skus, canonical_sku = _estimated_profit_pricing_lookup(business)
     parent_link_map = _flipkart_parent_link_map(business)
     cost_setting = _cost_setting(business)
+    report_status = flipkart_report_statuses(business)
+    cancelled_count = 0
+    cancelled_settlement = Decimal("0")
 
     all_rows_qs = FlipkartOrderPayment.objects.filter(business=business)
     has_any_rows = all_rows_qs.exists()
@@ -3432,9 +3459,16 @@ def _compute_flipkart_profit_summary(business, date_from=None, date_to=None, sku
         primary = max(group_rows, key=lambda r: abs(r.sale_amount or Decimal("0")))
         sku_id = primary.seller_sku or next((r.seller_sku for r in group_rows if r.seller_sku), "") or ""
         settlement = sum((r.settlement_value or Decimal("0") for r in group_rows), Decimal("0"))
-        returned = any(bool(r.return_type) and r.return_type.strip().upper() != "NA" for r in group_rows)
+        returned = flipkart_returned(group_rows)
         order_date = primary.order_date or next((r.order_date for r in group_rows if r.order_date), None)
         quantity = primary.quantity or next((r.quantity for r in group_rows if r.quantity), 1)
+        # Cancelled — never delivered: no item cost. Settled at 0, it's left out; a cancellation
+        # charge (or credit) counts as it is, with no cost.
+        if flipkart_cancelled(group_rows, report_status.get(primary.order_item_id)):
+            cancelled_count += 1
+            cancelled_settlement += settlement
+            if settlement == 0:
+                continue
         fulfilment_type = primary.fulfilment_type or next((r.fulfilment_type for r in group_rows if r.fulfilment_type), None)
         product_sub_category = primary.product_sub_category or next(
             (r.product_sub_category for r in group_rows if r.product_sub_category), None)
@@ -3453,6 +3487,9 @@ def _compute_flipkart_profit_summary(business, date_from=None, date_to=None, sku
                 non_loss_excluded_count += 1
                 non_loss_excluded_sum += settlement
                 continue
+            gross, cost, net = settlement, Decimal("0"), settlement
+        elif flipkart_cancelled(group_rows, report_status.get(primary.order_item_id)):
+            bucket = "return"                         # no sale: counted with the returns, at what was settled
             gross, cost, net = settlement, Decimal("0"), settlement
         else:
             item_price, packaging_cost, tax_pct = get_price(sku_id, order_date)
@@ -3575,6 +3612,9 @@ def _compute_flipkart_profit_summary(business, date_from=None, date_to=None, sku
         "missing_price_skus": missing_price_sku_list,
         "missing_price_settlement_sum": _to_num(missing_price_settlement),
         "non_loss_excluded_count": non_loss_excluded_count,
+        # Cancelled before delivery (Orders report, or settled at exactly 0): never costed as a sale.
+        "cancelled_count": cancelled_count,
+        "cancelled_settlement": _to_num(cancelled_settlement),
         "non_loss_excluded_sum": _to_num(non_loss_excluded_sum),
         "totals": {
             "order_count":  processed_count,
@@ -3651,6 +3691,7 @@ def flipkart_profit_sku_payments(request, business_id):
         qs = qs.filter(order_date__gte=date_from)
     if date_to:
         qs = qs.filter(order_date__lte=date_to)
+    report_status = flipkart_report_statuses(business)
 
     order_groups = {}
     for row in qs:
@@ -3661,7 +3702,8 @@ def flipkart_profit_sku_payments(request, business_id):
         primary = max(group_rows, key=lambda r: abs(r.sale_amount or Decimal("0")))
         sku_id = primary.seller_sku or sku_param
         settlement = sum((r.settlement_value or Decimal("0") for r in group_rows), Decimal("0"))
-        returned = any(bool(r.return_type) and r.return_type.strip().upper() != "NA" for r in group_rows)
+        returned = flipkart_returned(group_rows)
+        cancelled = flipkart_cancelled(group_rows, report_status.get(order_item_id))
         order_date = primary.order_date or next((r.order_date for r in group_rows if r.order_date), None)
         quantity = primary.quantity or next((r.quantity for r in group_rows if r.quantity), 1)
 
@@ -3669,7 +3711,10 @@ def flipkart_profit_sku_payments(request, business_id):
         net = settlement
         excluded_reason = None
 
-        if _sku_key(sku_id) not in known_skus or not _has_unit_price(get_price(sku_id, order_date)[0]):
+        if cancelled:
+            if settlement == 0:
+                excluded_reason = "cancelled"
+        elif _sku_key(sku_id) not in known_skus or not _has_unit_price(get_price(sku_id, order_date)[0]):
             excluded_reason = "missing_price"
         elif returned:
             if settlement >= 0:
@@ -3695,6 +3740,8 @@ def flipkart_profit_sku_payments(request, business_id):
             "fulfilment_type": primary.fulfilment_type,
             "product_sub_category": primary.product_sub_category,
             "is_return": returned,
+            "is_cancelled": cancelled,
+            "report_status": report_status.get(order_item_id),
             "return_type": next((r.return_type for r in group_rows if r.return_type and r.return_type.strip().upper() != "NA"), "NA"),
             "excluded_reason": excluded_reason,
             "cost": _to_num(cost),

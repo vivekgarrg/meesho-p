@@ -19,6 +19,7 @@ const STATUS_FILTERS = [
 const EXCLUDED_NOTE = {
   missing_price: 'no price set — left out of profit',
   non_loss_return: 'returned, not a loss — left out of profit',
+  cancelled: 'cancelled before delivery — no cost, nothing settled',
 };
 
 const subTh = { ...S.th, fontSize: 10, padding: '6px 12px' };
@@ -169,7 +170,7 @@ export function FlipkartPaymentsPanel() {
         <Kpi label="Cost of goods" value={fmt(kpi.total_cost)} accent={C.gray600} color={C.red} />
         <Kpi label="Profit" value={fmt(kpi.total_profit)} accent={kpi.total_profit >= 0 ? C.green : C.red} color={kpi.total_profit >= 0 ? C.green : C.red} sub={kpi.missing_price_orders ? `${kpi.missing_price_orders} order(s) have no SKU price` : 'before ads & fines'} />
         {kpi.by_status.map((s) => {
-          const m = GROUP_STATUS_META[s.status];
+          const m = GROUP_STATUS_META[s.status] || { label: s.status, color: C.gray500 };
           return <Kpi key={s.status} label={m.label} value={s.count} accent={m.color} color={m.color} sub={`${fmt(s.settlement)} settled`} />;
         })}
       </KpiRow>
