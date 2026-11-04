@@ -108,3 +108,22 @@ export function mergeDashboardResponses(responses, businesses) {
   }
   return merged;
 }
+
+/**
+ * Several businesses' /profit/daily/ answers as one: each date's counts and
+ * profit added across businesses (a date only one business shipped on is
+ * kept as it is), the totals added the same way.
+ */
+export function mergeDailyProfitResponses(responses) {
+  const byDate = new Map();
+  const totals = {};
+  for (const r of responses) {
+    for (const d of r?.days || []) {
+      const row = byDate.get(d.date) || { date: d.date };
+      for (const [k, v] of Object.entries(d)) if (typeof v === "number") row[k] = (row[k] || 0) + v;
+      byDate.set(d.date, row);
+    }
+    for (const [k, v] of Object.entries(r?.totals || {})) if (typeof v === "number") totals[k] = (totals[k] || 0) + v;
+  }
+  return { days: [...byDate.values()].sort((a, b) => (a.date < b.date ? -1 : 1)), totals };
+}

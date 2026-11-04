@@ -2,6 +2,9 @@ import React, { useEffect, useState } from "react";
 import CircularProgress from "@mui/material/CircularProgress";
 import { API, C, S, fmt } from "../../App";
 import { useDateFilter } from "../../contexts/DateFilterContext";
+import { useBusiness } from "../../contexts/BusinessContext";
+import { useCombinedView } from "../../contexts/CombinedViewContext";
+import { mergeDailyProfitResponses } from "../../lib/combinedMerge";
 import { AppBarChart } from "../Charts/AppBarChart";
 import { AppLineChart } from "../Charts/AppLineChart";
 
@@ -22,6 +25,8 @@ function fmtDay(iso) {
 }
 
 const pct = (n, of) => (of > 0 ? `${((n / of) * 100).toFixed(1)}%` : "—");
+
+const SCOPE_KEY = "daily_profit_scope";        // "all" (every ticked business) | "one" (the business on screen)
 
 /**
  * A plain count/rate tile. Unlike the shared `StatCard` (built for money —
@@ -44,9 +49,19 @@ function KpiTile({ label, value, sub, accent, icon }) {
 
 export function DailyProfitTab() {
   const { range, label: periodLabel, mode } = useDateFilter();
+  const { businesses } = useBusiness();
+  const combined = useCombinedView();
+  const [scope, setScopeState] = useState(() => { try { return localStorage.getItem(SCOPE_KEY) || "all"; } catch { return "all"; } });
+  const setScope = (v) => { setScopeState(v); try { localStorage.setItem(SCOPE_KEY, v); } catch { /* fine */ } };
   const [data, setData] = useState(null);
+  const [perBusiness, setPerBusiness] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+
+  // Every ticked business (the Combined selection, shared with the rest of the app) — or just the one on screen.
+  const many = businesses.length > 1;
+  const ids = many && scope === "all" ? combined.selectedIds.filter((id) => businesses.some((b) => b.id === id)) : [];
+  const combining = ids.length >= 2;
 
   useEffect(() => {
     let cancelled = false;
@@ -55,13 +70,18 @@ export function DailyProfitTab() {
     const params = new URLSearchParams();
     if (range.date_from) params.set("date_from", range.date_from);
     if (range.date_to)   params.set("date_to", range.date_to);
-    fetch(`${API}/profit/daily/?${params}`)
-      .then((r) => r.json())
-      .then((d) => { if (!cancelled) setData(d); })
+    const urls = combining ? ids.map((id) => `/api/business/${id}/profit/daily/?${params}`) : [`${API}/profit/daily/?${params}`];
+    Promise.all(urls.map((u) => fetch(u).then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))))
+      .then((list) => {
+        if (cancelled) return;
+        setData(combining ? mergeDailyProfitResponses(list) : list[0]);
+        setPerBusiness(combining ? list.map((d, i) => ({ business: businesses.find((b) => b.id === ids[i]), totals: d.totals || {} })) : []);
+      })
       .catch(() => { if (!cancelled) setError("Network error — could not load daily profit."); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [range.date_from, range.date_to]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [range.date_from, range.date_to, combining, ids.join(",")]);
 
   // Backend returns days oldest → newest, which is what both the table and
   // the charts want (chronological reading order, left to right / top to bottom).
@@ -75,12 +95,38 @@ export function DailyProfitTab() {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
       <div>
-        <h2 style={{ fontSize: 18, fontWeight: 800, color: C.gray800, marginBottom: 4 }}>Daily Profit</h2>
+        <h2 style={{ fontSize: 18, fontWeight: 800, color: C.gray800, marginBottom: 4 }}>
+          Daily Profit{combining ? <span style={{ fontSize: 13, fontWeight: 700, color: C.orange }}> · {ids.length} businesses combined</span> : null}
+        </h2>
         <p style={{ fontSize: 12, color: C.gray400, maxWidth: 720 }}>
           Profit attributed to the day an order shipped, not the day it settles. A day's numbers start mostly
           "awaiting Meesho data" and fill in as Delivered / RTO / Return outcomes and payments arrive over the
           following days — no fixed settlement delay is assumed, this is real settlement data as it lands. · {periodLabel}
         </p>
+        {many && (
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginTop: 10 }}>
+            <div role="tablist" aria-label="Businesses" style={{ display: "flex", background: C.gray100, borderRadius: 10, padding: 3 }}>
+              {[["all", "All businesses"], ["one", "This business only"]].map(([v, l]) => (
+                <button key={v} role="tab" aria-selected={scope === v} onClick={() => setScope(v)}
+                  style={{ border: "none", borderRadius: 8, padding: "6px 12px", fontSize: 12.5, fontWeight: 800, cursor: "pointer", fontFamily: "inherit",
+                    background: scope === v ? C.white : "transparent", color: scope === v ? C.orange : C.gray600 }}>{l}</button>
+              ))}
+            </div>
+            {scope === "all" && businesses.map((b) => {
+              const on = combined.selected.has(b.id);
+              return (
+                <button key={b.id} onClick={() => combined.toggleBusiness(b.id)} aria-pressed={on}
+                  style={{ borderRadius: 999, padding: "5px 12px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
+                    border: `1.5px solid ${on ? C.orange : C.gray200}`, background: on ? C.orangeLight : C.white, color: on ? C.orange : C.gray500 }}>
+                  {on ? "✓ " : ""}{b.name}
+                </button>
+              );
+            })}
+            {scope === "all" && !combining && (
+              <span style={{ fontSize: 12, color: C.gray500 }}>Tick two or more businesses to combine them — showing the active business.</span>
+            )}
+          </div>
+        )}
         {mode === "all" && !loading && data && (
           <p style={{ fontSize: 11.5, color: C.amber, marginTop: 6 }}>
             Showing the last 30 days (day-by-day view is capped at 92 days) — pick a month above for a specific period.
@@ -123,6 +169,37 @@ export function DailyProfitTab() {
               accent={netPos ? C.green : C.red} icon="📊"
               sub="blended — includes orders still pending" />
           </div>
+
+          {/* ── Each business's share, when combined ── */}
+          {combining && perBusiness.length > 0 && (
+            <div style={{ ...S.card, padding: 0, overflow: "hidden" }}>
+              <p style={{ fontSize: 11, fontWeight: 700, color: C.gray500, letterSpacing: "0.07em", textTransform: "uppercase", padding: "12px 16px 4px" }}>
+                By business
+              </p>
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                  <thead>
+                    <tr>{["Business", "Shipped", "Delivered", "RTO", "Return", "Awaiting data", "Net profit"].map((h, i) => (
+                      <th key={h} style={{ ...S.th, textAlign: i === 0 ? "left" : "right" }}>{h}</th>))}</tr>
+                  </thead>
+                  <tbody>
+                    {perBusiness.map(({ business, totals: t }, idx) => (
+                      <tr key={business?.id ?? idx} style={{ background: idx % 2 === 0 ? C.white : C.gray50 }}>
+                        <td style={{ ...S.td, fontWeight: 700, color: C.gray800 }}>{business?.name || "—"}</td>
+                        <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace" }}>{(t.shipped_count || 0).toLocaleString()}</td>
+                        <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", color: C.green }}>{(t.delivered_count || 0).toLocaleString()}</td>
+                        <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", color: C.red }}>{(t.rto_count || 0).toLocaleString()}</td>
+                        <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", color: C.orange }}>{(t.return_count || 0).toLocaleString()}</td>
+                        <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", color: C.amber }}>{(t.no_payment_count || 0).toLocaleString()}</td>
+                        <td style={{ ...S.td, textAlign: "right", fontFamily: "monospace", fontWeight: 800, color: (t.net_profit || 0) >= 0 ? C.green : C.red }}>
+                          {fmt(t.net_profit || 0)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
 
           {/* ── Outcome mix per day ── */}
           <div style={S.card}>
