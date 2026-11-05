@@ -55,6 +55,7 @@ reclaim_dir backend/.venv
 echo "==> Building frontend"
 npm ci --prefix frontend
 npm run build --prefix frontend
+npm cache verify --prefix frontend >/dev/null 2>&1 || true     # drops what npm's cache no longer needs
 # No copy step: Django reads the built index.html from frontend_build directly
 # (see TEMPLATES DIRS). Copying it over the tracked templates/index.html left
 # that file permanently modified on the server and broke the next git pull.
@@ -64,8 +65,11 @@ cd backend
 python3 -m venv .venv || true
 # shellcheck disable=SC1091
 source .venv/bin/activate
+# No pip download cache: it only grew on disk, a copy of every wheel ever installed.
+export PIP_NO_CACHE_DIR=1
 pip install --upgrade pip
 pip install -r requirements.txt
+pip cache purge >/dev/null 2>&1 || true
 set -a
 # shellcheck disable=SC1091
 source "$REPO_ROOT/deploy/hostinger/.env"
@@ -148,6 +152,9 @@ python manage.py migrate --noinput
 # the cached answers only expire when data changes — so every deploy starts
 # the response cache afresh.
 python manage.py shell -c "from meesho_app import api_cache; api_cache.bump()" || true
+# ...and the old answers' files go too (a bump alone leaves them on disk), with
+# old sync history and abandoned claim uploads — the daily HousekeepingJob's work.
+python manage.py housekeeping --clear-cache || true
 python manage.py collectstatic --noinput
 # Seed commands are idempotent: they no-op once the DB has data.
 python manage.py load_initial_data || true

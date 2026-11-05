@@ -4,3 +4,8 @@ meesho_schedule:
   class: "MeeshoScheduleJob"
   queue: "default"
   description: "Queue a Meesho pull for every account whose interval has passed (5 min by default)"
+housekeeping:
+  cron: "30 3 * * * Asia/Kolkata"
+  class: "HousekeepingJob"
+  queue: "default"
+  description: "Daily 3:30 am: drop old sync history, expired cache files, abandoned claim uploads, old dead jobs"

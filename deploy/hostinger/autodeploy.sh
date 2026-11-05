@@ -63,6 +63,9 @@ if [ "$AS_ROOT" -eq 1 ]; then
       echo "$(stamp) !!! could not install ffmpeg — big claim videos can't be compressed (apt-get install ffmpeg)"
     fi
   fi
+  # Memory and disk ceilings (MySQL's binary log, the journal, gunicorn/Sidekiq
+  # limits, leftovers). Silent and quick once they're in place.
+  bash "$REPO_ROOT/deploy/hostinger/limits.sh" || echo "$(stamp) !!! limits.sh failed"
 fi
 
 # Restart what runs the code, as root — every service that is installed.

@@ -16,8 +16,10 @@ EnvironmentFile=/home/deploy/meesho-p/deploy/hostinger/.env
 ExecStart=/home/deploy/meesho-p/backend/.venv/bin/gunicorn \
     meesho_project.wsgi:application \
     --bind 127.0.0.1:8000 \
-    --workers 3 \
+    --workers 2 --threads 4 --worker-class gthread \
+    --max-requests 500 --max-requests-jitter 50 \
     --timeout 120
+# Memory ceilings and the rest: limits.sh installs them as a drop-in.
 Restart=always
 RestartSec=3
 

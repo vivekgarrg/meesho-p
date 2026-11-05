@@ -862,7 +862,8 @@ class _Passing(Exception):
 
 
 def _joined(upload_id):
-    """(bytes, meta) of an upload whose every piece is here, or raise _Wait."""
+    """(path, meta) of an upload whose every piece is here — joined into one file
+    on disk, never in memory (a phone video can be hundreds of MB) — or raise _Wait."""
     folder = _upload_dir(upload_id)
     meta = _read_json(os.path.join(folder, "meta.json")) if folder else None
     st = _read_json(os.path.join(folder, "status.json")) if folder else None
@@ -879,24 +880,44 @@ def _joined(upload_id):
                                 f"closed (or the phone slept) before it finished. Raise the claim again with the file.",
                                 "files_stalled")
         raise _Wait()
-    parts = int(st.get("parts") or 0)
-    data = b"".join(open(os.path.join(folder, f"part-{i:05d}"), "rb").read() for i in range(parts))
-    if len(data) != meta["size"]:
-        raise TicketRefused(f"{meta['name']}: only {len(data)} of {meta['size']} bytes arrived — raise the claim again.", "file_lost")
-    return data, meta
+    whole = os.path.join(folder, "whole")
+    if not os.path.exists(whole):
+        parts = int(st.get("parts") or 0)
+        tmp = f"{whole}.{uuid.uuid4().hex}.tmp"
+        try:
+            with open(tmp, "wb") as out:
+                for i in range(parts):
+                    with open(os.path.join(folder, f"part-{i:05d}"), "rb") as fh:
+                        shutil.copyfileobj(fh, out, 1024 * 1024)
+        except OSError:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+            raise TicketRefused(f"{meta['name']}: a piece of it is missing on the server — raise the claim again.", "file_lost")
+        os.replace(tmp, whole)
+        for i in range(parts):                                     # the pieces aren't needed twice over
+            try:
+                os.remove(os.path.join(folder, f"part-{i:05d}"))
+            except OSError:
+                pass
+    size = os.path.getsize(whole)
+    if size != meta["size"]:
+        raise TicketRefused(f"{meta['name']}: only {size} of {meta['size']} bytes arrived — raise the claim again.", "file_lost")
+    return whole, meta
 
 
-def compress_video(data, name):
-    """Shrink a video under Meesho's 22 MB cap with ffmpeg: (bytes, new name)."""
+def _read(path):
+    with open(path, "rb") as fh:
+        return fh.read()
+
+
+def compress_video(src, name):
+    """Shrink the video at path `src` under Meesho's 22 MB cap with ffmpeg: (bytes, new name)."""
     import subprocess
     ffmpeg, ffprobe = shutil.which("ffmpeg"), shutil.which("ffprobe")
     if not ffmpeg:
         raise TicketRefused("The video is over 22 MB and this server has no ffmpeg to compress it — install ffmpeg "
                             "(apt-get install ffmpeg), then press Retry.", "no_ffmpeg")
-    with tempfile.TemporaryDirectory() as tmp:
-        src = os.path.join(tmp, "in" + (os.path.splitext(name)[1] or ".mp4"))
-        with open(src, "wb") as fh:
-            fh.write(data)
+    with tempfile.TemporaryDirectory(dir=os.path.dirname(src)) as tmp:
         seconds = 60.0
         if ffprobe:
             out = subprocess.run([ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", src],
@@ -986,7 +1007,7 @@ def process_claim(claim_id, attempt=1):
                 if item.get("url"):
                     continue
                 try:
-                    data, meta = _joined(item["upload_id"])
+                    path, meta = _joined(item["upload_id"])
                 except _Wait:
                     if (now - claim.created_at).total_seconds() > FILES_GIVE_UP:
                         raise TicketRefused("The files never finished arriving from the phone — raise the claim again.", "files_missing")
@@ -994,10 +1015,13 @@ def process_claim(claim_id, attempt=1):
                     save("status", "message")
                     return {"next": "wait", "in": FILES_WAIT}
                 name, ctype = meta["name"], meta["content_type"]
-                if ctype.startswith("video/") and len(data) > MEESHO_VIDEO_MAX:
-                    note("compressing", f"{name} {len(data) / 1048576:.1f} MB")
-                    data, name = compress_video(data, name)
+                size = os.path.getsize(path)
+                if ctype.startswith("video/") and size > MEESHO_VIDEO_MAX:
+                    note("compressing", f"{name} {size / 1048576:.1f} MB")
+                    data, name = compress_video(path, name)          # read from disk by ffmpeg, never loaded here
                     ctype = "video/mp4"
+                else:
+                    data = _read(path)                                # at most Meesho's cap
                 item["url"] = upload(account, name, data, ctype)
                 item["sent_size"] = len(data)
                 save("files")
