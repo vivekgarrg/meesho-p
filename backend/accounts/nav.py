@@ -102,6 +102,8 @@ API_OWNERSHIP = {
     # Meesho Orders holds the Sync and Inventory pages as tabs.
     "meesho-sync/":          ["/meesho-orders"],
     "meesho-orders/":        ["/meesho-orders"],
+    # The Meesho return analysis: the Meesho group, or the existing Return Analysis permission.
+    "meesho-orders/return-analysis/": ["/meesho-orders", "/return-analysis"],
     # Order linking marks parcels packed, so the scanning desk may use it too.
     "meesho-orders/linking/": ["/meesho-orders", "/meesho-linking", "/order-scan"],
     # The labels PDFs and their items: Meesho, the Labels Downloaded page, and the packing desk.

@@ -8,6 +8,7 @@ import { MeeshoSyncTab } from "./MeeshoSyncTab";
 import { MeeshoPaymentsTab } from "./MeeshoPaymentsTab";
 import { MeeshoLinkingTab } from "./MeeshoLinkingTab";
 import { MeeshoReturnsTab } from "./MeeshoReturnsTab";
+import { MeeshoReturnAnalysis } from "./MeeshoReturnAnalysis";
 import { SyncScheduleCard } from "./MeeshoSchedule";
 import { AutomationCard, LatestLabels } from "./MeeshoAutomation";
 import { MeeshoOverview } from "./MeeshoOverview";
@@ -27,6 +28,7 @@ import { Panel, ago } from "./MeeshoUI";
  *                    Cancelled      what was cancelled and why
  *   Order linking  AWB ↔ packet at the packing desk
  *   Returns        every return by status
+ *   Return analysis  return rate by parent SKU / SKU / flag / reason, money lost, how to stop it
  *   OTPs           couriers' delivery OTPs
  *   Inventory      every SKU by parent; pause
  *   Payments       paid, upcoming, outstanding
@@ -42,6 +44,7 @@ export const MEESHO_SECTIONS = [
   { key: "orders", slug: "orders", label: "Orders", icon: "📦" },
   { key: "linking", slug: "linking", label: "Order linking", icon: "🔗" },
   { key: "returns", slug: "returns", label: "Returns", icon: "↩" },
+  { key: "return-analysis", slug: "return-analysis", label: "Return analysis", icon: "📉" },
   { key: "otps", slug: "otps", label: "Delivery OTPs", icon: "🔑" },
   { key: "inventory", slug: "inventory", label: "Inventory", icon: "▤" },
   { key: "payments", slug: "payments", label: "Payments", icon: "₹" },
@@ -220,6 +223,7 @@ export function MeeshoHubTab() {
         )}
         {tab === "linking" && <MeeshoLinkingTab />}
         {tab === "returns" && <MeeshoReturnsTab part="returns" key="returns" />}
+        {tab === "return-analysis" && <MeeshoReturnAnalysis key="return-analysis" />}
         {tab === "otps" && <MeeshoReturnsTab part="otps" key="otps" />}
         {tab === "inventory" && <MeeshoLiveInventoryTab embedded />}
         {tab === "payments" && <MeeshoPaymentsTab />}

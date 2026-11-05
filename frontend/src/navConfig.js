@@ -28,6 +28,8 @@ export const NAV_GROUPS = [
       // Every order and its state by dispatch day — its own permission too, like Order Linking.
       { path: '/orders-panel', label: 'Orders Panel', icon: '🗂', alsoBy: MEESHO },
       { path: '/meesho/returns', label: 'Meesho Returns', icon: '↩', access: MEESHO },
+      // Return rate by parent SKU / SKU / flag / reason from Meesho's own returns data, and how to stop the loss.
+      { path: '/meesho/return-analysis', label: 'Return Analysis (Meesho)', icon: '📉', access: MEESHO },
       { path: '/meesho/otps', label: 'Delivery OTPs', icon: '🔑', access: MEESHO },
       { path: '/meesho/inventory', label: 'Meesho Inventory', icon: '▤', access: MEESHO },
       { path: '/meesho/payments', label: 'Meesho Payments', icon: '₹', access: MEESHO },
