@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { API, C, S, btn, Tag } from "../../App";
 import { CircularProgress } from "@mui/material";
+import { ParentLinkButton } from "./ParentLink";
 
 /*
  * The Meesho automation and its labels, for the Meesho Orders page:
@@ -347,16 +348,17 @@ function Thumb({ url, fallback, size = 44 }) {
 export function LabelItems({ file, onClose, inline = false }) {
   const [data, setData] = useState(null);
   const [err, setErr] = useState(null);
-  const [view, setView] = useState("skus");
+  const [view, setView] = useState("parents");
   const [courier, setCourier] = useState("");
   const [left, setLeft] = useState(false);
   const [q, setQ] = useState("");
+  const [reload, setReload] = useState(0);
 
   useEffect(() => {
     fetch(`${API}/meesho-orders/label-files/${file.id}/items/`)
       .then(async (r) => { const d = await r.json().catch(() => ({})); if (r.ok) setData(d); else setErr(d.error || "Couldn't read the labels."); })
       .catch(() => setErr("Network error."));
-  }, [file.id]);
+  }, [file.id, reload]);
   useEffect(() => {
     if (inline || !onClose) return undefined;
     const onKey = (e) => { if (e.key === "Escape") onClose(); };
@@ -376,11 +378,28 @@ export function LabelItems({ file, onClose, inline = false }) {
     g.couriers[o.courier] = (g.couriers[o.courier] || 0) + 1;
     return acc;
   }, {})).sort((a, b) => b.qty - a.qty || String(a.sku).localeCompare(String(b.sku)));
+  // By parent SKU (SKU Pricing): a SKU with no parent stands on its own, to be linked.
+  const parents = Object.values(orders.reduce((acc, o) => {
+    const name = o.parent || o.sku || "—";
+    const k = `${o.parent ? "p" : "s"}|${name.toLowerCase()}`;
+    const g = acc[k] || (acc[k] = { parent: o.parent, name, qty: 0, orders: 0, packed_qty: 0, image_url: o.image_url, image_fallback_url: o.image_fallback_url,
+      skus: {}, couriers: {}, businesses: {} });
+    g.qty += o.qty; g.orders += 1; g.packed_qty += o.packed ? o.qty : 0;
+    g.skus[o.sku || "—"] = (g.skus[o.sku || "—"] || 0) + o.qty;
+    g.couriers[o.courier] = (g.couriers[o.courier] || 0) + 1;
+    g.businesses[o.business_id] = o.business_name;
+    g.image_url = g.image_url || o.image_url;
+    return acc;
+  }, {})).sort((a, b) => b.qty - a.qty || String(a.name).localeCompare(String(b.name)));
+  const canLink = new Set(data?.can_link || []);
   const pieces = orders.reduce((n, o) => n + o.qty, 0);
   const title = `Labels ${new Date(file.created_at).toLocaleString("en-IN", { day: "2-digit", month: "short", hour: "numeric", minute: "2-digit" })}`;
 
   const csv = () => {
-    const rows = view === "skus"
+    const rows = view === "parents"
+      ? [["Parent SKU", "Pieces", "Orders", "Packed pieces", "SKUs"], ...parents.map((g) => [g.parent || `${g.name} (no parent)`, g.qty, g.orders, g.packed_qty,
+        Object.entries(g.skus).map(([k, n]) => `${k} ${n}`).join("; ")])]
+      : view === "skus"
       ? [["SKU", "Size", "Pieces", "Orders", "Packed pieces", "Couriers"], ...skus.map((g) => [g.sku, g.size, g.qty, g.orders, g.packed_qty,
         Object.entries(g.couriers).map(([c, n]) => `${c} ${n}`).join("; ")])]
       : [["#", "Sub-order", "SKU", "Size", "Qty", "Courier", "AWB", "Business", "Packed"], ...orders.map((o, i) => [i + 1, o.order_id, o.sku, o.size, o.qty,
@@ -392,9 +411,12 @@ export function LabelItems({ file, onClose, inline = false }) {
     document.body.appendChild(a); a.click(); a.remove();
   };
   const print = () => {
-    const head = view === "skus" ? ["", "SKU", "Size", "Pieces", "Orders", "Couriers", "✓"] : ["#", "", "SKU", "Size", "Qty", "Courier", "AWB", "✓"];
+    const head = view === "parents" ? ["", "Parent SKU", "Pieces", "Orders", "SKUs", "✓"]
+      : view === "skus" ? ["", "SKU", "Size", "Pieces", "Orders", "Couriers", "✓"] : ["#", "", "SKU", "Size", "Qty", "Courier", "AWB", "✓"];
     const img = (u) => (u ? `<img src="${esc(u)}" style="width:40px;height:40px;object-fit:cover;border-radius:4px">` : "");
-    const body = view === "skus"
+    const body = view === "parents"
+      ? parents.map((g) => `<tr><td>${img(g.image_url || g.image_fallback_url)}</td><td><b>${esc(g.name)}</b>${g.parent ? "" : " <i>(no parent)</i>"}</td><td style="font-size:18px"><b>${g.qty}</b></td><td>${g.orders}</td><td>${esc(Object.entries(g.skus).map(([k, n]) => `${k} ${n}`).join(", "))}</td><td>☐</td></tr>`).join("")
+      : view === "skus"
       ? skus.map((g) => `<tr><td>${img(g.image_url || g.image_fallback_url)}</td><td><b>${esc(g.sku)}</b></td><td>${esc(g.size)}</td><td style="font-size:18px"><b>${g.qty}</b></td><td>${g.orders}</td><td>${esc(Object.entries(g.couriers).map(([c, n]) => `${c} ${n}`).join(", "))}</td><td>☐</td></tr>`).join("")
       : orders.map((o, i) => `<tr><td>${i + 1}</td><td>${img(o.image_url || o.image_fallback_url)}</td><td><b>${esc(o.sku)}</b></td><td>${esc(o.size)}</td><td><b>${o.qty}</b></td><td>${esc(o.courier)}</td><td>${esc(o.awb)}</td><td>${o.packed ? "✔" : "☐"}</td></tr>`).join("");
     const w = window.open("", "_blank");
@@ -403,7 +425,7 @@ export function LabelItems({ file, onClose, inline = false }) {
       body{font-family:system-ui,sans-serif;margin:16px;color:#111} h1{font-size:16px;margin:0 0 4px} p{margin:0 0 10px;font-size:12px;color:#555}
       table{border-collapse:collapse;width:100%;font-size:12px} th,td{border:1px solid #ccc;padding:4px 6px;text-align:left;vertical-align:middle}
       th{background:#f3f4f6} tr{page-break-inside:avoid}</style></head><body>
-      <h1>${esc(title)} — ${view === "skus" ? "pick list" : "orders"}</h1>
+      <h1>${esc(title)} — ${view === "parents" ? "pick list by parent" : view === "skus" ? "pick list" : "orders"}</h1>
       <p>${esc((file.businesses || []).join(", "))} · ${orders.length} orders · ${pieces} pieces${courier ? ` · ${esc(courier)}` : ""}${left ? " · left to pack" : ""}</p>
       <table><thead><tr>${head.map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>${body}</tbody></table></body></html>`);
     w.document.close();
@@ -439,6 +461,7 @@ export function LabelItems({ file, onClose, inline = false }) {
           </div>
           {data && (
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+              <button onClick={() => setView("parents")} style={pill(view === "parents")}>By parent ({parents.length})</button>
               <button onClick={() => setView("skus")} style={pill(view === "skus")}>By SKU ({skus.length})</button>
               <button onClick={() => setView("orders")} style={pill(view === "orders")}>Every order ({orders.length})</button>
               <select value={courier} onChange={(e) => setCourier(e.target.value)} aria-label="Courier" style={{ ...S.inp, width: "auto", minHeight: 36 }}>
@@ -457,6 +480,37 @@ export function LabelItems({ file, onClose, inline = false }) {
           {err ? <div style={{ padding: 20, color: C.red, fontWeight: 700 }}>✕ {err}</div>
             : !data ? <div style={{ display: "flex", justifyContent: "center", padding: 40 }}><CircularProgress style={{ color: C.orange }} /></div>
               : data.orders.length === 0 ? <div style={{ padding: 20, color: C.gray500 }}>No orders could be read off these labels.</div>
+                : view === "parents" ? parents.map((g) => {
+                  const done = g.packed_qty >= g.qty;
+                  return (
+                    <div key={`${g.parent ? "p" : "s"}|${g.name}`} style={{ display: "flex", gap: 10, alignItems: "center", padding: "8px 14px", borderBottom: `1px solid ${C.gray100}`,
+                      background: done ? C.greenLight : C.white, flexWrap: "wrap" }}>
+                      <Thumb url={g.image_url} fallback={g.image_fallback_url} />
+                      <div style={{ flex: 1, minWidth: 160 }}>
+                        <div style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 14, color: C.gray900, wordBreak: "break-all" }}>{g.name}
+                          {!g.parent && <span style={{ fontFamily: "inherit", marginLeft: 6 }}><Tag variant="amber">No parent</Tag></span>}</div>
+                        <div style={{ fontSize: 12, color: C.gray500, wordBreak: "break-word" }}>
+                          {g.orders} order{g.orders === 1 ? "" : "s"}{g.parent ? ` · ${Object.entries(g.skus).map(([k, n]) => `${k} ×${n}`).join(", ")}` : ""}
+                          {" · "}{Object.entries(g.couriers).map(([c, n]) => `${c} ${n}`).join(", ")}</div>
+                        {!g.parent && Object.entries(g.businesses).filter(([id]) => canLink.has(Number(id))).length > 0 && (
+                          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 4 }}>
+                            {Object.entries(g.businesses).filter(([id]) => canLink.has(Number(id))).map(([id, name]) => (
+                              <span key={id} style={{ display: "inline-flex", gap: 4, alignItems: "center", fontSize: 12, color: C.gray500 }}>
+                                <ParentLinkButton compact businessId={Number(id)} businessName={name} sku={g.name} onLinked={() => setReload((n) => n + 1)} />
+                                {Object.keys(g.businesses).length > 1 ? name : ""}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                      <div style={{ textAlign: "right", flexShrink: 0 }}>
+                        <div style={{ fontFamily: "monospace", fontWeight: 900, fontSize: 22, color: C.gray900, lineHeight: 1 }}>×{g.qty}</div>
+                        <div style={{ fontSize: 11.5, fontWeight: 800, color: done ? "#15803D" : g.packed_qty ? C.orange : C.gray400 }}>
+                          {done ? "✓ packed" : g.packed_qty ? `${g.packed_qty} packed` : "to pack"}</div>
+                      </div>
+                    </div>
+                  );
+                })
                 : view === "skus" ? skus.map((g) => {
                   const done = g.packed_qty >= g.qty;
                   return (

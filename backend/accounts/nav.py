@@ -107,6 +107,8 @@ API_OWNERSHIP = {
     # The labels PDFs and their items: Meesho, the Labels Downloaded page, and the packing desk.
     # The Orders Panel: its own permission, and the whole-Meesho one.
     "meesho-orders/panel/":  ["/meesho-orders", "/orders-panel"],
+    # Linking an order's SKU to its parent, from the Orders Panel or a labels list (needs SKU Pricing's linking too — checked inside).
+    "meesho-orders/sku-parent/": ["/meesho-orders", "/orders-panel", "/label-items", "/order-scan"],
     "meesho-orders/label-files/": ["/meesho-orders", "/label-items", "/order-scan"],
     # Return claims raised on Meesho — from their own page, or from the returns screens.
     "return-claim/":         ["/return-claim", "/return-scan", "/returns"],

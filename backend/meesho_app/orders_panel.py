@@ -136,6 +136,14 @@ def orders_panel(request, business_id):
             }
 
     rows = list(orders.values())
+    # Each order's parent SKU (SKU Pricing), for grouping by parent.
+    from . import sku_parents
+    for r in rows:
+        r["sku"] = sku_parents.clean(r["sku"], r["variation"])
+    index = sku_parents.parents_for({b: {r["sku"] for r in rows if r["business_id"] == b} for b in {r["business_id"] for r in rows}})
+    for r in rows:
+        p = sku_parents.lookup(index, r["business_id"], r["sku"])
+        r["parent"] = p["parent"] if p else None
     first = incoming - timedelta(days=DAYS_BACK + (1 if incoming > today else 0))
     days = {}
     d = first
@@ -195,6 +203,7 @@ def orders_panel(request, business_id):
     return Response({
         "now": now, "today": t_iso, "incoming_day": incoming.isoformat(), "cutoff_hour": cutoff,
         "businesses": [{"id": b.pk, "name": b.name, "connected": any(a.business_id == b.pk for a in accounts)} for b in desk],
+        "can_link": sku_parents.linkable_ids(request, desk),
         "updated_at": min(stamps) if stamps else None, "latest_at": max(stamps) if stamps else None,
         "fetched": list(fetched.values()),
         "statuses": [{"key": k, "label": l} for k, l in STATUSES],

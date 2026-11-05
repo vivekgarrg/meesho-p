@@ -1403,6 +1403,9 @@ def label_items(f, mine, names):
              ScannedOrder.objects.filter(business_id__in=mine, sub_order_no__in=[l.order_id for l in rows])}
     packed_states = (ScannedOrder.STATUS_PACKED, ScannedOrder.STATUS_DISPATCHED, ScannedOrder.STATUS_SCANNED,
                      ScannedOrder.STATUS_CANCELLED)
+    from . import sku_parents
+    index = sku_parents.parents_for({b: {sku_parents.clean(l.sku) for l in rows if l.business_id == b}
+                                     for b in {l.business_id for l in rows}})
     orders, skus = [], {}
     for l in rows:
         sc = scans.get((l.business_id, l.order_id))
@@ -1412,7 +1415,8 @@ def label_items(f, mine, names):
         orders.append({"order_id": l.order_id, "business_id": l.business_id, "business_name": names.get(l.business_id, ""),
                        "sku": l.sku, "size": l.size, "qty": l.qty or 1, "courier": courier, "awb": l.awb_number,
                        "payment": l.payment_type, "image_url": photo, "image_fallback_url": fallback,
-                       "packed": packed, "state": sc.status if sc else "PENDING"})
+                       "packed": packed, "state": sc.status if sc else "PENDING",
+                       "parent": (sku_parents.lookup(index, l.business_id, sku_parents.clean(l.sku)) or {}).get("parent")})
         key = (l.sku or "").strip().casefold(), (l.size or "").strip().casefold()
         g = skus.setdefault(key, {"sku": l.sku, "size": l.size, "qty": 0, "orders": 0, "packed_qty": 0,
                                   "image_url": photo, "image_fallback_url": fallback, "couriers": {}, "businesses": set()})
@@ -1429,21 +1433,50 @@ def label_items(f, mine, names):
     return orders, by_sku, len(ids) - len(rows)
 
 
+def by_parent(orders):
+    """The pick list by parent SKU: each parent's pieces, orders and the SKUs under it. A SKU with
+    no parent on SKU Pricing stands on its own (parent None), to be linked."""
+    groups = {}
+    for o in orders:
+        name = o.get("parent") or o.get("sku") or "—"
+        key = ("p" if o.get("parent") else "s", name.casefold())
+        g = groups.setdefault(key, {"parent": o.get("parent"), "name": name, "qty": 0, "orders": 0, "packed_qty": 0,
+                                    "image_url": o.get("image_url"), "image_fallback_url": o.get("image_fallback_url"),
+                                    "skus": {}, "couriers": {}, "business_ids": set()})
+        q = o.get("qty") or 1
+        g["qty"] += q
+        g["orders"] += 1
+        g["packed_qty"] += q if o.get("packed") else 0
+        g["skus"][o.get("sku") or "—"] = g["skus"].get(o.get("sku") or "—", 0) + q
+        g["couriers"][o["courier"]] = g["couriers"].get(o["courier"], 0) + 1
+        g["business_ids"].add(o.get("business_id"))
+        g["image_url"] = g["image_url"] or o.get("image_url")
+    out = [{**g, "business_ids": sorted(b for b in g["business_ids"] if b),
+            "skus": [{"sku": k, "qty": n} for k, n in sorted(g["skus"].items(), key=lambda x: -x[1])],
+            "couriers": [{"courier": k, "orders": n} for k, n in sorted(g["couriers"].items(), key=lambda x: -x[1])]}
+           for g in groups.values()]
+    out.sort(key=lambda g: (-g["qty"], g["name"]))
+    return out
+
+
 def pick_list_text(f, limit=3800):
-    """A labels file's pick list as plain text (Telegram / email): pieces per SKU and size, most first, then per courier."""
+    """A labels file's pick list as plain text (Telegram / email): pieces per parent SKU, most first
+    (a SKU with no parent on its own, marked), then per courier."""
     from accounts.models import Business
     mine = set(f.business_ids or [])
     names = dict(Business.objects.filter(pk__in=mine).values_list("pk", "name"))
-    orders, by_sku, _ = label_items(f, mine, names)
+    orders, _by_sku, _ = label_items(f, mine, names)
     if not orders:
         return ""
-    head = f"📋 On these labels — {len(orders)} orders, {sum(o['qty'] for o in orders)} pieces, {len(by_sku)} SKUs\n"
+    groups = by_parent(orders)
+    loose = sum(1 for g in groups if not g["parent"])
+    head = (f"📋 On these labels — {len(orders)} orders, {sum(o['qty'] for o in orders)} pieces, "
+            f"{len(groups) - loose} parents" + (f" + {loose} SKUs with no parent" if loose else "") + "\n")
     lines, used = [], len(head)
-    for g in by_sku:
-        size = f" ({g['size']})" if g["size"] and g["size"] != "Free Size" else ""
-        line = f"{g['qty']} × {g['sku'] or '—'}{size}"
+    for g in groups:
+        line = f"{g['qty']} × {g['name']}" + ("" if g["parent"] else "  ⚠ no parent")
         if used + len(line) + 1 > limit:
-            lines.append(f"… and {len(by_sku) - len(lines)} more SKUs — see Labels Downloaded")
+            lines.append(f"… and {len(groups) - len(lines)} more — see Labels Downloaded")
             break
         lines.append(line)
         used += len(line) + 1
@@ -1476,8 +1509,15 @@ def meesho_label_file_items(request, business_id, file_id):
         "file": {"id": f.pk, "created_at": f.created_at, "trigger": f.trigger, "labels": f.labels, "businesses": f.business_names},
         "summary": {"orders": len(orders), "pieces": sum(o["qty"] for o in orders), "skus": len(by_sku),
                     "packed": sum(1 for o in orders if o["packed"]), "not_found": not_found},
-        "skus": by_sku, "orders": orders,
+        "skus": by_sku, "orders": orders, "parents": by_parent(orders),
+        "can_link": _sku_parents_linkable(request, f),
     })
+
+
+def _sku_parents_linkable(request, f):
+    from accounts.models import Business
+    from . import sku_parents
+    return sku_parents.linkable_ids(request, list(Business.objects.filter(pk__in=f.business_ids or [])))
 
 
 @api_view(["POST"])

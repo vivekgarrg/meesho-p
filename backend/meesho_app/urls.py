@@ -5,7 +5,7 @@ from . import api_cache
 from . import upload_cleanup
 from . import return_desk
 from . import meesho_return_claim
-from . import meesho_linking, meesho_returns, meesho_search, meesho_sync, orders_panel
+from . import meesho_linking, meesho_returns, meesho_search, meesho_sync, orders_panel, sku_parents
 from . import bulk_listing_views
 from . import listing_images_views
 from . import insights
@@ -193,6 +193,7 @@ urlpatterns = [
     path("meesho-orders/returns/refresh/",  meesho_returns.returns_refresh,   name="meesho_returns_refresh"),
     path("meesho-orders/returns/list/",     meesho_returns.returns_list,      name="meesho_returns_list"),
     path("meesho-orders/sync-settings/",    meesho_sync.meesho_sync_schedule, name="meesho_sync_schedule"),
+    path("meesho-orders/sku-parent/", sku_parents.sku_parent,          name="meesho_sku_parent"),
     path("meesho-orders/panel/",    orders_panel.orders_panel,          name="meesho_orders_panel"),
     path("meesho-orders/summary/",  meesho_sync.meesho_summary,         name="meesho_summary"),
     path("meesho-orders/accounts/<int:account_business_id>/login/", meesho_sync.meesho_account_login, name="meesho_account_login"),

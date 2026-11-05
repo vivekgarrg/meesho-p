@@ -1010,6 +1010,20 @@ class AutoLabelsSendTests(TestCase):
         top = d["skus"][0]
         self.assertEqual((top["sku"], top["qty"], top["orders"], top["packed_qty"]), ("lota-a", 2, 2, 1))   # most pieces first
         self.assertEqual({o["order_id"]: o["packed"] for o in d["orders"]}["342118874307078145_1"], True)
+        self.assertEqual([(g["parent"], g["name"], g["qty"]) for g in d["parents"]], [(None, "lota-a", 2), (None, "lota-b", 1)])
+        # Both SKUs under one parent: one line, 3 pieces — on the page and on Telegram.
+        from .models import FinalPrice, ParentItemPrice
+        parent = ParentItemPrice.objects.create(business=self.biz, item_id="brass-lota", item_price=100, tax_percent=0,
+                                                packaging_cost=0, final_price=100)
+        for sku in ("lota-a", "lota-b"):
+            FinalPrice.objects.create(business=self.biz, sku_id=sku, parent=parent, item_price=100, final_price=100)
+        d = c.get(f"/api/business/{self.biz.id}/meesho-orders/label-files/{f.pk}/items/").data
+        g = d["parents"]
+        self.assertEqual([(x["parent"], x["qty"], x["packed_qty"], [k["sku"] for k in x["skus"]]) for x in g],
+                         [("brass-lota", 3, 1, ["lota-a", "lota-b"])])
+        text = meesho_sync.pick_list_text(f)
+        self.assertIn("3 orders, 3 pieces, 1 parents", text)
+        self.assertIn("3 × brass-lota", text)
 
     def test_an_older_file_has_its_orders_read_off_the_pdf(self):
         from .models import MeeshoLabelFile
@@ -1040,8 +1054,8 @@ class AutoLabelsSendTests(TestCase):
         with mock.patch.object(meesho_sync, "_fetch_label_pdf", return_value=pdf):
             out, notify_send = self.save(batch="auto-7", send=True)
         picks = notify_send.call_args_list[-1].args                                    # after the PDF: what's on it
-        self.assertIn("2 orders, 2 pieces, 1 SKUs", picks[1])
-        self.assertIn("2 × lota-a", picks[1])
+        self.assertIn("2 orders, 2 pieces, 0 parents + 1 SKUs with no parent", picks[1])
+        self.assertIn("2 × lota-a  ⚠ no parent", picks[1])
         # Someone with only Order Scan (no Meesho) — the packing desk.
         packer = User.objects.create_user(username="packer", password="pw", role=User.ROLE_BUSINESS_USER)
         Membership.objects.create(user=packer, business=self.biz)

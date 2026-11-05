@@ -100,3 +100,49 @@ class OrdersPanelTests(TestCase):
         res = self.get(local(2026, 11, 5, 15), c)
         self.assertEqual(res.status_code, 200)
         self.assertEqual([b["name"] for b in res.data["businesses"]], ["Rudam"])  # only what they're assigned to
+
+
+class ParentSkuTests(OrdersPanelTests):
+    """Orders carry their parent SKU; a SKU with none can be linked from the panel."""
+
+    def test_orders_carry_their_parent_and_a_loose_sku_can_be_linked(self):
+        from .models import FinalPrice, ParentItemPrice
+        parent = ParentItemPrice.objects.create(business=self.a, item_id="7-inch-plate", item_price=100, tax_percent=0,
+                                                packaging_cost=0, final_price=100)
+        FinalPrice.objects.create(business=self.a, sku_id="sku-P1", parent=parent, item_price=100, final_price=100)
+        d = self.get(local(2026, 11, 5, 15)).data
+        by = {r["sub_order_num"]: r for r in d["orders"]}
+        self.assertEqual((by["P1"]["parent"], by["P2"]["parent"]), ("7-inch-plate", None))
+        self.assertTrue({self.a.pk, self.b.pk} <= set(d["can_link"]))                # an admin may link in every business
+        # The picker: that business's parents.
+        url = f"/api/business/{self.a.id}/meesho-orders/sku-parent/"
+        g = self.c.get(url, {"business": self.a.pk, "sku": "sku-P2"}).data
+        self.assertEqual((g["parents"], g["current"]), (["7-inch-plate"], None))
+        # Link it; the panel then groups it under the parent.
+        res = self.c.post(url, {"business": self.a.pk, "sku": "sku-P2", "parent": "7-inch-plate"}, format="json")
+        self.assertEqual((res.status_code, res.data["created"]), (200, True))
+        d = self.get(local(2026, 11, 5, 15)).data
+        self.assertEqual({r["sub_order_num"]: r["parent"] for r in d["orders"]}["P2"], "7-inch-plate")
+        # A parent of another business is not this one's.
+        res = self.c.post(url, {"business": self.b.pk, "sku": "sku-P3", "parent": "7-inch-plate"}, format="json")
+        self.assertEqual(res.status_code, 404)
+
+    def test_linking_needs_sku_pricing_access(self):
+        from .models import ParentItemPrice
+        ParentItemPrice.objects.create(business=self.a, item_id="7-inch-plate", item_price=100, tax_percent=0, packaging_cost=0, final_price=100)
+        clerk = User.objects.create_user(username="p", password="pw", role=User.ROLE_BUSINESS_USER)
+        Membership.objects.create(user=clerk, business=self.a)
+        c = APIClient()
+        c.force_authenticate(clerk)
+        url = f"/api/business/{self.a.id}/meesho-orders/sku-parent/"
+        set_user_rule(clerk, ["/orders-panel"])
+        self.assertEqual(self.get(local(2026, 11, 5, 15), c).data["can_link"], [])
+        res = c.post(url, {"business": self.a.pk, "sku": "sku-P2", "parent": "7-inch-plate"}, format="json")
+        self.assertEqual(res.status_code, 403)
+        set_user_rule(clerk, ["/orders-panel", "/pricing"])
+        self.assertEqual(self.get(local(2026, 11, 5, 15), c).data["can_link"], [self.a.pk])
+        res = c.post(url, {"business": self.a.pk, "sku": "sku-P2", "parent": "7-inch-plate"}, format="json")
+        self.assertEqual(res.status_code, 200)
+        # Only businesses they're assigned to.
+        res = c.post(url, {"business": self.b.pk, "sku": "sku-P3", "parent": "7-inch-plate"}, format="json")
+        self.assertEqual(res.status_code, 403)
