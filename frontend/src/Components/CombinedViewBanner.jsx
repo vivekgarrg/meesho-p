@@ -5,7 +5,7 @@ import { useCombinedView } from "../contexts/CombinedViewContext";
 
 // Pages that merge their own data when Combined is on (see lib/combinedMerge.js)
 // and so show their own "combined" indicator instead of this generic banner.
-const MERGE_AWARE_PATHS = ["/combined-dashboard", "/", "/sku-analysis", "/daily-profit"];
+const MERGE_AWARE_PATHS = ["/combined-dashboard", "/", "/sku-analysis", "/daily-profit", "/orders-panel"];
 
 /**
  * Shown on every screen that *isn't* merge-aware yet while the global

@@ -20,6 +20,8 @@ NAV_CATALOG = [
     {"path": "/meesho-orders",     "label": "Meesho (every page in this group)", "group": "Meesho"},
     # Order linking alone, for a packing-desk person who needs nothing else of Meesho.
     {"path": "/meesho-linking",    "label": "Order Linking",     "group": "Meesho"},
+    # Every order and its state (to accept, labels to download…) by dispatch day — can be given alone.
+    {"path": "/orders-panel",      "label": "Orders Panel",      "group": "Meesho"},
     {"path": "/",                  "label": "Overview",          "group": "Analytics"},
     {"path": "/combined-dashboard", "label": "Combined Dashboard", "group": "Analytics"},
     {"path": "/sku-analysis",      "label": "SKU Analysis",      "group": "Analytics"},
@@ -103,6 +105,8 @@ API_OWNERSHIP = {
     # Order linking marks parcels packed, so the scanning desk may use it too.
     "meesho-orders/linking/": ["/meesho-orders", "/meesho-linking", "/order-scan"],
     # The labels PDFs and their items: Meesho, the Labels Downloaded page, and the packing desk.
+    # The Orders Panel: its own permission, and the whole-Meesho one.
+    "meesho-orders/panel/":  ["/meesho-orders", "/orders-panel"],
     "meesho-orders/label-files/": ["/meesho-orders", "/label-items", "/order-scan"],
     # Return claims raised on Meesho — from their own page, or from the returns screens.
     "return-claim/":         ["/return-claim", "/return-scan", "/returns"],

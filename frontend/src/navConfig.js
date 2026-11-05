@@ -25,6 +25,8 @@ export const NAV_GROUPS = [
       { path: '/meesho/orders', label: 'Meesho Orders', icon: '📦', access: MEESHO },
       // Its own permission, so it can be given alone; the whole-Meesho permission shows it too.
       { path: '/meesho-linking', label: 'Order Linking', icon: '🔗', alsoBy: MEESHO },
+      // Every order and its state by dispatch day — its own permission too, like Order Linking.
+      { path: '/orders-panel', label: 'Orders Panel', icon: '🗂', alsoBy: MEESHO },
       { path: '/meesho/returns', label: 'Meesho Returns', icon: '↩', access: MEESHO },
       { path: '/meesho/otps', label: 'Delivery OTPs', icon: '🔑', access: MEESHO },
       { path: '/meesho/inventory', label: 'Meesho Inventory', icon: '▤', access: MEESHO },
