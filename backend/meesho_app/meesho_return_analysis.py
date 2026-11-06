@@ -29,7 +29,8 @@ from django.utils import timezone
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
-from .models import FinalPrice, Order, OrderPayment, ReturnDelivery
+from . import return_guard
+from .models import ListingHubPause, Order, OrderPayment, ReturnDelivery, SkuPause
 
 PATH = "meesho-orders/return-analysis/"
 WINDOWS = (7, 30, 60, 90)
@@ -119,18 +120,7 @@ def return_analysis(request, business_id):
 
     # ── SKU → parent ─────────────────────────────────────────────────────
     sku_key = v._sku_key
-    fp = {}
-    for biz, sku_id, parent_item in (FinalPrice.objects.filter(business_id__in=ids)
-                                     .values_list("business_id", "sku_id", "parent__item_id")):
-        fp[(biz, sku_key(sku_id))] = (sku_id, parent_item or "")
-
-    def resolve(biz, sku, variation=""):
-        """(sku shown, parent or ''), with Meesho's glued-on variation taken off."""
-        cleaned = v.meesho_sku(sku or "", variation or "") or (sku or "")
-        hit = fp.get((biz, sku_key(cleaned))) or fp.get((biz, sku_key(sku or "")))
-        if hit:
-            return hit
-        return cleaned or "—", ""
+    resolve = return_guard.sku_resolver(ids)
 
     for r in rows:
         r["sku_name"], r["parent"] = resolve(r["business_id"], r["sku"], r["variation"])
@@ -165,6 +155,7 @@ def return_analysis(request, business_id):
         return [r for r in rows if in_window(r["eff"], a, b) and all(r[k] == val for k, val in where.items())]
 
     d7s, d30s = today - timedelta(days=6), today - timedelta(days=29)
+    buckets = _buckets(start, today, days)
 
     # ── Headline windows: last 7 / last 30 / the one picked ────────────────
     def window(a, b, pa, pb):
@@ -172,12 +163,21 @@ def return_analysis(request, business_id):
         cust = [r for r in now if r["kind"] == "customer"]
         rto = [r for r in now if r["kind"] == "rto"]
         shipped = orders_in(a, b)
+        delivered = max(shipped - len(rto), 0)
+        p_cust = sum(1 for r in before if r["kind"] == "customer")
+        p_rto = len(before) - p_cust
+        p_shipped = orders_in(pa, pb)
         return {
             "from": a.isoformat(), "to": b.isoformat(),
             "returns": len(now), "customer": len(cust), "rto": len(rto),
             "units": sum(r["qty"] for r in now),
-            "orders": shipped, "rate": _pct(len(now), shipped), "customer_rate": _pct(len(cust), shipped),
+            "orders": shipped, "delivered": delivered,
+            "rate": _pct(len(now), shipped),
+            "customer_rate": _pct(len(cust), delivered), "rto_rate": _pct(len(rto), shipped),
             "previous": len(before), "change": _delta(len(now), len(before)),
+            "previous_customer": p_cust, "previous_rto": p_rto, "previous_orders": p_shipped,
+            "previous_customer_rate": _pct(p_cust, max(p_shipped - p_rto, 0)), "previous_rto_rate": _pct(p_rto, p_shipped),
+            "customer_change": _delta(len(cust), p_cust), "rto_change": _delta(len(rto), p_rto),
         }
 
     headline = {
@@ -190,6 +190,8 @@ def return_analysis(request, business_id):
     prev = rets(prev_start, prev_end)
     total_orders = headline["picked"]["orders"]
     avg_rate = headline["picked"]["rate"] or 0.0
+    avg_customer_rate = headline["picked"]["customer_rate"] or 0.0
+    avg_rto_rate = headline["picked"]["rto_rate"] or 0.0
 
     # ── What each return cost: the payments sheet, by sub-order ──────────────
     cost = {}
@@ -263,13 +265,29 @@ def return_analysis(request, business_id):
         top_group = max(groups.items(), key=lambda kv: kv[1]["count"])[0] if groups else None
         rate = _pct(n, ord_now)
         prev_rate = _pct(len(group_prev), ord_prev)
+        n_rto = n - len(cust)
+        p_cust = sum(1 for r in group_prev if r["kind"] == "customer")
+        p_rto = len(group_prev) - p_cust
+        delivered = max(ord_now - n_rto, 0)
+        p_delivered = max(ord_prev - p_rto, 0)
+        couriers = sorted(tally([r for r in group_cur if r["kind"] == "rto"], lambda r: r["courier_partner"] or "Not given").items(),
+                          key=lambda kv: -kv[1]["count"])[:3]
         m = money(group_cur)
         e = {
             "key": key, "label": label, "parent": parent,
             "returns": n, "customer": len(cust), "rto": n - len(cust), "units": sum(r["qty"] for r in group_cur),
-            "orders": ord_now, "rate": rate, "prev_rate": prev_rate, "previous": len(group_prev),
+            "orders": ord_now, "delivered": delivered, "rate": rate, "prev_rate": prev_rate, "previous": len(group_prev),
+            "customer_rate": _pct(len(cust), delivered), "rto_rate": _pct(n_rto, ord_now),
+            "prev_customer_rate": _pct(p_cust, p_delivered), "prev_rto_rate": _pct(p_rto, ord_prev),
+            "previous_customer": p_cust, "previous_rto": p_rto,
             "vs_avg": round(rate - avg_rate, 1) if rate is not None else None,
+            "customer_vs_avg": round(_pct(len(cust), delivered) - avg_customer_rate, 1) if _pct(len(cust), delivered) is not None else None,
+            "rto_vs_avg": round(_pct(n_rto, ord_now) - avg_rto_rate, 1) if _pct(n_rto, ord_now) is not None else None,
+            "top_couriers": [{"courier": k, "count": o["count"]} for k, o in couriers],
             "d7": sum(1 for r in group_cur if r["eff"] >= d7s), "d30": sum(1 for r in group_cur if r["eff"] >= d30s),
+            "d7_customer": sum(1 for r in cust if r["eff"] >= d7s), "d7_rto": sum(1 for r in group_cur if r["kind"] == "rto" and r["eff"] >= d7s),
+            "d30_customer": sum(1 for r in cust if r["eff"] >= d30s), "d30_rto": sum(1 for r in group_cur if r["kind"] == "rto" and r["eff"] >= d30s),
+            "trend": _trend(group_cur, buckets),
             "top_reasons": [{"reason": k, "count": o["count"], "share": _pct(o["count"], len(cust))} for k, o in top],
             "top_group": top_group, "top_group_label": v._RETURN_REASON_GROUP_LABEL.get(top_group, "") if top_group else "",
             "flags": {k: o["count"] for k, o in tally(group_cur, lambda r: r["flag"]).items()},
@@ -327,6 +345,17 @@ def return_analysis(request, business_id):
     mismatches = [r for r in cur if r["verify_result"] == ReturnDelivery.VERIFY_MISMATCH]
     summary_money = money(cur)
 
+    trend = []
+    for a, b in buckets:
+        in_b = rets(a, b)
+        n_rto = sum(1 for r in in_b if r["kind"] == "rto")
+        shipped = orders_in(a, b)
+        trend.append({"from": a.isoformat(), "to": b.isoformat(), "orders": shipped,
+                      "customer": len(in_b) - n_rto, "rto": n_rto,
+                      "customer_rate": _pct(len(in_b) - n_rto, max(shipped - n_rto, 0)), "rto_rate": _pct(n_rto, shipped)})
+
+    guard = _guard_view(request, desk, ids, today, parents, skus)
+
     pointers = _pointers(parents, skus, by_courier, by_group, summary_money, headline, open_claims,
                          mismatches, len(cur), avg_rate, total_orders, days)
 
@@ -342,9 +371,97 @@ def return_analysis(request, business_id):
         "parents": parents[:80], "skus": skus[:200],
         "open_claims": {"count": len(open_claims)},
         "pointers": pointers,
+        "trend": trend,
+        "guard": guard,
+        "average_customer_rate": avg_customer_rate, "average_rto_rate": avg_rto_rate,
         "data": {"returns_in_range": len(rows), "synced": sum(1 for r in rows if r["synced_at"]),
                  "with_payment": summary_money["with_payment"], "of": len(cur)},
     })
+
+
+def _buckets(start, today, days):
+    """The window cut into day (7-day view) or week pieces, for the trend lines."""
+    step = 1 if days <= 7 else 7
+    out, a = [], start
+    while a <= today:
+        b = min(a + timedelta(days=step - 1), today)
+        out.append((a, b))
+        a = b + timedelta(days=1)
+    return out
+
+
+def _trend(group, buckets):
+    """Customer returns and RTOs of this product in each piece of the window — a sparkline."""
+    return [{"customer": sum(1 for r in group if r["kind"] == "customer" and a <= r["eff"] <= b),
+             "rto": sum(1 for r in group if r["kind"] == "rto" and a <= r["eff"] <= b)} for a, b in buckets]
+
+
+def _guard_view(request, desk, ids, today, parents, skus):
+    """What the Return Guard sees: its rules, each product's standing against them, what it has paused, the alerts."""
+    v = _views()
+    admin = v._is_admin(request.user)
+    stats = return_guard.return_stats(ids, today)
+    losses = {}
+    for b in desk:
+        try:
+            for parent, l in return_guard.loss_stats(b, today).items():
+                losses[(b.pk, parent)] = l
+        except Exception:                      # the profit engine failing must not blank this page
+            continue
+    paused = {(biz, item): auto for biz, item, auto in
+              ListingHubPause.objects.filter(business_id__in=ids).values_list("business_id", "parent__item_id", "auto")}
+    default_biz = desk[0].pk if desk else None
+    # A parent row is for one business in practice; find it by the parent's name across the desk.
+    owners = {}
+    for (biz, item) in set(stats) | set(losses) | set(paused):
+        owners.setdefault(item, []).append(biz)
+    for e in parents:
+        item = e["label"] if e.get("has_parent") else None
+        e["guard"] = None
+        if not item:
+            continue
+        biz = (owners.get(item) or [default_biz])[0]
+        st = stats.get((biz, item), {"orders": 0, "returns": 0, "customer": 0, "rto": 0})
+        ls = losses.get((biz, item))
+        e["guard"] = {
+            "level": "parent", "business": biz,
+            "orders": st["orders"], "returns": st["returns"],
+            "rate": _pct(st["returns"], st["orders"]),
+            "returns_breach": return_guard.breaches_returns(st["orders"], st["returns"]),
+            "loss_units": ls["units"] if ls else 0, "loss": float(ls["loss"]) if ls else 0.0,
+            "loss_breach": bool(ls and return_guard.breaches_loss(ls["units"], ls["loss"])),
+            "paused": (biz, item) in paused, "paused_auto": bool(paused.get((biz, item))),
+        }
+    sku_stats = return_guard.return_stats(ids, today, level="sku")
+    sku_losses = {}
+    for b in desk:
+        try:
+            for sk, l in return_guard.loss_stats(b, today, level="sku").items():
+                sku_losses[(b.pk, sk)] = l
+        except Exception:
+            continue
+    sku_paused = {(biz, sk): auto for biz, sk, auto in SkuPause.objects.filter(business_id__in=ids).values_list("business_id", "sku__sku_id", "auto")}
+    for e in skus:
+        e["guard"] = None
+        if not e.get("parent"):
+            continue
+        pg = next((p["guard"] for p in parents if p["label"] == e["parent"] and p.get("guard")), None)
+        biz = pg["business"] if pg else default_biz
+        st = sku_stats.get((biz, e["key"]), {"orders": 0, "returns": 0})
+        ls = sku_losses.get((biz, e["key"]))
+        e["guard"] = {
+            "level": "sku", "business": biz, "orders": st["orders"], "returns": st["returns"], "rate": _pct(st["returns"], st["orders"]),
+            "returns_breach": return_guard.breaches_returns(st["orders"], st["returns"]),
+            "loss_units": ls["units"] if ls else 0, "loss": float(ls["loss"]) if ls else 0.0,
+            "loss_breach": bool(ls and return_guard.breaches_loss(ls["units"], ls["loss"])),
+            "paused": (biz, e["key"]) in sku_paused, "paused_auto": bool(sku_paused.get((biz, e["key"]))),
+        }
+    alerts = return_guard.alerts_payload(ids)
+    return {"rules": return_guard.rules(), "can_pause": admin, "alerts": alerts,
+            "unseen": sum(1 for a in alerts if not a["seen"]),
+            "paused_count": len(paused),
+            "at_risk": sum(1 for e in parents + skus if e.get("guard") and not e["guard"]["paused"]
+                           and (e["guard"]["returns_breach"] or e["guard"]["loss_breach"]))}
 
 
 # ── Decisions ────────────────────────────────────────────────────────────────

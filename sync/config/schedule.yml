@@ -9,3 +9,8 @@ housekeeping:
   class: "HousekeepingJob"
   queue: "default"
   description: "Daily 3:30 am: drop old sync history, expired cache files, abandoned claim uploads, old dead jobs"
+return_guard:
+  cron: "0 7 * * * Asia/Kolkata"
+  class: "ReturnGuardJob"
+  queue: "default"
+  description: "Daily 7 am: pause products with returns over 40% (50+ units) or selling at a loss (20+ units), and alert"

@@ -72,7 +72,7 @@ def _money(x):
 # ── finding products ─────────────────────────────────────────────────────────
 
 def _parent_skus(business, parent):
-    return list(FinalPrice.objects.filter(business=business, parent=parent).values_list("sku_id", flat=True))
+    return list(FinalPrice.objects.filter(business=business, parent=parent, sku_pause__isnull=True).values_list("sku_id", flat=True))
 
 
 def _photo_counts(business):
@@ -172,7 +172,7 @@ def hub_search(request, business_id):
 
     total = len(rows)
     page = rows[offset:offset + 48]
-    sku_counts = dict(FinalPrice.objects.filter(business=business, parent_id__in=[p.id for p in page])
+    sku_counts = dict(FinalPrice.objects.filter(business=business, parent_id__in=[p.id for p in page], sku_pause__isnull=True)
                       .values("parent_id").annotate(n=Count("id")).values_list("parent_id", "n"))
     saved = defaultdict(dict)
     for lp in ListingPrice.objects.filter(business=business, parent_id__in=[p.id for p in page]):

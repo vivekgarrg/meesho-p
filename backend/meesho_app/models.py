@@ -3157,12 +3157,74 @@ class ListingHubPause(models.Model):
     paused_by = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True, blank=True,
                                   related_name="listing_pauses_made")
     paused_at = models.DateTimeField(auto_now_add=True)
+    # True when the Return Guard paused it (returns or losses over the limit),
+    # not a person — paused_by is empty then, and the alert says why.
+    auto = models.BooleanField(default=False)
 
     class Meta:
         db_table = "listing_hub_pauses"
 
     def __str__(self):
         return f"paused: {self.parent.item_id}"
+
+
+class SkuPause(models.Model):
+    """One SKU paused on its own (by the Return Guard or a person). Pausing a
+    parent product pauses each of its SKUs this way too, so a SKU can also be
+    paused and resumed one at a time. Paused SKUs are left out of the Listing
+    Hub's listings. Deleting the row resumes the SKU."""
+    business = models.ForeignKey("accounts.Business", on_delete=models.CASCADE, related_name="sku_pauses")
+    sku = models.OneToOneField(FinalPrice, on_delete=models.CASCADE, related_name="sku_pause")
+    note = models.CharField(max_length=255, blank=True)
+    paused_by = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True, blank=True,
+                                  related_name="sku_pauses_made")
+    auto = models.BooleanField(default=False)
+    paused_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "sku_pauses"
+
+    def __str__(self):
+        return f"paused: {self.sku.sku_id}"
+
+
+class ReturnGuardAlert(models.Model):
+    """
+    A product the Return Guard paused on its own — because too many of its
+    orders come back (RETURNS) or it sold in quantity below cost (LOSS) — or
+    that a person paused from the Return Analysis. Shown on the page until seen.
+    """
+    KIND_RETURNS = "returns"
+    KIND_LOSS = "loss"
+    KIND_MANUAL = "manual"
+    KIND_CHOICES = [(KIND_RETURNS, "Returns over the limit"), (KIND_LOSS, "Selling at a loss"),
+                    (KIND_MANUAL, "Paused by hand")]
+
+    business = models.ForeignKey("accounts.Business", on_delete=models.CASCADE, related_name="return_guard_alerts")
+    parent = models.ForeignKey(ParentItemPrice, on_delete=models.SET_NULL, null=True, blank=True,
+                               related_name="return_guard_alerts")
+    parent_item_id = models.CharField(max_length=255)
+    sku = models.CharField(max_length=200, blank=True)          # set when one SKU was paused, not the whole parent
+    kind = models.CharField(max_length=10, choices=KIND_CHOICES)
+    message = models.CharField(max_length=500)
+    days = models.PositiveIntegerField(default=30)
+    orders = models.PositiveIntegerField(default=0)            # units shipped in the period
+    returns = models.PositiveIntegerField(default=0)           # units returned in the period
+    rate = models.FloatField(null=True, blank=True)            # returns ÷ orders, in %
+    units_sold = models.PositiveIntegerField(default=0)        # delivered units (LOSS)
+    loss = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    seen = models.BooleanField(default=False)
+    # Set when someone resumes the product: the guard leaves it alone for a while after.
+    resumed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "return_guard_alerts"
+        ordering = ["-created_at", "-id"]
+        indexes = [models.Index(fields=["business", "seen"])]
+
+    def __str__(self):
+        return f"{self.kind}: {self.parent_item_id}"
 
 
 class ReturnScan(models.Model):
