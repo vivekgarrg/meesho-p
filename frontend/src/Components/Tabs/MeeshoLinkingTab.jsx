@@ -348,8 +348,12 @@ export function MeeshoLinkingTab() {
     }
     return { ...prev, links, count: links.length, plan };
   });
+  // Any error or alert: both fields are emptied at once, so the next scan starts fresh —
+  // the error itself still shows which AWB and packet it was (and "Link anyway" uses those).
   const stop = (b) => {
     setResult(null);
+    setAwb(""); setPacket("");
+    typed.current = { awb: null, packet: null, awbAt: null };
     setBlocked(b);
     document.activeElement?.blur?.();
     if (String(b.code || "").startsWith("already_linked")) sounds.warn(); else sounds.error();
@@ -358,7 +362,7 @@ export function MeeshoLinkingTab() {
 
   // Put the cursor in a field, its text selected — a fresh scan replaces it.
   const focusField = (ref) => setTimeout(() => { ref.current?.focus(); ref.current?.select(); }, 50);   // after the fields are enabled again
-  // Which field a refusal is about, so the right one can be rescanned.
+  // Which field a refusal is about — its border shows red.
   const AWB_ERRORS = ["unknown_awb", "two_packets", "scan_failed"];
   const method = (startedAt) => (startedAt && Date.now() - startedAt < 600 ? "SCAN" : "MANUAL");
   const onType = (field, setter) => (e) => {
@@ -413,18 +417,12 @@ export function MeeshoLinkingTab() {
       reloadSoon(r.data.code === "timeout" ? 500 : 4000);
     }
   };
-  // OK on the error: back to the field that needs scanning again.
+  // OK on the error: both fields are already empty — start again from the AWB.
   const acknowledge = () => {
-    const b = blocked;
     setBlocked(null);
-    if (!b) return;
-    if (b.code === "already_linked" || b.code === "already_linked_here" || b.code === "cancelled") {   // done before / not to ship: on to the next parcel
-      setAwb(""); setPacket("");
-      typed.current = { awb: null, packet: null, awbAt: null };
-      focusField(awbRef);
-      return;
-    }
-    focusField(b.code === "missing" ? (b.awb ? packetRef : awbRef) : AWB_ERRORS.includes(b.code) ? awbRef : packetRef);
+    setAwb(""); setPacket("");
+    typed.current = { awb: null, packet: null, awbAt: null };
+    focusField(awbRef);
   };
 
   // A scanner types the code and presses Enter: AWB → on to the packet; packet → link.
