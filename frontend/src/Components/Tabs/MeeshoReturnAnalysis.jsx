@@ -78,7 +78,7 @@ function PauseControl({ e, guard, onDone, compact }) {
     return e.has_parent === false || e.parent === null || e.parent === undefined
       ? <span style={{ fontSize: 11.5, color: C.gray400 }}>Link to a parent to pause</span> : null;
   }
-  const reasons = [g.returns_breach && `returns ${g.rate}% of ${g.orders} units`, g.loss_breach && `selling at a loss (₹${Math.round(g.loss).toLocaleString("en-IN")} on ${g.loss_units} units)`].filter(Boolean);
+  const reasons = [g.returns_breach && `customers returned ${g.rate}% of ${g.orders} delivered`, g.loss_breach && `selling at a loss (₹${Math.round(g.loss).toLocaleString("en-IN")} on ${g.loss_units} units)`].filter(Boolean);
   const act = async (paused) => {
     let note = "";
     if (paused) {
@@ -119,7 +119,9 @@ function GuardPanel({ guard, onChange }) {
       action={guard.can_pause && <button onClick={run} disabled={busy} style={{ ...btn("ghost", "sm"), minHeight: 36 }}>{busy ? "Checking…" : "Check now"}</button>}>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 10 }}>
         <div style={{ padding: "10px 12px", borderRadius: 10, background: C.gray50, fontSize: 13, lineHeight: 1.45 }}>
-          <b>Returns:</b> pause when more than <b>{r.return_pct}%</b> of the units shipped come back (customer returns + RTO), once at least <b>{r.min_orders}</b> units were shipped. Checked for each product and for each SKU on its own.
+          <b>Returns:</b> pause when customers send back more than <b>{r.return_pct}%</b> of the units delivered to them, once at least <b>{r.min_orders}</b> were delivered.
+          Counted per order: of the orders placed {r.settle_days + r.days - 1} to {r.settle_days} days ago, each counts once by how it ended — kept, or returned by the customer.
+          RTOs (never delivered) and orders still on the way don't count. Checked for each product and each SKU on its own.
         </div>
         <div style={{ padding: "10px 12px", borderRadius: 10, background: C.gray50, fontSize: 13, lineHeight: 1.45 }}>
           <b>Loss:</b> pause when it sold <b>{r.loss_min_units}+</b> delivered units and made a loss on them — it is selling below what it costs.
@@ -147,6 +149,97 @@ function GuardPanel({ guard, onChange }) {
           </div>
         </div>
       )}
+    </Panel>
+  );
+}
+
+/** Everything paused — by the guard or by hand — why, where it stands now, and Resume. */
+function PausedPanel({ onChange, version }) {
+  const [d, setD] = useState(null);
+  const [err, setErr] = useState(null);
+  const [busy, setBusy] = useState(null);
+  const mobile = useIsMobile();
+  const load = useCallback(async () => {
+    try {
+      const r = await fetch(`${API}/meesho-orders/return-analysis/paused/`);
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || "Couldn't read what's paused.");
+      setD(j); setErr(null);
+    } catch (e) { setErr(e.message); }
+  }, []);
+  useEffect(() => { load(); }, [load, version]);   // again after a pause / resume elsewhere on the page
+  if (err) return <div role="alert" style={{ color: C.red, fontWeight: 700, fontSize: 13 }}>✕ {err}</div>;
+  if (!d || !d.items.length) return null;
+
+  const resume = async (body, what, key) => {
+    if (!window.confirm(`Make ${what} active again? The guard then leaves ${body.all ? "them" : "it"} alone for 14 days.`)) return;
+    setBusy(key);
+    try { await post("resume/", body); await load(); onChange(); }
+    catch (e) { window.alert(e.message); } finally { setBusy(null); }
+  };
+  const autoCount = d.items.filter((i) => i.auto).length;
+  const fine = d.items.filter((i) => i.auto && i.now && !i.now.over_limit).length;
+  const when = (iso) => new Date(iso).toLocaleString("en-IN", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" });
+  const span = d.window.map((x) => new Date(x).toLocaleDateString("en-IN", { day: "numeric", month: "short" })).join(" – ");
+
+  return (
+    <Panel title={`Paused products · ${d.items.length}`}
+      subtitle={`Hidden from the Listing Hub (not paused on Meesho itself). "Now" is the exact customer-return rate for orders of ${span}.`}
+      action={d.can_resume && (
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
+          {autoCount > 0 && <button disabled={!!busy} onClick={() => resume({ all: "auto" }, `all ${autoCount} paused by the guard`, "auto")} style={{ ...btn("ghost", "sm"), minHeight: 36 }}>
+            {busy === "auto" ? "Resuming…" : `▶ Resume guard's ${autoCount}`}</button>}
+          <button disabled={!!busy} onClick={() => resume({ all: true }, `all ${d.items.length} paused products`, "all")} style={{ ...btn("ghost", "sm"), minHeight: 36 }}>
+            {busy === "all" ? "Resuming…" : "▶ Resume all"}</button>
+        </div>
+      )}>
+      {fine > 0 && (
+        <div style={{ padding: "8px 12px", borderRadius: 10, background: TONE.warn.soft, color: "#92400E", fontSize: 13, fontWeight: 700, marginBottom: 10 }}>
+          ⚠ {fine} paused by the guard {fine === 1 ? "is" : "are"} under the {d.rules.return_pct}% limit on the exact count — {fine === 1 ? "it was" : "they were"} likely paused under the older count (RTOs and parcels still on the way taken as returns).
+        </div>
+      )}
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {d.items.map((i) => {
+          const key = `${i.level}|${i.business}|${i.parent}|${i.sku}`;
+          const n = i.now;
+          const what = i.level === "sku" ? `SKU ${i.sku}` : `${i.parent}${i.skus > 1 ? ` and its ${i.skus} SKUs` : ""}`;
+          return (
+            <div key={key} style={{ display: "grid", gridTemplateColumns: mobile ? "1fr" : "minmax(0, 1fr) minmax(200px, 260px) auto", gap: mobile ? 8 : 14, alignItems: "center",
+              padding: "10px 12px", border: `1px solid ${C.gray200}`, borderRadius: 12, background: C.white }}>
+              <div style={{ display: "flex", gap: 10, minWidth: 0 }}>
+                {i.image ? <img src={i.image} alt="" loading="lazy" style={{ width: 44, height: 44, borderRadius: 8, objectFit: "cover", flexShrink: 0 }} />
+                  : <span aria-hidden style={{ width: 44, height: 44, borderRadius: 8, background: C.gray100, flexShrink: 0 }} />}
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontWeight: 900, fontSize: 14, color: C.gray900, wordBreak: "break-word" }}>
+                    {i.level === "sku" ? i.sku : i.parent}
+                    <span style={{ marginLeft: 8, fontSize: 11.5, fontWeight: 800, color: i.auto ? "#B91C1C" : C.gray600, background: i.auto ? TONE.bad.soft : C.gray100, padding: "2px 8px", borderRadius: 999 }}>
+                      {i.auto ? "by the guard" : `by ${i.paused_by || "hand"}`}</span>
+                  </div>
+                  <div style={{ fontSize: 12, color: C.gray500 }}>
+                    {i.level === "sku" ? `SKU of ${i.parent || "—"}` : `Product · ${i.skus} SKU${i.skus === 1 ? "" : "s"}`} · {i.business_name} · {when(i.paused_at)}
+                  </div>
+                  {i.reason && <div style={{ fontSize: 12, color: C.gray600, marginTop: 2, lineHeight: 1.4 }}>{i.reason}</div>}
+                </div>
+              </div>
+              <div style={{ fontSize: 12.5, lineHeight: 1.45 }}>
+                {n && n.delivered_to_customers > 0 ? (
+                  <>
+                    <div style={{ fontWeight: 900, color: n.over_limit ? "#B91C1C" : "#15803D" }}>
+                      Now {n.rate}% {n.over_limit ? "· over the limit" : "· under the limit"}</div>
+                    <div style={{ color: C.gray500, fontVariantNumeric: "tabular-nums" }}>
+                      {num(n.customer_returns)} returned of {num(n.delivered_to_customers)} delivered · {num(n.rto)} RTO, {num(n.open)} on the way not counted</div>
+                  </>
+                ) : <div style={{ color: C.gray400 }}>No delivered orders in the window to judge by.</div>}
+              </div>
+              {d.can_resume && (
+                <button disabled={!!busy} onClick={() => resume({ items: [{ business: i.business, ...(i.level === "sku" ? { sku: i.sku } : { parent: i.parent }) }] }, what, key)}
+                  style={{ ...btn(n && !n.over_limit && i.auto ? "primary" : "ghost", "sm"), minHeight: 38, justifySelf: mobile ? "stretch" : "end", whiteSpace: "nowrap" }}>
+                  {busy === key ? "Resuming…" : "▶ Make active"}</button>
+              )}
+            </div>
+          );
+        })}
+      </div>
     </Panel>
   );
 }
@@ -435,6 +528,7 @@ export function MeeshoReturnAnalysis() {
 
       {/* ── The Guard ─────────────────────────────────────────────────── */}
       {guardOn && <GuardPanel guard={g} onChange={load} />}
+      {guardOn && <PausedPanel onChange={load} version={`${g.paused_count}|${g.alerts.length}|${g.at_risk}`} />}
 
       {/* ── Headline numbers: shipped → delivered → returned ───────────── */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 12 }}>

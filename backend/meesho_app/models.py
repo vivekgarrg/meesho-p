@@ -3208,8 +3208,8 @@ class ReturnGuardAlert(models.Model):
     kind = models.CharField(max_length=10, choices=KIND_CHOICES)
     message = models.CharField(max_length=500)
     days = models.PositiveIntegerField(default=30)
-    orders = models.PositiveIntegerField(default=0)            # units shipped in the period
-    returns = models.PositiveIntegerField(default=0)           # units returned in the period
+    orders = models.PositiveIntegerField(default=0)            # units delivered to customers (kept + customer-returned)
+    returns = models.PositiveIntegerField(default=0)           # of those, units customers returned (RTO not counted)
     rate = models.FloatField(null=True, blank=True)            # returns ÷ orders, in %
     units_sold = models.PositiveIntegerField(default=0)        # delivered units (LOSS)
     loss = models.DecimalField(max_digits=12, decimal_places=2, default=0)

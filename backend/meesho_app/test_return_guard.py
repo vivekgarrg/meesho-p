@@ -1,4 +1,4 @@
-"""Return Guard: pause a product with returns over 40% of 50+ units, or one selling at a loss in 20+ units."""
+"""Return Guard: pause a product whose customers return over 40% of 30+ units delivered to them, or one selling at a loss in 20+ units."""
 
 from datetime import timedelta
 from decimal import Decimal as D
@@ -12,7 +12,7 @@ from rest_framework.test import APIClient
 from accounts.models import Business, Membership, User
 
 from . import return_guard
-from .models import FinalPrice, ListingHubPause, Order, ParentItemPrice, ReturnDelivery, ReturnGuardAlert, SkuPause
+from .models import FinalPrice, ListingHubPause, Order, OrderPayment, ParentItemPrice, ReturnDelivery, ReturnGuardAlert, SkuPause
 
 
 class GuardTests(TestCase):
@@ -43,9 +43,22 @@ class GuardTests(TestCase):
                 sub_type="forward_RTO" if i < rto else "FIRST_RET", return_reason="Size too small",
                 synced_at=timezone.now())
 
-    def test_pauses_above_forty_percent_with_fifty_units(self):
-        self.orders(50)
-        self.returns(21, rto=6)                                  # 42%
+    def sold(self, kept, returned=0, rto=0, on_the_way=0, sku="lota-1", days_ago=15):
+        """Orders placed `days_ago` and how they ended: delivered and kept, returned by the customer
+        (the orders sheet still says DELIVERED; the returns file says customer return), RTO, or still on the way."""
+        for status, n in (("kept", kept), ("returned", returned), ("rto", rto), ("open", on_the_way)):
+            for _ in range(n):
+                self.n += 1
+                so = f"S{self.n}_1"
+                Order.objects.create(business=self.biz, sub_order_no=so, sku=sku, quantity=1, order_date=self.today - timedelta(days=days_ago),
+                                     reason_for_credit_entry={"kept": "DELIVERED", "returned": "DELIVERED", "rto": "RTO_COMPLETE", "open": "SHIPPED"}[status])
+                if status == "returned":
+                    ReturnDelivery.objects.create(business=self.biz, suborder_no=so, awb_number=f"A{self.n}", sku=sku, qty=1,
+                                                  return_created_date=self.today - timedelta(days=days_ago - 6), type_of_return="Customer Return",
+                                                  sub_type="FIRST_RET", return_reason="Size too small", synced_at=timezone.now())
+
+    def test_pauses_when_customers_return_over_forty_percent_of_what_was_delivered(self):
+        self.sold(kept=29, returned=21, rto=10, on_the_way=5)    # 21 of 50 delivered = 42%; RTO and in transit don't count
         with mock.patch("meesho_app.notify.channels", return_value=[]):
             done = return_guard.run()
         self.assertEqual([d["parent"] for d in done if "sku" not in d], ["LOTA"])
@@ -54,17 +67,37 @@ class GuardTests(TestCase):
         alert = ReturnGuardAlert.objects.get(sku="")
         self.assertEqual((alert.kind, alert.orders, alert.returns), ("returns", 50, 21))
         self.assertIn("42.0%", alert.message)
+        self.assertIn("21 of 50 units delivered", alert.message)
+        self.assertIn("RTO not counted", alert.message)
 
-    def test_exactly_forty_percent_or_under_fifty_orders_is_left_alone(self):
-        self.orders(50)
-        self.returns(20)                                         # exactly 40% — not above
+    def test_exactly_forty_percent_or_under_thirty_delivered_is_left_alone(self):
+        self.sold(kept=30, returned=20)                          # exactly 40% — not above
         self.assertEqual(return_guard.run(), [])
         ReturnDelivery.objects.all().delete()
         Order.objects.all().delete()
-        self.orders(49)
-        self.returns(30)                                         # 61%, but only 49 units
+        self.sold(kept=15, returned=14)                          # 48%, but only 29 delivered
         self.assertEqual(return_guard.run(), [])
         self.assertFalse(ListingHubPause.objects.exists())
+
+    def test_rto_is_not_a_customer_return(self):
+        self.sold(kept=30, returned=10, rto=40)                  # 10 of 40 delivered = 25%, however many RTOs
+        self.assertEqual(return_guard.run(), [])
+        st = return_guard.return_stats([self.biz.pk], self.today)[(self.biz.pk, "LOTA")]
+        self.assertEqual((st["orders"], st["returns"], st["rto"]), (40, 10, 40))
+
+    def test_orders_too_recent_to_have_been_returned_are_not_counted(self):
+        self.sold(kept=30, returned=30, days_ago=return_guard.SETTLE_DAYS - 1)
+        self.assertEqual(return_guard.return_stats([self.biz.pk], self.today), {})
+        self.sold(kept=30, returned=30, days_ago=return_guard.SETTLE_DAYS + return_guard.GUARD_DAYS)   # too old
+        self.assertEqual(return_guard.return_stats([self.biz.pk], self.today), {})
+
+    def test_the_payments_report_says_returned_too(self):
+        self.sold(kept=40)
+        for so in list(Order.objects.values_list("sub_order_no", flat=True))[:20]:
+            OrderPayment.objects.create(business=self.biz, sub_order_no=so, live_order_status="Return", payment_date=self.today,
+                                        transaction_id=f"T{so}", final_settlement_amount=-50)
+        st = return_guard.return_stats([self.biz.pk], self.today)[(self.biz.pk, "LOTA")]
+        self.assertEqual((st["orders"], st["returns"], st["delivered"]), (40, 20, 20))
 
     def test_pauses_a_product_selling_at_a_loss(self):
         loss = {"LOTA": {"units": 25, "loss": D("500")}}
@@ -85,8 +118,7 @@ class GuardTests(TestCase):
             self.assertEqual(return_guard.loss_stats(self.biz, self.today), {})
 
     def test_dry_run_changes_nothing_and_paused_ones_are_not_repeated(self):
-        self.orders(60)
-        self.returns(30)
+        self.sold(kept=30, returned=30)
         self.assertEqual(len(return_guard.run(dry_run=True)), 1)
         self.assertFalse(ListingHubPause.objects.exists())
         self.assertEqual(len(return_guard.run()), 1)
@@ -94,8 +126,7 @@ class GuardTests(TestCase):
         self.assertEqual(ReturnGuardAlert.objects.filter(sku="").count(), 1)
 
     def test_resumed_product_is_left_alone_for_a_while(self):
-        self.orders(60)
-        self.returns(30)
+        self.sold(kept=30, returned=30)
         return_guard.run()
         return_guard.resume(self.lota)
         self.assertEqual(return_guard.run(), [])
@@ -103,16 +134,14 @@ class GuardTests(TestCase):
         self.assertEqual(len(return_guard.run()), 1)
 
     def test_alert_goes_out_on_the_channels_set_up(self):
-        self.orders(60)
-        self.returns(30)
+        self.sold(kept=30, returned=30)
         with mock.patch("meesho_app.notify.channels", return_value=["telegram"]), \
                 mock.patch("meesho_app.notify.send") as send:
             return_guard.run()
         self.assertIn("LOTA paused", send.call_args[0][1])
 
     def test_command_prints_what_it_paused(self):
-        self.orders(60)
-        self.returns(30)
+        self.sold(kept=30, returned=30)
         out = mock.MagicMock()
         call_command("return_guard", "--dry-run", stdout=out)
         self.assertIn("LOTA", "".join(c.args[0] for c in out.write.call_args_list))
@@ -154,12 +183,11 @@ class GuardTests(TestCase):
         self.assertEqual(sum(t["orders"] for t in d["trend"]), 50)
 
     def test_analysis_shows_what_the_guard_sees(self):
-        self.orders(60)
-        self.returns(30)
+        self.sold(kept=30, returned=30)
         d = self.client.get(self.url()).data
         g = d["guard"]
         self.assertTrue(g["can_pause"])
-        self.assertEqual((g["rules"]["return_pct"], g["rules"]["min_orders"], g["at_risk"]), (40.0, 50, 2))   # the parent and its one SKU
+        self.assertEqual((g["rules"]["return_pct"], g["rules"]["min_orders"], g["at_risk"]), (40.0, 30, 2))   # the parent and its one SKU
         self.assertTrue(d["parents"][0]["guard"]["returns_breach"])
         self.client.post(self.url("run/"), {}, format="json")
         d = self.client.get(self.url()).data
@@ -174,9 +202,8 @@ class GuardTests(TestCase):
 
     def test_one_bad_sku_is_paused_alone_and_the_parent_stays(self):
         FinalPrice.objects.create(business=self.biz, sku_id="lota-2", parent=self.lota)
-        self.orders(100, sku="lota-2")                           # lota-2 is fine
-        self.orders(50, sku="lota-1")
-        self.returns(25, sku="lota-1")                           # lota-1: 50% — parent overall 25/150
+        self.sold(kept=100, sku="lota-2")                        # lota-2 is fine
+        self.sold(kept=25, returned=25, sku="lota-1")            # lota-1: 50% — parent overall 25/150
         done = return_guard.run()
         self.assertEqual([(d.get("sku"), d["parent"]) for d in done], [("lota-1", "LOTA")])
         self.assertFalse(ListingHubPause.objects.exists())
@@ -205,3 +232,40 @@ class GuardTests(TestCase):
         FinalPrice.objects.create(business=self.biz, sku_id="lota-2", parent=self.lota)
         self.client.post(self.url("pause/"), {"sku": "lota-2", "paused": True}, format="json")
         self.assertEqual(_parent_skus(self.biz, self.lota), ["lota-1"])
+
+    # ── What is paused, and making it active again ───────────────────────
+
+    def test_the_paused_list_and_resume(self):
+        FinalPrice.objects.create(business=self.biz, sku_id="lota-2", parent=self.lota)
+        bowl = ParentItemPrice.objects.create(business=self.biz, item_id="BOWL", item_price=D("100"), final_price=D("110"))
+        FinalPrice.objects.create(business=self.biz, sku_id="bowl-1", parent=bowl)
+        self.sold(kept=30, returned=5)                           # LOTA is fine now (14%) — paused under an older count
+        return_guard.pause(self.biz, self.lota, "returns", "LOTA paused: 92% came back", auto=True)
+        self.client.post(self.url("pause/"), {"sku": "bowl-1", "paused": True, "note": "dented"}, format="json")
+        d = self.client.get(self.url("paused/")).data
+        rows = {(i["level"], i["parent"], i["sku"]): i for i in d["items"]}
+        self.assertEqual(set(rows), {("parent", "LOTA", ""), ("sku", "BOWL", "bowl-1")})   # LOTA's SKUs go with it, not listed twice
+        lota = rows[("parent", "LOTA", "")]
+        self.assertEqual((lota["auto"], lota["skus"], lota["reason"]), (True, 2, "LOTA paused: 92% came back"))
+        self.assertEqual((lota["now"]["delivered_to_customers"], lota["now"]["customer_returns"], lota["now"]["rate"], lota["now"]["over_limit"]),
+                         (35, 5, 14.3, False))
+        self.assertTrue(d["can_resume"])
+        # Only what the guard paused.
+        r = self.client.post(self.url("resume/"), {"all": "auto"}, format="json")
+        self.assertEqual(r.data["resumed"], ["LOTA"])
+        self.assertFalse(ListingHubPause.objects.exists())
+        self.assertEqual(list(SkuPause.objects.values_list("sku__sku_id", flat=True)), ["bowl-1"])
+        # One by one.
+        self.client.post(self.url("resume/"), {"items": [{"business": self.biz.pk, "sku": "bowl-1"}]}, format="json")
+        self.assertFalse(SkuPause.objects.exists())
+        self.assertEqual(self.client.get(self.url("paused/")).data["items"], [])
+
+    def test_only_admins_resume(self):
+        return_guard.pause(self.biz, self.lota, "returns", "x", auto=True)
+        worker = User.objects.create_user(username="w", password="pw")
+        Membership.objects.create(user=worker, business=self.biz)
+        c = APIClient()
+        c.force_authenticate(worker)
+        self.assertEqual(c.post(self.url("resume/"), {"all": True}, format="json").status_code, 403)
+        self.assertFalse(c.get(self.url("paused/")).data["can_resume"])
+        self.assertTrue(ListingHubPause.objects.exists())

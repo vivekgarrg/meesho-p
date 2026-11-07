@@ -5,8 +5,12 @@ Run every morning by the sync worker (manage.py return_guard), and by hand from
 the Return Analysis page, it looks at the last GUARD_DAYS days of every
 business and pauses a parent product (the same pause the Listing Hub has) when
 
-  * RETURNS — more than RETURN_PCT % of the units shipped came back (customer
-    returns and RTOs together), with at least MIN_ORDERS units shipped, or
+  * RETURNS — customers sent back more than RETURN_PCT % of the units that
+    were delivered to them, with at least MIN_ORDERS units delivered. Exact, per
+    order: of the orders placed in the window, each counts once by how it
+    ended — delivered and kept, or returned by the customer. RTOs never reached
+    a customer and orders still on the way have no outcome yet: neither counts.
+    The window ends SETTLE_DAYS ago, so its returns have had time to come in, or
   * LOSS — it sold LOSS_MIN_UNITS or more delivered units and made a loss on
     them, i.e. it is being sold below what it costs.
 
@@ -39,8 +43,9 @@ from .models import FinalPrice, ListingHubPause, Order, ParentItemPrice, ReturnD
 log = logging.getLogger(__name__)
 
 GUARD_DAYS = 30
-RETURN_PCT = 40.0            # paused when returns are ABOVE this share of units shipped…
-MIN_ORDERS = 50              # …and at least this many units were shipped
+SETTLE_DAYS = 10             # orders this recent may still be returned — the window ends this many days ago
+RETURN_PCT = 40.0            # paused when customer returns are ABOVE this share of units delivered to customers…
+MIN_ORDERS = 30              # …and at least this many units were delivered to customers
 LOSS_MIN_UNITS = 20          # sold at a loss in at least this many delivered units
 GRACE_DAYS = 14              # after someone resumes a product
 
@@ -53,7 +58,7 @@ def _views():
 
 
 def rules():
-    return {"days": GUARD_DAYS, "return_pct": RETURN_PCT, "min_orders": MIN_ORDERS,
+    return {"days": GUARD_DAYS, "settle_days": SETTLE_DAYS, "return_pct": RETURN_PCT, "min_orders": MIN_ORDERS,
             "loss_min_units": LOSS_MIN_UNITS, "grace_days": GRACE_DAYS}
 
 
@@ -77,42 +82,72 @@ def sku_resolver(business_ids):
 
 # ── What the rules look at ───────────────────────────────────────────────────
 
-def return_stats(business_ids, today, days=GUARD_DAYS, level="parent"):
-    """{(business, parent item id): {"orders", "returns", "customer", "rto"}} in UNITS, over
-    the last `days` days. Only SKUs that have a parent. level="sku" keys by (business, SKU as
-    priced) instead."""
+def window(today, days=GUARD_DAYS):
+    """The orders the returns rule looks at: placed from `days`+SETTLE_DAYS ago up to SETTLE_DAYS ago."""
+    stop = today - timedelta(days=SETTLE_DAYS)
+    return stop - timedelta(days=days - 1), stop
+
+
+def _outcomes(business_ids, subs):
+    """{(business, sub-order): "customer" | "rto" | "delivered"} — how each order ended, from the
+    returns file (customer return vs courier RTO) and the payments report's status."""
     from .meesho_return_analysis import flag_of
-    start = today - timedelta(days=days - 1)
+    from .models import OrderPayment
+    out = {}
+    rank = {"delivered": 1, "exchange": 1, "rto": 2, "return": 3}
+    by_biz = {}
+    for biz, so in subs:
+        by_biz.setdefault(biz, []).append(so)
+    for biz, sos in by_biz.items():
+        for i in range(0, len(sos), 1000):
+            part = sos[i:i + 1000]
+            best = {}
+            for so, st in OrderPayment.objects.filter(business_id=biz, sub_order_no__in=part).values_list("sub_order_no", "live_order_status"):
+                r = rank.get((st or "").strip().lower(), 0)
+                if r > best.get(so, (0, ""))[0]:
+                    best[so] = (r, (st or "").strip().lower())
+            for so, (_r, st) in best.items():
+                out[(biz, so)] = "customer" if st == "return" else "rto" if st == "rto" else "delivered"
+            # The returns file knows a customer return from an RTO even before payments do.
+            for r in ReturnDelivery.objects.filter(business_id=biz, suborder_no__in=part).values("suborder_no", "type_of_return", "sub_type"):
+                kind, _label = flag_of(r)
+                if kind == "customer" or out.get((biz, r["suborder_no"])) != "customer":
+                    out[(biz, r["suborder_no"])] = kind
+    return out
+
+
+def return_stats(business_ids, today, days=GUARD_DAYS, level="parent"):
+    """{(business, parent item id): counts} in UNITS for the orders placed in window(today, days):
+
+      delivered  delivered and kept          customer  returned by the customer
+      rto        never reached the customer  open      no outcome yet
+      orders     delivered to customers = delivered + customer   (what the rate is out of)
+      returns    = customer                                       (what came back)
+
+    Only SKUs that have a parent. level="sku" keys by (business, SKU as priced) instead."""
+    start, stop = window(today, days)
     resolve = sku_resolver(business_ids)
+    seen = {}
+    for biz, so, sku, qty, st in (Order.objects.filter(business_id__in=business_ids, order_date__gte=start, order_date__lte=stop)
+                                  .exclude(reason_for_credit_entry__iexact="CANCELLED")
+                                  .values_list("business_id", "sub_order_no", "sku", "quantity", "reason_for_credit_entry")):
+        seen.setdefault((biz, so), (sku, qty or 1, (st or "").strip().upper()))
+    ends = _outcomes(business_ids, list(seen))
     out = {}
     by_sku = level == "sku"
-
-    def slot(biz, key):
-        return out.setdefault((biz, key), {"orders": 0, "returns": 0, "customer": 0, "rto": 0})
-
-    seen = {}
-    for biz, so, sku, qty in (Order.objects.filter(business_id__in=business_ids, order_date__gte=start, order_date__lte=today)
-                              .exclude(reason_for_credit_entry__iexact="CANCELLED")
-                              .values_list("business_id", "sub_order_no", "sku", "quantity")):
-        seen.setdefault((biz, so), (sku, qty or 1))
-    for (biz, _so), (sku, qty) in seen.items():
+    for (biz, so), (sku, qty, st) in seen.items():
         shown, parent = resolve(biz, sku)
-        if parent:
-            slot(biz, shown if by_sku else parent)["orders"] += qty
-
-    rows = (ReturnDelivery.objects.filter(business_id__in=business_ids)
-            .annotate(eff=Coalesce("return_created_date", "delivered_date", "dispatch_date"))
-            .filter(eff__gte=start, eff__lte=today)
-            .values("business_id", "sku", "variation", "qty", "type_of_return", "sub_type"))
-    for r in rows:
-        shown, parent = resolve(r["business_id"], r["sku"], r["variation"])
         if not parent:
             continue
-        kind, _label = flag_of(r)
-        qty = r["qty"] or 1
-        s = slot(r["business_id"], shown if by_sku else parent)
-        s["returns"] += qty
-        s[kind] += qty
+        s = out.setdefault((biz, shown if by_sku else parent),
+                           {"orders": 0, "returns": 0, "delivered": 0, "customer": 0, "rto": 0, "open": 0})
+        end = ends.get((biz, so))
+        if end is None:                                   # not in payments or returns yet: the orders sheet's own status
+            end = "rto" if st.startswith("RTO") else "delivered" if st in ("DELIVERED", "DOOR_STEP_EXCHANGED") else "open"
+        s[end] += qty
+    for s in out.values():
+        s["orders"] = s["delivered"] + s["customer"]
+        s["returns"] = s["customer"]
     return out
 
 
@@ -132,6 +167,11 @@ def loss_stats(business, today, days=GUARD_DAYS, level="parent"):
         s["units"] += int(b.get("delivered_quantity") or 0)
         s["loss"] += Decimal(str(b.get("delivered_profit") or 0))
     return {p: {"units": s["units"], "loss": -s["loss"]} for p, s in out.items() if s["loss"] < 0}
+
+
+def _span(today):
+    a, b = window(today)
+    return f"{a:%d %b}–{b:%d %b}"
 
 
 def breaches_returns(orders, returns):
@@ -235,8 +275,8 @@ def run(business_ids=None, today=None, dry_run=False):
             rate = round(100.0 * s["returns"] / s["orders"], 1)
             biz = next(b for b in businesses if b.pk == biz_id)
             act(biz, parent_id, ReturnGuardAlert.KIND_RETURNS,
-                f"{parent_id} paused: {rate}% of its units came back ({s['returns']} of {s['orders']} shipped in {GUARD_DAYS} days; "
-                f"{s['customer']} customer returns, {s['rto']} RTO) — limit is {RETURN_PCT:g}%.",
+                f"{parent_id} paused: customers returned {rate}% of what they received — {s['returns']} of {s['orders']} units "
+                f"delivered (orders of {_span(today)}; RTO not counted) — limit is {RETURN_PCT:g}%.",
                 {**s, "rate": rate})
     for biz in businesses:
         try:
@@ -271,8 +311,8 @@ def run(business_ids=None, today=None, dry_run=False):
             rate = round(100.0 * st["returns"] / st["orders"], 1)
             biz = next(b for b in businesses if b.pk == biz_id)
             act_sku(biz, sku_id, ReturnGuardAlert.KIND_RETURNS,
-                    f"SKU {sku_id} paused: {rate}% of its units came back ({st['returns']} of {st['orders']} shipped in {GUARD_DAYS} days; "
-                    f"{st['customer']} customer returns, {st['rto']} RTO) — limit is {RETURN_PCT:g}%.", {**st, "rate": rate})
+                    f"SKU {sku_id} paused: customers returned {rate}% of what they received — {st['returns']} of {st['orders']} units "
+                    f"delivered (orders of {_span(today)}; RTO not counted) — limit is {RETURN_PCT:g}%.", {**st, "rate": rate})
     for biz in businesses:
         try:
             sku_losses = loss_stats(biz, today, level="sku")
@@ -372,3 +412,109 @@ def guard_run(request, business_id):
     desk, _accounts = _desk_accounts(request, business, api_path=PATH)
     done = run([b.pk for b in desk], dry_run=bool(request.data.get("dry_run")))
     return Response({"paused": done, "dry_run": bool(request.data.get("dry_run"))})
+
+
+# ── What is paused, and making it active again ───────────────────────────────
+
+def _desk(request, business_id):
+    from .meesho_sync import _desk_accounts
+    business = _views().get_authorized_business(request, business_id)
+    desk, _accounts = _desk_accounts(request, business, api_path=PATH)
+    return desk
+
+
+@api_view(["GET"])
+def guard_paused(request, business_id):
+    """
+    Every product and SKU paused on this desk's businesses — by the guard or by hand — with
+    why, when, and where it stands now on the exact returns rule (so a pause made under an
+    older, looser count can be seen for what it is).
+    """
+    desk = _desk(request, business_id)
+    ids = [b.pk for b in desk]
+    names = {b.pk: b.name for b in desk}
+    today = timezone.localdate()
+    stats = return_stats(ids, today)
+    sku_stats = return_stats(ids, today, level="sku")
+    latest = {}
+    for a in ReturnGuardAlert.objects.filter(business_id__in=ids).order_by("created_at"):
+        latest[(a.business_id, a.parent_item_id, a.sku)] = a
+
+    def standing(st):
+        st = st or {"orders": 0, "returns": 0, "delivered": 0, "customer": 0, "rto": 0, "open": 0}
+        return {"delivered_to_customers": st["orders"], "kept": st.get("delivered", 0), "customer_returns": st["returns"],
+                "rto": st.get("rto", 0), "open": st.get("open", 0),
+                "rate": round(100.0 * st["returns"] / st["orders"], 1) if st["orders"] else None,
+                "over_limit": breaches_returns(st["orders"], st["returns"])}
+
+    items = []
+    parent_paused = set()
+    for p in ListingHubPause.objects.filter(business_id__in=ids).select_related("parent", "paused_by"):
+        parent_paused.add(p.parent_id)
+        a = latest.get((p.business_id, p.parent.item_id, ""))
+        items.append({"level": "parent", "business": p.business_id, "business_name": names.get(p.business_id, ""),
+                      "parent": p.parent.item_id, "sku": "", "image": p.parent.image_url or "",
+                      "skus": FinalPrice.objects.filter(parent=p.parent).count(),
+                      "auto": p.auto, "paused_at": p.paused_at, "paused_by": p.paused_by.get_username() if p.paused_by else "",
+                      "reason": (a.message if a else "") or p.note, "kind": a.kind if a else "",
+                      "now": standing(stats.get((p.business_id, p.parent.item_id)))})
+    for sp in SkuPause.objects.filter(business_id__in=ids).select_related("sku__parent", "paused_by"):
+        if sp.sku.parent_id in parent_paused:
+            continue                                         # paused with its parent — listed there
+        parent = sp.sku.parent.item_id if sp.sku.parent else ""
+        a = latest.get((sp.business_id, parent, sp.sku.sku_id))
+        items.append({"level": "sku", "business": sp.business_id, "business_name": names.get(sp.business_id, ""),
+                      "parent": parent, "sku": sp.sku.sku_id, "image": (sp.sku.parent.image_url if sp.sku.parent else "") or "",
+                      "skus": 1, "auto": sp.auto, "paused_at": sp.paused_at,
+                      "paused_by": sp.paused_by.get_username() if sp.paused_by else "",
+                      "reason": (a.message if a else "") or sp.note, "kind": a.kind if a else "",
+                      "now": standing(sku_stats.get((sp.business_id, sp.sku.sku_id)))})
+    items.sort(key=lambda i: i["paused_at"], reverse=True)
+    return Response({"items": items, "rules": rules(), "can_resume": _views()._is_admin(request.user),
+                     "window": [d.isoformat() for d in window(today)]})
+
+
+@api_view(["POST"])
+def guard_resume(request, business_id):
+    """
+    Admins: make paused products / SKUs active again — {items: [{business, parent} | {business, sku}]},
+    or {all: true} for everything paused on the desk (or {all: "auto"}: only what the guard paused).
+    The guard then leaves each alone for GRACE_DAYS.
+    """
+    if not _views()._is_admin(request.user):
+        return Response({"error": "Only an admin can make a product active again."}, status=status.HTTP_403_FORBIDDEN)
+    desk = _desk(request, business_id)
+    ids = {b.pk for b in desk}
+    every = request.data.get("all")
+    done = []
+    if every:
+        qs = ListingHubPause.objects.filter(business_id__in=ids).select_related("parent")
+        sq = SkuPause.objects.filter(business_id__in=ids).select_related("sku")
+        if every == "auto":
+            qs, sq = qs.filter(auto=True), sq.filter(auto=True)
+        for p in list(qs):
+            resume(p.parent)
+            done.append(p.parent.item_id)
+        for sp in list(sq):
+            if SkuPause.objects.filter(pk=sp.pk).exists():     # not already resumed with its parent
+                resume_sku(sp.sku)
+                done.append(sp.sku.sku_id)
+        return Response({"resumed": done})
+    for it in request.data.get("items") or []:
+        try:
+            biz = int(it.get("business"))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if biz not in ids:
+            continue
+        if it.get("sku"):
+            fp = FinalPrice.objects.filter(business_id=biz, sku_id__iexact=str(it["sku"])).first()
+            if fp:
+                resume_sku(fp)
+                done.append(fp.sku_id)
+        elif it.get("parent"):
+            parent = ParentItemPrice.objects.filter(business_id=biz, item_id__iexact=str(it["parent"])).first()
+            if parent:
+                resume(parent)
+                done.append(parent.item_id)
+    return Response({"resumed": done})
