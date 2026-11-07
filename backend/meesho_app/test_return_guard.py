@@ -269,3 +269,46 @@ class GuardTests(TestCase):
         self.assertEqual(c.post(self.url("resume/"), {"all": True}, format="json").status_code, 403)
         self.assertFalse(c.get(self.url("paused/")).data["can_resume"])
         self.assertTrue(ListingHubPause.objects.exists())
+
+    # ── Auto-pause is off unless switched on; the simple page ────────────
+
+    def test_the_morning_run_pauses_nothing_while_auto_pause_is_off(self):
+        import json as _json
+        from io import StringIO
+        from .models import MeeshoAutoSetting
+        self.sold(kept=30, returned=30)
+        out = StringIO()
+        call_command("return_guard", stdout=out)
+        self.assertEqual(_json.loads(out.getvalue())["skipped"], "auto-pause is off")
+        self.assertFalse(ListingHubPause.objects.exists())
+        r = self.client.post(self.url("auto/"), {"on": True}, format="json")
+        self.assertEqual(r.data["auto_pause"], True)
+        self.assertTrue(MeeshoAutoSetting.get().return_guard_auto)
+        with mock.patch("meesho_app.notify.channels", return_value=[]):
+            call_command("return_guard", stdout=StringIO())
+        self.assertTrue(ListingHubPause.objects.exists())
+
+    def test_only_admins_switch_auto_pause(self):
+        worker = User.objects.create_user(username="w", password="pw")
+        Membership.objects.create(user=worker, business=self.biz)
+        c = APIClient()
+        c.force_authenticate(worker)
+        self.assertEqual(c.post(self.url("auto/"), {"on": True}, format="json").status_code, 403)
+
+    def test_the_simple_page(self):
+        FinalPrice.objects.create(business=self.biz, sku_id="lota-2", parent=self.lota)
+        self.sold(kept=29, returned=21, rto=10, on_the_way=5, sku="lota-1")
+        self.sold(kept=10, sku="lota-2")
+        self.sold(kept=5, returned=1, sku="loose-sku")           # no parent
+        d = self.client.get(self.url("simple/"), {"days": 30}).data
+        t = d["totals"]
+        self.assertEqual((t["orders"], t["returns"], t["rto"], t["open"], t["shipped"]), (66, 22, 10, 5, 81))
+        lota = next(p for p in d["products"] if p["key"] == "LOTA")
+        self.assertEqual((lota["orders"], lota["returns"], lota["rate"], lota["status"]), (60, 21, 35.0, "high"))
+        self.assertEqual({s["key"]: s["status"] for s in lota["skus"]}, {"lota-1": "over", "lota-2": "ok"})
+        loose = next(p for p in d["products"] if p["key"] == "loose-sku")
+        self.assertEqual((loose["level"], loose["status"]), ("unlinked", "few"))
+        self.assertFalse(d["auto_pause"])
+        return_guard.pause(self.biz, self.lota, "manual", "x", auto=False)
+        lota = next(p for p in self.client.get(self.url("simple/")).data["products"] if p["key"] == "LOTA")
+        self.assertEqual((lota["status"], lota["paused"]), ("paused", True))

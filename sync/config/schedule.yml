@@ -13,4 +13,4 @@ return_guard:
   cron: "0 7 * * * Asia/Kolkata"
   class: "ReturnGuardJob"
   queue: "default"
-  description: "Daily 7 am: pause products with returns over 40% (50+ units) or selling at a loss (20+ units), and alert"
+  description: "Daily 7 am, only while auto-pause is on: pause products customers return over 40% of (30+ delivered) or selling at a loss (20+ units)"

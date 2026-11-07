@@ -3423,6 +3423,8 @@ class MeeshoAutoSetting(models.Model):
     stock_refill_time = models.CharField(max_length=5, default="21:00")
     stock_refill_qty = models.PositiveIntegerField(default=5000)
     last_stock_refill_at = models.DateTimeField(null=True, blank=True)
+    # Return Guard: pause products over the returns limit by itself every morning. Off unless an admin turns it on.
+    return_guard_auto = models.BooleanField(default=False)
     last_accept_at = models.DateTimeField(null=True, blank=True)
     last_labels_at = models.DateTimeField(null=True, blank=True)
     updated_by = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")

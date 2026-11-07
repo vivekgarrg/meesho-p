@@ -1,4 +1,4 @@
-# Daily: pause products whose returns are over the limit (40% of 50+ units) or
+# Daily: while auto-pause is on (Return Analysis switch, off by default), pause products whose customers return over 40% of 30+ units delivered, or
 # that sell at a loss (20+ units), and send an alert. The rules live in Django
 # (manage.py return_guard); this only runs it on a schedule.
 class ReturnGuardJob
