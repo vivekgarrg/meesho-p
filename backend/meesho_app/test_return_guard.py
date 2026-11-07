@@ -295,6 +295,26 @@ class GuardTests(TestCase):
         c.force_authenticate(worker)
         self.assertEqual(c.post(self.url("auto/"), {"on": True}, format="json").status_code, 403)
 
+    def test_the_simple_page_pauses_one_sku_and_the_product_stays_live(self):
+        lota2 = FinalPrice.objects.create(business=self.biz, sku_id="lota-2", parent=self.lota)
+        FinalPrice.objects.create(business=self.biz, sku_id="lota-3", parent=self.lota)      # no orders in the window
+        self.sold(kept=29, returned=21, sku="lota-1")
+        self.sold(kept=10, sku="lota-2")
+        r = self.client.post(self.url("pause/"), {"business": self.biz.id, "sku": "LOTA-2", "paused": True}, format="json")
+        self.assertEqual((r.status_code, r.data["sku"]), (200, "lota-2"))
+        self.assertTrue(SkuPause.objects.filter(sku=lota2).exists())
+        self.assertFalse(ListingHubPause.objects.exists())                          # the parent isn't paused
+        lota = next(p for p in self.client.get(self.url("simple/")).data["products"] if p["key"] == "LOTA")
+        self.assertEqual((lota["paused"], lota["paused_skus"], lota["status"]), (False, 1, "high"))
+        self.assertEqual({s["key"]: (s["paused"], s["status"]) for s in lota["skus"]},
+                         {"lota-1": (False, "over"), "lota-2": (True, "paused")})
+        # A paused SKU still shows when it has no orders in the period.
+        self.client.post(self.url("pause/"), {"business": self.biz.id, "sku": "lota-3", "paused": True}, format="json")
+        lota = next(p for p in self.client.get(self.url("simple/")).data["products"] if p["key"] == "LOTA")
+        self.assertEqual((lota["paused_skus"], sorted(s["key"] for s in lota["skus"] if s["paused"])), (2, ["lota-2", "lota-3"]))
+        # The Listing Hub keeps the product with just the SKUs still live.
+        self.assertEqual(list(FinalPrice.objects.filter(parent=self.lota, sku_pause__isnull=True).values_list("sku_id", flat=True)), ["lota-1"])
+
     def test_the_simple_page(self):
         FinalPrice.objects.create(business=self.biz, sku_id="lota-2", parent=self.lota)
         self.sold(kept=29, returned=21, rto=10, on_the_way=5, sku="lota-1")

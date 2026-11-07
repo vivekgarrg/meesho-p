@@ -9,7 +9,9 @@ import { ParentLinkButton } from "./ParentLink";
  *
  *   1. how many orders reached customers, how many customers sent back, how many were RTO
  *   2. every product (open one for its SKUs): returned of delivered, its return %, a status
- *      flag — and beside the flag, Pause / Resume (or Link to parent for a SKU without one)
+ *      flag — and beside the flag, Pause / Resume (or Link to parent for a SKU without one).
+ *      A product with several SKUs gets "Pause…": pause just the SKUs that are bad (the
+ *      product and its other SKUs stay on the Listing Hub), or the whole product.
  *   3. why customers send things back
  *   4. the Auto-pause switch — off unless an admin turns it on
  *
@@ -64,7 +66,7 @@ function Tile({ label, value, sub, color }) {
 }
 
 /** What can be done beside a row's flag: Pause / Resume, or Link to parent. */
-function Action({ e, d, onDone, parentPaused }) {
+function Action({ e, d, onDone, parentPaused, onChoose }) {
   const [busy, setBusy] = useState(false);
   if (e.level === "unlinked") {
     return d.can_link.includes(e.business)
@@ -73,6 +75,13 @@ function Action({ e, d, onDone, parentPaused }) {
   }
   if (!d.can_pause) return null;
   if (e.level === "sku" && parentPaused) return <span style={{ fontSize: 11.5, color: C.gray400 }}>Paused with product</span>;
+  // Several SKUs: choose which — one SKU, some, or the whole product.
+  if (e.level === "parent" && !e.paused && onChoose && (e.skus?.length > 1 || e.paused_skus > 0)) {
+    return (
+      <button onClick={(ev) => { ev.stopPropagation(); onChoose(e); }}
+        style={{ ...btn(e.status === "over" ? "danger" : "ghost", "sm"), minHeight: 34, whiteSpace: "nowrap" }}>⏸ Pause…</button>
+    );
+  }
   const what = e.level === "sku" ? `SKU ${e.key}` : `${e.key}${e.skus?.length > 1 ? ` and its ${e.skus.length} SKUs` : ""}`;
   const act = async (ev) => {
     ev.stopPropagation();
@@ -93,7 +102,7 @@ function Action({ e, d, onDone, parentPaused }) {
 }
 
 /** One product (or SKU) row: picture, name, returned of delivered, return %, flag, and the action beside the flag. */
-function Row({ e, d, onDone, mobile, open, onToggle, sub = false, parentPaused = false }) {
+function Row({ e, d, onDone, mobile, open, onToggle, sub = false, parentPaused = false, onChoose }) {
   const canOpen = !sub && e.skus?.length > 0;
   const rateColor = e.status === "over" ? "#B91C1C" : e.status === "high" ? "#B45309" : C.gray900;
   return (
@@ -110,6 +119,7 @@ function Row({ e, d, onDone, mobile, open, onToggle, sub = false, parentPaused =
           </div>
           <div style={{ fontSize: 12, color: C.gray500 }}>
             {sub ? "SKU" : e.level === "unlinked" ? "SKU without a parent" : `${e.skus.length} SKU${e.skus.length === 1 ? "" : "s"}`}
+            {!sub && e.paused_skus > 0 && <b style={{ color: "#475569" }}> · {e.paused_skus} of {e.skus.length} paused</b>}
             {d.businesses.length > 1 && !sub ? ` · ${e.business_name}` : ""}
           </div>
         </div>
@@ -131,17 +141,80 @@ function Row({ e, d, onDone, mobile, open, onToggle, sub = false, parentPaused =
           <Bar e={e} />
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
             <span style={{ fontSize: 12, color: C.gray600 }}><b>{n(e.returns)}</b> returned of <b>{n(e.orders)}</b> delivered{e.rto ? ` · ${n(e.rto)} RTO` : ""}</span>
-            <span style={{ display: "flex", gap: 8, alignItems: "center" }}><Flag status={e.status} /><Action e={e} d={d} onDone={onDone} parentPaused={parentPaused} /></span>
+            <span style={{ display: "flex", gap: 8, alignItems: "center" }}><Flag status={e.status} /><Action e={e} d={d} onDone={onDone} parentPaused={parentPaused} onChoose={onChoose} /></span>
           </div>
         </div>
       ) : (
         <>
           <div style={{ fontSize: 20, fontWeight: 900, color: rateColor, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{e.rate == null ? "—" : `${e.rate}%`}</div>
           <div style={{ display: "flex", gap: 8, alignItems: "center", justifyContent: "flex-end", minWidth: 210 }}>
-            <Flag status={e.status} /><Action e={e} d={d} onDone={onDone} parentPaused={parentPaused} />
+            <Flag status={e.status} /><Action e={e} d={d} onDone={onDone} parentPaused={parentPaused} onChoose={onChoose} />
           </div>
         </>
       )}
+    </div>
+  );
+}
+
+/**
+ * Pause a product's SKUs one by one — or the whole product. Each SKU's button
+ * acts at once; a paused SKU leaves the Listing Hub while the product and its
+ * other SKUs stay on it.
+ */
+function PauseChooser({ e, d, onDone, onClose }) {
+  const [busy, setBusy] = useState(null);
+  const [err, setErr] = useState(null);
+  useEffect(() => {
+    const onKey = (ev) => { if (ev.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  const why = (x) => (x.rate != null ? `${x.rate}% returned (${x.returns} of ${x.orders} delivered)` : "");
+  const send = async (id, body) => {
+    setBusy(id); setErr(null);
+    try { await post("pause/", { business: e.business, ...body }); await onDone(); }
+    catch (ex) { setErr(ex.message); } finally { setBusy(null); }
+  };
+  const whole = async () => {
+    if (!window.confirm(`Pause the whole product ${e.key} — all ${e.skus.length} SKUs? It disappears from the Listing Hub (not from Meesho).`)) return;
+    await send("whole", { parent: e.key, paused: true, note: why(e) });
+    onClose();
+  };
+  return (
+    <div role="dialog" aria-modal="true" aria-label={`Pause SKUs of ${e.key}`} onClick={onClose}
+      style={{ position: "fixed", inset: 0, zIndex: 4000, background: "rgba(15,23,42,.5)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div onClick={(ev) => ev.stopPropagation()} style={{ ...S.card, width: "100%", maxWidth: 560, maxHeight: "88vh", padding: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+        <div style={{ padding: "16px 18px 10px" }}>
+          <div style={{ fontSize: 16, fontWeight: 900, color: C.gray900, wordBreak: "break-word" }}>Pause {e.key}</div>
+          <div style={{ fontSize: 12.5, color: C.gray500, marginTop: 3, lineHeight: 1.5 }}>
+            Pause only the SKUs that come back too often — the product and its other SKUs stay on the Listing Hub. Nothing changes on Meesho.
+          </div>
+        </div>
+        <div style={{ overflowY: "auto", borderTop: `1px solid ${C.gray100}` }}>
+          {e.skus.map((x) => (
+            <div key={x.key} style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: 10, alignItems: "center", padding: "10px 18px",
+              borderBottom: `1px solid ${C.gray100}`, background: x.paused ? C.gray50 : C.white }}>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 13.5, color: C.gray900, wordBreak: "break-all" }}>{x.key}</div>
+                <div style={{ fontSize: 12, color: C.gray600, marginTop: 2, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                  <Flag status={x.status} />
+                  {x.orders ? <span><b>{x.rate}%</b> · {n(x.returns)} returned of {n(x.orders)} delivered</span> : <span style={{ color: C.gray400 }}>no orders in this period</span>}
+                </div>
+              </div>
+              <button disabled={!!busy} onClick={() => send(x.key, { sku: x.key, paused: !x.paused, note: why(x) })}
+                style={{ ...btn(x.paused ? "ghost" : x.status === "over" ? "danger" : "ghost", "sm"), minHeight: 34, minWidth: 116, whiteSpace: "nowrap" }}>
+                {busy === x.key ? "…" : x.paused ? "▶ Resume SKU" : "⏸ Pause SKU"}
+              </button>
+            </div>
+          ))}
+        </div>
+        {err && <div role="alert" style={{ padding: "8px 18px", color: C.red, fontWeight: 700, fontSize: 13 }}>✕ {err}</div>}
+        <div style={{ padding: "12px 18px", display: "flex", gap: 8, justifyContent: "space-between", flexWrap: "wrap", borderTop: `1px solid ${C.gray100}` }}>
+          <button onClick={whole} disabled={!!busy} style={{ ...btn("ghost", "sm"), color: C.red }}>
+            {busy === "whole" ? "…" : `⏸ Pause whole product (${e.skus.length} SKUs)`}</button>
+          <button onClick={onClose} style={btn("primary", "sm")}>Done</button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -187,6 +260,7 @@ export function MeeshoReturnAnalysis() {
   const [filter, setFilter] = useState("all");
   const [q, setQ] = useState("");
   const [open, setOpen] = useState({});
+  const [choosing, setChoosing] = useState(null);      // the product whose SKUs are being paused
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -202,12 +276,17 @@ export function MeeshoReturnAnalysis() {
 
   const counts = useMemo(() => {
     const c = { all: 0, over: 0, high: 0, paused: 0 };
-    for (const e of d?.products || []) { c.all += 1; if (c[e.status] !== undefined) c[e.status] += 1; }
+    for (const e of d?.products || []) {
+      c.all += 1;
+      if (e.status === "paused" || e.paused_skus > 0) c.paused += 1;
+      if (e.status !== "paused" && c[e.status] !== undefined) c[e.status] += 1;
+    }
     return c;
   }, [d]);
   const list = useMemo(() => {
     const needle = q.trim().toLowerCase();
-    return (d?.products || []).filter((e) => (filter === "all" || e.status === filter)
+    const shows = (e) => filter === "all" || e.status === filter || (filter === "paused" && e.paused_skus > 0);
+    return (d?.products || []).filter((e) => shows(e)
       && (!needle || e.key.toLowerCase().includes(needle) || e.skus.some((s) => s.key.toLowerCase().includes(needle))));
   }, [d, filter, q]);
 
@@ -246,6 +325,10 @@ export function MeeshoReturnAnalysis() {
       </div>
 
       <AutoPause d={d} onChange={load} />
+      {choosing && (() => {
+        const p = d.products.find((x) => x.level === "parent" && x.business === choosing.business && x.key === choosing.key);
+        return p ? <PauseChooser e={p} d={d} onDone={load} onClose={() => setChoosing(null)} /> : null;
+      })()}
 
       {/* Products */}
       <section style={{ ...S.card, padding: 0, overflow: "hidden", minWidth: 0 }}>
@@ -260,7 +343,7 @@ export function MeeshoReturnAnalysis() {
         <div style={{ padding: "8px 14px", fontSize: 12.5, color: C.gray500, background: C.gray50 }}>
           Return % = returned by customers ÷ delivered to customers (RTO not counted).
           <b style={{ color: STATUS.over.fg }}> Over limit</b> = above {r.return_pct}% with {r.min_orders}+ delivered ·
-          <b style={{ color: STATUS.high.fg }}> High</b> = {r.watch_pct}%+ · tap a product for its SKUs.
+          <b style={{ color: STATUS.high.fg }}> High</b> = {r.watch_pct}%+ · tap a product for its SKUs · “Pause…” lets you pause just one SKU.
         </div>
         {!mobile && (
           <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 2.2fr) minmax(0, 1.6fr) 70px auto", gap: 14, padding: "8px 14px", fontSize: 11.5, fontWeight: 800,
@@ -274,7 +357,8 @@ export function MeeshoReturnAnalysis() {
             const k = `${e.level}|${e.business}|${e.key}`;
             return (
               <React.Fragment key={k}>
-                <Row e={e} d={d} onDone={load} mobile={mobile} open={!!open[k]} onToggle={() => setOpen((o) => ({ ...o, [k]: !o[k] }))} />
+                <Row e={e} d={d} onDone={load} mobile={mobile} open={!!open[k]} onToggle={() => setOpen((o) => ({ ...o, [k]: !o[k] }))}
+                  onChoose={(p) => setChoosing({ business: p.business, key: p.key })} />
                 {open[k] && e.skus.map((s) => <Row key={s.key} e={s} d={d} onDone={load} mobile={mobile} sub parentPaused={e.paused} />)}
               </React.Fragment>
             );

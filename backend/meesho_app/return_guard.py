@@ -572,8 +572,14 @@ def simple_view(request, business_id):
 
     paused_parents = {(b, item): auto for b, item, auto in
                       ListingHubPause.objects.filter(business_id__in=ids).values_list("business_id", "parent__item_id", "auto")}
-    paused_skus = {(b, sku): auto for b, sku, auto in
-                   SkuPause.objects.filter(business_id__in=ids).values_list("business_id", "sku__sku_id", "auto")}
+    # SKUs paused on their own (case-insensitive, as SKUs are matched everywhere), and their parents —
+    # so a paused SKU shows under its product even with no orders in the window.
+    paused_skus, paused_sku_parent = {}, {}
+    for b, sku, parent_item, auto in SkuPause.objects.filter(business_id__in=ids).values_list(
+            "business_id", "sku__sku_id", "sku__parent__item_id", "auto"):
+        paused_skus[(b, sku.casefold())] = auto
+        paused_sku_parent[(b, sku.casefold())] = (parent_item, sku)
+
     images = {(b, item): img for b, item, img in
               ParentItemPrice.objects.filter(business_id__in=ids).values_list("business_id", "item_id", "image_url")}
 
@@ -593,18 +599,29 @@ def simple_view(request, business_id):
             loose.setdefault((r["business"], r["sku"]), []).append(r)
     for (b, item) in paused_parents:                     # paused, even with no orders in the window
         by_parent.setdefault((b, item), [])
+    extra_skus = {}                                      # paused SKUs with no orders in the window
+    for (b, key), (item, sku) in paused_sku_parent.items():
+        if item:
+            by_parent.setdefault((b, item), [])
+            extra_skus.setdefault((b, item), {})[key] = sku
     products = []
     for (b, item), group in by_parent.items():
+        parent_paused = (b, item) in paused_parents
         e = entry("parent", b, item, item, group, paused_parents.get((b, item)))
         skus = {}
         for r in group:
-            skus.setdefault(r["sku"], []).append(r)
-        e["skus"] = sorted((entry("sku", b, sku, item, g, paused_skus.get((b, sku)) if (b, item) not in paused_parents else paused_parents[(b, item)])
-                            for sku, g in skus.items()), key=lambda x: -(x["rate"] or 0))
+            skus.setdefault(r["sku"].casefold(), (r["sku"], []))[1].append(r)
+        for key, sku in extra_skus.get((b, item), {}).items():
+            skus.setdefault(key, (sku, []))
+        e["skus"] = sorted((entry("sku", b, sku, item, g, paused_parents[(b, item)] if parent_paused else paused_skus.get((b, key)))
+                            for key, (sku, g) in skus.items()), key=lambda x: -(x["rate"] or 0))
+        # Paused on their own while the product stays live: the rest of its SKUs keep selling.
+        e["paused_skus"] = 0 if parent_paused else sum(1 for x in e["skus"] if x["paused"])
         products.append(e)
-    for (b, sku), group in loose.items():                # SKUs with no parent: shown, but can't be paused until linked
-        e = entry("unlinked", b, sku, "", group, None)
+    for (b, sku), group in loose.items():                # SKUs with no parent: not on the Listing Hub — link them first
+        e = entry("unlinked", b, sku, "", group, paused_skus.get((b, sku.casefold())))
         e["skus"] = []
+        e["paused_skus"] = 0
         products.append(e)
     order = {"over": 0, "paused": 1, "high": 2, "ok": 3, "few": 4}
     products.sort(key=lambda e: (order[e["status"]], -(e["rate"] or 0), -e["orders"]))
