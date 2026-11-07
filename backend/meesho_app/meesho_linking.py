@@ -488,6 +488,68 @@ def _link(request, business, awb, packet, override=False, scan=None):
     return link, before, res.data, meesho_code
 
 
+def _day_window(request, desk, day_param=None):
+    """The packing day on screen (?day=, else the one the Order Scan desk is on — it turns
+    at 1 pm, once the new day has work) and the window its links are counted in."""
+    v = _views()
+    day = v._parse_day(day_param or "") or v._following_day(request, [b.pk for b in desk])[0]
+    # Every link made in this packing day's window (1 pm to 1 pm) — and any filed under it. A scan can
+    # be counted toward the previous day's list (its label is on it) while the next scan starts the new
+    # day, so going by pack_day alone split one evening's links across two days ("scanned 4, shows 1").
+    start, end = v._packing_day_window(day)
+    if not day_param:
+        now_start, now_end = v._packing_day_window(v._current_business_date())
+        start, end = min(start, now_start), max(end, now_end)
+    return day, start, end
+
+
+def _day_links(desk, day, start, end):
+    return (MeeshoPacketLink.objects.filter(business__in=desk)
+            .filter(Q(pack_day=day) | Q(linked_at__gte=start, linked_at__lt=end)))
+
+
+def _live(desk, day, start, end, accounts, ships=None):
+    """
+    The day's packed count, straight from the links stored — each one a scan
+    Meesho answered green, counted the moment it is made. Nothing queued or
+    synced adds to it; it drops only when the order is cancelled (on Meesho's
+    Cancelled list, or cancelled at the desk) or the link is undone.
+    """
+    cancelled_subs = _cancelled_subs(accounts)
+    couriers = _courier_names()
+    out = {"packed": 0, "cancelled": 0, "by_courier": {}, "links": {}}
+    for l in _day_links(desk, day, start, end).select_related("scanned_order"):
+        so = l.scanned_order
+        gone = bool(l.sub_order_no and (l.business_id, l.sub_order_no) in cancelled_subs) \
+            or bool(so and so.status == ScannedOrder.STATUS_CANCELLED)
+        name = " ".join((l.courier_name or couriers.get(l.carrier_id, "") or "").split()) or "No courier on label"
+        out["links"][(l.business_id, l.awb_number)] = {"cancelled": gone, "courier": name}
+        if gone:
+            out["cancelled"] += 1
+            continue
+        out["packed"] += 1
+        out["by_courier"][name] = out["by_courier"].get(name, 0) + 1
+    return out
+
+
+def _counts(request, desk, accounts, day_param=None):
+    """The day's counts alone — what the desk's screen refreshes after every scan."""
+    day, start, end = _day_window(request, desk, day_param)
+    ships = _shipments(accounts)
+    live = _live(desk, day, start, end, accounts, ships)
+    return {"day": day, "count": live["packed"], "cancelled_after": live["cancelled"],
+            "by_courier": sorted(({"courier": k, "count": n} for k, n in live["by_courier"].items()), key=lambda x: -x["count"]),
+            "plan": _plan(request, desk, day, ships, live, details=False), "at": timezone.now()}
+
+
+@api_view(["GET"])
+def link_counts(request, business_id):
+    """GET — the day's packed counts, read from the links as they stand right now (?day=)."""
+    business = _views().get_authorized_business(request, business_id)
+    desk, accounts = _desk(request, business)
+    return Response(_counts(request, desk, accounts, request.GET.get("day")))
+
+
 def _learn_courier(carrier_id, name):
     name = " ".join(str(name).split())[:100]
     c, _ = MeeshoCourier.objects.get_or_create(carrier_id=int(carrier_id), defaults={"name": name, "source": "labels"})
@@ -511,18 +573,8 @@ def linking(request, business_id):
                         bool(d.get("override")), MeeshoLinkLog.ACTION_LINK, scan=_scan_info(d))
 
     desk, _ = _desk(request, business)
-    # The packing day the Order Scan desk is on (it turns at 1 pm, once the new day has work).
-    day = v._parse_day(request.GET.get("day") or "") or v._following_day(request, [b.pk for b in desk])[0]
-    # Every link made in this packing day's window (1 pm to 1 pm) — and any filed under it. A scan can
-    # be counted toward the previous day's list (its label is on it) while the next scan starts the new
-    # day, so going by pack_day alone split one evening's links across two days ("scanned 4, shows 1").
-    start, end = v._packing_day_window(day)
-    if not request.GET.get("day"):
-        start = min(start, v._packing_day_window(v._current_business_date())[0])
-        end = max(end, v._packing_day_window(v._current_business_date())[1])
-    qs = (MeeshoPacketLink.objects.filter(business__in=desk)
-          .filter(Q(pack_day=day) | Q(linked_at__gte=start, linked_at__lt=end))
-          .select_related("business", "linked_by", "scanned_order").order_by("-linked_at"))
+    day, start, end = _day_window(request, desk, request.GET.get("day"))
+    qs = _day_links(desk, day, start, end).select_related("business", "linked_by", "scanned_order").order_by("-linked_at")
     q = _clean(request.GET.get("q"))
     if q:
         qs = qs.filter(Q(awb_number__icontains=q) | Q(packet_id__icontains=q) | Q(sub_order_no__icontains=q) | Q(sku__icontains=q))
@@ -532,25 +584,25 @@ def linking(request, business_id):
     states = {}
     for l in links:
         states[l["state"]] = states.get(l["state"], 0) + 1
-    by_courier = {}
-    for l in links:
-        name = l["courier"] or (f"Courier #{l['carrier_id']}" if l["carrier_id"] else "Courier not known")
-        by_courier[name] = by_courier.get(name, 0) + 1
     biz_ids = [b.pk for b in desk]
     errors = MeeshoLinkLog.objects.filter(Q(business_id__in=biz_ids) | Q(business__isnull=True, user=request.user),
                                           ok=False, resolved=False, created_at__date__gte=day).count()
+    live = _live(desk, day, start, end, _, ships)
     return Response({
-        "day": day, "links": links, "count": len(links),
+        "day": day, "links": links,
+        # Packed: every green link of the day, counted from the links themselves the moment
+        # they're made — less any whose order is cancelled since. Never from a queued read of Meesho.
+        "count": live["packed"], "cancelled_after": live["cancelled"],
         "matched": sum(1 for l in links if l["check"] == MeeshoPacketLink.CHECK_MATCH),
         "states": states,
         "checked_at": _checked_at(_),
-        "by_courier": sorted(({"courier": k, "count": n} for k, n in by_courier.items()), key=lambda x: -x["count"]),
+        "by_courier": sorted(({"courier": k, "count": n} for k, n in live["by_courier"].items()), key=lambda x: -x["count"]),
         "open_errors": errors,
         "couriers": [{"carrier_id": c.carrier_id, "name": c.name, "source": c.source, "shipments": c.shipments_seen}
                      for c in MeeshoCourier.objects.all()],
         "is_admin": v._is_admin(request.user),
         "syncing": _syncing(_),
-        "plan": _plan(request, desk, day, ships),
+        "plan": _plan(request, desk, day, ships, live),
     })
 
 
@@ -622,6 +674,12 @@ def _do_link(request, business, awb, packet, override, action, retry_of=None, sc
     body = {"link": _link_json(link), "log_id": log.pk, "previous_packet": before, "meesho_code": meesho_code,
             "already_scanned": bool(scan.get("already_scanned")), "stats": scan.get("stats"),
             "product": _product(link), "ms": int((time.monotonic() - started) * 1000), "via": getattr(link, "via", None)}
+    # The day's counts as they stand with this link in them — the screen shows them from this answer at once.
+    try:
+        desk, accounts = _desk(request, business)
+        body["counts"] = _counts(request, desk, accounts)
+    except Exception:                                              # noqa: BLE001 — the link is made; the screen reads them again
+        body["counts"] = None
     return Response(body, status=status.HTTP_201_CREATED)
 
 
@@ -641,38 +699,67 @@ def _product(link):
             "sub_order_no": sub, "image_url": photo, "image_fallback_url": fallback}
 
 
-def _plan(request, desk, day, ships):
+def _plan(request, desk, day, ships, live=None, details=True):
     """
     The day's Meesho parcels to link — every Meesho label downloaded for the
-    packing day — and where each stands: linked (here, or Meesho already has its
-    packet), cancelled before linking, or still to link. Counted per courier and
-    in total; the ones left are listed with their product.
+    packing day, and any parcel linked today that isn't on them — and where each
+    stands: packed (scanned here and Meesho answered green), cancelled, or still
+    to link. A parcel counts as packed only from its own scan here — never
+    because a sync of Meesho's lists shows it linked; those are only pointed out
+    ("linked on Meesho, not scanned here"). Counted per courier and in total;
+    with `details`, the ones left are listed with their product.
     """
     from .meesho_images import photo_map
     v = _views()
     ids = [b.pk for b in desk]
     names = {b.pk: b.name for b in desk}
+    accounts = list(MeeshoAccount.objects.filter(business_id__in=ids))
+    if live is None:
+        start, end = v._packing_day_window(day)
+        live = _live(desk, day, start, end, accounts, ships)
     labels = list(v._labels_on_day(LabelOrder.objects.filter(business_id__in=ids).exclude(platform="flipkart"), day)
                   .order_by("courier_name", "sku", "order_id")[:4000])
-    linked = set(MeeshoPacketLink.objects.filter(business_id__in=ids, awb_number__in=[l.awb_number for l in labels if l.awb_number])
-                 .values_list("business_id", "awb_number"))
-    accounts = list(MeeshoAccount.objects.filter(business_id__in=ids))
+    # Linked here on any day (a label carried over from yesterday may have been scanned then).
+    linked = {(b, a): None for b, a in MeeshoPacketLink.objects.filter(
+        business_id__in=ids, awb_number__in=[_clean(l.awb_number) for l in labels if l.awb_number])
+        .values_list("business_id", "awb_number")}
     cancelled = _cancelled_subs(accounts)
-    couriers, left = {}, []
+    couriers, left, seen = {}, [], set()
+    on_meesho_only = 0
+
+    def bucket(name):
+        return couriers.setdefault(name.casefold(), {"courier": name, "total": 0, "linked": 0, "left": 0, "cancelled": 0})
+
     for l in labels:
         name = " ".join((l.courier_name or "").split()) or "No courier on label"
-        c = couriers.setdefault(name.casefold(), {"courier": name, "total": 0, "linked": 0, "left": 0, "cancelled": 0})
+        c = bucket(name)
         awb = _clean(l.awb_number)
-        if (l.business_id, awb) in linked or (ships.get(awb) or {}).get("packet_id"):
+        key = (l.business_id, awb)
+        seen.add(key)
+        mine = live["links"].get(key)
+        if (l.business_id, l.order_id) in cancelled or (mine and mine["cancelled"]):
+            c["cancelled"] += 1
+        elif key in linked:
             c["total"] += 1
             c["linked"] += 1
-        elif (l.business_id, l.order_id) in cancelled:
-            c["cancelled"] += 1
         else:
             c["total"] += 1
             c["left"] += 1
             left.append(l)
-    photos = photo_map(left[:300], sub_of=lambda l: l.order_id, own=lambda l: "") if left else {}
+            if (ships.get(awb) or {}).get("packet_id"):
+                on_meesho_only += 1
+    # Scanned green today but not on the day's labels (a label from another day, or not downloaded here):
+    # still packed today, so still counted.
+    for key, info in live["links"].items():
+        if key in seen:
+            continue
+        c = bucket(info["courier"])
+        if info["cancelled"]:
+            c["cancelled"] += 1
+        else:
+            c["total"] += 1
+            c["linked"] += 1
+    photos = photo_map(left[:300], sub_of=lambda l: l.order_id, own=lambda l: "") if left and details else {}
     by_courier = sorted(couriers.values(), key=lambda c: (-c["total"], c["courier"]))
     return {
         "day": day,
@@ -680,8 +767,10 @@ def _plan(request, desk, day, ships):
         "linked": sum(c["linked"] for c in by_courier),
         "left": sum(c["left"] for c in by_courier),
         "cancelled": sum(c["cancelled"] for c in by_courier),
+        "on_meesho_only": on_meesho_only,
         "by_courier": by_courier,
-        "left_orders": [{"business_name": names.get(l.business_id, ""), "sub_order_no": l.order_id, "awb": _clean(l.awb_number),
+        "left_awbs": [_clean(l.awb_number) for l in left] if not details else None,
+        "left_orders": [] if not details else [{"business_name": names.get(l.business_id, ""), "sub_order_no": l.order_id, "awb": _clean(l.awb_number),
                          "sku": l.sku, "size": l.size, "qty": l.qty or 1,
                          "courier": " ".join((l.courier_name or "").split()) or "No courier on label",
                          "image_url": photos.get((l.business_id, l.order_id), (None, None))[0],

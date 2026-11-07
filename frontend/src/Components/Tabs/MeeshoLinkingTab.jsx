@@ -11,10 +11,12 @@ import { sounds, isMuted, setMuted } from "../../lib/sounds";
  * is recorded PACKED in Order Scan (so the packed counts are right). Every
  * attempt is logged — a failed one can be corrected and retried from the log.
  *
- * Every outcome is heard: a chirp when linked, an alarm when not. A link
- * updates the screen from its own answer at once (the product, the courier's
- * count); the full list is read again a few seconds after the last scan, so a
- * busy desk never waits on it. The link itself goes through the server: the
+ * Every outcome is heard: a chirp when linked, an alarm when not. The packed
+ * count is live: every green scan is counted the moment Meesho answers — from
+ * that answer itself, which carries the day's counts as they now stand — and
+ * the counts are read again every few seconds, so a scan at another desk shows
+ * here too. Nothing queued or synced adds to it: only a green scan here does,
+ * and it stays counted until the order is cancelled or the link undone. The link itself goes through the server: the
  * Meesho session lives there, encrypted, and is never handed to a browser.
  */
 
@@ -100,13 +102,18 @@ function Progress({ plan, isMobile, courier, setCourier }) {
       <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap", alignItems: "baseline" }}>
         <span style={{ fontSize: 14, fontWeight: 800, color: C.gray800 }}>
           <span style={{ fontFamily: "monospace", fontSize: 26, color: C.gray900 }}>{plan.linked}</span>
-          <span style={{ color: C.gray500 }}> of {plan.total} linked</span>
-          {plan.cancelled ? <span style={{ color: C.gray500, fontWeight: 600, fontSize: 12.5 }}> · {plan.cancelled} cancelled before packing</span> : null}
+          <span style={{ color: C.gray500 }}> of {plan.total} packed</span>
+          {plan.cancelled ? <span style={{ color: C.gray500, fontWeight: 600, fontSize: 12.5 }}> · {plan.cancelled} cancelled</span> : null}
         </span>
         <span style={{ fontSize: 15, fontWeight: 900, color: plan.total === 0 ? C.gray500 : done ? C.green : C.orange }}>
-          {plan.total === 0 ? "No Meesho labels downloaded for this day yet" : done ? "✓ All linked" : `${plan.left} left to link`}
+          {plan.total === 0 ? "No Meesho labels downloaded for this day yet" : done ? "✓ All packed" : `${plan.left} left to scan`}
         </span>
       </div>
+      {plan.on_meesho_only > 0 && (
+        <div style={{ fontSize: 12.5, color: "#92400E", fontWeight: 600 }}>
+          {plan.on_meesho_only} of those left show linked on Meesho already but weren't scanned here — they count only once scanned here.
+        </div>
+      )}
       <div role="progressbar" aria-label="Linked" aria-valuemin={0} aria-valuemax={plan.total} aria-valuenow={plan.linked}
         style={{ height: 10, borderRadius: 99, background: C.gray100, overflow: "hidden" }}>
         <div style={{ height: "100%", width: `${pct(plan.linked, plan.total)}%`, background: C.green, transition: "width .25s" }} />
@@ -127,7 +134,7 @@ function Progress({ plan, isMobile, courier, setCourier }) {
                   <span style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 14, color: C.gray400 }}> / {c.total}</span></span>
                 <span style={{ height: 5, borderRadius: 99, background: C.gray100, overflow: "hidden" }}>
                   <span style={{ display: "block", height: "100%", width: `${pct(c.linked, c.total)}%`, background: cdone ? C.green : t.solid }} /></span>
-                <span style={{ fontSize: 12, fontWeight: 800, color: cdone ? "#15803D" : C.red }}>{cdone ? "✓ all linked" : `${c.left} left`}</span>
+                <span style={{ fontSize: 12, fontWeight: 800, color: cdone ? "#15803D" : C.red }}>{cdone ? "✓ all packed" : `${c.left} left`}</span>
               </button>
             );
           })}
@@ -295,6 +302,21 @@ function BlockingError({ e, onOk, onOverride }) {
   );
 }
 
+/** "● Live" — the counts are read every few seconds; grey if they haven't been for a while. */
+function LiveDot({ at }) {
+  const [, tick] = useState(0);
+  useEffect(() => { const t = setInterval(() => tick((n) => n + 1), 5000); return () => clearInterval(t); }, []);
+  const stale = !at || Date.now() - at.getTime() > 20000;
+  return (
+    <span title={at ? `Counts read at ${at.toLocaleTimeString("en-IN")}` : "Not read yet"}
+      style={{ display: "inline-flex", gap: 4, alignItems: "center", fontSize: 10.5, fontWeight: 800, color: stale ? C.gray400 : C.green,
+        textTransform: "uppercase", letterSpacing: ".05em" }}>
+      <span aria-hidden style={{ width: 7, height: 7, borderRadius: 99, background: stale ? C.gray300 : C.green }} />
+      {stale ? "Reconnecting" : "Live"}
+    </span>
+  );
+}
+
 export function MeeshoLinkingTab() {
   const isMobile = useIsMobile();
   const [data, setData] = useState(null);
@@ -311,6 +333,7 @@ export function MeeshoLinkingTab() {
   const [rowNote, setRowNote] = useState(null);
   const [courier, setCourier] = useState(null);
   const [muted, setMute] = useState(isMuted());
+  const [countsAt, setCountsAt] = useState(null);     // when the counts on screen were read
   const inFlight = useRef(false);
   const reloadTimer = useRef(null);
   const awbRef = useRef(null);
@@ -323,31 +346,60 @@ export function MeeshoLinkingTab() {
     const p = new URLSearchParams();
     if (q.trim()) p.set("q", q.trim());
     const r = await call(`?${p}`);
-    if (r.ok) setData(r.data);
+    if (r.ok) { setData(r.data); setCountsAt(new Date()); }
   }, [q]);
+  // The day's counts as the server has them right now — from a scan's own answer, or read again.
+  const applyCounts = useCallback((c) => {
+    if (!c) return false;
+    let sameDay = true;
+    setData((prev) => {
+      if (!prev) return prev;
+      if (String(c.day) !== String(prev.day)) { sameDay = false; return prev; }
+      const left = c.plan.left_awbs ? new Set(c.plan.left_awbs) : null;
+      const plan = prev.plan && { ...prev.plan, ...c.plan, left_awbs: undefined,
+        left_orders: left ? prev.plan.left_orders.filter((o) => left.has(o.awb)) : prev.plan.left_orders };
+      return { ...prev, count: c.count, cancelled_after: c.cancelled_after, by_courier: c.by_courier, plan };
+    });
+    setCountsAt(new Date());
+    return sameDay;
+  }, []);
+  const readCounts = useCallback(async () => {
+    const r = await call("counts/").catch(() => null);
+    if (r?.ok && !applyCounts(r.data)) load();      // the packing day turned: read everything again
+  }, [applyCounts, load]);
   useEffect(() => { load(); }, [load]);
   useEffect(() => { awbRef.current?.focus(); }, []);
   // The full list again a few seconds after the last link — never in a scan's way.
   const reloadSoon = useCallback((ms = 4000) => { clearTimeout(reloadTimer.current); reloadTimer.current = setTimeout(load, ms); }, [load]);
   useEffect(() => {
     const t = setInterval(() => { if (!inFlight.current) load(); }, 60000);   // labels downloaded meanwhile
-    return () => { clearInterval(t); clearTimeout(reloadTimer.current); };
-  }, [load]);
+    // The counts, live: read again every 5 seconds while the page is open — scans at another desk show too.
+    const live = setInterval(() => { if (!inFlight.current && document.visibilityState === "visible") readCounts(); }, 5000);
+    return () => { clearInterval(t); clearInterval(live); clearTimeout(reloadTimer.current); };
+  }, [load, readCounts]);
 
-  // A link Meesho took: shown from its own answer at once — the link, and the day's counts.
-  const applyLinked = (d) => setData((prev) => {
-    if (!prev || !d?.link) return prev;
+  // A link Meesho took: shown from its own answer at once — the link, and the day's counts with it in them.
+  const applyLinked = (d) => {
+    if (!d?.link) return;
     const l = d.link;
-    const links = [l, ...prev.links.filter((x) => x.id !== l.id)];
-    let plan = prev.plan;
-    const hit = plan?.left_orders.find((o) => o.awb === l.awb);
-    if (hit) {
-      plan = { ...plan, linked: plan.linked + 1, left: Math.max(0, plan.left - 1),
-        left_orders: plan.left_orders.filter((o) => o.awb !== l.awb),
-        by_courier: plan.by_courier.map((c) => (c.courier === hit.courier ? { ...c, linked: c.linked + 1, left: Math.max(0, c.left - 1) } : c)) };
-    }
-    return { ...prev, links, count: links.length, plan };
-  });
+    const fresh = !data?.links.some((x) => x.id === l.id);
+    setData((prev) => {
+      if (!prev) return prev;
+      const links = [l, ...prev.links.filter((x) => x.id !== l.id)];
+      if (d.counts) return { ...prev, links };
+      // No counts in the answer: count it here — it's packed the moment Meesho said yes.
+      let plan = prev.plan;
+      const hit = plan?.left_orders.find((o) => o.awb === l.awb);
+      if (plan && fresh) {
+        const courier = hit?.courier;
+        plan = { ...plan, linked: plan.linked + 1, total: hit ? plan.total : plan.total + 1, left: hit ? Math.max(0, plan.left - 1) : plan.left,
+          left_orders: plan.left_orders.filter((o) => o.awb !== l.awb),
+          by_courier: plan.by_courier.map((c) => (courier && c.courier === courier ? { ...c, linked: c.linked + 1, left: Math.max(0, c.left - 1) } : c)) };
+      }
+      return { ...prev, links, count: (prev.count || 0) + (fresh ? 1 : 0), plan };
+    });
+    if (d.counts) applyCounts(d.counts);
+  };
   // Any error or alert: both fields are emptied at once, so the next scan starts fresh —
   // the error itself still shows which AWB and packet it was (and "Link anyway" uses those).
   const stop = (b) => {
@@ -546,7 +598,10 @@ export function MeeshoLinkingTab() {
       <Progress plan={data.plan} isMobile={isMobile} courier={courier} setCourier={setCourier} />
 
       <div style={{ display: "grid", gap: 10, gridTemplateColumns: "repeat(3, minmax(0, 1fr))" }}>
-        <div style={{ ...S.card, padding: "10px 12px" }}><div style={{ fontSize: 12, fontWeight: 800, color: C.green }}>Linked here today</div><div style={{ fontFamily: "monospace", fontSize: 24, fontWeight: 900 }}>{data.count}</div></div>
+        <div style={{ ...S.card, padding: "10px 12px" }}><div style={{ fontSize: 12, fontWeight: 800, color: C.green, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+          Packed today <LiveDot at={countsAt} /></div>
+          <div style={{ fontFamily: "monospace", fontSize: 24, fontWeight: 900 }}>{data.count}</div>
+          {data.cancelled_after ? <div style={{ fontSize: 11.5, color: C.gray500 }}>{data.cancelled_after} cancelled after packing — not counted</div> : null}</div>
         <div style={{ ...S.card, padding: "10px 12px" }}><div style={{ fontSize: 12, fontWeight: 800, color: "#2563EB" }}>Match Meesho</div><div style={{ fontFamily: "monospace", fontSize: 24, fontWeight: 900 }}>{data.matched}</div></div>
         <div style={{ ...S.card, padding: "10px 12px" }}><div style={{ fontSize: 12, fontWeight: 800, color: C.red }}>Open problems</div><div style={{ fontFamily: "monospace", fontSize: 24, fontWeight: 900 }}>{data.open_errors}</div></div>
       </div>

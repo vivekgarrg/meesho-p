@@ -80,24 +80,64 @@ class OrderLinkingTests(TestCase):
 
     def test_the_days_parcels_linked_and_left_per_courier(self):
         plan = self.c.get(self.base).data["plan"]
-        # VL1001 / VL1002: Meesho already has their packets; DL2001 is still to link.
-        self.assertEqual((plan["total"], plan["linked"], plan["left"]), (3, 2, 1))
+        # Nothing scanned here yet: Meesho's lists showing packets for VL1001 / VL1002 count nothing — only pointed out.
+        self.assertEqual((plan["total"], plan["linked"], plan["left"], plan["on_meesho_only"]), (3, 0, 3, 2))
         self.assertEqual({c["courier"]: (c["linked"], c["left"]) for c in plan["by_courier"]},
-                         {"Valmo": (2, 0), "Delhivery": (0, 1)})
-        self.assertEqual([(o["awb"], o["courier"]) for o in plan["left_orders"]], [("DL2001", "Delhivery")])
+                         {"Valmo": (0, 2), "Delhivery": (0, 1)})
         r = self.link("DL2001", "KP9ZZZZ12345678")
         self.assertEqual(r.status_code, 201, r.data)
         self.assertEqual((r.data["product"]["sku"], r.data["product"]["qty"], r.data["product"]["sub_order_no"]), ("x", 1, "13_1"))
         self.assertIsInstance(r.data["ms"], int)
+        self.assertEqual((r.data["counts"]["count"], r.data["counts"]["plan"]["linked"]), (1, 1))     # in the link's own answer
         plan = self.c.get(self.base).data["plan"]
-        self.assertEqual((plan["linked"], plan["left"], plan["left_orders"]), (3, 0, []))
+        self.assertEqual((plan["linked"], plan["left"]), (1, 2))
+        self.assertEqual({c["courier"]: (c["linked"], c["left"]) for c in plan["by_courier"]},
+                         {"Valmo": (0, 2), "Delhivery": (1, 0)})
+        self.assertNotIn("DL2001", [o["awb"] for o in plan["left_orders"]])
+
+    def test_every_green_scan_counts_at_once_and_stays_until_cancelled(self):
+        counts = f"{self.base}counts/"
+        self.assertEqual(self.c.get(counts).data["count"], 0)
+        for n, (awb, packet) in enumerate((("VL1001", "KP4AUSE32034836"), ("VL1002", "KP2SECT43976500"),
+                                           ("DL2001", "KP9ZZZZ12345678")), start=1):
+            r = self.link(awb, packet)
+            self.assertEqual(r.status_code, 201, r.data)
+            self.assertEqual(r.data["counts"]["count"], n)                          # each scan's answer has it
+            self.assertEqual(self.c.get(counts).data["count"], n)                    # and so does anyone else's screen
+        d = self.c.get(counts).data
+        self.assertEqual((d["plan"]["total"], d["plan"]["linked"], d["plan"]["left"]), (3, 3, 0))
+        # A refused scan adds nothing.
+        self.submit.return_value = ("FAILED", "req-2")
+        LabelOrder.objects.create(order_id="14_1", awb_number="DL2002", courier_name="Delhivery",
+                                  uploaded_date=views._current_business_date(), business=self.biz, sku="y")
+        self.assertEqual(self.link("DL2002", "KP7YYYY12345678").status_code, 409)
+        self.assertEqual(self.c.get(counts).data["count"], 3)
+        # Cancelled after packing: no longer counted packed.
+        acct = MeeshoAccount.objects.get()
+        MeeshoSyncSnapshot.objects.create(account=acct, endpoint="orders_cancelled", http_status=200, fetched_at=timezone.now(),
+                                          payload=[{"sub_order_num": "12_1"}])
+        d = self.c.get(counts).data
+        self.assertEqual((d["count"], d["cancelled_after"], d["plan"]["linked"], d["plan"]["cancelled"]), (2, 1, 2, 1))
+        self.assertEqual(self.c.get(self.base).data["count"], 2)
+
+    def test_a_green_scan_not_on_the_days_labels_still_counts(self):
+        LabelOrder.objects.filter(awb_number="DL2001").delete()
+        self.assertEqual(self.link("DL2001", "KP9ZZZZ12345678").status_code, 201)
+        d = self.c.get(f"{self.base}counts/").data
+        self.assertEqual((d["count"], d["plan"]["total"], d["plan"]["linked"]), (1, 3, 1))
+
+    def test_a_search_doesnt_change_the_count(self):
+        self.link("VL1001", "KP4AUSE32034836")
+        self.link("DL2001", "KP9ZZZZ12345678")
+        d = self.c.get(self.base, {"q": "VL1001"}).data
+        self.assertEqual((d["count"], len(d["links"])), (2, 1))
 
     def test_a_cancelled_label_is_not_left_to_link(self):
         acct = MeeshoAccount.objects.get()
         MeeshoSyncSnapshot.objects.create(account=acct, endpoint="orders_cancelled", http_status=200, fetched_at=timezone.now(),
                                           payload=[{"sub_order_num": "13_1"}])
         plan = self.c.get(self.base).data["plan"]
-        self.assertEqual((plan["total"], plan["left"], plan["cancelled"]), (2, 0, 1))
+        self.assertEqual((plan["total"], plan["left"], plan["cancelled"]), (2, 2, 1))       # 13_1 cancelled; the other two not scanned yet
         self.assertEqual(self.link("DL2001", "KP9ZZZZ12345678").data["code"], "cancelled")
 
     def test_the_kept_alive_connection_keeps_no_cookies(self):

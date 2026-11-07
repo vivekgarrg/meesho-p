@@ -218,6 +218,7 @@ urlpatterns = [
     path("return-claim/upload/<str:upload_id>/chunk/", meesho_return_claim.claim_upload_chunk, name="return_claim_upload_chunk"),
     path("return-claim/upload/<str:upload_id>/finish/", meesho_return_claim.claim_upload_finish, name="return_claim_upload_finish"),
     path("return-claim/upload/<str:upload_id>/", meesho_return_claim.claim_upload_status, name="return_claim_upload_status"),
+    path("meesho-orders/linking/counts/",               meesho_linking.link_counts,      name="meesho_link_counts"),
     path("meesho-orders/linking/check/",                meesho_linking.link_check,       name="meesho_link_check"),
     path("meesho-orders/linking/logs/",                 meesho_linking.link_logs,        name="meesho_link_logs"),
     path("meesho-orders/linking/logs/<int:log_id>/",    meesho_linking.link_log_detail,  name="meesho_link_log_detail"),
