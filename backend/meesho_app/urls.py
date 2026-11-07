@@ -5,7 +5,7 @@ from . import api_cache
 from . import upload_cleanup
 from . import return_desk
 from . import meesho_return_claim
-from . import meesho_linking, meesho_return_analysis, meesho_returns, meesho_search, meesho_sync, orders_panel, return_guard, sku_parents
+from . import meesho_linking, meesho_return_analysis, meesho_returns, meesho_search, meesho_sync, orders_panel, return_guard, scan_unshipped, sku_parents
 from . import bulk_listing_views
 from . import listing_images_views
 from . import insights
@@ -256,6 +256,7 @@ urlpatterns = [
     path("order-scan/queue/status/", views.scan_queue_admin_status,   name="scan_queue_admin_status"),
     path("order-scan/shift/",       views.scan_queue_shift,           name="scan_queue_shift"),
     path("order-scan/courier-summary/", views.scan_courier_summary, name="scan_courier_summary"),
+    path("order-scan/unshipped/",   scan_unshipped.unshipped,         name="order_scan_unshipped"),
     path("order-scan/linked/",      meesho_linking.linked_orders,     name="order_scan_linked"),
     path("order-scan/settings/",     views.scan_desk_settings,         name="scan_desk_settings"),
     path("order-scan/<int:pk>/",     views.scanned_order_detail,       name="scanned_order_detail"),

@@ -1727,15 +1727,15 @@ export function OrderScanTab() {
   const [scopeTick, setScopeTick] = useState(0);
   const onScopeChanged = () => { setScopeTick((t) => t + 1); desk.reload(); };
   // Scanned (the day's desk) or Linked (parcels linked to a packet, by where they are on Meesho now).
-  const [show, setShowState] = useState(() => { try { return localStorage.getItem("order-scan-show") || "scanned"; } catch { return "scanned"; } });
+  const [show, setShowState] = useState(() => { try { const v = localStorage.getItem("order-scan-show"); return v === "linked" ? "unshipped" : v || "scanned"; } catch { return "scanned"; } });
   const setShow = (m) => { setShowState(m); try { localStorage.setItem("order-scan-show", m); } catch { /* fine */ } };
   const props = { desk, platform, setPlatform, businesses, onScopeChanged, scopeTick, setShow,
     multi: (businesses.info?.selected?.length || 0) > 1 };
-  if (show === "linked") return <LinkedOrders isMobile={isMobile} setMode={setShow} businesses={businesses} onScopeChanged={onScopeChanged} />;
+  if (show === "unshipped" || show === "linked") return <UnshippedOrders isMobile={isMobile} setMode={setShow} businesses={businesses} onScopeChanged={onScopeChanged} />;
   return isMobile ? <MobilePack {...props} /> : <DesktopPack {...props} />;
 }
 
-/** Scanned (the day's packing desk) or Linked (parcels linked to their packet, ready to ship or shipped). */
+/** Scanned (the day's packing desk) or Unshipped (every Meesho parcel scanned and not shipped yet). */
 function ModeToggle({ mode, setMode }) {
   const opt = (key, label) => (
     <button key={key} role="tab" aria-selected={mode === key} onClick={() => setMode(key)} className="os-btn"
@@ -1746,49 +1746,92 @@ function ModeToggle({ mode, setMode }) {
   return (
     <div role="tablist" aria-label="Show" style={{ display: "flex", background: C.gray100, borderRadius: 10, padding: 3, maxWidth: 420 }}>
       {opt("scanned", "📦 Scanned")}
-      {opt("linked", "🔗 Linked")}
+      {opt("unshipped", "🚚 Unshipped")}
     </div>
   );
 }
 
-const LINK_STATES = [
-  { key: "ready_to_ship", label: "Ready to ship", tone: C.orange, tag: "amber" },
-  { key: "shipped", label: "Shipped", tone: C.green, tag: "green" },
-  { key: "other", label: "Not on Meesho's lists", tone: C.gray500, tag: "gray" },
+const UNSHIPPED_TABS = [
+  { key: "unshipped", label: "Unshipped", tone: C.orange },
+  { key: "gone", label: "Shipped · gone", tone: "#15803D" },
+  { key: "cancelled", label: "Cancelled after packing", tone: C.red },
 ];
+const ago = (iso) => {
+  if (!iso) return "never";
+  const m = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
+  return m < 1 ? "just now" : m < 60 ? `${m} min ago` : `${Math.round(m / 60)} h ago`;
+};
 
 /**
- * Every parcel linked to a packet (on Order linking, or as it was packed) and
- * where it is on Meesho now: still waiting in Ready to ship, or Shipped — the
- * server marks those shipped in Order Scan as Meesho moves them. Per courier.
+ * Every Meesho parcel scanned or linked at the desk that Meesho hasn't shipped
+ * yet — across days, oldest first. The server settles each scan against what
+ * the Meesho sync last read (Shipped / Cancelled lists, the orders table) on
+ * every read and after every sync, so a parcel leaves this list as soon as
+ * Meesho shows it shipped. Read again every 15 seconds.
  */
-function LinkedOrders({ isMobile, setMode, businesses, onScopeChanged }) {
+function UnshippedOrders({ isMobile, setMode, businesses, onScopeChanged }) {
   const [data, setData] = useState(null);
-  const [state, setState] = useState("ready_to_ship");
+  const [tab, setTab] = useState("unshipped");
   const [courier, setCourier] = useState("");
   const [q, setQ] = useState("");
+  const [checking, setChecking] = useState(false);
+  const [readAt, setReadAt] = useState(null);
   const load = useCallback(async () => {
-    const res = await fetch(`${API}/order-scan/linked/`).catch(() => null);
-    if (res?.ok) setData(await res.json());
+    const res = await fetch(`${API}/order-scan/unshipped/`).catch(() => null);
+    if (res?.ok) { setData(await res.json()); setReadAt(new Date()); }
   }, []);
-  useEffect(() => { load(); const t = setInterval(load, 60000); return () => clearInterval(t); }, [load]);
+  useEffect(() => {
+    load();
+    const t = setInterval(() => { if (document.visibilityState === "visible") load(); }, 15000);
+    return () => clearInterval(t);
+  }, [load]);
+  // Ask the sync to read Meesho's lists now, then read this again as it lands.
+  const checkNow = async () => {
+    setChecking(true);
+    await fetch(`${API}/meesho-orders/linking/check/`, { method: "POST" }).catch(() => null);
+    for (let i = 0; i < 20; i++) {
+      await new Promise((ok) => setTimeout(ok, 3000));
+      const st = await fetch(`${API}/order-scan/unshipped/`).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+      if (st) { setData(st); setReadAt(new Date()); if (!st.syncing) break; }
+    }
+    setChecking(false);
+  };
 
   const needle = q.trim().toLowerCase();
-  const rows = (data?.rows || []).filter((r) => r.state === state && (!courier || r.courier === courier)
+  const rows = (data?.rows || []).filter((r) => r.state === tab && (!courier || r.courier === courier)
     && (!needle || [r.sku, r.awb, r.packet_id, r.sub_order_no].some((v) => String(v || "").toLowerCase().includes(needle))));
-  const couriers = [...new Set((data?.rows || []).map((r) => r.courier))].sort();
+  const sum = data?.summary || {};
+  const stale = !readAt || Date.now() - readAt.getTime() > 45000;
 
   const body = (
     <div style={{ display: "flex", flexDirection: "column", gap: 12, padding: isMobile ? 10 : 0 }}>
       {!data ? <div style={{ display: "flex", justifyContent: "center", padding: 40 }}><CircularProgress style={{ color: C.orange }} /></div> : (
         <>
-          <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(3, minmax(0, 1fr))" }}>
-            {LINK_STATES.map((st) => (
-              <button key={st.key} onClick={() => setState(st.key)} aria-pressed={state === st.key} className="os-btn"
+          <div style={{ ...S.card, padding: "14px 16px", borderTop: `5px solid ${C.orange}`, display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
+            <div style={{ flex: "1 1 220px", minWidth: 0 }}>
+              <div style={{ fontSize: 12.5, fontWeight: 800, color: C.gray500 }}>Scanned, not shipped yet</div>
+              <div style={{ fontFamily: "monospace", fontWeight: 900, fontSize: isMobile ? 38 : 46, color: C.gray900, lineHeight: 1.05 }}>{sum.unshipped}</div>
+              <div style={{ fontSize: 12.5, color: C.gray600, marginTop: 2 }}>
+                {sum.ready_to_ship} in Meesho's Ready to ship · {sum.not_on_lists} not on its lists yet
+                {sum.old ? <b style={{ color: C.red }}> · {sum.old} waiting since an earlier day</b> : null}
+              </div>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6, alignItems: isMobile ? "flex-start" : "flex-end" }}>
+              <span style={{ display: "inline-flex", gap: 6, alignItems: "center", fontSize: 11.5, fontWeight: 800, color: stale ? C.gray400 : C.green, textTransform: "uppercase", letterSpacing: ".05em" }}>
+                <span aria-hidden style={{ width: 8, height: 8, borderRadius: 99, background: stale ? C.gray300 : C.green }} />{stale ? "Reconnecting" : "Live"}
+              </span>
+              <span style={{ fontSize: 12, color: C.gray500 }}>Meesho's lists read {ago(data.checked_at)}{data.syncing ? " · reading now…" : ""}</span>
+              <button onClick={checkNow} disabled={checking} className="os-btn" style={{ ...btn("ghost", "sm"), minHeight: 36, opacity: checking ? 0.6 : 1 }}>
+                {checking ? "Checking with Meesho…" : "↻ Check with Meesho now"}</button>
+            </div>
+          </div>
+          <div role="tablist" aria-label="Show" style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(3, minmax(0, 1fr))" }}>
+            {UNSHIPPED_TABS.map((t) => (
+              <button key={t.key} role="tab" aria-selected={tab === t.key} onClick={() => setTab(t.key)} className="os-btn"
                 style={{ textAlign: "left", cursor: "pointer", fontFamily: "inherit", borderRadius: 14, padding: "10px 12px", minWidth: 0,
-                  border: `2px solid ${state === st.key ? st.tone : C.gray200}`, background: state === st.key ? C.white : C.gray50 }}>
-                <div style={{ fontFamily: "monospace", fontWeight: 900, fontSize: isMobile ? 24 : 28, color: C.gray900, lineHeight: 1 }}>{data.summary[st.key]}</div>
-                <div style={{ fontSize: 12, fontWeight: 800, color: st.tone, marginTop: 4 }}>{st.label}</div>
+                  border: `2px solid ${tab === t.key ? t.tone : C.gray200}`, background: tab === t.key ? C.white : C.gray50 }}>
+                <div style={{ fontFamily: "monospace", fontWeight: 900, fontSize: isMobile ? 22 : 26, color: C.gray900, lineHeight: 1 }}>{sum[t.key] || 0}</div>
+                <div style={{ fontSize: 12, fontWeight: 800, color: t.tone, marginTop: 4 }}>{t.label}</div>
               </button>
             ))}
           </div>
@@ -1801,7 +1844,7 @@ function LinkedOrders({ isMobile, setMode, businesses, onScopeChanged }) {
                   <button key={c.courier} onClick={() => setCourier(courier === c.courier ? "" : c.courier)} className="os-btn"
                     style={{ minHeight: 34, borderRadius: 999, padding: "4px 12px", fontFamily: "inherit", fontSize: 12.5, fontWeight: 800, cursor: "pointer",
                       border: `1.5px solid ${courier === c.courier ? t.solid : t.border}`, background: courier === c.courier ? t.bg : C.white, color: t.fg }}>
-                    {c.courier} · {c[state]}
+                    {c.courier} · {c[tab]}
                   </button>
                 );
               })}
@@ -1811,9 +1854,8 @@ function LinkedOrders({ isMobile, setMode, businesses, onScopeChanged }) {
             style={{ ...S.inp, minHeight: 42 }} />
           <div style={{ ...S.card, padding: 0, overflow: "hidden" }}>
             {rows.length === 0 ? <div style={{ padding: 24, textAlign: "center", color: C.gray500, fontSize: 13.5 }}>
-              {state === "ready_to_ship" ? "Nothing linked is waiting in Ready to ship." : state === "shipped" ? "Nothing linked has shipped yet." : "Every linked parcel is on Meesho's lists."}</div>
+              {tab === "unshipped" ? "✓ Every scanned parcel has shipped." : tab === "gone" ? `Nothing shipped in the last ${data.gone_hours} hours.` : "Nothing cancelled after packing."}</div>
               : rows.map((r) => {
-                const st = LINK_STATES.find((x) => x.key === r.state);
                 const t = courierTone(r.courier);
                 return (
                   <div key={r.id} style={{ display: "flex", gap: 10, alignItems: "center", padding: "9px 12px", borderBottom: `1px solid ${C.gray100}` }}>
@@ -1827,14 +1869,22 @@ function LinkedOrders({ isMobile, setMode, businesses, onScopeChanged }) {
                         <span style={{ fontWeight: 800, color: t.fg, background: t.bg, border: `1px solid ${t.border}`, borderRadius: 6, padding: "0 6px", marginRight: 6 }}>{r.courier}</span>
                         {[r.awb, r.packet_id, r.business_name].filter(Boolean).join(" · ")}
                       </div>
-                      <div style={{ fontSize: 11.5, color: C.gray400 }}>linked {fmtTime(r.linked_at)}{r.linked_by ? ` · ${r.linked_by}` : ""}</div>
+                      <div style={{ fontSize: 11.5, color: C.gray400 }}>
+                        scanned {r.scan_day ? fmtDay(String(r.scan_day)) : ""} {fmtTime(r.scanned_at)}
+                        {r.state !== "unshipped" && r.ship_status_raw ? ` · ${r.ship_status_raw}` : ""}
+                      </div>
                     </div>
-                    <Tag variant={st.tag}>{st.label}</Tag>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 4, alignItems: "flex-end", flexShrink: 0 }}>
+                      {r.state === "unshipped" && (r.on_meesho === "ready_to_ship" ? <Tag variant="amber">Ready to ship</Tag> : <Tag variant="gray">Not on Meesho's lists</Tag>)}
+                      {r.state === "gone" && <Tag variant="green">Shipped</Tag>}
+                      {r.state === "cancelled" && <Tag variant="red">Cancelled</Tag>}
+                      {r.state === "unshipped" && r.age_days > 0 && <span style={{ fontSize: 11.5, fontWeight: 800, color: C.red }}>{r.age_days} day{r.age_days === 1 ? "" : "s"} waiting</span>}
+                    </div>
                   </div>
                 );
               })}
           </div>
-          {data.checked_at && <div style={{ fontSize: 11.5, color: C.gray400 }}>Meesho's lists read {fmtDay(String(data.checked_at).slice(0, 10))} {fmtTime(data.checked_at)} — updated by the sync every few minutes.</div>}
+          <div style={{ fontSize: 11.5, color: C.gray400 }}>Meesho parcels scanned in the last {data.days} days. A parcel leaves this list once Meesho shows it shipped; shipped ones stay under “Shipped · gone” for {data.gone_hours} hours.</div>
         </>
       )}
     </div>
@@ -1845,9 +1895,9 @@ function LinkedOrders({ isMobile, setMode, businesses, onScopeChanged }) {
       <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
         <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
           <div>
-            <h1 style={{ fontSize: 22, fontWeight: 800, color: C.gray900, margin: 0 }}>Order scan · linked</h1>
-            <p style={{ fontSize: 13, color: C.gray500, marginTop: 3 }}>Parcels linked to their packet — waiting in Ready to ship, or shipped.</p>
-            <div style={{ marginTop: 8 }}><ModeToggle mode="linked" setMode={setMode} /></div>
+            <h1 style={{ fontSize: 22, fontWeight: 800, color: C.gray900, margin: 0 }}>Order scan · unshipped</h1>
+            <p style={{ fontSize: 13, color: C.gray500, marginTop: 3 }}>Every Meesho parcel scanned at the desk that hasn't shipped yet — gone as soon as Meesho ships it.</p>
+            <div style={{ marginTop: 8 }}><ModeToggle mode="unshipped" setMode={setMode} /></div>
           </div>
           <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
             <DeskBusinesses desk={businesses} onChanged={() => { onScopeChanged(); load(); }} />
@@ -1866,11 +1916,11 @@ function LinkedOrders({ isMobile, setMode, businesses, onScopeChanged }) {
           style={{ background: "none", border: "none", width: 44, height: 44, cursor: "pointer", lineHeight: 0, color: C.gray700, flexShrink: 0 }}>
           <MenuIcon />
         </button>
-        <div style={{ flex: 1, fontSize: 17, fontWeight: 900, color: C.gray900 }}>Linked parcels</div>
+        <div style={{ flex: 1, fontSize: 17, fontWeight: 900, color: C.gray900 }}>Unshipped parcels</div>
         <DeskBusinesses desk={businesses} onChanged={() => { onScopeChanged(); load(); }} compact />
         <button onClick={load} aria-label="Refresh" className="os-btn" style={{ ...btn("ghost", "sm"), minHeight: 40, minWidth: 44 }}>↻</button>
       </div>
-      <div style={{ padding: "6px 10px", background: C.white, borderBottom: `1px solid ${C.gray200}`, flexShrink: 0 }}><ModeToggle mode="linked" setMode={setMode} /></div>
+      <div style={{ padding: "6px 10px", background: C.white, borderBottom: `1px solid ${C.gray200}`, flexShrink: 0 }}><ModeToggle mode="unshipped" setMode={setMode} /></div>
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto", paddingBottom: "env(safe-area-inset-bottom)" }}>{body}</div>
     </div>
   );

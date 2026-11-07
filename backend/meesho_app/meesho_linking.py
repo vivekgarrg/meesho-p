@@ -722,6 +722,10 @@ def _product(link):
             "sub_order_no": sub, "image_url": photo, "image_fallback_url": fallback}
 
 
+# How many parcels left to scan are listed (the bottom list on Order linking), and how many with a photo.
+LEFT_LISTED, LEFT_PHOTOS = 1500, 400
+
+
 def _plan(request, desk, day, ships, live=None, details=True):
     """
     The day's Meesho parcels to link — every Meesho label downloaded for the
@@ -803,7 +807,7 @@ def _plan(request, desk, day, ships, live=None, details=True):
         else:
             c["total"] += 1
             c["linked"] += 1
-    photos = photo_map(left[:300], sub_of=lambda l: l.order_id, own=lambda l: "") if left and details else {}
+    photos = photo_map(left[:LEFT_PHOTOS], sub_of=lambda l: l.order_id, own=lambda l: "") if left and details else {}
     by_courier = sorted(couriers.values(), key=lambda c: (-c["total"], c["courier"]))
     return {
         "day": day,
@@ -818,7 +822,7 @@ def _plan(request, desk, day, ships, live=None, details=True):
                          "sku": l.sku, "size": l.size, "qty": l.qty or 1,
                          "courier": " ".join((l.courier_name or "").split()) or "No courier on label",
                          "image_url": photos.get((l.business_id, l.order_id), (None, None))[0],
-                         "image_fallback_url": photos.get((l.business_id, l.order_id), (None, None))[1]} for l in left[:300]],
+                         "image_fallback_url": photos.get((l.business_id, l.order_id), (None, None))[1]} for l in left[:LEFT_LISTED]],
     }
 
 

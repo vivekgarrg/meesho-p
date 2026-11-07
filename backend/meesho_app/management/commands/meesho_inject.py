@@ -45,4 +45,7 @@ class Command(BaseCommand):
             # Linked parcels Meesho has moved on to Shipped: Order Scan shows them shipped.
             from meesho_app.meesho_linking import mark_shipped
             out["marked_shipped"] = mark_shipped([a])
+            # And every parcel scanned at the desk (linked or not): shipped / cancelled as Meesho now shows it.
+            from meesho_app.scan_unshipped import settle
+            out["scans_settled"] = settle([a.business_id], [a])
         self.stdout.write(json.dumps(out, default=str))

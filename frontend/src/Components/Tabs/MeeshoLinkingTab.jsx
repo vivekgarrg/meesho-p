@@ -92,10 +92,8 @@ function LinkedCard({ r }) {
 
 /** The day's Meesho parcels: linked against the total, per courier and overall, and what's left. */
 function Progress({ plan, isMobile, courier, setCourier }) {
-  const [open, setOpen] = useState(false);
   if (!plan) return null;
   const pct = (a, b) => (b ? Math.min(100, (a / b) * 100) : 0);
-  const left = plan.left_orders.filter((o) => !courier || o.courier === courier);
   const done = plan.total > 0 && plan.left === 0;
   return (
     <div style={{ ...S.card, padding: 14, display: "flex", flexDirection: "column", gap: 12 }}>
@@ -125,7 +123,7 @@ function Progress({ plan, isMobile, courier, setCourier }) {
             const on = courier === c.courier;
             const cdone = c.total > 0 && c.left === 0;
             return (
-              <button key={c.courier} onClick={() => { setCourier(on ? null : c.courier); setOpen(true); }} aria-pressed={on}
+              <button key={c.courier} onClick={() => setCourier(on ? null : c.courier)} aria-pressed={on}
                 style={{ textAlign: "left", cursor: "pointer", fontFamily: "inherit", minWidth: 0, background: on ? t.bg : C.white,
                   border: `2px solid ${on ? t.solid : t.border}`, borderTop: `5px solid ${t.solid}`, borderRadius: 12, padding: "8px 12px",
                   display: "flex", flexDirection: "column", gap: 3 }}>
@@ -141,31 +139,89 @@ function Progress({ plan, isMobile, courier, setCourier }) {
         </div>
       )}
       {plan.left > 0 && (
-        <div>
-          <button onClick={() => setOpen(!open)} style={{ ...btn("ghost", "sm"), minHeight: 36 }}>
-            {open ? "▾" : "▸"} Left to link{courier ? ` · ${courier}` : ""} ({courier ? left.length : plan.left})
-          </button>
-          {courier && <button onClick={() => setCourier(null)} style={{ ...btn("ghostOrange", "sm"), marginLeft: 6, minHeight: 36 }}>All couriers ✕</button>}
-          {open && (
-            <div style={{ marginTop: 8, maxHeight: 360, overflowY: "auto", border: `1px solid ${C.gray100}`, borderRadius: 10 }}>
-              {left.length === 0 && <div style={{ padding: 14, fontSize: 13, color: C.gray500 }}>Nothing left here.</div>}
-              {left.map((o) => (
-                <div key={`${o.business_name}-${o.sub_order_no}`} style={{ display: "flex", gap: 10, alignItems: "center", padding: "8px 10px", borderBottom: `1px solid ${C.gray100}` }}>
-                  <Photo url={o.image_url} fallback={o.image_fallback_url} size={40} />
-                  <div style={{ minWidth: 0, flex: 1 }}>
-                    <div style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 13.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                      {o.sku}{o.size ? ` · ${o.size}` : ""} <span style={{ color: (o.qty || 1) > 1 ? C.red : C.orange }}>×{o.qty || 1}</span></div>
-                    <div style={{ fontSize: 12, color: C.gray500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                      {[o.courier, o.awb, o.business_name].filter(Boolean).join(" · ")}</div>
-                  </div>
-                </div>
-              ))}
-              {plan.left > plan.left_orders.length && !courier && <div style={{ padding: 10, fontSize: 12, color: C.gray500 }}>…and {plan.left - plan.left_orders.length} more.</div>}
-            </div>
-          )}
-        </div>
+        <button onClick={() => document.getElementById("not-scanned")?.scrollIntoView({ behavior: "smooth", block: "start" })}
+          style={{ ...btn("ghost", "sm"), minHeight: 36, alignSelf: "flex-start" }}>↓ See the {plan.left} not scanned yet</button>
       )}
     </div>
+  );
+}
+
+/**
+ * The day's parcels not scanned (linked) yet — always open at the bottom of the
+ * page, by courier, as cards that fit a phone, an iPad or a desktop. A parcel
+ * leaves the list the moment its scan goes green (here or at another desk).
+ */
+function NotScanned({ plan, courier, setCourier, isMobile }) {
+  const [q, setQ] = useState("");
+  if (!plan) return null;
+  const needle = q.trim().toLowerCase();
+  const all = plan.left_orders;
+  const rows = all.filter((o) => (!courier || o.courier === courier)
+    && (!needle || [o.sku, o.awb, o.sub_order_no, o.business_name].some((v) => String(v || "").toLowerCase().includes(needle))));
+  const couriers = plan.by_courier.filter((c) => c.left > 0);
+  const groups = {};
+  for (const o of rows) (groups[o.courier] = groups[o.courier] || []).push(o);
+  return (
+    <section id="not-scanned" style={{ ...S.card, padding: 0, overflow: "hidden", scrollMarginTop: 12 }}>
+      <div style={{ padding: "12px 14px", display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", borderBottom: `1px solid ${C.gray100}` }}>
+        <span style={{ fontWeight: 900, fontSize: 15, flex: "1 1 200px", color: C.gray900 }}>
+          Not scanned yet <span style={{ fontFamily: "monospace", color: plan.left ? C.red : C.green }}>{plan.left}</span>
+          <span style={{ fontSize: 12, fontWeight: 600, color: C.gray500, marginLeft: 8 }}>labels downloaded for the day, not linked here</span>
+        </span>
+        <input type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search SKU, AWB, sub-order…" aria-label="Search not scanned"
+          style={{ ...S.inp, width: isMobile ? "100%" : 240, minHeight: 40 }} />
+      </div>
+      {couriers.length > 1 && (
+        <div style={{ padding: "8px 14px", display: "flex", gap: 6, flexWrap: "wrap", borderBottom: `1px solid ${C.gray100}` }}>
+          <button onClick={() => setCourier(null)} style={{ ...btn(courier ? "ghost" : "ghostOrange", "sm"), minHeight: 36 }}>All · {plan.left}</button>
+          {couriers.map((c) => {
+            const t = courierTone(c.courier);
+            const on = courier === c.courier;
+            return (
+              <button key={c.courier} onClick={() => setCourier(on ? null : c.courier)} aria-pressed={on}
+                style={{ minHeight: 36, borderRadius: 999, padding: "4px 12px", fontFamily: "inherit", fontSize: 13, fontWeight: 800, cursor: "pointer",
+                  border: `1.5px solid ${on ? t.solid : t.border}`, background: on ? t.bg : C.white, color: t.fg }}>{c.courier} · {c.left}</button>
+            );
+          })}
+        </div>
+      )}
+      {plan.left === 0 ? (
+        <div style={{ padding: 22, textAlign: "center", fontSize: 14, fontWeight: 800, color: plan.total ? C.green : C.gray500 }}>
+          {plan.total ? "✓ Every parcel for the day is scanned." : "No Meesho labels downloaded for this day yet."}</div>
+      ) : rows.length === 0 ? (
+        <div style={{ padding: 22, textAlign: "center", fontSize: 13.5, color: C.gray500 }}>Nothing matches.</div>
+      ) : (
+        <div style={{ maxHeight: isMobile ? "none" : 620, overflowY: isMobile ? "visible" : "auto" }}>
+          {Object.entries(groups).map(([name, list]) => {
+            const t = courierTone(name);
+            return (
+              <div key={name}>
+                <div style={{ position: "sticky", top: 0, zIndex: 1, padding: "6px 14px", background: t.bg, color: t.fg, fontWeight: 900, fontSize: 13,
+                  borderTop: `1px solid ${t.border}`, borderBottom: `1px solid ${t.border}` }}>{name} · {list.length}</div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(min(100%, 280px), 1fr))" }}>
+                  {list.map((o) => (
+                    <div key={`${o.business_name}-${o.sub_order_no}`} style={{ display: "flex", gap: 10, alignItems: "center", padding: "9px 12px",
+                      borderBottom: `1px solid ${C.gray100}`, borderRight: `1px solid ${C.gray100}`, minWidth: 0 }}>
+                      <Photo url={o.image_url} fallback={o.image_fallback_url} size={48} />
+                      <div style={{ minWidth: 0, flex: 1 }}>
+                        <div style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 14, color: C.gray900, wordBreak: "break-all" }}>
+                          {o.sku}{o.size ? <span style={{ fontWeight: 700, color: C.gray500, fontSize: 12 }}> · {o.size}</span> : null}
+                          <span style={{ marginLeft: 6, color: (o.qty || 1) > 1 ? "#fff" : C.orange, background: (o.qty || 1) > 1 ? C.red : C.orangeLight, borderRadius: 6, padding: "0 6px" }}>×{o.qty || 1}</span>
+                        </div>
+                        <div style={{ fontSize: 12, color: C.gray600, marginTop: 2, wordBreak: "break-all" }}>
+                          <span style={{ fontFamily: "monospace" }}>{o.awb || "no AWB"}</span>{o.business_name ? ` · ${o.business_name}` : ""}</div>
+                        <div style={{ fontSize: 11.5, color: C.gray400, fontFamily: "monospace" }}>{o.sub_order_no}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+          {plan.left > all.length && !courier && !needle && <div style={{ padding: 10, fontSize: 12, color: C.gray500 }}>…and {plan.left - all.length} more.</div>}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -665,6 +721,8 @@ export function MeeshoLinkingTab() {
           </table>
         </div>
       </div>
+
+      <NotScanned plan={data.plan} courier={courier} setCourier={setCourier} isMobile={isMobile} />
 
       <div style={{ ...S.card, padding: "12px 14px", display: "flex", flexDirection: "column", gap: 8 }}>
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
