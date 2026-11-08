@@ -95,6 +95,27 @@ class OrderLinkingTests(TestCase):
                          {"Valmo": (0, 2), "Delhivery": (1, 0)})
         self.assertNotIn("DL2001", [o["awb"] for o in plan["left_orders"]])
 
+    def test_parcels_downloaded_on_meesho_itself_are_to_pack_too(self):
+        snap = MeeshoSyncSnapshot.objects.get(endpoint="orders_ready_to_ship")
+        snap.payload = snap.payload + [
+            {"sub_order_num": "21_1", "sku": "kadai", "awb": "VL3001", "carrier_id": 19, "quantity": 2, "label": "Downloaded"},
+            {"sub_order_num": "22_1", "sku": "tawa", "awb": "VL3002", "carrier_id": 19, "label": "Not Downloaded"},   # no label yet
+        ]
+        snap.save()
+        MeeshoCourier.objects.create(carrier_id=19, name="Valmo")
+        d = self.c.get(self.base).data["plan"]
+        # The 3 labels downloaded here, plus the one downloaded on Meesho's panel; the undownloaded one isn't to pack yet.
+        self.assertEqual((d["total"], d["linked"], d["left"]), (4, 0, 4))
+        mine = [o for o in d["left_orders"] if o["awb"] == "VL3001"]
+        self.assertEqual((mine[0]["sku"], mine[0]["qty"], mine[0]["courier"]), ("kadai", 2, "Valmo"))
+        self.assertEqual({c["courier"]: c["left"] for c in d["by_courier"]}, {"Valmo": 3, "Delhivery": 1})
+        # Packed — scanned here — it moves from left to linked, and is counted once.
+        r = self.link("VL3001", "KP0AAAA00000001")
+        self.assertEqual(r.status_code, 201, r.data)
+        d = self.c.get(self.base)
+        self.assertEqual((d.data["count"], d.data["plan"]["total"], d.data["plan"]["linked"], d.data["plan"]["left"]), (1, 4, 1, 3))
+        self.assertNotIn("VL3001", [o["awb"] for o in d.data["plan"]["left_orders"]])
+
     def test_every_green_scan_counts_at_once_and_stays_until_cancelled(self):
         counts = f"{self.base}counts/"
         self.assertEqual(self.c.get(counts).data["count"], 0)
