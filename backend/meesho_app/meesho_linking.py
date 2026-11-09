@@ -122,29 +122,6 @@ def _build_shipments(snap_ids):
     return by_awb
 
 
-def _ready_to_ship(accounts):
-    """Meesho's Ready to ship list with its label downloaded — wherever it was downloaded, here or on
-    Meesho's own panel: {AWB: {business_id, sub_order_num, sku, qty, carrier_id, packet_id}}."""
-    return _cached("rts", accounts, ("orders_ready_to_ship",), _build_rts)
-
-
-def _build_rts(snap_ids):
-    out = {}
-    for snap in MeeshoSyncSnapshot.objects.filter(pk__in=snap_ids).select_related("account"):
-        for r in snap.payload if isinstance(snap.payload, list) else []:
-            awb = _clean(r.get("awb")) if isinstance(r, dict) else ""
-            if not awb or r.get("label") in (False, "Not Downloaded"):
-                continue
-            try:
-                qty = int(r.get("quantity") or 1)
-            except (TypeError, ValueError):
-                qty = 1
-            out.setdefault((snap.account.business_id, awb), {
-                "sub_order_num": r.get("sub_order_num") or "", "sku": r.get("sku") or "", "qty": qty,
-                "carrier_id": r.get("carrier_id"), "packet_id": _clean(r.get("packet_id"))})
-    return out
-
-
 # Where a shipment's AWB ↔ packet link stands, from Meesho's own lists (Ready
 # to ship / Shipped carry the packet Meesho has for each AWB) and our links.
 LINKED = "linked"                    # Meesho has a packet for it (ours, if we have one)
@@ -728,10 +705,9 @@ LEFT_LISTED, LEFT_PHOTOS = 1500, 400
 
 def _plan(request, desk, day, ships, live=None, details=True):
     """
-    The day's Meesho parcels to link — every Meesho label downloaded for the
-    packing day (here, or on Meesho's own panel: its Ready to ship list carries
-    those too), and any parcel linked today that isn't on them — and where each
-    stands: packed (scanned here and Meesho answered green), cancelled, or still
+    The day's Meesho parcels to link — the Meesho labels downloaded through
+    this app for the packing day (every download from 1 pm to 1 pm), and only
+    those — and where each stands: packed (scanned here and Meesho answered green), cancelled, or still
     to link. A parcel counts as packed only from its own scan here — never
     because a sync of Meesho's lists shows it linked; those are only pointed out
     ("linked on Meesho, not scanned here"). Counted per courier and in total;
@@ -753,7 +729,6 @@ def _plan(request, desk, day, ships, live=None, details=True):
         .values_list("business_id", "awb_number")}
     cancelled = _cancelled_subs(accounts)
     couriers, left, seen = {}, [], set()
-    couriers_by_id = _courier_names()
     on_meesho_only = 0
 
     def bucket(name):
@@ -777,36 +752,9 @@ def _plan(request, desk, day, ships, live=None, details=True):
             left.append(l)
             if (ships.get(awb) or {}).get("packet_id"):
                 on_meesho_only += 1
-    # Labels downloaded on Meesho's own panel (not through this app): the app has no label row for them,
-    # but they are in Ready to ship and still to pack — on the day the desk is on now.
-    from types import SimpleNamespace
-    if v._following_day(request, ids)[0] == day:
-        rts = _ready_to_ship(accounts)
-        done = links_by_awb(ids, [a for _b, a in rts])
-        for (biz_id, awb), r in rts.items():
-            key = (biz_id, awb)
-            if key in seen or key in live["links"] or key in done or (biz_id, r["sub_order_num"]) in cancelled:
-                continue
-            seen.add(key)
-            name = " ".join((couriers_by_id.get(r["carrier_id"], "") or "").split()) or "No courier on label"
-            c = bucket(name)
-            c["total"] += 1
-            c["left"] += 1
-            if r["packet_id"]:
-                on_meesho_only += 1
-            left.append(SimpleNamespace(business_id=biz_id, order_id=r["sub_order_num"], awb_number=awb, sku=r["sku"], size="",
-                                        qty=r["qty"], courier_name=name if name != "No courier on label" else ""))
-    # Scanned green today but not on the day's labels (a label from another day, or not downloaded here):
-    # still packed today, so still counted.
-    for key, info in live["links"].items():
-        if key in seen:
-            continue
-        c = bucket(info["courier"])
-        if info["cancelled"]:
-            c["cancelled"] += 1
-        else:
-            c["total"] += 1
-            c["linked"] += 1
+    # Scanned green today but not on the day's downloaded labels: packed (they're in "Packed today"),
+    # but not in this count — it is the labels downloaded for the day, and only those.
+    not_on_labels = sum(1 for key, info in live["links"].items() if key not in seen and not info["cancelled"])
     photos = photo_map(left[:LEFT_PHOTOS], sub_of=lambda l: l.order_id, own=lambda l: "") if left and details else {}
     by_courier = sorted(couriers.values(), key=lambda c: (-c["total"], c["courier"]))
     return {
@@ -816,6 +764,8 @@ def _plan(request, desk, day, ships, live=None, details=True):
         "left": sum(c["left"] for c in by_courier),
         "cancelled": sum(c["cancelled"] for c in by_courier),
         "on_meesho_only": on_meesho_only,
+        "downloaded": len(labels),
+        "not_on_labels": not_on_labels,
         "by_courier": by_courier,
         "left_awbs": [_clean(l.awb_number) for l in left] if not details else None,
         "left_orders": [] if not details else [{"business_name": names.get(l.business_id, ""), "sub_order_no": l.order_id, "awb": _clean(l.awb_number),

@@ -1,6 +1,7 @@
 """Meesho Orders → Order linking: AWB ↔ packet, PACKED in Order Scan, couriers, and the log."""
 
 import json
+from datetime import timedelta
 import os
 from unittest import mock
 
@@ -95,26 +96,27 @@ class OrderLinkingTests(TestCase):
                          {"Valmo": (0, 2), "Delhivery": (1, 0)})
         self.assertNotIn("DL2001", [o["awb"] for o in plan["left_orders"]])
 
-    def test_parcels_downloaded_on_meesho_itself_are_to_pack_too(self):
+    def test_only_the_labels_downloaded_here_make_the_days_total(self):
+        # Meesho's Ready to ship also holds parcels whose labels were downloaded elsewhere or on earlier days:
+        # none of them are in the day's total.
         snap = MeeshoSyncSnapshot.objects.get(endpoint="orders_ready_to_ship")
         snap.payload = snap.payload + [
             {"sub_order_num": "21_1", "sku": "kadai", "awb": "VL3001", "carrier_id": 19, "quantity": 2, "label": "Downloaded"},
-            {"sub_order_num": "22_1", "sku": "tawa", "awb": "VL3002", "carrier_id": 19, "label": "Not Downloaded"},   # no label yet
+            {"sub_order_num": "22_1", "sku": "tawa", "awb": "VL3002", "carrier_id": 19, "label": "Not Downloaded"},
         ]
         snap.save()
-        MeeshoCourier.objects.create(carrier_id=19, name="Valmo")
         d = self.c.get(self.base).data["plan"]
-        # The 3 labels downloaded here, plus the one downloaded on Meesho's panel; the undownloaded one isn't to pack yet.
-        self.assertEqual((d["total"], d["linked"], d["left"]), (4, 0, 4))
-        mine = [o for o in d["left_orders"] if o["awb"] == "VL3001"]
-        self.assertEqual((mine[0]["sku"], mine[0]["qty"], mine[0]["courier"]), ("kadai", 2, "Valmo"))
-        self.assertEqual({c["courier"]: c["left"] for c in d["by_courier"]}, {"Valmo": 3, "Delhivery": 1})
-        # Packed — scanned here — it moves from left to linked, and is counted once.
-        r = self.link("VL3001", "KP0AAAA00000001")
-        self.assertEqual(r.status_code, 201, r.data)
-        d = self.c.get(self.base)
-        self.assertEqual((d.data["count"], d.data["plan"]["total"], d.data["plan"]["linked"], d.data["plan"]["left"]), (1, 4, 1, 3))
-        self.assertNotIn("VL3001", [o["awb"] for o in d.data["plan"]["left_orders"]])
+        self.assertEqual((d["downloaded"], d["total"], d["linked"], d["left"]), (3, 3, 0, 3))
+        self.assertNotIn("VL3001", [o["awb"] for o in d["left_orders"]])
+
+    def test_two_downloads_in_one_packing_day_are_one_total(self):
+        # A download at 5 pm and another before 1 pm the next morning fall in the same packing day.
+        day = views._current_business_date()
+        LabelOrder.objects.create(order_id="31_1", awb_number="VL4001", courier_name="Valmo", uploaded_date=day, business=self.biz, sku="y")
+        LabelOrder.objects.create(order_id="32_1", awb_number="VL4002", courier_name="Valmo", uploaded_date=day - timedelta(days=1),
+                                  business=self.biz, sku="y")                      # yesterday's: not today's
+        d = self.c.get(self.base).data["plan"]
+        self.assertEqual((d["downloaded"], d["total"]), (4, 4))
 
     def test_every_green_scan_counts_at_once_and_stays_until_cancelled(self):
         counts = f"{self.base}counts/"
@@ -141,11 +143,12 @@ class OrderLinkingTests(TestCase):
         self.assertEqual((d["count"], d["cancelled_after"], d["plan"]["linked"], d["plan"]["cancelled"]), (2, 1, 2, 1))
         self.assertEqual(self.c.get(self.base).data["count"], 2)
 
-    def test_a_green_scan_not_on_the_days_labels_still_counts(self):
+    def test_a_green_scan_not_on_the_days_labels_counts_packed_but_not_in_the_total(self):
         LabelOrder.objects.filter(awb_number="DL2001").delete()
         self.assertEqual(self.link("DL2001", "KP9ZZZZ12345678").status_code, 201)
         d = self.c.get(f"{self.base}counts/").data
-        self.assertEqual((d["count"], d["plan"]["total"], d["plan"]["linked"]), (1, 3, 1))
+        # Packed today, but not in the downloaded labels' total — said apart.
+        self.assertEqual((d["count"], d["plan"]["total"], d["plan"]["linked"], d["plan"]["not_on_labels"]), (1, 2, 0, 1))
 
     def test_a_search_doesnt_change_the_count(self):
         self.link("VL1001", "KP4AUSE32034836")

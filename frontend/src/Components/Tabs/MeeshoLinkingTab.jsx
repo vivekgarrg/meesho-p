@@ -101,7 +101,11 @@ function Progress({ plan, isMobile, courier, setCourier }) {
         <span style={{ fontSize: 14, fontWeight: 800, color: C.gray800 }}>
           <span style={{ fontFamily: "monospace", fontSize: 26, color: C.gray900 }}>{plan.linked}</span>
           <span style={{ color: C.gray500 }}> of {plan.total} packed</span>
-          {plan.cancelled ? <span style={{ color: C.gray500, fontWeight: 600, fontSize: 12.5 }}> · {plan.cancelled} cancelled</span> : null}
+          <span style={{ display: "block", color: C.gray500, fontWeight: 600, fontSize: 12.5 }}>
+            {plan.downloaded ?? plan.total + plan.cancelled} labels downloaded for this packing day (1 pm to 1 pm)
+            {plan.cancelled ? ` · ${plan.cancelled} cancelled` : ""}
+            {plan.not_on_labels ? ` · ${plan.not_on_labels} more scanned that aren't on these labels` : ""}
+          </span>
         </span>
         <span style={{ fontSize: 15, fontWeight: 900, color: plan.total === 0 ? C.gray500 : done ? C.green : C.orange }}>
           {plan.total === 0 ? "No Meesho labels downloaded for this day yet" : done ? "✓ All packed" : `${plan.left} left to scan`}
