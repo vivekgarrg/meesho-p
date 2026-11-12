@@ -5,6 +5,7 @@ from . import api_cache
 from . import upload_cleanup
 from . import return_desk
 from . import meesho_return_claim
+from . import parent_merge
 from . import meesho_linking, meesho_return_analysis, meesho_returns, meesho_search, meesho_sync, orders_panel, return_guard, scan_unshipped, sku_parents
 from . import bulk_listing_views
 from . import listing_images_views
@@ -61,6 +62,7 @@ urlpatterns = [
     path("ads/sku-analysis/", views.ads_sku_analysis, name="ads_sku_analysis"),
     path("referrals/", views.referral_list, name="referral_list"),
     path("compensation/", views.compensation_recovery_list, name="compensation_recovery_list"),
+    path("parent-merge/", parent_merge.parent_merge, name="parent_merge"),
     path("parent-prices/", views.parent_price_list, name="parent_price_list"),
     path("parent-prices/sales/", views.parent_price_sales, name="parent_price_sales"),
     path("parent-prices/<str:item_id>/", views.parent_price_detail, name="parent_item_pricing"),

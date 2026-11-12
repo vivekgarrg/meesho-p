@@ -211,6 +211,8 @@ API_OWNERSHIP = {
     # parent SKUs, and SKU Analysis reads the same rows.
     "final-prices/":         ["/pricing", "/labels", "/inventory", "/sku-analysis"],
     "parent-prices/":        ["/pricing", "/labels", "/inventory", "/sku-analysis"],
+    # Merging two parents into one can't be undone: SKU Pricing only.
+    "parent-merge/":         ["/pricing"],
     "parent-from-sku/":      ["/pricing", "/labels", "/inventory"],
     "parent-linking/":       ["/pricing", "/labels", "/inventory"],
     "link-sku/":             ["/pricing", "/labels", "/inventory"],

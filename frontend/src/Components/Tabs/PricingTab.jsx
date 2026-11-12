@@ -333,7 +333,7 @@ function CreateChildForm({ parentId, parentPrice, onSaved, onCancel }) {
 // ── parent card ───────────────────────────────────────────────────────────────
 function ParentCard({ parent, notify, onLink, dragging, unlinked = [], onOptOut, masterItems = [], sales }) {
   const [open, setOpen] = useState(false);
-  const [panel, setPanel] = useState(null); // null | "history" | "link" | "create" | "edit" | "suggest" | "sheet" | "stock" | "photos" | "rename" | "bom"
+  const [panel, setPanel] = useState(null); // null | "history" | "link" | "create" | "edit" | "suggest" | "sheet" | "stock" | "photos" | "rename" | "bom" | "merge"
   const [dragOver, setDragOver] = useState(false);
   // Seeded from the parent, and re-seeded every time the Edit panel is opened
   // (see `toggle` below). Seeding only at mount meant a card that had been on
@@ -1013,12 +1013,19 @@ function ParentCard({ parent, notify, onLink, dragging, unlinked = [], onOptOut,
             <button onClick={() => toggle("edit")} style={{ ...btn(panel === "edit" ? "ghostOrange" : "ghost", "sm"), fontSize: 11 }}>
               {panel === "edit" ? "✕ Cancel" : "✏️ Edit Price"}
             </button>
+            <button onClick={() => toggle("merge")} title="Two parents of the same product? Move all of this one's SKUs into the other."
+              style={{ ...btn(panel === "merge" ? "ghostOrange" : "ghost", "sm"), fontSize: 11 }}>
+              {panel === "merge" ? "✕ Cancel" : "⇄ Merge"}
+            </button>
             <button onClick={deleteParent} style={{ ...btn("danger", "sm"), fontSize: 11 }}>🗑 Delete</button>
           </div>
 
           {/* Panel area */}
           {panel && (
             <div style={{ padding: "12px 16px", borderBottom: `1px solid ${C.gray100}` }}>
+              {panel === "merge" && (
+                <MergePanel parent={parent} notify={notify} onDone={() => { setPanel(null); invalidatePricing(); }} />
+              )}
               {panel === "rename" && (
                 <ActionPanel accent={C.orange} icon="✎" title="Rename Parent SKU">
                   <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
@@ -1657,6 +1664,101 @@ function ParentCard({ parent, notify, onLink, dragging, unlinked = [], onOptOut,
 // India's GST slabs, offered as a choice so a typo can't mis-tax a parent.
 // The server accepts any whole number 0–28 (clean_new_parent_pricing).
 const GST_SLABS = ["0", "3", "5", "12", "18", "28"];
+
+/**
+ * Merge this parent into another of the same product: every SKU of this one —
+ * and its stock, tasks, listings, pauses and product page — moves under the
+ * one picked, at that parent's price, and this one is removed. Shows what will
+ * happen first (server: parent_merge.preview), then asks once more.
+ */
+function MergePanel({ parent, notify, onDone }) {
+  const [q, setQ] = useState("");
+  const [target, setTarget] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const term = q.trim();
+  const { data: found } = useSWR(term.length >= 1 ? parentsKey(term) : null);
+  const options = (found?.results || []).filter((p) => p.item_id !== parent.item_id).slice(0, 12);
+  const previewKey = target ? `${API}/parent-merge/?source=${encodeURIComponent(parent.item_id)}&target=${encodeURIComponent(target)}` : null;
+  const { data: pv, error: pvErr, isLoading } = useSWR(previewKey);
+  const money = (v) => (v == null ? "—" : `₹${Number(v).toLocaleString("en-IN")}`);
+
+  const go = async () => {
+    if (!pv || pv.blocked) return;
+    if (!window.confirm(`Merge ${parent.item_id} into ${target}?\n\nAll ${pv.source.skus.length} SKUs move to ${target} at its price, and ${parent.item_id} is removed. This can't be undone.`)) return;
+    setBusy(true); setErr("");
+    try {
+      const r = await fetch(`${API}/parent-merge/`, { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source: parent.item_id, target }) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || `Merge failed (${r.status}).`);
+      notify("ok", `${parent.item_id} merged into ${target} — ${pv.source.skus.length} SKU(s) moved.`);
+      onDone();
+    } catch (e) { setErr(e.message); } finally { setBusy(false); }
+  };
+
+  const side = (title, p, tone) => (
+    <div style={{ flex: "1 1 220px", minWidth: 0, border: `1.5px solid ${tone}`, borderRadius: 10, padding: 10, background: C.white }}>
+      <div style={{ fontSize: 11, fontWeight: 800, color: tone, textTransform: "uppercase", letterSpacing: ".04em" }}>{title}</div>
+      <div style={{ fontFamily: "monospace", fontWeight: 900, fontSize: 14, color: C.gray900, wordBreak: "break-all" }}>{p.item_id}</div>
+      <div style={{ fontSize: 12, color: C.gray600, marginTop: 4, lineHeight: 1.6 }}>
+        Price {money(p.price.final_price)} <span style={{ color: C.gray400 }}>(item {money(p.price.item_price)})</span><br />
+        {Array.isArray(p.skus) ? p.skus.length : p.skus} SKUs · {p.history} price change{p.history === 1 ? "" : "s"}
+        {p.paused ? " · paused" : ""}{p.product ? " · product page" : ""}
+      </div>
+    </div>
+  );
+
+  return (
+    <ActionPanel accent={C.orange} icon="⇄" title="Merge into another parent">
+      <div style={{ fontSize: 12.5, color: C.gray600, marginBottom: 8, lineHeight: 1.5 }}>
+        Two parents for the same product? Pick the one to <b>keep</b>. Every SKU of <b style={{ fontFamily: "monospace" }}>{parent.item_id}</b> moves
+        under it at its price — with the stock, tasks, listings and pauses — and <b style={{ fontFamily: "monospace" }}>{parent.item_id}</b> is removed.
+      </div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+        <input value={q} onChange={(e) => { setQ(e.target.value); setTarget(""); }} placeholder="Search the parent to keep…" autoFocus
+          style={{ ...S.inp, flex: "1 1 220px", minWidth: 0 }} />
+      </div>
+      {!target && term && (
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
+          {options.length === 0 ? <span style={{ fontSize: 12, color: C.gray400 }}>{found ? "No other parent matches." : "Searching…"}</span>
+            : options.map((p) => (
+              <button key={p.item_id} onClick={() => { setTarget(p.item_id); setQ(p.item_id); }}
+                style={{ ...btn("ghost", "sm"), fontFamily: "monospace", fontSize: 12 }}>{p.item_id}</button>
+            ))}
+        </div>
+      )}
+      {target && (
+        <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
+          {isLoading && <span style={{ fontSize: 12, color: C.gray400 }}>Checking…</span>}
+          {pvErr && <span style={{ fontSize: 12.5, color: C.red, fontWeight: 700 }}>Couldn't check this merge.</span>}
+          {pv && (
+            <>
+              <div style={{ display: "flex", gap: 8, alignItems: "stretch", flexWrap: "wrap" }}>
+                {side("Merge (removed)", pv.source, C.red)}
+                <div style={{ alignSelf: "center", fontSize: 20, color: C.gray400 }}>→</div>
+                {side("Keep", pv.target, C.green)}
+              </div>
+              <div style={{ fontSize: 12.5, color: C.gray700, lineHeight: 1.6 }}>
+                Moves to <b style={{ fontFamily: "monospace" }}>{target}</b>: {pv.source.skus.join(", ") || "no SKUs"}.
+                {pv.price_changes.length > 0 && <> <b style={{ color: "#B45309" }}>{pv.price_changes.length} SKU{pv.price_changes.length === 1 ? "" : "s"} change price</b> to {money(pv.target.price.final_price)}.</>}
+                {(pv.source.purchases + pv.source.adjustments + pv.source.packed) > 0 && <> Stock entries move too ({pv.source.purchases} purchases, {pv.source.adjustments} adjustments, {pv.source.packed} packing).</>}
+                {pv.target.history > 0 && pv.source.history > 0 && <> {target}'s price history is kept; {parent.item_id}'s {pv.source.history} change{pv.source.history === 1 ? " is" : "s are"} dropped.</>}
+                {pv.also_in.length > 0 && <> Also merged in {pv.also_in.map((b) => b.business).join(", ")} (shared pricing).</>}
+              </div>
+              {pv.blocked && <div role="alert" style={{ fontSize: 12.5, color: C.red, fontWeight: 700 }}>✕ {pv.blocked}</div>}
+              {err && <div role="alert" style={{ fontSize: 12.5, color: C.red, fontWeight: 700 }}>✕ {err}</div>}
+              <div>
+                <button onClick={go} disabled={busy || !!pv.blocked} style={{ ...btn("danger", "sm"), opacity: busy || pv.blocked ? 0.5 : 1 }}>
+                  {busy ? "Merging…" : `⇄ Merge ${pv.source.skus.length} SKU${pv.source.skus.length === 1 ? "" : "s"} into ${target}`}</button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </ActionPanel>
+  );
+}
 
 function AddParentForm({ onSaved, onCancel, notify }) {
   // Tax and packaging start EMPTY, not "0": pre-filled zeros counted as
