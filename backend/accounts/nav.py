@@ -18,6 +18,7 @@ NAV_CATALOG = [
     # Every page of the sidebar's Meesho group (orders, linking, returns, OTPs,
     # inventory, payments, settings) goes by this one permission.
     {"path": "/meesho-orders",     "label": "Meesho (every page in this group)", "group": "Meesho"},
+    {"path": "/flipkart-seller",   "label": "Flipkart Seller Hub", "group": "Flipkart"},
     # Order linking alone, for a packing-desk person who needs nothing else of Meesho.
     {"path": "/meesho-linking",    "label": "Order Linking",     "group": "Meesho"},
     # Every order and its state (to accept, labels to download…) by dispatch day — can be given alone.
@@ -213,6 +214,7 @@ API_OWNERSHIP = {
     "parent-prices/":        ["/pricing", "/labels", "/inventory", "/sku-analysis"],
     # Merging two parents into one can't be undone: SKU Pricing only.
     "parent-merge/":         ["/pricing"],
+    "flipkart-seller/":      ["/flipkart-seller"],
     "parent-from-sku/":      ["/pricing", "/labels", "/inventory"],
     "parent-linking/":       ["/pricing", "/labels", "/inventory"],
     "link-sku/":             ["/pricing", "/labels", "/inventory"],

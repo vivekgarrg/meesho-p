@@ -84,3 +84,6 @@ return_claim.py
 
 # Return-claim files on their way to Meesho
 backend/claim_uploads/
+
+# Flipkart seller-panel calls copied from the browser: carry live session cookies / tokens.
+flipkart-api.py

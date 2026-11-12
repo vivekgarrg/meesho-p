@@ -37,6 +37,14 @@ export const NAV_GROUPS = [
     ],
   },
   {
+    // Flipkart Seller Hub, connected (password + OTP) — orders and accepting follow as they're added.
+    label: 'Flipkart',
+    color: '#2874F0',
+    items: [
+      { path: '/flipkart-seller', label: 'Flipkart Seller Hub', icon: '🛒' },
+    ],
+  },
+  {
     label: 'Analytics',
     color: '#A78BFA',
     items: [

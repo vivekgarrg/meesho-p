@@ -5,7 +5,7 @@ from . import api_cache
 from . import upload_cleanup
 from . import return_desk
 from . import meesho_return_claim
-from . import parent_merge
+from . import flipkart_seller, parent_merge
 from . import meesho_linking, meesho_return_analysis, meesho_returns, meesho_search, meesho_sync, orders_panel, return_guard, scan_unshipped, sku_parents
 from . import bulk_listing_views
 from . import listing_images_views
@@ -63,6 +63,11 @@ urlpatterns = [
     path("referrals/", views.referral_list, name="referral_list"),
     path("compensation/", views.compensation_recovery_list, name="compensation_recovery_list"),
     path("parent-merge/", parent_merge.parent_merge, name="parent_merge"),
+    # Flipkart Seller Hub, connected (flipkart_seller.py).
+    path("flipkart-seller/",          flipkart_seller.account_view, name="flipkart_seller"),
+    path("flipkart-seller/connect/",  flipkart_seller.connect,      name="flipkart_seller_connect"),
+    path("flipkart-seller/otp/",      flipkart_seller.otp,          name="flipkart_seller_otp"),
+    path("flipkart-seller/refresh/",  flipkart_seller.refresh_view, name="flipkart_seller_refresh"),
     path("parent-prices/", views.parent_price_list, name="parent_price_list"),
     path("parent-prices/sales/", views.parent_price_sales, name="parent_price_sales"),
     path("parent-prices/<str:item_id>/", views.parent_price_detail, name="parent_item_pricing"),

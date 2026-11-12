@@ -51,6 +51,7 @@ import { MeeshoLinkingPage } from './Components/Tabs/MeeshoLinkingTab';
 import { ReturnClaimTab } from './Components/Tabs/ReturnClaimTab';
 import { LabelsDownloadedTab } from './Components/Tabs/LabelsDownloadedTab';
 import { OrdersPanelTab } from './Components/Tabs/OrdersPanelTab';
+import { FlipkartSellerTab } from './Components/Tabs/FlipkartSellerTab';
 import { ScanLookupTab } from './Components/Tabs/ScanLookupTab';
 import { ExtensionTab } from './Components/Tabs/ExtensionTab';
 import { BulkListingTab } from './Components/Tabs/BulkListingTab';
@@ -1249,6 +1250,7 @@ function AppShell() {
                 <Route path="/return-claim" element={<ReturnClaimTab />} />
                 <Route path="/label-items" element={<LabelsDownloadedTab />} />
                 <Route path="/orders-panel" element={<OrdersPanelTab />} />
+                <Route path="/flipkart-seller" element={<FlipkartSellerTab />} />
                 {/* Sync and Inventory are tabs of Meesho Orders now; old links land on the right tab. */}
                 {/* Meesho: one page per section, each in the sidebar's Meesho group. */}
                 <Route path="/meesho-linking" element={<MeeshoLinkingPage />} />

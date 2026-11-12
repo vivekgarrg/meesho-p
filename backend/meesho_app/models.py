@@ -3731,3 +3731,47 @@ class MeeshoReturnClaim(models.Model):
 
     def __str__(self):
         return f"{self.sub_order_no} · {self.sub_category} · {self.status}"
+
+
+class FlipkartSellerAccount(models.Model):
+    """
+    A business's Flipkart Seller Hub login, held so the app can read (and later
+    act on) its panel the way the Meesho automation does. See flipkart_seller.py.
+
+    Flipkart asks for an OTP at every login, so connecting is two steps a person
+    does (password, then the OTP from their phone); the session that comes back
+    is kept encrypted here and kept alive by a refresh every few minutes. When
+    Flipkart ends it, the account says EXPIRED and needs a new OTP.
+    """
+    STATUS_NEW      = "NEW"
+    STATUS_OTP_SENT = "OTP_SENT"     # password taken, waiting for the OTP
+    STATUS_ACTIVE   = "ACTIVE"       # session held
+    STATUS_EXPIRED  = "EXPIRED"      # Flipkart ended the session — log in again (new OTP)
+    STATUS_FAILED   = "FAILED"       # login refused — see status_message
+    STATUS_CHOICES = [(s, s.replace("_", " ").title()) for s in
+                      (STATUS_NEW, STATUS_OTP_SENT, STATUS_ACTIVE, STATUS_EXPIRED, STATUS_FAILED)]
+
+    business = models.OneToOneField("accounts.Business", on_delete=models.CASCADE, related_name="flipkart_seller_account")
+    username = models.CharField(max_length=100, help_text="The mobile number (or email) Seller Hub logs in with")
+    password_enc = models.TextField(help_text="AES-GCM encrypted — never shown, never logged")
+    cookies_enc = models.TextField(blank=True, help_text="Encrypted JSON of the session cookies")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_NEW)
+    status_message = models.TextField(blank=True)
+    seller_id = models.CharField(max_length=64, blank=True)
+    # Seller Hub's pickup location (LOC…), sent with its graphql reads.
+    location_id = models.CharField(max_length=64, blank=True)
+    otp_sent_at = models.DateTimeField(null=True, blank=True)
+    last_login_at = models.DateTimeField(null=True, blank=True)
+    last_check_at = models.DateTimeField(null=True, blank=True)
+    # The last read of the Seller Hub dashboard: units / sales value today and yesterday, impressions, out of stock.
+    summary = models.JSONField(default=dict, blank=True)
+    summary_at = models.DateTimeField(null=True, blank=True)
+    created_by = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "flipkart_seller_accounts"
+
+    def __str__(self):
+        return f"Flipkart {self.username} ({self.business_id}) {self.status}"

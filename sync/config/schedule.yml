@@ -14,3 +14,8 @@ return_guard:
   class: "ReturnGuardJob"
   queue: "default"
   description: "Daily 7 am, only while auto-pause is on: pause products customers return over 40% of (30+ delivered) or selling at a loss (20+ units)"
+flipkart_refresh:
+  cron: "*/10 * * * *"
+  class: "FlipkartRefreshJob"
+  queue: "default"
+  description: "Every 10 min: read each connected Flipkart Seller Hub account (keeps its session alive)"
