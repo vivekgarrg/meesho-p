@@ -104,6 +104,9 @@ API_OWNERSHIP = {
     "meesho-orders/":        ["/meesho-orders"],
     # The Meesho return analysis: the Meesho group, or the existing Return Analysis permission.
     "meesho-orders/return-analysis/": ["/meesho-orders", "/return-analysis"],
+    # SKU Analysis pauses a loss-making SKU of one business, and shows which are paused.
+    "meesho-orders/return-analysis/pause/":      ["/meesho-orders", "/return-analysis", "/sku-analysis"],
+    "meesho-orders/return-analysis/sku-pauses/": ["/meesho-orders", "/return-analysis", "/sku-analysis"],
     # Order linking marks parcels packed, so the scanning desk may use it too.
     "meesho-orders/linking/": ["/meesho-orders", "/meesho-linking", "/order-scan"],
     # The labels PDFs and their items: Meesho, the Labels Downloaded page, and the packing desk.

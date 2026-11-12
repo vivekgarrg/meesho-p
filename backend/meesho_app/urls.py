@@ -196,6 +196,7 @@ urlpatterns = [
     path("meesho-orders/return-analysis/pause/", return_guard.guard_pause, name="return_guard_pause"),
     path("meesho-orders/return-analysis/seen/",  return_guard.guard_seen, name="return_guard_seen"),
     path("meesho-orders/return-analysis/run/",   return_guard.guard_run, name="return_guard_run"),
+    path("meesho-orders/return-analysis/sku-pauses/", return_guard.sku_pauses, name="return_guard_sku_pauses"),
     path("meesho-orders/return-analysis/paused/", return_guard.guard_paused, name="return_guard_paused"),
     path("meesho-orders/return-analysis/resume/", return_guard.guard_resume, name="return_guard_resume"),
     path("meesho-orders/return-analysis/simple/", return_guard.simple_view, name="return_guard_simple"),

@@ -309,7 +309,121 @@ function MetricsPanel({ data, filterLabel, profitSummary, combinedCount, flipkar
 // identity column swaps to show the child count instead of a single parent
 // tag, and per-unit cost is dropped (summing a per-unit cost across different
 // SKUs isn't a meaningful number).
-function SKUDataTable({ data, onRowClick, mode = "sku", onStockClick }) {
+// ── Pausing one business's SKU (the Listing Hub's SKU pause) ────────────────
+// A SKU making a loss can be paused for the business it's losing in — only that
+// business's SKU, never the same SKU code elsewhere, nor its parent's other SKUs.
+// Same API as Return Analysis: POST meesho-orders/return-analysis/pause/ {business, sku, paused}.
+
+function useSkuPauses(ids, tick) {
+  const [d, setD] = useState({ skus: new Map(), parents: new Map(), can: false, loaded: false });
+  const [own, setOwn] = useState(0);
+  const key = (ids || []).join(",");
+  useEffect(() => {
+    if (!key) return;
+    const ctrl = new AbortController();
+    fetch(`/api/business/${ids[0]}/meesho-orders/return-analysis/sku-pauses/?businesses=${key}`, { signal: ctrl.signal })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j) => {
+        if (!j) { setD((x) => ({ ...x, loaded: true })); return; }
+        setD({
+          skus: new Map(j.skus.map((x) => [`${x.business}::${String(x.sku).toLowerCase()}`, x])),
+          parents: new Map(j.parents.map((x) => [`${x.business}::${String(x.parent).toLowerCase()}`, x])),
+          can: j.can_pause, loaded: true,
+        });
+      })
+      .catch(() => {});
+    return () => ctrl.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key, tick, own]);
+  return { ...d, reload: () => setOwn((n) => n + 1) };
+}
+
+function SkuPauseCell({ row, pauses }) {
+  const st = pauses.state(row);
+  if (st.paused) {
+    return (
+      <Box sx={{ display: "flex", flexDirection: "column", gap: 0.4, alignItems: "flex-start" }}>
+        <Tooltip title={st.byParent ? `Paused with its product ${row.parent_item_id || ""}` : (st.info?.note || "Paused")}>
+          <Chip label={st.byParent ? "⏸ Product paused" : "⏸ Paused"} size="small" sx={{ bgcolor: "#475569", color: "#fff", fontWeight: 700, fontSize: 11 }} />
+        </Tooltip>
+        {pauses.can && !st.byParent && (
+          <Button size="small" onClick={(e) => { e.stopPropagation(); pauses.ask(row, false); }}
+            sx={{ fontSize: 11, fontWeight: 800, p: "0 6px", minWidth: 0, textTransform: "none", color: "#059669" }}>▶ Resume</Button>
+        )}
+      </Box>
+    );
+  }
+  if (!pauses.can) return <Typography sx={{ fontSize: 12, color: "#059669", fontWeight: 700 }}>● Live</Typography>;
+  if (!row.parent_item_id) {
+    return <Tooltip title="Not on the Listing Hub: link this SKU to a parent on SKU Pricing first">
+      <Typography sx={{ fontSize: 11.5, color: "#94A3B8" }}>No parent</Typography></Tooltip>;
+  }
+  const loss = Number(row.net_profit) < 0;
+  return (
+    <Button size="small" variant={loss ? "contained" : "outlined"} onClick={(e) => { e.stopPropagation(); pauses.ask(row, true); }}
+      sx={{ fontSize: 11.5, fontWeight: 800, textTransform: "none", py: 0.25, px: 1, minWidth: 0, boxShadow: "none",
+        ...(loss ? { bgcolor: "#DC2626", "&:hover": { bgcolor: "#B91C1C", boxShadow: "none" } } : { color: "#475569", borderColor: "#CBD5E1" }) }}>
+      ⏸ Pause SKU
+    </Button>
+  );
+}
+
+/** Confirm before pausing / resuming: which SKU, in which business, and what it made in the period. */
+function SkuPauseDialog({ ask, label, onClose, onDone }) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [note, setNote] = useState("");
+  if (!ask) return null;
+  const { row, pause, bizId, bizName } = ask;
+  const net = Number(row.net_profit || 0);
+  const go = async () => {
+    setBusy(true); setErr("");
+    try {
+      const r = await fetch(`/api/business/${bizId}/meesho-orders/return-analysis/pause/`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ business: bizId, sku: row.sku_id, paused: pause,
+          note: pause ? (note.trim() || `Net P&L ${fmt(net)} in SKU Analysis (${label})`) : "" }) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || `Failed (${r.status})`);
+      onDone();
+    } catch (e) { setErr(e.message); } finally { setBusy(false); }
+  };
+  const line = (k, v, color) => (
+    <Box sx={{ display: "flex", justifyContent: "space-between", gap: 2, py: 0.5, borderBottom: "1px solid #F1F5F9" }}>
+      <Typography sx={{ fontSize: 13, color: "#64748B" }}>{k}</Typography>
+      <Typography sx={{ fontSize: 13, fontWeight: 800, color: color || "#0F172A", fontFamily: "monospace", textAlign: "right" }}>{v}</Typography>
+    </Box>
+  );
+  return (
+    <Dialog open onClose={busy ? undefined : onClose} maxWidth="xs" fullWidth onClick={(e) => e.stopPropagation()}>
+      <DialogTitle sx={{ fontWeight: 900, fontSize: 17 }}>{pause ? "Pause this SKU?" : "Make this SKU live again?"}</DialogTitle>
+      <DialogContent>
+        {line("SKU", row.sku_id)}
+        {line("Business", bizName || "—")}
+        {row.parent_item_id && line("Parent", row.parent_item_id)}
+        {line(`Net P&L · ${label}`, `${net >= 0 ? "+" : ""}${fmt(net)}`, net < 0 ? "#DC2626" : "#059669")}
+        {row.avg_profit_per_piece != null && line("Profit / piece delivered", fmt(row.avg_profit_per_piece), row.avg_profit_per_piece < 0 ? "#DC2626" : undefined)}
+        {line("Delivered · returned · RTO", `${row.delivered_count || 0} · ${row.return_count || 0} · ${row.rto_count || 0}`)}
+        <Typography sx={{ fontSize: 12.5, color: "#64748B", mt: 1.5 }}>
+          {pause
+            ? <>Only <b>{row.sku_id}</b> of <b>{bizName}</b> leaves the Listing Hub — its product's other SKUs, and this SKU in other businesses, stay live. Nothing changes on Meesho.</>
+            : <>{row.sku_id} of {bizName} goes back on the Listing Hub.</>}
+        </Typography>
+        {pause && <TextField size="small" fullWidth sx={{ mt: 1.5 }} label="Why (optional)" value={note} onChange={(e) => setNote(e.target.value)}
+          placeholder={`Net P&L ${fmt(net)} in SKU Analysis`} />}
+        {err && <Alert severity="error" sx={{ mt: 1.5 }}>{err}</Alert>}
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={onClose} disabled={busy} sx={{ textTransform: "none" }}>Cancel</Button>
+        <Button onClick={go} disabled={busy} variant="contained" sx={{ textTransform: "none", fontWeight: 800, boxShadow: "none",
+          bgcolor: pause ? "#DC2626" : "#059669", "&:hover": { bgcolor: pause ? "#B91C1C" : "#047857" } }}>
+          {busy ? "…" : pause ? "⏸ Pause SKU" : "▶ Resume SKU"}</Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+
+function SKUDataTable({ data, onRowClick, mode = "sku", onStockClick, pauses }) {
   const columns = [
     {
       field: "sku_id", headerName: mode === "parent" ? "Parent SKU" : "SKU", minWidth: 190, flex: 1.2,
@@ -397,6 +511,12 @@ function SKUDataTable({ data, onRowClick, mode = "sku", onStockClick }) {
       field: "net_profit", headerName: "Net P&L", width: 150, type: "number",
       valueFormatter: value => fmt(value),
       renderCell: p => <PLChip value={p.value} large />,
+    },
+    // Listing: is this business's SKU live on the Listing Hub, or paused — and Pause / Resume it there.
+    mode !== "parent" && pauses && {
+      field: "listing", headerName: "Listing", width: 128, sortable: false,
+      valueGetter: (_v, row) => (pauses.state(row).paused ? "Paused" : "Live"),
+      renderCell: p => <SkuPauseCell row={p.row} pauses={pauses} />,
     },
     {
       field: "actions", headerName: "", width: mode === "parent" && onStockClick ? 92 : 52, sortable: false,
@@ -1733,10 +1853,11 @@ function MissingSkuPanel({ missingSkus, ordersCount, onResolved }) {
 // ── Main tab ──────────────────────────────────────────────────────────────────
 function MeeshoSKUAnalysisTab() {
   const { range, label, months, mode: globalMode, selectedMonth: globalMonth } = useDateFilter();
-  const { businesses } = useBusiness();
+  const { businesses, activeBusinessId } = useBusiness();
   const combined = useCombinedView();
   const combinedIds = combined.active ? combined.selectedIds : null;
   const [allData, setAllData] = useState([]);
+  const [pauseAsk, setPauseAsk] = useState(null);      // {row, pause, bizId, bizName} — the confirm dialog
   const [profitSummary, setProfitSummary] = useState(null);
   const [loading, setLoading] = useState(true);
   const [view, setView] = useState("all");
@@ -1837,6 +1958,22 @@ function MeeshoSKUAnalysisTab() {
     }).sort((a, b) => b.net_profit - a.net_profit);
   }, [allData]);
 
+  // Which business each row is from (combined view tags it; otherwise the one on screen), and whether it's paused there.
+  const pauseIds = combinedIds || (activeBusinessId ? [activeBusinessId] : []);
+  const skuPauses = useSkuPauses(pauseIds, reloadTick);
+  const bizOf = (row) => row._business_id || activeBusinessId;
+  const pauses = {
+    can: skuPauses.can,
+    state: (row) => {
+      const b = bizOf(row);
+      const info = skuPauses.skus.get(`${b}::${String(row.sku_id).toLowerCase()}`);
+      const byParent = !info && row.parent_item_id ? skuPauses.parents.has(`${b}::${String(row.parent_item_id).toLowerCase()}`) : false;
+      return { paused: !!info || byParent, byParent: byParent && !info, info };
+    },
+    ask: (row, pause) => setPauseAsk({ row, pause, bizId: bizOf(row),
+      bizName: row.business || businesses.find((b) => b.id === bizOf(row))?.name || "" }),
+  };
+
   const activeData = groupBy === "parent" ? groupedData : allData;
   // Matched on business too (when set) — in combined mode two businesses can
   // name a parent the same thing, and drilling into one must not pull in the
@@ -1851,7 +1988,8 @@ function MeeshoSKUAnalysisTab() {
     .filter(s => s.avg_profit_per_piece !== null && s.avg_profit_per_piece < marginThreshold && (s.delivered_quantity || 0) > 0)
     .sort((a, b) => a.avg_profit_per_piece - b.avg_profit_per_piece);
 
-  const viewData = view === "profit" ? profitRows : view === "loss" ? lossRows : view === "low-margin" ? lowMarginRows : activeData;
+  const pausedRows = groupBy === "parent" ? [] : allData.filter((s) => pauses.state(s).paused);
+  const viewData = view === "profit" ? profitRows : view === "loss" ? lossRows : view === "low-margin" ? lowMarginRows : view === "paused" ? pausedRows : activeData;
   const chartData = [...activeData].sort((a, b) => Math.abs(b.net_profit) - Math.abs(a.net_profit)).slice(0, 12);
 
   const VIEWS = [
@@ -1859,10 +1997,13 @@ function MeeshoSKUAnalysisTab() {
     { id: "profit", label: "Profitable", count: profitRows.length, activeBg: "#059669", activeText: "#fff", idleBg: "#ECFDF5", idleText: "#059669", idleBorder: "#A7F3D0" },
     { id: "loss", label: "In Loss", count: lossRows.length, activeBg: "#DC2626", activeText: "#fff", idleBg: "#FFF1F2", idleText: "#DC2626", idleBorder: "#FECDD3" },
     { id: "low-margin", label: "Low Margin", count: lowMarginRows.length, activeBg: "#D97706", activeText: "#fff", idleBg: "#FFFBEB", idleText: "#D97706", idleBorder: "#FDE68A" },
-  ];
+    groupBy !== "parent" && skuPauses.loaded && { id: "paused", label: "Paused", count: pausedRows.length, activeBg: "#475569", activeText: "#fff", idleBg: "#F1F5F9", idleText: "#475569", idleBorder: "#CBD5E1" },
+  ].filter(Boolean);
 
   return (
     <Box sx={{ display: "flex", flexDirection: "column", gap: 2.5 }}>
+      <SkuPauseDialog ask={pauseAsk} label={label} onClose={() => setPauseAsk(null)}
+        onDone={() => { setPauseAsk(null); skuPauses.reload(); }} />
 
       {/* ── Page header ──────────────────────────────────────────────────── */}
       <Box sx={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", flexWrap: "wrap", gap: 2 }}>
@@ -2068,7 +2209,7 @@ function MeeshoSKUAnalysisTab() {
                   📦 Meesho stock
                 </Button>
               </Box>
-              <SKUDataTable data={drillRows} onRowClick={setSelSKU} />
+              <SKUDataTable data={drillRows} onRowClick={setSelSKU} pauses={pauses} />
             </Box>
           )}
 
@@ -2088,7 +2229,7 @@ function MeeshoSKUAnalysisTab() {
                     : "Click any row to open full P&L analysis"}
                 </Typography>
               </Box>
-              <SKUDataTable data={viewData} mode={groupBy}
+              <SKUDataTable data={viewData} mode={groupBy} pauses={pauses}
                 onStockClick={(row) => setStockParent(row.sku_id)}
                 onRowClick={(row) => { if (groupBy === "parent") setDrillParent({ key: row.sku_id, business: row.business }); else setSelSKU(row); }} />
             </Box>

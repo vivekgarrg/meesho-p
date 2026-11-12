@@ -378,7 +378,8 @@ def guard_pause(request, business_id):
     paused = bool(request.data.get("paused"))
     note = str(request.data.get("note") or "").strip() or "Paused from Return Analysis"
     if sku:                                                   # one SKU
-        fp = FinalPrice.objects.filter(business=biz, sku_id__iexact=sku).select_related("parent").first()
+        fp = (FinalPrice.objects.filter(business=biz, sku_id__iexact=sku).select_related("parent").first()
+              or FinalPrice.objects.filter(business=biz, sku_id__iexact=_views().meesho_sku(sku, "")).select_related("parent").first())
         if not fp:
             return Response({"error": "No such SKU."}, status=status.HTTP_404_NOT_FOUND)
         if paused:
@@ -433,6 +434,28 @@ def _desk(request, business_id):
     business = _views().get_authorized_business(request, business_id)
     desk, _accounts = _desk_accounts(request, business, api_path=PATH)
     return desk
+
+
+@api_view(["GET"])
+def sku_pauses(request, business_id):
+    """
+    GET ?businesses=1,2 — which SKUs are paused in these businesses (each the
+    caller can open; default the one on screen), on their own or with their
+    parent product — for SKU Analysis to show beside each SKU's P&L and offer
+    Pause / Resume (POST pause/ with {business, sku, paused}).
+    """
+    v = _views()
+    on_screen = v.get_authorized_business(request, business_id)
+    mine = {b.pk: b for b in v.accessible_businesses(request, include=on_screen)}
+    want = [int(x) for x in str(request.GET.get("businesses") or on_screen.pk).split(",") if x.strip().isdigit()]
+    ids = [i for i in want if i in mine] or [on_screen.pk]
+    skus = [{"business": b, "sku": sku, "parent": parent or "", "note": note, "auto": auto, "at": at, "by": by}
+            for b, sku, parent, note, auto, at, by in SkuPause.objects.filter(business_id__in=ids).values_list(
+                "business_id", "sku__sku_id", "sku__parent__item_id", "note", "auto", "paused_at", "paused_by__username")]
+    parents = [{"business": b, "parent": item, "note": note, "auto": auto, "at": at}
+               for b, item, note, auto, at in ListingHubPause.objects.filter(business_id__in=ids).values_list(
+                   "business_id", "parent__item_id", "note", "auto", "paused_at")]
+    return Response({"skus": skus, "parents": parents, "can_pause": v._is_admin(request.user), "businesses": ids})
 
 
 @api_view(["GET"])

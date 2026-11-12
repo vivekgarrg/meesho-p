@@ -295,6 +295,29 @@ class GuardTests(TestCase):
         c.force_authenticate(worker)
         self.assertEqual(c.post(self.url("auto/"), {"on": True}, format="json").status_code, 403)
 
+    def test_sku_analysis_pauses_one_businesss_sku_and_reads_it_back(self):
+        other = Business.objects.create(name="Cosmify")
+        Membership.objects.create(user=self.admin, business=other)
+        theirs = ParentItemPrice.objects.create(business=other, item_id="LOTA", item_price=D("100"), final_price=D("110"))
+        FinalPrice.objects.create(business=other, sku_id="lota-1", parent=theirs)          # same SKU code, another business
+        r = self.client.post(self.url("pause/"), {"business": other.id, "sku": "lota-1", "paused": True,
+                                                  "note": "Loss in SKU Analysis"}, format="json")
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(list(SkuPause.objects.values_list("business_id", "sku__sku_id")), [(other.id, "lota-1")])   # only that business's
+        d = self.client.get(self.url("sku-pauses/"), {"businesses": f"{self.biz.id},{other.id}"}).data
+        self.assertTrue(d["can_pause"])
+        self.assertEqual([(x["business"], x["sku"], x["parent"], x["note"]) for x in d["skus"]], [(other.id, "lota-1", "LOTA", "SKU lota-1 paused by a: Loss in SKU Analysis")])
+        return_guard.pause(self.biz, self.lota, "manual", "x", auto=False)
+        d = self.client.get(self.url("sku-pauses/"), {"businesses": f"{self.biz.id},{other.id}"}).data
+        self.assertIn({"business": self.biz.id, "parent": "LOTA"}, [{"business": x["business"], "parent": x["parent"]} for x in d["parents"]])
+        # Only admins pause; a member reads — and never a business they can't open.
+        member = User.objects.create_user(username="m", password="pw", role=User.ROLE_BUSINESS_USER)
+        Membership.objects.create(user=member, business=self.biz)
+        c = APIClient(); c.force_authenticate(member)
+        self.assertEqual(c.post(self.url("pause/"), {"sku": "lota-1", "paused": True}, format="json").status_code, 403)
+        d = c.get(self.url("sku-pauses/"), {"businesses": str(other.id)}).data
+        self.assertEqual((d["businesses"], {x["business"] for x in d["skus"]}, d["can_pause"]), ([self.biz.id], {self.biz.id}, False))
+
     def test_the_simple_page_pauses_one_sku_and_the_product_stays_live(self):
         lota2 = FinalPrice.objects.create(business=self.biz, sku_id="lota-2", parent=self.lota)
         FinalPrice.objects.create(business=self.biz, sku_id="lota-3", parent=self.lota)      # no orders in the window
