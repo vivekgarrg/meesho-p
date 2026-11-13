@@ -34,7 +34,7 @@ async function call(path, method = "GET", body) {
     method, headers: body ? { "Content-Type": "application/json" } : undefined, body: body ? JSON.stringify(body) : undefined,
   });
   const j = await r.json().catch(() => ({}));
-  return { ok: r.ok, data: j };
+  return { ok: r.ok, status: r.status, data: j };
 }
 
 function Badge({ status }) {
@@ -229,6 +229,102 @@ function FlipkartOrders({ accounts, mobile }) {
             })}
           </div>
         </>
+      )}
+    </section>
+  );
+}
+
+// ── Acting on the orders: accept, then (labels printed in Seller Hub) mark RTD ───────────
+const STAGE_INFO = {
+  accept: { title: "To accept", verb: "Accept", path: "accept/", tone: "#B45309" },
+  label: { title: "Labels to print", tone: "#7C3AED" },
+  rtd: { title: "Ready to mark RTD", verb: "Mark RTD", path: "rtd/", tone: "#DC2626" },
+};
+
+function FlipkartActions({ accounts, mobile, onState }) {
+  const [biz, setBiz] = useState(accounts[0]?.business);
+  const [w, setW] = useState(null);
+  const [busy, setBusy] = useState(null);
+  const [msg, setMsg] = useState(null);
+  const name = accounts.find((a) => a.business === biz)?.business_name || "";
+  const check = useCallback(async () => {
+    if (!biz) return;
+    setBusy("check"); setMsg(null);
+    const r = await call(`actions/?business=${biz}`);
+    setBusy(null);
+    if (r.ok) setW(r.data); else { setW(null); setMsg({ bad: true, text: r.data.error || "Couldn't read Seller Hub." }); }
+  }, [biz]);
+  useEffect(() => { setW(null); check(); }, [check]);
+  if (!accounts.length) return null;
+
+  const act = async (stage, groups) => {
+    const info = STAGE_INFO[stage];
+    const list = groups || w[stage].filter((g) => stage !== "accept" || !g.missing_dimensions);
+    const n = list.reduce((t, g) => t + g.shipments, 0);
+    if (!window.confirm(`${info.verb} ${n} Flipkart order${n === 1 ? "" : "s"} for ${name} in Seller Hub now?`)) return;
+    setBusy(stage); setMsg(null);
+    const r = await call(info.path, "POST", { business: biz, groups: groups ? groups.map((g) => g.group_id) : undefined });
+    setBusy(null);
+    if (r.data?.accounts) onState(r.data);
+    if (!r.ok && r.status !== 207 && !r.data.results) { setMsg({ bad: true, text: r.data.error || `Couldn't ${info.verb.toLowerCase()}.` }); return; }
+    const failed = (r.data.results || []).flatMap((x) => x.failed || []);
+    const errors = r.data.errors || [];
+    setMsg({ bad: failed.length > 0 || errors.length > 0,
+      text: `${info.verb}: ${(r.data.shipments || 0) - failed.length} of ${r.data.shipments || 0} done.`
+        + (failed.length ? ` Flipkart refused ${failed.length}: ${[...new Set(failed.map((f) => f.error))].join("; ")}.` : "")
+        + (errors.length ? ` ${errors.join("; ")}` : "")
+        + ((r.data.skipped || []).length ? ` ${r.data.skipped.length} group(s) have no package size — accept those in Seller Hub.` : "") });
+    check();
+  };
+
+  return (
+    <section style={{ ...S.card, padding: 16, display: "flex", flexDirection: "column", gap: 12, minWidth: 0 }}>
+      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+        <span style={{ fontWeight: 900, fontSize: 15, color: C.gray900, flex: 1 }}>Accept & mark RTD</span>
+        <button onClick={check} disabled={!!busy} style={{ ...btn("ghost", "sm"), opacity: busy ? 0.6 : 1 }}>{busy === "check" ? "Reading Seller Hub…" : "↻ Check Seller Hub"}</button>
+      </div>
+      {accounts.length > 1 && (
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {accounts.map((a) => (
+            <button key={a.business} onClick={() => setBiz(a.business)} aria-pressed={biz === a.business}
+              style={{ ...btn(biz === a.business ? "primary" : "ghost", "sm"), minHeight: 34 }}>{a.business_name}</button>
+          ))}
+        </div>
+      )}
+      {msg && <div role="status" style={{ fontSize: 13, fontWeight: 700, color: msg.bad ? C.red : "#15803D" }}>{msg.bad ? "✕" : "✓"} {msg.text}</div>}
+      {!w ? (busy === "check" && <div style={{ display: "flex", justifyContent: "center", padding: 16 }}><CircularProgress size={22} style={{ color: "#2874F0" }} /></div>) : (
+        <div style={{ display: "grid", gap: 12, gridTemplateColumns: mobile ? "1fr" : "repeat(3, minmax(0, 1fr))" }}>
+          {Object.entries(STAGE_INFO).map(([stage, info]) => {
+            const list = w[stage] || [];
+            const n = list.reduce((t, g) => t + g.shipments, 0);
+            return (
+              <div key={stage} style={{ border: `1px solid ${C.gray200}`, borderTop: `3px solid ${info.tone}`, borderRadius: 12, padding: 10, display: "flex", flexDirection: "column", gap: 8, minWidth: 0 }}>
+                <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                  <span style={{ fontWeight: 900, color: C.gray900, flex: 1 }}>{info.title}</span>
+                  <span style={{ fontSize: 20, fontWeight: 900, color: info.tone, fontVariantNumeric: "tabular-nums" }}>{n}</span>
+                </div>
+                {stage === "label" && n > 0 && <div style={{ fontSize: 12.5, color: C.gray600 }}>Print these labels in Seller Hub; they then show under "Ready to mark RTD".</div>}
+                {list.length === 0 ? <div style={{ fontSize: 12.5, color: C.gray500 }}>Nothing waiting.</div> : list.map((g) => (
+                  <div key={g.group_id + g.dispatch_by} style={{ display: "flex", gap: 8, alignItems: "center", minWidth: 0 }}>
+                    {g.items[0]?.image ? <img src={g.items[0].image} alt="" loading="lazy" style={{ width: 32, height: 32, borderRadius: 6, objectFit: "cover", flexShrink: 0 }} /> : null}
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontFamily: "monospace", fontSize: 12.5, fontWeight: 800, color: C.gray900, wordBreak: "break-word" }}>{g.items.map((i) => i.sku).join(", ")} ×{g.shipments}</div>
+                      <div style={{ fontSize: 11.5, color: g.missing_dimensions ? C.red : C.gray500 }}>
+                        {g.missing_dimensions ? "No package size — accept in Seller Hub" : `dispatch by ${dayTime(g.dispatch_by)}`}</div>
+                    </div>
+                    {info.verb && !(stage === "accept" && g.missing_dimensions) && (
+                      <button onClick={() => act(stage, [g])} disabled={!!busy} style={{ ...btn("ghost", "sm"), minHeight: 30, opacity: busy ? 0.6 : 1 }}>{info.verb}</button>
+                    )}
+                  </div>
+                ))}
+                {info.verb && list.length > 1 && (
+                  <button onClick={() => act(stage)} disabled={!!busy} style={{ ...btn("primary", "sm"), opacity: busy ? 0.6 : 1 }}>
+                    {busy === stage ? "Working…" : `${info.verb} all ${n}`}</button>
+                )}
+              </div>
+            );
+          })}
+        </div>
       )}
     </section>
   );
@@ -509,12 +605,13 @@ export function FlipkartSellerTab() {
         </button>
       )}
 
+      <FlipkartActions accounts={d.accounts.filter((a) => a.connected)} mobile={mobile} onState={setD} />
       <FlipkartOrders accounts={d.accounts.filter((a) => a.connected || a.orders_at)} mobile={mobile} />
       <FlipkartPayments accounts={d.accounts.filter((a) => a.connected || a.sync_at)} mobile={mobile} />
 
       {d.is_admin && (
         <section style={{ ...S.card, padding: "12px 16px", fontSize: 13, color: C.gray600, lineHeight: 1.6 }}>
-          <b style={{ color: C.gray900 }}>Accepting, labels and the manifest</b> come next, once their Seller Hub requests are added.
+          <b style={{ color: C.gray900 }}>Printing labels and the manifest</b> come next, once their Seller Hub requests are added — until then print labels in Seller Hub.
         </section>
       )}
     </div>

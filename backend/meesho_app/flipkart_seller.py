@@ -317,7 +317,8 @@ def _row(sh, tab):
             "tier": sh.get("dispatchServiceTier") or "", "tracking_id": tr.get("trackingId") or "",
             "courier": tr.get("courierName") or tr.get("pickupVendorName") or "", "tab": tab,
             "accepted_at": st.get("acceptedTime"), "rtd_at": st.get("readyToDispatchTime"),
-            "dispatched_at": st.get("dispatchTime"), "delivered_at": st.get("deliveredTime")}
+            "dispatched_at": st.get("dispatchTime"), "delivered_at": st.get("deliveredTime"),
+            "location_id": sh.get("locationId") or ""}
 
 
 def read_orders(account, s=None):
@@ -395,6 +396,10 @@ def refresh(account, sync=None):
     try:
         account.orders, account.orders_at = read_orders(account, s), timezone.now()
         fields += ["orders", "orders_at"]
+        if not account.location_id:          # the pickup location, as the orders name it (accepting and RTD need it)
+            account.location_id = next((r["location_id"] for rows in account.orders["tabs"].values() for r in rows
+                                        if r.get("location_id")), "")
+            fields += ["location_id"] if account.location_id else []
     except FlipkartError as e:
         if e.expired:
             account.status, account.status_message = A.STATUS_EXPIRED, str(e)
