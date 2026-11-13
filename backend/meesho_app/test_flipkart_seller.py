@@ -110,6 +110,10 @@ class FlipkartSellerTests(TestCase):
         self.c.force_authenticate(self.admin)
         self.base = f"/api/business/{self.biz.id}/flipkart-seller/"
 
+    def me(self, data, biz=None):
+        """This business's entry in the page's answer."""
+        return next(a for a in data["accounts"] if a["business"] == (biz or self.biz).id)
+
     def connect(self, **kw):
         return self.c.post(f"{self.base}connect/", {"username": "8273343222", "password": "secret-pw", **kw}, format="json")
 
@@ -120,13 +124,13 @@ class FlipkartSellerTests(TestCase):
     # ── Connecting ───────────────────────────────────────────────────────
     def test_password_then_otp_connects_and_keeps_the_session_encrypted(self):
         r = self.connect()
-        self.assertEqual((r.status_code, r.data["status"]), (200, "OTP_SENT"), r.data)
+        self.assertEqual((r.status_code, self.me(r.data)["status"]), (200, "OTP_SENT"), r.data)
         login = next(c for c in FakeFlipkart.calls if c["path"] == "/login")
         self.assertEqual(login["json"], {"authName": "flipkart", "username": "8273343222", "password": "secret-pw",
                                          "userNameType": "mobileNumber"})
         self.assertEqual(FakeFlipkart.calls[0]["path"], "/getStateDetails")
         r = self.c.post(f"{self.base}otp/", {"otp": " 193 575 "}, format="json")
-        self.assertEqual((r.status_code, r.data["connected"], r.data["seller_id"]), (200, True, "41ad149fa06e4194"), r.data)
+        self.assertEqual((r.status_code, self.me(r.data)["connected"], self.me(r.data)["seller_id"]), (200, True, "41ad149fa06e4194"), r.data)
         # The OTP went with the half-made session from the password step.
         verify = next(c for c in FakeFlipkart.calls if c["path"] == "/verifyOtp")
         self.assertEqual(verify["cookies"]["connect.sid"], "pre-otp")
@@ -143,14 +147,14 @@ class FlipkartSellerTests(TestCase):
     def test_a_wrong_otp_says_so_and_keeps_waiting_for_the_right_one(self):
         self.connect()
         r = self.c.post(f"{self.base}otp/", {"otp": "000000"}, format="json")
-        self.assertEqual((r.status_code, r.data["status"]), (409, "OTP_SENT"))
+        self.assertEqual((r.status_code, self.me(r.data)["status"]), (409, "OTP_SENT"))
         self.assertIn("Invalid OTP", r.data["error"])
-        self.assertEqual(self.c.post(f"{self.base}otp/", {"otp": "193575"}, format="json").data["status"], "ACTIVE")
+        self.assertEqual(self.me(self.c.post(f"{self.base}otp/", {"otp": "193575"}, format="json").data)["status"], "ACTIVE")
 
     def test_a_refused_password_is_said_plainly(self):
         FakeFlipkart.script["/login"] = lambda s, kw: _resp(401, {"message": "Invalid username or password"})
         r = self.connect()
-        self.assertEqual((r.status_code, r.data["status"]), (409, "FAILED"))
+        self.assertEqual((r.status_code, self.me(r.data)["status"]), (409, "FAILED"))
         self.assertIn("Invalid username or password", r.data["error"])
 
     def test_flipkart_unreachable(self):
@@ -168,7 +172,7 @@ class FlipkartSellerTests(TestCase):
     def test_the_dashboard_is_read_with_the_sessions_csrf_and_location(self):
         r = self.connected()
         self.assertEqual(r.status_code, 200, r.data)
-        s = r.data["summary"]
+        s = self.me(r.data)["summary"]
         self.assertIn({"label": "today · gross_units", "value": 12}, s["sales"])
         self.assertIn({"label": "yesterday · gross_gmv", "value": 9800}, s["sales"])
         self.assertEqual(s["impressions"], [{"label": "impressions_latest", "value": 5000}, {"label": "impressions_prev", "value": 4200}])
@@ -189,7 +193,7 @@ class FlipkartSellerTests(TestCase):
             return _resp(200, {})
         FakeFlipkart.script.update({"/verifyOtp": verify, "/index.html": panel})
         r = self.connected()
-        self.assertEqual((r.data["status"], r.data["status_message"]), ("ACTIVE", ""), r.data)
+        self.assertEqual((self.me(r.data)["status"], self.me(r.data)["status_message"]), ("ACTIVE", ""), r.data)
         q = next(c for c in FakeFlipkart.calls if c["path"] == "/napi/graphql")
         self.assertEqual(q["headers"]["fk-csrf-token"], "csrf-from-panel")
         self.assertLess([c["path"] for c in FakeFlipkart.calls].index("/index.html"),
@@ -203,20 +207,20 @@ class FlipkartSellerTests(TestCase):
         FakeFlipkart.script["/verifyOtp"] = verify
         self.connected()
         r = self.c.post(f"{self.base}refresh/")
-        self.assertEqual((r.status_code, r.data["status"]), (200, "ACTIVE"))
-        self.assertIn("security token (CSRF)", r.data["status_message"])
+        self.assertEqual((r.status_code, self.me(r.data)["status"]), (200, "ACTIVE"))
+        self.assertIn("security token (CSRF)", self.me(r.data)["status_message"])
 
     def test_a_403_is_said_as_flipkart_said_it_not_called_expired(self):
         self.connected()
         FakeFlipkart.script["/napi/graphql"] = lambda s, kw: _resp(403, {"message": "Forbidden for location"})
         r = self.c.post(f"{self.base}refresh/")
-        self.assertEqual(r.data["status"], "ACTIVE")
-        self.assertIn("HTTP 403): Forbidden for location", r.data["status_message"])
+        self.assertEqual(self.me(r.data)["status"], "ACTIVE")
+        self.assertIn("HTTP 403): Forbidden for location", self.me(r.data)["status_message"])
 
     # ── Orders ───────────────────────────────────────────────────────────
     def test_the_orders_page_is_read_every_tab_with_its_count(self):
         r = self.connected()
-        o = r.data["orders"]
+        o = self.me(r.data)["orders"]
         self.assertEqual((o["counts"]["upcoming"], o["counts"]["pendingToDispatch"], o["counts"]["completed"]), (2, 3, 271))
         self.assertEqual({k: len(v) for k, v in o["tabs"].items()},
                          {"pendingToAccept": 2, "pendingToPack": 0, "pendingToDispatch": 3, "inTransit": 1, "pendingService": 0})
@@ -255,10 +259,10 @@ class FlipkartSellerTests(TestCase):
             r = self.c.post(f"{self.base}refresh/")
         finally:
             FakeFlipkart.orders = staticmethod(_orders)
-        self.assertEqual(r.data["status"], "ACTIVE")
-        self.assertIn("orders: Flipkart said: orders down", r.data["status_message"])
+        self.assertEqual(self.me(r.data)["status"], "ACTIVE")
+        self.assertIn("orders: Flipkart said: orders down", self.me(r.data)["status_message"])
         self.assertEqual(A.objects.get().orders, before)
-        self.assertTrue(r.data["summary"]["sales"])
+        self.assertTrue(self.me(r.data)["summary"]["sales"])
 
     def test_an_ended_session_on_the_orders_page_marks_it_expired(self):
         self.connected()
@@ -267,7 +271,7 @@ class FlipkartSellerTests(TestCase):
             r = self.c.post(f"{self.base}refresh/")
         finally:
             FakeFlipkart.orders = staticmethod(_orders)
-        self.assertEqual(r.data["status"], "EXPIRED")
+        self.assertEqual(self.me(r.data)["status"], "EXPIRED")
 
     def test_renewed_cookies_are_kept(self):
         self.connected()
@@ -282,7 +286,7 @@ class FlipkartSellerTests(TestCase):
         self.connected()
         FakeFlipkart.script["/napi/graphql"] = lambda s, kw: _resp(401, {"message": "Unauthorized"})
         r = self.c.post(f"{self.base}refresh/")
-        self.assertEqual((r.status_code, r.data["status"]), (409, "EXPIRED"))
+        self.assertEqual((r.status_code, self.me(r.data)["status"]), (409, "EXPIRED"))
         self.assertIn("new OTP", r.data["error"])
 
     def test_a_graphql_error_on_one_read_keeps_the_others(self):
@@ -293,10 +297,10 @@ class FlipkartSellerTests(TestCase):
             return _resp(200, {"data": {"x": {"result": {"n": 1}}}})
         FakeFlipkart.script["/napi/graphql"] = partly
         r = self.c.post(f"{self.base}refresh/")
-        self.assertEqual((r.status_code, r.data["status"]), (200, "ACTIVE"))
-        self.assertIn("impressions: Flipkart said: field not available", r.data["status_message"])
-        self.assertNotIn("impressions", r.data["summary"])
-        self.assertEqual(r.data["summary"]["sales"], [{"label": "x · n", "value": 1}])
+        self.assertEqual((r.status_code, self.me(r.data)["status"]), (200, "ACTIVE"))
+        self.assertIn("impressions: Flipkart said: field not available", self.me(r.data)["status_message"])
+        self.assertNotIn("impressions", self.me(r.data)["summary"])
+        self.assertEqual(self.me(r.data)["summary"]["sales"], [{"label": "x · n", "value": 1}])
 
     def test_the_schedule_refreshes_every_connected_account(self):
         self.connected()
@@ -318,16 +322,84 @@ class FlipkartSellerTests(TestCase):
     def test_location_disconnect_and_who_may_do_what(self):
         self.connected()
         self.assertEqual(self.c.patch(self.base, {"location_id": "nope"}, format="json").status_code, 400)
-        self.assertEqual(self.c.patch(self.base, {"location_id": "LOCabc123456"}, format="json").data["location_id"], "LOCabc123456")
+        self.assertEqual(self.me(self.c.patch(self.base, {"location_id": "LOCabc123456"}, format="json").data)["location_id"], "LOCabc123456")
         member = User.objects.create_user(username="m", password="pw", role=User.ROLE_BUSINESS_USER)
         Membership.objects.create(user=member, business=self.biz)
         set_user_rule(member, ["/flipkart-seller"])
         c = APIClient(); c.force_authenticate(member)
-        self.assertEqual(c.get(self.base).data["connected"], True)                 # sees it
+        self.assertEqual(self.me(c.get(self.base).data)["connected"], True)                 # sees it
         self.assertEqual(c.post(f"{self.base}refresh/").status_code, 200)          # may read it now
         self.assertEqual(c.post(f"{self.base}connect/", {"username": "1", "password": "x"}, format="json").status_code, 403)
         self.assertEqual(c.delete(self.base).status_code, 403)
         set_user_rule(member, ["/orders"])
         self.assertEqual(c.get(self.base).status_code, 403)                         # not their page
-        self.assertEqual(self.c.delete(self.base).data["connected"], False)
+        self.assertEqual(self.me(self.c.delete(self.base).data)["connected"], False)
         self.assertFalse(A.objects.exists())
+
+    # ── Several businesses, one Seller Hub login each ────────────────────
+    def two(self):
+        other = Business.objects.create(name="Cosmify")
+        Membership.objects.create(user=self.admin, business=other)
+        return other
+
+    def test_each_business_has_its_own_login_and_their_orders_come_together(self):
+        other = self.two()
+        d = self.c.get(self.base).data
+        mine = [a for a in d["accounts"] if a["business"] in (self.biz.id, other.id)]
+        self.assertEqual([(a["business_name"], a["connected"]) for a in mine], [("Rudam", False), ("Cosmify", False)])
+        self.assertEqual(d["accounts"][0]["business"], self.biz.id)                # the one on screen first
+        self.connected()                                                    # Rudam
+        r = self.c.post(f"{self.base}connect/", {"business": other.id, "username": "9000000002", "password": "pw2"}, format="json")
+        self.assertEqual(self.me(r.data, other)["status"], "OTP_SENT")
+        self.assertEqual(self.me(r.data)["status"], "ACTIVE")                # Rudam untouched
+        def verify_other(s, kw):
+            for k, v in (("connect.sid", "SESS-cosmify"), ("sellerId", "c0ffee0000000002"), ("is_login", "true"),
+                         (flipkart_seller.CSRF_COOKIE, "csrf-2")):
+                s.cookies.set(k, v, domain="seller.flipkart.com")
+            return _resp(200, {})
+        FakeFlipkart.script["/verifyOtp"] = verify_other
+        r = self.c.post(f"{self.base}otp/", {"business": other.id, "otp": "111111"}, format="json")
+        self.assertEqual((r.status_code, self.me(r.data, other)["seller_id"]), (200, "c0ffee0000000002"), r.data)
+        accounts = {a.business_id: a for a in A.objects.all()}
+        self.assertEqual((accounts[self.biz.id].seller_id, accounts[other.id].seller_id), ("41ad149fa06e4194", "c0ffee0000000002"))
+        # Each read goes as its own seller, with its own session.
+        FakeFlipkart.calls = []
+        self.assertEqual(self.c.post(f"{self.base}refresh/").status_code, 200)
+        sellers = {c["headers"].get("x-user-id") for c in FakeFlipkart.calls if c["path"] == "/orchestrator/graphql"}
+        self.assertEqual(sellers, {"41ad149fa06e4194", "c0ffee0000000002"})
+        sessions = {c["cookies"]["connect.sid"] for c in FakeFlipkart.calls if c["path"] == "/orchestrator/graphql"}
+        self.assertEqual(sessions, {"SESS-7f3q", "SESS-cosmify"})
+        d = self.c.get(self.base).data
+        self.assertTrue(all(self.me(d, b)["orders"]["tabs"]["pendingToDispatch"] for b in (self.biz, other)))
+
+    def test_one_business_logging_in_again_or_disconnecting_leaves_the_other(self):
+        other = self.two()
+        self.connected()
+        self.c.post(f"{self.base}connect/", {"business": other.id, "username": "9000000002", "password": "pw2"}, format="json")
+        r = self.c.delete(self.base, {"business": other.id}, format="json")
+        self.assertEqual((self.me(r.data, other)["connected"], self.me(r.data)["connected"]), (False, True))
+        self.assertEqual(list(A.objects.values_list("business_id", flat=True)), [self.biz.id])
+
+    def test_the_same_flipkart_login_or_seller_cant_be_on_two_businesses(self):
+        other = self.two()
+        self.connected()
+        r = self.c.post(f"{self.base}connect/", {"business": other.id, "username": "8273343222", "password": "x"}, format="json")
+        self.assertEqual(r.status_code, 409)
+        self.assertIn("already connected for Rudam", r.data["error"])
+        # A different login that turns out to be the same Flipkart seller.
+        self.c.post(f"{self.base}connect/", {"business": other.id, "username": "other@x.in", "password": "x"}, format="json")
+        r = self.c.post(f"{self.base}otp/", {"business": other.id, "otp": "193575"}, format="json")
+        self.assertEqual((r.status_code, self.me(r.data, other)["status"]), (409, "FAILED"))
+        self.assertIn("already connected for Rudam", r.data["error"])
+        self.assertEqual(self.me(r.data)["status"], "ACTIVE")
+
+    def test_a_business_not_yours_cant_be_connected_or_seen(self):
+        stranger = Business.objects.create(name="Elsewhere")
+        member = User.objects.create_user(username="m2", password="pw", role=User.ROLE_BUSINESS_USER)
+        Membership.objects.create(user=member, business=self.biz)
+        set_user_rule(member, ["/flipkart-seller"])
+        c = APIClient(); c.force_authenticate(member)
+        self.assertEqual([a["business"] for a in c.get(self.base).data["accounts"]], [self.biz.id])
+        r = self.c.post(f"{self.base}connect/", {"business": 999999, "username": "1", "password": "x"}, format="json")
+        self.assertEqual(r.status_code, 403)
+        self.assertFalse(A.objects.filter(business=stranger).exists())

@@ -418,21 +418,56 @@ def refresh_all():
 
 
 # ── API ──────────────────────────────────────────────────────────────────────
+# One Seller Hub login per business, as Meesho: the page shows every business this
+# person can open (with this page), each with its own login, and their orders together.
+# Each write names its business: {"business": id} (default: the one on screen).
+
+PATH = "flipkart-seller/"
+
 
 def _views():
     from . import views
     return views
 
 
-def _json(account, request):
+def _desk(request, business_id):
+    """(the business on screen, every business this person may see Flipkart for — that one first)."""
+    from accounts.access import api_access_denied
     v = _views()
+    on_screen = v.get_authorized_business(request, business_id)
+    others = [b for b in v.accessible_businesses(request, include=on_screen)
+              if b.pk != on_screen.pk and not api_access_denied(request.user, b, PATH)]
+    return on_screen, [on_screen, *sorted(others, key=lambda b: b.name.lower())]
+
+
+def _account_json(business, account):
+    out = {"business": business.pk, "business_name": business.name}
     if not account:
-        return {"connected": False, "status": None, "is_admin": v._is_admin(request.user)}
-    return {"connected": account.status == A.STATUS_ACTIVE, "status": account.status, "status_message": account.status_message,
+        return {**out, "connected": False, "status": None}
+    return {**out, "connected": account.status == A.STATUS_ACTIVE, "status": account.status, "status_message": account.status_message,
             "username": account.username, "seller_id": account.seller_id, "location_id": account.location_id,
             "otp_sent_at": account.otp_sent_at, "last_login_at": account.last_login_at, "last_check_at": account.last_check_at,
-            "summary": account.summary, "summary_at": account.summary_at,
-            "orders": account.orders, "orders_at": account.orders_at, "is_admin": v._is_admin(request.user)}
+            "summary": account.summary, "summary_at": account.summary_at, "orders": account.orders, "orders_at": account.orders_at}
+
+
+def _state(request, business_id):
+    _b, desk = _desk(request, business_id)
+    accounts = {a.business_id: a for a in A.objects.filter(business__in=desk)}
+    return {"accounts": [_account_json(b, accounts.get(b.pk)) for b in desk], "is_admin": _views()._is_admin(request.user)}
+
+
+def _target(request, business_id):
+    """The business a write is for — one shown on this page — or (None, Response)."""
+    _b, desk = _desk(request, business_id)
+    data = request.data if request.method != "GET" and isinstance(request.data, dict) else request.GET
+    try:
+        want = int(data.get("business") or desk[0].pk)
+    except (TypeError, ValueError):
+        return None, Response({"error": "Which business?"}, status=status.HTTP_400_BAD_REQUEST)
+    biz = next((b for b in desk if b.pk == want), None)
+    if not biz:
+        return None, Response({"error": "That business isn't yours to change."}, status=status.HTTP_403_FORBIDDEN)
+    return biz, None
 
 
 def _admin_only(request):
@@ -441,45 +476,60 @@ def _admin_only(request):
     return None
 
 
+def _fail(request, business_id, message, http=status.HTTP_409_CONFLICT):
+    return Response({"error": message, **_state(request, business_id)}, status=http)
+
+
 @api_view(["GET", "PATCH", "DELETE"])
 def account_view(request, business_id):
-    """GET where the Flipkart login stands and the last dashboard read; PATCH {location_id}; DELETE disconnects."""
-    business = _views().get_authorized_business(request, business_id)
-    account = A.objects.filter(business=business).first()
+    """
+    GET    every business's Flipkart login, its last dashboard read and orders.
+    PATCH  {business, location_id} — the pickup location.   DELETE {business} — disconnect it.
+    """
     if request.method == "GET":
-        return Response(_json(account, request))
+        return Response(_state(request, business_id))
     denied = _admin_only(request)
     if denied:
         return denied
+    biz, err = _target(request, business_id)
+    if err:
+        return err
+    account = A.objects.filter(business=biz).first()
     if not account:
-        return Response({"error": "Flipkart isn't connected."}, status=status.HTTP_404_NOT_FOUND)
+        return _fail(request, business_id, f"Flipkart isn't connected for {biz.name}.", status.HTTP_404_NOT_FOUND)
     if request.method == "DELETE":
         account.delete()
-        return Response(_json(None, request))
+        return Response(_state(request, business_id))
     loc = str(request.data.get("location_id") or "").strip()
     if loc and not re.fullmatch(r"LOC[0-9A-Za-z]{6,60}", loc):
-        return Response({"error": "A pickup location id looks like LOC… (letters and numbers)."}, status=status.HTTP_400_BAD_REQUEST)
+        return _fail(request, business_id, "A pickup location id looks like LOC… (letters and numbers).", status.HTTP_400_BAD_REQUEST)
     account.location_id = loc
     account.save(update_fields=["location_id", "updated_at"])
-    return Response(_json(account, request))
+    return Response(_state(request, business_id))
 
 
 @api_view(["POST"])
 def connect(request, business_id):
-    """{username, password, location_id?} — save the login and send it to Flipkart; an OTP follows."""
+    """{business, username, password, location_id?} — save that business's login and send it to Flipkart; an OTP follows."""
     denied = _admin_only(request)
     if denied:
         return denied
-    business = _views().get_authorized_business(request, business_id)
+    biz, err = _target(request, business_id)
+    if err:
+        return err
     username = re.sub(r"\s+", "", str(request.data.get("username") or ""))
     password = str(request.data.get("password") or "")
-    account = A.objects.filter(business=business).first()
+    account = A.objects.filter(business=biz).first()
     if not username or (not password and not account):
-        return Response({"error": "Enter the Seller Hub mobile number (or email) and password."}, status=status.HTTP_400_BAD_REQUEST)
+        return _fail(request, business_id, "Enter the Seller Hub mobile number (or email) and password.", status.HTTP_400_BAD_REQUEST)
+    # One Flipkart seller account belongs to one business: the same login twice would mix two businesses' orders.
+    taken = A.objects.filter(username__iexact=username).exclude(business=biz).select_related("business").first()
+    if taken:
+        return _fail(request, business_id, f"{username} is already connected for {taken.business.name}.", status.HTTP_409_CONFLICT)
     enc, _dec = _crypto()
     try:
         if account is None:
-            account = A(business=business, created_by=request.user)
+            account = A(business=biz, created_by=request.user)
         account.username = username
         if password:
             account.password_enc = enc(password)
@@ -491,42 +541,61 @@ def connect(request, business_id):
         account.save()
         start_login(account, password or None)
     except FlipkartError as e:
-        return Response({"error": str(e), **_json(account, request)}, status=status.HTTP_409_CONFLICT)
+        return _fail(request, business_id, f"{biz.name}: {e}")
     except Exception as e:                                        # noqa: BLE001 — e.g. the server's key isn't set
-        return Response({"error": f"Couldn't start the login: {e}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
-    return Response(_json(account, request))
+        return _fail(request, business_id, f"Couldn't start the login: {e}", status.HTTP_503_SERVICE_UNAVAILABLE)
+    return Response(_state(request, business_id))
 
 
 @api_view(["POST"])
 def otp(request, business_id):
-    """{otp} — finish the login with the OTP Flipkart sent."""
+    """{business, otp} — finish that business's login with the OTP Flipkart sent."""
     denied = _admin_only(request)
     if denied:
         return denied
-    business = _views().get_authorized_business(request, business_id)
-    account = A.objects.filter(business=business).first()
+    biz, err = _target(request, business_id)
+    if err:
+        return err
+    account = A.objects.filter(business=biz).first()
     if not account:
-        return Response({"error": "Start with the password."}, status=status.HTTP_404_NOT_FOUND)
+        return _fail(request, business_id, "Start with the password.", status.HTTP_404_NOT_FOUND)
     try:
         verify_otp(account, request.data.get("otp"))
+        # Two accounts can't be the same Flipkart seller (one login per business).
+        dup = A.objects.filter(seller_id=account.seller_id).exclude(pk=account.pk).select_related("business").first() if account.seller_id else None
+        if dup:
+            A.objects.filter(pk=account.pk).update(status=A.STATUS_FAILED, cookies_enc="",
+                                                   status_message=f"This Flipkart seller is already connected for {dup.business.name}.")
+            return _fail(request, business_id, f"This Flipkart seller is already connected for {dup.business.name}.")
         try:
             refresh(account)
         except FlipkartError:
             pass                                                  # connected; the first read can come later
     except FlipkartError as e:
-        return Response({"error": str(e), **_json(account, request)}, status=status.HTTP_409_CONFLICT)
-    return Response(_json(account, request))
+        return _fail(request, business_id, f"{biz.name}: {e}")
+    return Response(_state(request, business_id))
 
 
 @api_view(["POST"])
 def refresh_view(request, business_id):
-    """Read the Seller Hub dashboard now."""
-    business = _views().get_authorized_business(request, business_id)
-    account = A.objects.filter(business=business).first()
-    if not account:
-        return Response({"error": "Flipkart isn't connected."}, status=status.HTTP_404_NOT_FOUND)
-    try:
-        refresh(account)
-    except FlipkartError as e:
-        return Response({"error": str(e), **_json(account, request)}, status=status.HTTP_409_CONFLICT)
-    return Response(_json(account, request))
+    """{business?} — read Seller Hub now: that business, or (no business given) every connected one on the page."""
+    _b, desk = _desk(request, business_id)
+    want = request.data.get("business") if isinstance(request.data, dict) else None
+    if want:
+        biz, err = _target(request, business_id)
+        if err:
+            return err
+        accounts = list(A.objects.filter(business=biz))
+        if not accounts:
+            return _fail(request, business_id, f"Flipkart isn't connected for {biz.name}.", status.HTTP_404_NOT_FOUND)
+    else:
+        accounts = list(A.objects.filter(business__in=desk, status=A.STATUS_ACTIVE).select_related("business"))
+    problems = []
+    for a in accounts:
+        try:
+            refresh(a)
+        except FlipkartError as e:
+            problems.append(f"{a.business.name}: {e}")
+    if problems:
+        return _fail(request, business_id, " · ".join(problems))
+    return Response(_state(request, business_id))

@@ -50,7 +50,7 @@ function ConnectForm({ d, onDone, setErr }) {
   const submit = async (e) => {
     e.preventDefault();
     setBusy(true); setErr(null);
-    const r = await call("connect/", "POST", { username, password, location_id: location });
+    const r = await call("connect/", "POST", { business: d.business, username, password, location_id: location });
     setBusy(false);
     if (!r.ok) setErr(r.data.error || "Couldn't start the login.");
     onDone(r.data);
@@ -78,14 +78,14 @@ function OtpForm({ d, onDone, setErr }) {
   const submit = async (e) => {
     e.preventDefault();
     setBusy(true); setErr(null);
-    const r = await call("otp/", "POST", { otp });
+    const r = await call("otp/", "POST", { business: d.business, otp });
     setBusy(false);
     if (!r.ok) setErr(r.data.error || "OTP not accepted.");
     onDone(r.data);
   };
   const resend = async () => {
     setBusy(true); setErr(null);
-    const r = await call("connect/", "POST", { username: d.username });
+    const r = await call("connect/", "POST", { business: d.business, username: d.username });
     setBusy(false);
     if (!r.ok) setErr(r.data.error || "Couldn't send a new OTP.");
     onDone(r.data);
@@ -118,13 +118,23 @@ const dayTime = (s) => { const d = istDate(s); return d ? d.toLocaleString("en-I
 const isUpcoming = (o) => { const d = istDate(o.dispatch_after); return !!d && d > new Date(); };
 
 /** Seller Hub's Forward Orders, as last read: a tile per tab, the SKUs to pack, and the orders. */
-function FlipkartOrders({ d, mobile }) {
+function FlipkartOrders({ accounts, mobile }) {
   const [tab, setTab] = useState("dispatch");
   const [q, setQ] = useState("");
-  const o = d.orders || {};
-  const counts = o.counts || {};
+  const [biz, setBiz] = useState(null);          // one business, or all of them
+  const read = accounts.filter((a) => a.orders_at);
+  const shown = read.filter((a) => !biz || a.business === biz);
+  // Every business's orders together (as Meesho's), each order marked with its business.
+  const counts = {};
+  const tabs = {};
+  for (const a of shown) {
+    for (const [k, v] of Object.entries(a.orders?.counts || {})) counts[k] = (counts[k] || 0) + v;
+    for (const [k, v] of Object.entries(a.orders?.tabs || {})) tabs[k] = [...(tabs[k] || []), ...v.map((r) => ({ ...r, business_name: a.business_name }))];
+  }
+  const o = { cut: shown.flatMap((a) => a.orders?.cut || []) };
+  const ordersAt = shown.map((a) => a.orders_at).sort()[0];
   const t = ORDER_TABS.find((x) => x.key === tab);
-  const base = t.list ? (o.tabs?.[t.list] || []) : [];
+  const base = t.list ? (tabs[t.list] || []) : [];
   const listed = t.key === "accept" ? base.filter((x) => !isUpcoming(x)) : t.key === "upcoming" ? base.filter(isUpcoming) : base;
   const needle = q.trim().toLowerCase();
   const rows = listed.filter((x) => !needle || [x.order_id, x.tracking_id, ...x.items.map((i) => `${i.sku} ${i.title}`)]
@@ -137,13 +147,23 @@ function FlipkartOrders({ d, mobile }) {
   }
   const skus = Object.values(bySku).sort((a, b) => b.qty - a.qty);
   const now = new Date();
-  if (!d.orders_at) return null;
+  if (!read.length) return null;
   return (
     <section style={{ ...S.card, padding: 16, display: "flex", flexDirection: "column", gap: 12, minWidth: 0 }}>
       <div style={{ display: "flex", gap: 10, alignItems: "baseline", flexWrap: "wrap" }}>
         <span style={{ fontWeight: 900, fontSize: 15, color: C.gray900, flex: 1 }}>Flipkart orders</span>
-        <span style={{ fontSize: 12, color: C.gray400 }}>read {when(d.orders_at)}</span>
+        <span style={{ fontSize: 12, color: C.gray400 }}>read {when(ordersAt)}</span>
       </div>
+      {read.length > 1 && (
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          <button onClick={() => setBiz(null)} aria-pressed={!biz} style={{ ...btn(biz ? "ghost" : "primary", "sm"), minHeight: 34 }}>All businesses</button>
+          {read.map((a) => (
+            <button key={a.business} onClick={() => setBiz(biz === a.business ? null : a.business)} aria-pressed={biz === a.business}
+              style={{ ...btn(biz === a.business ? "primary" : "ghost", "sm"), minHeight: 34 }}>
+              {a.business_name} · {(a.orders?.counts?.pendingToDispatch || 0) + (a.orders?.counts?.pendingToPack || 0)} to ship</button>
+          ))}
+        </div>
+      )}
       <div role="tablist" aria-label="Order tabs" style={{ display: "grid", gap: 8, gridTemplateColumns: mobile ? "repeat(2, minmax(0, 1fr))" : "repeat(auto-fill, minmax(140px, 1fr))" }}>
         {ORDER_TABS.map((x) => (
           <button key={x.key} role="tab" aria-selected={tab === x.key} onClick={() => setTab(x.key)}
@@ -193,7 +213,7 @@ function FlipkartOrders({ d, mobile }) {
                       </div>
                     ))}
                     <div style={{ fontSize: 12, color: C.gray500, marginTop: 2, wordBreak: "break-all" }}>
-                      {[r.order_id, r.tracking_id && `${r.courier || "Courier"} ${r.tracking_id}`, r.tier].filter(Boolean).join(" · ")}
+                      {[read.length > 1 && !biz && r.business_name, r.order_id, r.tracking_id && `${r.courier || "Courier"} ${r.tracking_id}`, r.tier].filter(Boolean).join(" · ")}
                     </div>
                   </div>
                   <div style={{ textAlign: "right", flexShrink: 0, fontSize: 12, color: C.gray600, lineHeight: 1.5 }}>
@@ -215,111 +235,134 @@ function FlipkartOrders({ d, mobile }) {
 
 const lbl = { display: "flex", flexDirection: "column", gap: 5, fontSize: 12.5, fontWeight: 800, color: C.gray600, minWidth: 0 };
 
-export function FlipkartSellerTab() {
-  const mobile = useIsMobile();
-  const [d, setD] = useState(null);
+/** One business's Seller Hub login: where it stands, logging it in (password → OTP), and its dashboard. */
+function AccountCard({ d, isAdmin, mobile, onState }) {
   const [err, setErr] = useState(null);
   const [busy, setBusy] = useState(false);
   const [relogin, setRelogin] = useState(false);
-
-  const load = useCallback(async () => {
-    const r = await call("");
-    if (r.ok) setD(r.data); else setErr(r.data.error || r.data.detail || "Couldn't read the Flipkart connection.");
-  }, []);
-  useEffect(() => { load(); }, [load]);
-  // While connected, read again every minute (the server's own refresh runs every 10).
-  useEffect(() => {
-    if (d?.status !== "ACTIVE") return undefined;
-    const t = setInterval(load, 60000);
-    return () => clearInterval(t);
-  }, [d?.status, load]);
-
-  const got = (data) => { if (data && "status" in data) { setD(data); setRelogin(false); } };
+  const got = (data) => { if (data?.accounts) { onState(data); setRelogin(false); } };
   const refresh = async () => {
     setBusy(true); setErr(null);
-    const r = await call("refresh/", "POST");
+    const r = await call("refresh/", "POST", { business: d.business });
     setBusy(false);
     if (!r.ok) setErr(r.data.error || "Couldn't read Flipkart.");
     got(r.data);
   };
   const disconnect = async () => {
-    if (!window.confirm("Disconnect Flipkart? The saved login and session are deleted from the server.")) return;
-    const r = await call("", "DELETE");
-    if (r.ok) setD(r.data);
+    if (!window.confirm(`Disconnect Flipkart for ${d.business_name}? Its saved login and session are deleted from the server.`)) return;
+    const r = await call("", "DELETE", { business: d.business });
+    if (!r.ok) setErr(r.data.error || "Couldn't disconnect.");
+    got(r.data);
+  };
+  const showLogin = isAdmin && (!d.status || ["FAILED", "EXPIRED", "NEW"].includes(d.status) || relogin);
+  const [open, setOpen] = useState(!d.connected);
+  const groups = GROUPS.filter(([k]) => (d.summary?.[k] || []).length);
+
+  return (
+    <section style={{ ...S.card, padding: 16, borderTop: `4px solid ${d.connected ? "#2874F0" : C.gray300}`, display: "flex", flexDirection: "column", gap: 12, minWidth: 0 }}>
+      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+        <span style={{ fontWeight: 900, fontSize: 16, color: C.gray900, flex: "1 1 200px", minWidth: 0 }}>
+          {d.business_name}
+          {d.username && <span style={{ fontWeight: 600, fontSize: 12.5, color: C.gray500 }}> · {d.username}</span>}
+        </span>
+        <Badge status={d.status} />
+        {d.status && <button onClick={() => setOpen(!open)} aria-expanded={open} style={{ ...btn("ghost", "sm"), minHeight: 32 }}>{open ? "▾ Less" : "▸ More"}</button>}
+      </div>
+      {d.connected && groups.length > 0 && (
+        <div style={{ display: "grid", gap: 8, gridTemplateColumns: mobile ? "repeat(2, minmax(0, 1fr))" : "repeat(auto-fill, minmax(150px, 1fr))" }}>
+          {groups.flatMap(([k]) => d.summary[k]).map((t) => (
+            <div key={t.label} style={{ border: `1px solid ${C.gray200}`, borderRadius: 12, padding: "8px 10px", minWidth: 0 }}>
+              <div style={{ fontSize: 11.5, color: C.gray500, fontWeight: 700, textTransform: "capitalize", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{pretty(t.label)}</div>
+              <div style={{ fontSize: 19, fontWeight: 900, color: C.gray900, fontVariantNumeric: "tabular-nums" }}>{value(t.label, t.value)}</div>
+            </div>
+          ))}
+        </div>
+      )}
+      {d.status_message && <div style={{ fontSize: 13, color: d.status === "OTP_SENT" || d.status === "ACTIVE" ? "#92400E" : C.red, fontWeight: 700 }}>
+        {d.status === "ACTIVE" ? "Some figures couldn't be read: " : ""}{d.status_message}</div>}
+      {err && <div role="alert" style={{ fontSize: 13, color: C.red, fontWeight: 700 }}>✕ {err}</div>}
+      {open && d.status && (
+        <div style={{ display: "grid", gap: "4px 14px", gridTemplateColumns: mobile ? "1fr" : "repeat(3, minmax(0, 1fr))", fontSize: 13, color: C.gray600 }}>
+          {d.seller_id && <span>Seller id: <b style={{ fontFamily: "monospace", color: C.gray900 }}>{d.seller_id}</b></span>}
+          <span>Pickup location: <b style={{ fontFamily: "monospace", color: C.gray900 }}>{d.location_id || "not set"}</b></span>
+          <span>Logged in: {when(d.last_login_at)}</span>
+          <span>Last read: {when(d.last_check_at)}</span>
+        </div>
+      )}
+      {!isAdmin && !d.connected && <div style={{ fontSize: 13, color: C.gray500 }}>Not connected — an admin connects Flipkart here.</div>}
+      {isAdmin && d.status === "OTP_SENT" && !relogin && <OtpForm d={d} onDone={got} setErr={setErr} />}
+      {showLogin && (open || !d.status) && <ConnectForm d={d} onDone={got} setErr={setErr} />}
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        {d.connected && <button onClick={refresh} disabled={busy} style={{ ...btn("primary", "sm"), opacity: busy ? 0.6 : 1 }}>{busy ? "Reading Flipkart…" : "↻ Read now"}</button>}
+        {isAdmin && d.status && !showLogin && open && <button onClick={() => setRelogin(true)} style={btn("ghost", "sm")}>Log in again</button>}
+        {isAdmin && relogin && <button onClick={() => setRelogin(false)} style={btn("ghost", "sm")}>Cancel</button>}
+        {isAdmin && d.status && open && <button onClick={disconnect} style={{ ...btn("ghost", "sm"), color: C.red }}>Disconnect</button>}
+      </div>
+    </section>
+  );
+}
+
+export function FlipkartSellerTab() {
+  const mobile = useIsMobile();
+  const [d, setD] = useState(null);
+  const [err, setErr] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [showAll, setShowAll] = useState(false);
+
+  const load = useCallback(async () => {
+    const r = await call("");
+    if (r.ok) setD(r.data); else setErr(r.data.error || r.data.detail || "Couldn't read the Flipkart connections.");
+  }, []);
+  useEffect(() => { load(); }, [load]);
+  const anyConnected = (d?.accounts || []).some((a) => a.connected);
+  // While any is connected, read again every minute (the server's own refresh runs every 10).
+  useEffect(() => {
+    if (!anyConnected) return undefined;
+    const t = setInterval(load, 60000);
+    return () => clearInterval(t);
+  }, [anyConnected, load]);
+
+  const refreshAll = async () => {
+    setBusy(true); setErr(null);
+    const r = await call("refresh/", "POST", {});
+    setBusy(false);
+    if (!r.ok) setErr(r.data.error || "Couldn't read Flipkart.");
+    if (r.data?.accounts) setD(r.data);
   };
 
   if (!d) {
     return err ? <div role="alert" style={{ ...S.card, color: C.red, fontWeight: 700 }}>✕ {err}</div>
       : <div style={{ display: "flex", justifyContent: "center", padding: 60 }}><CircularProgress style={{ color: "#2874F0" }} /></div>;
   }
-  const showLogin = d.is_admin && (!d.status || ["FAILED", "EXPIRED", "NEW"].includes(d.status) || relogin);
+  // Businesses with a login first; the others on request (an admin may have many).
+  const withLogin = d.accounts.filter((a) => a.status);
+  const without = d.accounts.filter((a) => !a.status);
+  const cards = showAll || withLogin.length === 0 ? [...withLogin, ...without] : withLogin;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14, maxWidth: 1100, minWidth: 0 }}>
-      <div>
-        <h1 style={{ fontSize: 22, fontWeight: 900, color: C.gray900, margin: 0 }}>Flipkart Seller Hub</h1>
-        <p style={{ fontSize: 13, color: C.gray500, margin: "4px 0 0", maxWidth: 760 }}>
-          The business's Seller Hub login, held on the server (encrypted). Flipkart asks for an OTP at every login; once in, the session is kept alive and read every 10 minutes.
-        </p>
-      </div>
-
-      <section style={{ ...S.card, padding: 16, borderTop: "4px solid #2874F0", display: "flex", flexDirection: "column", gap: 12 }}>
-        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-          <span style={{ fontWeight: 900, fontSize: 15, color: C.gray900, flex: "1 1 200px" }}>Connection</span>
-          <Badge status={d.status} />
+      <div style={{ display: "flex", gap: 12, alignItems: "flex-start", flexWrap: "wrap" }}>
+        <div style={{ flex: "1 1 320px", minWidth: 0 }}>
+          <h1 style={{ fontSize: 22, fontWeight: 900, color: C.gray900, margin: 0 }}>Flipkart Seller Hub</h1>
+          <p style={{ fontSize: 13, color: C.gray500, margin: "4px 0 0", maxWidth: 760 }}>
+            Each business's own Seller Hub login, held on the server (encrypted) — Flipkart asks for an OTP at every login. Once in, each is kept alive
+            and read every 10 minutes, and their orders show together below.
+          </p>
         </div>
-        {d.status && (
-          <div style={{ display: "grid", gap: "4px 14px", gridTemplateColumns: mobile ? "1fr" : "repeat(3, minmax(0, 1fr))", fontSize: 13, color: C.gray600 }}>
-            <span>Login: <b style={{ color: C.gray900 }}>{d.username}</b></span>
-            {d.seller_id && <span>Seller id: <b style={{ fontFamily: "monospace", color: C.gray900 }}>{d.seller_id}</b></span>}
-            <span>Pickup location: <b style={{ fontFamily: "monospace", color: C.gray900 }}>{d.location_id || "not set"}</b></span>
-            <span>Logged in: {when(d.last_login_at)}</span>
-            <span>Last read: {when(d.last_check_at)}</span>
-          </div>
+        {withLogin.filter((a) => a.connected).length > 1 && (
+          <button onClick={refreshAll} disabled={busy} style={{ ...btn("primary", "sm"), opacity: busy ? 0.6 : 1 }}>{busy ? "Reading Flipkart…" : "↻ Read all now"}</button>
         )}
-        {d.status_message && d.status !== "ACTIVE" && <div style={{ fontSize: 13, color: d.status === "OTP_SENT" ? "#92400E" : C.red, fontWeight: 700 }}>{d.status_message}</div>}
-        {err && <div role="alert" style={{ fontSize: 13, color: C.red, fontWeight: 700 }}>✕ {err}</div>}
+      </div>
+      {err && <div role="alert" style={{ fontSize: 13, color: C.red, fontWeight: 700 }}>✕ {err}</div>}
 
-        {!d.is_admin && !d.connected && <div style={{ fontSize: 13, color: C.gray500 }}>Not connected — an admin connects Flipkart here.</div>}
-        {d.is_admin && d.status === "OTP_SENT" && !relogin && <OtpForm d={d} onDone={got} setErr={setErr} />}
-        {showLogin && d.status !== "OTP_SENT" && <ConnectForm d={d} onDone={got} setErr={setErr} />}
-        {showLogin && d.status === "OTP_SENT" && relogin && <ConnectForm d={d} onDone={got} setErr={setErr} />}
-
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          {d.connected && <button onClick={refresh} disabled={busy} style={{ ...btn("primary", "sm"), opacity: busy ? 0.6 : 1 }}>{busy ? "Reading Flipkart…" : "↻ Read Flipkart now"}</button>}
-          {d.is_admin && d.status && !showLogin && <button onClick={() => setRelogin(true)} style={btn("ghost", "sm")}>Log in again</button>}
-          {d.is_admin && relogin && <button onClick={() => setRelogin(false)} style={btn("ghost", "sm")}>Cancel</button>}
-          {d.is_admin && d.status && <button onClick={disconnect} style={{ ...btn("ghost", "sm"), color: C.red }}>Disconnect</button>}
-        </div>
-      </section>
-
-      {d.connected && (
-        <section style={{ ...S.card, padding: 16 }}>
-          <div style={{ display: "flex", gap: 10, alignItems: "baseline", flexWrap: "wrap", marginBottom: 10 }}>
-            <span style={{ fontWeight: 900, fontSize: 15, color: C.gray900, flex: 1 }}>Seller Hub today</span>
-            <span style={{ fontSize: 12, color: C.gray400 }}>read {when(d.summary_at)}</span>
-          </div>
-          {d.status_message && <div style={{ fontSize: 12.5, color: "#92400E", marginBottom: 10 }}>Some numbers couldn't be read: {d.status_message}</div>}
-          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-            {GROUPS.filter(([k]) => (d.summary?.[k] || []).length).map(([k, title]) => (
-              <div key={k}>
-                <div style={{ fontSize: 12, fontWeight: 800, color: C.gray500, textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 6 }}>{title}</div>
-                <div style={{ display: "grid", gap: 8, gridTemplateColumns: mobile ? "repeat(2, minmax(0, 1fr))" : "repeat(4, minmax(0, 1fr))" }}>
-                  {d.summary[k].map((t) => (
-                    <div key={t.label} style={{ border: `1px solid ${C.gray200}`, borderRadius: 12, padding: "10px 12px", minWidth: 0 }}>
-                      <div style={{ fontSize: 12, color: C.gray500, fontWeight: 700, textTransform: "capitalize", overflow: "hidden", textOverflow: "ellipsis" }}>{pretty(t.label)}</div>
-                      <div style={{ fontSize: 22, fontWeight: 900, color: C.gray900, fontVariantNumeric: "tabular-nums" }}>{value(t.label, t.value)}</div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ))}
-            {!GROUPS.some(([k]) => (d.summary?.[k] || []).length) && <div style={{ fontSize: 13, color: C.gray500 }}>Nothing read yet — press “Read Flipkart now”.</div>}
-          </div>
-        </section>
+      {cards.map((a) => <AccountCard key={a.business} d={a} isAdmin={d.is_admin} mobile={mobile} onState={setD} />)}
+      {d.is_admin && without.length > 0 && withLogin.length > 0 && (
+        <button onClick={() => setShowAll(!showAll)} style={{ ...btn("ghost", "md"), alignSelf: "flex-start" }}>
+          {showAll ? "Hide businesses without Flipkart" : `+ Connect Flipkart for another business (${without.length})`}
+        </button>
       )}
 
-      {d.connected && <FlipkartOrders d={d} mobile={mobile} />}
+      <FlipkartOrders accounts={d.accounts.filter((a) => a.connected || a.orders_at)} mobile={mobile} />
 
       {d.is_admin && (
         <section style={{ ...S.card, padding: "12px 16px", fontSize: 13, color: C.gray600, lineHeight: 1.6 }}>
