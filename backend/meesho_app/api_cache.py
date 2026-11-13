@@ -68,6 +68,8 @@ _NEVER_CACHE_PREFIXES = (
     "meesho-sync/",           # live job status, written by the Sidekiq worker
     "meesho-orders/",         # the Meesho panel's orders — also written by the worker,
                               # which never bumps this cache's versions
+    "flipkart-seller/",       # Flipkart Seller Hub: several businesses' logins and orders on one
+                              # page, read live from Flipkart and refreshed by the sync's job
 )
 # All-time figures that only change when data does: no date in the key and a long
 # expiry, so they are recomputed only after an upload or edit (a version bump).

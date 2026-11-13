@@ -403,3 +403,17 @@ class FlipkartSellerTests(TestCase):
         r = self.c.post(f"{self.base}connect/", {"business": 999999, "username": "1", "password": "x"}, format="json")
         self.assertEqual(r.status_code, 403)
         self.assertFalse(A.objects.filter(business=stranger).exists())
+
+    def test_never_served_from_the_api_cache(self):
+        # The page combines businesses and is written by the refresh job — a cached answer would be stale.
+        from django.core.cache import caches
+        from django.test import override_settings
+        from .test_api_cache import LOCMEM, jwt_client
+        self.connected()
+        with override_settings(CACHES=LOCMEM, API_CACHE_ENABLED=True):
+            caches["api"].clear()
+            c = jwt_client(self.admin)
+            read = lambda: self.me(json.loads(c.get(self.base).content))["status"]
+            self.assertEqual(read(), "ACTIVE")
+            A.objects.filter(business=self.biz).update(status="EXPIRED")          # as the job writes it: no signals
+            self.assertEqual(read(), "EXPIRED")
