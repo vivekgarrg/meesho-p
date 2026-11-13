@@ -3766,6 +3766,9 @@ class FlipkartSellerAccount(models.Model):
     # The last read of the Seller Hub dashboard: units / sales value today and yesterday, impressions, out of stock.
     summary = models.JSONField(default=dict, blank=True)
     summary_at = models.DateTimeField(null=True, blank=True)
+    # The Forward Orders page as last read: {"counts": {tab: n}, "tabs": {tab: [shipment]}, "cut": [tabs not read in full]}.
+    orders = models.JSONField(default=dict, blank=True)
+    orders_at = models.DateTimeField(null=True, blank=True)
     created_by = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

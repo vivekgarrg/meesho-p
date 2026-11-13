@@ -44,10 +44,12 @@ class FakeFlipkart(requests.Session):
         if path == "/verifyOtp":
             if (kw.get("json") or {}).get("otp") != "193575":
                 return _resp(400, {"message": "Invalid OTP"})
-            for k, v in (("connect.sid", "live"), ("sellerId", "41ad149fa06e4194"), ("is_login", "true"),
+            for k, v in (("connect.sid", "SESS-7f3q"), ("sellerId", "41ad149fa06e4194"), ("is_login", "true"),
                          (flipkart_seller.CSRF_COOKIE, "csrf-1")):
                 self.cookies.set(k, v, domain="seller.flipkart.com")
             return _resp(200, {"status": "OK"})
+        if path == "/orchestrator/graphql":
+            return FakeFlipkart.orders(kw)
         if path == "/napi/graphql":
             op = (kw.get("json") or {}).get("operationName")
             data = {
@@ -61,6 +63,37 @@ class FakeFlipkart(requests.Session):
             }[op]
             return _resp(200, {"data": data})
         return _resp(200, {})
+
+
+def _shipment(n, tab, sku="5-inch-golden-plate", qty=1):
+    return {"shippingId": f"SH{n}", "orderId": f"OD{n}", "sellerPrice": 85.0, "creationTime": "2026-11-10T07:24:11",
+            "dispatchAfterDate": "2026-11-12T16:00:00", "dispatchByDate": "2026-11-13T12:00:00", "dispatchServiceTier": "EXPRESS",
+            "shipmentContents": {"shipmentGroupSpecs": [{"listing": {"product": {"sku": sku, "title": "Golden plate", "fsn": "FSN1",
+                                                                              "primaryImageUrl": "https://img/x.jpg"}}, "quantity": qty}]},
+            "statusHistory": {"acceptedTime": "2026-11-12T17:23:08" if tab != "pendingToAccept" else None},
+            "tracking": {"trackingId": f"FMPC{n}", "courierName": "Ekart Logistics"},
+            "shipmentOrderItems": [{"orderItemId": f"OI{n}"}]}
+
+
+def _orders(kw):
+    """Seller Hub's orders page: counts, and each tab's shipments 3 to a page in pages of ORDER_PAGE."""
+    body = kw["json"]
+    if body["operationName"] == "GetStateCount":
+        return _resp(200, {"data": {"shipmentStatesCountAndBreakdown": {"shipmentStatesCountMetrics": {"shipmentStatesCount": {
+            "pendingToAccept": 0, "upcoming": 2, "pendingToPack": 0, "pendingToDispatch": 3, "inTransit": 1, "completed": 271,
+            "pendingService": 0}, "timestamp": "t"}}}, "graphErrors": [], "dataErrors": {}})
+    inp = body["variables"]["input"]
+    have = {"pendingToAccept": [_shipment(10 + i, "pendingToAccept") for i in range(2)],
+            "pendingToDispatch": [_shipment(20 + i, "pendingToDispatch", qty=i + 1) for i in range(3)],
+            "inTransit": [_shipment(30, "inTransit")]}.get(inp["status"], [])
+    page, size = inp["paginationInput"]["pageNum"], inp["paginationInput"]["pageSize"]
+    chunk = have[(page - 1) * size: page * size]
+    return _resp(200, {"data": {"filteredShipmentGroups": {"shipmentGroups": [{"shipments": chunk}],
+                                                           "pageInfo": {"hasMore": page * size < len(have), "total": len(have)}}},
+                       "graphErrors": [], "dataErrors": {}})
+
+
+FakeFlipkart.orders = staticmethod(_orders)
 
 
 @mock.patch.dict(os.environ, {"MEESHO_SYNC_KEY": KEY})
@@ -100,12 +133,12 @@ class FlipkartSellerTests(TestCase):
         a = A.objects.get()
         self.assertNotIn("secret-pw", a.password_enc)
         self.assertEqual(meesho_sync.decrypt(a.password_enc), "secret-pw")
-        self.assertNotIn("live", a.cookies_enc)
-        self.assertEqual(json.loads(meesho_sync.decrypt(a.cookies_enc))["connect.sid"], "live")
+        self.assertNotIn("SESS-7f3q", a.cookies_enc)
+        self.assertEqual(json.loads(meesho_sync.decrypt(a.cookies_enc))["connect.sid"], "SESS-7f3q")
         # Nothing secret comes back to the browser.
         body = json.dumps(self.c.get(self.base).data, default=str)
         self.assertNotIn("secret-pw", body)
-        self.assertNotIn("live", body)
+        self.assertNotIn("SESS-7f3q", body)
 
     def test_a_wrong_otp_says_so_and_keeps_waiting_for_the_right_one(self):
         self.connect()
@@ -143,12 +176,12 @@ class FlipkartSellerTests(TestCase):
         q = next(c for c in FakeFlipkart.calls if c["path"] == "/napi/graphql")
         self.assertEqual((q["headers"]["fk-csrf-token"], q["headers"]["x-location-id"], q["headers"]["operation-name"]),
                          ("csrf-1", "LOC3695231456da41de87ae9704b810e002", "GetBusinessSummarySalesUnits"))
-        self.assertEqual(q["cookies"]["connect.sid"], "live")
+        self.assertEqual(q["cookies"]["connect.sid"], "SESS-7f3q")
 
     def test_the_panel_is_opened_after_the_otp_to_get_the_csrf_token(self):
         # As the real Seller Hub does: /verifyOtp logs in, but the CSRF cookie comes with the panel page.
         def verify(s, kw):
-            for k, v in (("connect.sid", "live"), ("sellerId", "41ad149fa06e4194"), ("is_login", "true")):
+            for k, v in (("connect.sid", "SESS-7f3q"), ("sellerId", "41ad149fa06e4194"), ("is_login", "true")):
                 s.cookies.set(k, v, domain="seller.flipkart.com")
             return _resp(200, {})
         def panel(s, kw):
@@ -164,7 +197,7 @@ class FlipkartSellerTests(TestCase):
 
     def test_no_csrf_token_is_said_plainly_not_called_an_ended_session(self):
         def verify(s, kw):
-            for k, v in (("connect.sid", "live"), ("sellerId", "41"), ("is_login", "true")):
+            for k, v in (("connect.sid", "SESS-7f3q"), ("sellerId", "41"), ("is_login", "true")):
                 s.cookies.set(k, v, domain="seller.flipkart.com")
             return _resp(200, {})
         FakeFlipkart.script["/verifyOtp"] = verify
@@ -179,6 +212,62 @@ class FlipkartSellerTests(TestCase):
         r = self.c.post(f"{self.base}refresh/")
         self.assertEqual(r.data["status"], "ACTIVE")
         self.assertIn("HTTP 403): Forbidden for location", r.data["status_message"])
+
+    # ── Orders ───────────────────────────────────────────────────────────
+    def test_the_orders_page_is_read_every_tab_with_its_count(self):
+        r = self.connected()
+        o = r.data["orders"]
+        self.assertEqual((o["counts"]["upcoming"], o["counts"]["pendingToDispatch"], o["counts"]["completed"]), (2, 3, 271))
+        self.assertEqual({k: len(v) for k, v in o["tabs"].items()},
+                         {"pendingToAccept": 2, "pendingToPack": 0, "pendingToDispatch": 3, "inTransit": 1, "pendingService": 0})
+        row = o["tabs"]["pendingToDispatch"][1]
+        self.assertEqual({k: row[k] for k in ("order_id", "shipment_id", "qty", "price", "dispatch_by", "tracking_id", "courier", "order_item_ids")},
+                         {"order_id": "OD21", "shipment_id": "SH21", "qty": 2, "price": 85.0, "dispatch_by": "2026-11-13T12:00:00",
+                          "tracking_id": "FMPC21", "courier": "Ekart Logistics", "order_item_ids": ["OI21"]})
+        self.assertEqual(row["items"][0]["sku"], "5-inch-golden-plate")
+        self.assertIsNone(o["tabs"]["pendingToAccept"][0]["accepted_at"])
+        q = next(c for c in FakeFlipkart.calls if c["path"] == "/orchestrator/graphql")
+        self.assertEqual((q["headers"]["x-user-id"], q["headers"]["x-client-id"], q["headers"]["fk-csrf-token"]),
+                         ("41ad149fa06e4194", "SD", "csrf-1"))
+        self.assertEqual(q["json"]["variables"]["input"]["params"]["seller_id"], "41ad149fa06e4194")
+        self.assertIsNotNone(A.objects.get().orders_at)
+
+    def test_every_page_of_a_tab_is_read(self):
+        self.connected()
+        with mock.patch.object(flipkart_seller, "ORDER_PAGE", 2):
+            self.c.post(f"{self.base}refresh/")
+        o = A.objects.get().orders
+        self.assertEqual([r["order_id"] for r in o["tabs"]["pendingToDispatch"]], ["OD20", "OD21", "OD22"])
+        pages = [c["json"]["variables"]["input"]["paginationInput"]["pageNum"] for c in FakeFlipkart.calls
+                 if c["path"] == "/orchestrator/graphql" and c["json"]["variables"]["input"].get("status") == "pendingToDispatch"
+                 and "paginationInput" in c["json"]["variables"]["input"]]
+        self.assertEqual(pages[-2:], [1, 2])
+        self.assertEqual(o["cut"], [])
+        with mock.patch.object(flipkart_seller, "ORDER_PAGE", 1), mock.patch.object(flipkart_seller, "ORDER_PAGES", 2):
+            self.c.post(f"{self.base}refresh/")
+        self.assertEqual(A.objects.get().orders["cut"], ["pendingToDispatch"])          # more than it reads: said so
+
+    def test_an_orders_error_keeps_the_dashboard_and_the_last_orders(self):
+        self.connected()
+        before = A.objects.get().orders
+        FakeFlipkart.orders = staticmethod(lambda kw: _resp(200, {"data": None, "graphErrors": [{"message": "orders down"}]}))
+        try:
+            r = self.c.post(f"{self.base}refresh/")
+        finally:
+            FakeFlipkart.orders = staticmethod(_orders)
+        self.assertEqual(r.data["status"], "ACTIVE")
+        self.assertIn("orders: Flipkart said: orders down", r.data["status_message"])
+        self.assertEqual(A.objects.get().orders, before)
+        self.assertTrue(r.data["summary"]["sales"])
+
+    def test_an_ended_session_on_the_orders_page_marks_it_expired(self):
+        self.connected()
+        FakeFlipkart.orders = staticmethod(lambda kw: _resp(401, {}))
+        try:
+            r = self.c.post(f"{self.base}refresh/")
+        finally:
+            FakeFlipkart.orders = staticmethod(_orders)
+        self.assertEqual(r.data["status"], "EXPIRED")
 
     def test_renewed_cookies_are_kept(self):
         self.connected()

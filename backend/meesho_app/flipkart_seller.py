@@ -60,6 +60,51 @@ QUERIES = {
 }
 
 
+# ── Orders (Seller Hub's Forward Orders page, read through /orchestrator/graphql) ──────────
+ORCH = "/orchestrator/graphql?"
+# The tabs read in full (up to ORDER_PAGES pages each); Completed is only counted.
+ORDER_TABS = ("pendingToAccept", "pendingToPack", "pendingToDispatch", "inTransit", "pendingService")
+ORDER_PAGE, ORDER_PAGES = 100, 10
+COUNT_QUERY = (
+    "query GetStateCount($input: FetchShipmentCountRequestInput) {\n"
+    "  shipmentStatesCountAndBreakdown(input: $input) {\n    shipmentStatesCountMetrics {\n"
+    "      shipmentStatesCount {\n        pendingToAccept\n        pendingToPack\n        pendingLabel\n"
+    "        pendingRTD\n        pendingToDispatch\n        inTransit\n        completed\n        upcoming\n"
+    "        underProcessing\n        gettingAccepted\n        gettingMarkedAsRTD\n        pendingService\n"
+    "        erroredSellerActionable\n        erroredNonSellerActionable\n        errored\n      }\n"
+    "      timestamp\n    }\n  }\n}"
+)
+LIST_QUERY = (
+    "query GetShipmentListByOrderId($input: ShipmentGroupFilterRequestInput!) {\n"
+    "  filteredShipmentGroups(input: $input) {\n    shipmentGroups {\n      shipments {\n        shippingId\n"
+    "        groupId\n        shipmentContents {\n          shipmentGroupSpecs {\n            listing {\n"
+    "              listingId\n              product {\n                productId\n                title\n"
+    "                fsn\n                sku\n                primaryImageUrl\n                productUrl\n"
+    "              }\n            }\n            quantity\n          }\n          packages {\n"
+    "            packageId\n            dimensions {\n              length\n              breadth\n"
+    "              height\n              weight\n            }\n          }\n        }\n"
+    "        statusHistory {\n          reservationTime\n          gettingAcceptedTime\n"
+    "          acceptedTime\n          gettingMarkedAsRTDTime\n          readyToDispatchTime\n"
+    "          dispatchTime\n          deliveredTime\n        }\n        tracking {\n          trackingId\n"
+    "          pickupReattemptCount\n          courierName\n          pickupVendorName\n"
+    "          logisticsPartner\n        }\n        orderId\n        sellerPrice\n        creationTime\n"
+    "        shipmentType\n        packagingPolicy\n        dispatchServiceTier\n        dispatchAfterDate\n"
+    "        dispatchByDate\n        dispatchByDateWithGrace\n        serviceByDate\n        channelOfSale\n"
+    "        isLarge\n        isMps\n        subShipmentCount\n        locationId\n"
+    "        shipmentOrderItems {\n          orderItemId\n          enforcedGroupId\n          quantity\n"
+    "          pharmaOtcDetails {\n            mandatoryFields\n            otcComplianceValues {\n"
+    "              manufacturerName\n              batchNumber\n              quantity\n"
+    "              expiryDate\n            }\n          }\n          imeiDetails {\n"
+    "            imeiCountPerQuantity\n            imei\n          }\n          tagloopDetails {\n"
+    "            tagIds\n            quantity\n          }\n          orderItem {\n            offers {\n"
+    "              offerId\n              title\n              adjustmentType\n"
+    "              isSellerPromotion\n              offerDescription\n              offerValueInRupees\n"
+    "              promotionId\n              sellerContribution\n              fkmpContribution\n"
+    "            }\n          }\n        }\n      }\n    }\n    pageInfo {\n      hasMore\n      total\n    }\n"
+    "    timestamp\n  }\n}"
+)
+
+
 class FlipkartError(Exception):
     def __init__(self, message, expired=False):
         super().__init__(message)
@@ -185,8 +230,9 @@ def verify_otp(account, otp):
 
 # ── Reading ──────────────────────────────────────────────────────────────────
 
-def graphql(account, op_name, variables, query, s=None):
-    """One Seller Hub graphql query, as the panel sends it. Returns its `data`."""
+def graphql(account, op_name, variables, query, s=None, path="/napi/graphql", extra_headers=None):
+    """One Seller Hub graphql query, as the panel sends it. Returns its `data`.
+    The dashboard's go to /napi/graphql; the orders page's to /orchestrator/graphql (see orchestrator)."""
     if account.status != A.STATUS_ACTIVE or not account.cookies_enc:
         raise FlipkartError("Flipkart isn't connected.", expired=account.status == A.STATUS_EXPIRED)
     s = s or _load(account, _http())
@@ -198,8 +244,9 @@ def graphql(account, op_name, variables, query, s=None):
                "x-internal-env-type": "WEB", "fk-csrf-token": jar.get(CSRF_COOKIE, ""), "Referer": f"{BASE}/index.html"}
     if account.location_id:
         headers["x-location-id"] = account.location_id
+    headers.update(extra_headers or {})
     try:
-        r = s.post(f"{BASE}/napi/graphql", json={"operationName": op_name, "variables": variables, "query": query},
+        r = s.post(f"{BASE}{path}", json={"operationName": op_name, "variables": variables, "query": query},
                    headers=headers, timeout=TIMEOUT, allow_redirects=False)
     except requests.RequestException as e:
         raise FlipkartError(f"Couldn't reach Flipkart: {e.__class__.__name__}.")
@@ -212,13 +259,86 @@ def graphql(account, op_name, variables, query, s=None):
         body = r.json()
     except ValueError:
         raise FlipkartError("Flipkart sent something other than data — the session may have ended.", expired=True)
-    errors = body.get("errors") if isinstance(body, dict) else None
+    errors = (body.get("errors") or body.get("graphErrors")) if isinstance(body, dict) else None
     if errors:
         text = " ".join(str(e.get("message", e)) if isinstance(e, dict) else str(e) for e in errors)[:300]
         if re.search(r"unauth|login|session|forbidden", text, re.I):
             raise FlipkartError("Flipkart ended the session — log in again with a new OTP.", expired=True)
         raise FlipkartError(f"Flipkart said: {text}")
     return (body or {}).get("data") or {}
+
+
+def orchestrator(account, op_name, variables, query, s=None):
+    """A query of Seller Hub's orders page: /orchestrator/graphql, as the seller (x-user-id)."""
+    if not account.seller_id:
+        raise FlipkartError("The seller id isn't known yet — log in again.")
+    return graphql(account, op_name, variables, query, s=s, path=ORCH,
+                   extra_headers={"x-client-id": "SD", "x-user-id": account.seller_id})
+
+
+def _count_params(account):
+    return {"seller_id": account.seller_id, "shipment_id": "", "status": {"picked_up": "false", "dispatched": "false", "shipped": "false"},
+            "service_profile": "", "on_hold": False, "location_id": account.location_id or "", "dispatch_after_date": {},
+            "order_id": "", "order_item_id": "", "tracking_id": "", "order_date": {}, "approval_date": {}, "dispatch_by_date": {},
+            "delivered_date": {}, "service_by_date": {}, "upcoming": False, "single": False, "multi": False, "is_large": "false",
+            "is_mps": "false", "reattempts": False, "rtd_date": {}}
+
+
+_LIST_NULLS = ("status", "on_hold", "dispatch_after_date", "sku", "fsn", "order_id", "order_item_id", "tracking_id", "dbd",
+               "is_breached", "order_date", "approval_date", "dispatch_by_date", "delivered_date", "service_by_date",
+               "dispatch_service_tiers", "upcoming", "single", "multi", "multiple_quantity", "replacement", "multiple_product",
+               "multiple_packages", "forms_required", "is_transparent_packaging", "vendor_group_codes", "is_large", "is_mps",
+               "pickup_after_date", "reattempts", "rtd_date", "must_dispatch_today", "channel_of_sale", "logistics_partners")
+
+
+def _list_input(account, tab, page):
+    return {"status": tab,
+            "viewType": {"groupedByFsn": False, "shipment": True, "shipmentsInGroup": False, "groupedByPricing": False, "shipmentDetails": False},
+            "shipmentParams": {"seller_id": account.seller_id, "location_id": account.location_id or None, **{k: None for k in _LIST_NULLS}},
+            "paginationInput": {"pageNum": page, "pageSize": ORDER_PAGE},
+            "sortInputs": [{"field": "skus", "order": "asc"}, {"field": "dispatch_service_tier", "order": "asc"}]}
+
+
+def _row(sh, tab):
+    """One shipment, as the app shows it (no customer details are read)."""
+    specs = (sh.get("shipmentContents") or {}).get("shipmentGroupSpecs") or []
+    items = []
+    for x in specs:
+        p = ((x.get("listing") or {}).get("product") or {})
+        items.append({"sku": p.get("sku") or "", "title": p.get("title") or "", "fsn": p.get("fsn") or "",
+                      "image": p.get("primaryImageUrl") or "", "url": p.get("productUrl") or "", "qty": x.get("quantity") or 1})
+    st = sh.get("statusHistory") or {}
+    tr = sh.get("tracking") or {}
+    return {"shipment_id": sh.get("shippingId") or "", "order_id": sh.get("orderId") or "",
+            "order_item_ids": [i.get("orderItemId") for i in sh.get("shipmentOrderItems") or [] if i.get("orderItemId")],
+            "items": items, "qty": sum(i["qty"] for i in items) or 1, "price": sh.get("sellerPrice"),
+            "created": sh.get("creationTime"), "dispatch_after": sh.get("dispatchAfterDate"), "dispatch_by": sh.get("dispatchByDate"),
+            "tier": sh.get("dispatchServiceTier") or "", "tracking_id": tr.get("trackingId") or "",
+            "courier": tr.get("courierName") or tr.get("pickupVendorName") or "", "tab": tab,
+            "accepted_at": st.get("acceptedTime"), "rtd_at": st.get("readyToDispatchTime"),
+            "dispatched_at": st.get("dispatchTime"), "delivered_at": st.get("deliveredTime")}
+
+
+def read_orders(account, s=None):
+    """Every order on the Forward Orders tabs (but Completed, only counted), and each tab's count."""
+    s = s or _load(account, _http())
+    data = orchestrator(account, "GetStateCount", {"input": {"status": "pendingToPack", "params": _count_params(account)}},
+                        COUNT_QUERY, s=s)
+    counts = (((data.get("shipmentStatesCountAndBreakdown") or {}).get("shipmentStatesCountMetrics") or {})
+              .get("shipmentStatesCount") or {})
+    tabs, cut = {}, []
+    for tab in ORDER_TABS:
+        rows = []
+        for page in range(1, ORDER_PAGES + 1):
+            d = orchestrator(account, "GetShipmentListByOrderId", {"input": _list_input(account, tab, page)}, LIST_QUERY, s=s)
+            f = d.get("filteredShipmentGroups") or {}
+            rows += [_row(sh, tab) for g in f.get("shipmentGroups") or [] for sh in g.get("shipments") or []]
+            if not (f.get("pageInfo") or {}).get("hasMore"):
+                break
+        else:
+            cut.append(tab)
+        tabs[tab] = rows
+    return {"counts": {k: v for k, v in counts.items() if isinstance(v, int)}, "tabs": tabs, "cut": cut}
 
 
 def _numbers(node, path=()):
@@ -266,9 +386,20 @@ def refresh(account):
             problems.append(f"{key}: {e}")
             continue
         summary[key] = [{"label": l, "value": v} for l, v in _numbers(data)]
+    fields = ["summary", "summary_at", "last_check_at", "status_message"]
+    try:
+        account.orders, account.orders_at = read_orders(account, s), timezone.now()
+        fields += ["orders", "orders_at"]
+    except FlipkartError as e:
+        if e.expired:
+            account.status, account.status_message = A.STATUS_EXPIRED, str(e)
+            account.last_check_at = timezone.now()
+            account.save(update_fields=["status", "status_message", "last_check_at", "updated_at"])
+            raise
+        problems.append(f"orders: {e}")
     account.summary, account.summary_at, account.last_check_at = summary, timezone.now(), timezone.now()
     account.status_message = "; ".join(problems)[:500]
-    _save(account, s, ["summary", "summary_at", "last_check_at", "status_message"])
+    _save(account, s, fields)
     return account
 
 
@@ -300,7 +431,8 @@ def _json(account, request):
     return {"connected": account.status == A.STATUS_ACTIVE, "status": account.status, "status_message": account.status_message,
             "username": account.username, "seller_id": account.seller_id, "location_id": account.location_id,
             "otp_sent_at": account.otp_sent_at, "last_login_at": account.last_login_at, "last_check_at": account.last_check_at,
-            "summary": account.summary, "summary_at": account.summary_at, "is_admin": v._is_admin(request.user)}
+            "summary": account.summary, "summary_at": account.summary_at,
+            "orders": account.orders, "orders_at": account.orders_at, "is_admin": v._is_admin(request.user)}
 
 
 def _admin_only(request):
