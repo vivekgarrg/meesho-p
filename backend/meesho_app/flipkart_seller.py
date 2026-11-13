@@ -24,6 +24,7 @@ Nothing here changes anything on Flipkart: the login, and reads.
 
 import json
 import os
+from datetime import timedelta
 import re
 
 import requests
@@ -370,8 +371,12 @@ def _numbers(node, path=()):
     return out
 
 
-def refresh(account):
-    """Read the dashboard (and so keep the session alive). Marks the account EXPIRED when Flipkart has ended it."""
+SYNC_EVERY = timedelta(minutes=30)     # the 10-minute refresh writes orders & payments into the tables this often
+
+
+def refresh(account, sync=None):
+    """Read the dashboard (and so keep the session alive). Marks the account EXPIRED when Flipkart has ended it.
+    Then syncs orders and payments into the Flipkart tables — always when sync=True, else every SYNC_EVERY."""
     s = _load(account, _http())
     summary, problems = {}, []
     for key, (op, variables, query) in QUERIES.items():
@@ -397,6 +402,21 @@ def refresh(account):
             account.save(update_fields=["status", "status_message", "last_check_at", "updated_at"])
             raise
         problems.append(f"orders: {e}")
+    # Then orders and payments into the app's Flipkart tables (flipkart_sync.py), as the Meesho sync does.
+    from . import flipkart_sync
+    if sync is None:
+        sync = account.sync_at is None or timezone.now() - account.sync_at >= SYNC_EVERY
+    try:
+        out = flipkart_sync.run(account, s) if sync else {"ok": True}
+        if not out.get("ok"):
+            problems.append(out.get("message") or "the sync wrote nothing")
+    except FlipkartError as e:
+        if e.expired:
+            account.status, account.status_message = A.STATUS_EXPIRED, str(e)
+            account.last_check_at = timezone.now()
+            account.save(update_fields=["status", "status_message", "last_check_at", "updated_at"])
+            raise
+        problems.append(f"payments: {e}")
     account.summary, account.summary_at, account.last_check_at = summary, timezone.now(), timezone.now()
     account.status_message = "; ".join(problems)[:500]
     _save(account, s, fields)
@@ -447,7 +467,8 @@ def _account_json(business, account):
     return {**out, "connected": account.status == A.STATUS_ACTIVE, "status": account.status, "status_message": account.status_message,
             "username": account.username, "seller_id": account.seller_id, "location_id": account.location_id,
             "otp_sent_at": account.otp_sent_at, "last_login_at": account.last_login_at, "last_check_at": account.last_check_at,
-            "summary": account.summary, "summary_at": account.summary_at, "orders": account.orders, "orders_at": account.orders_at}
+            "summary": account.summary, "summary_at": account.summary_at, "orders": account.orders, "orders_at": account.orders_at,
+            "sync": account.sync, "sync_at": account.sync_at}
 
 
 def _state(request, business_id):
@@ -593,7 +614,9 @@ def refresh_view(request, business_id):
     problems = []
     for a in accounts:
         try:
-            refresh(a)
+            # One business: its orders and payments into the tables now (~30 s). All of them: as the schedule
+            # would, so the request stays inside the server's time limit.
+            refresh(a, sync=True if want else None)
         except FlipkartError as e:
             problems.append(f"{a.business.name}: {e}")
     if problems:

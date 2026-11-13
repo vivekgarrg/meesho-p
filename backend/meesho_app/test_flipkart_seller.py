@@ -52,6 +52,8 @@ class FakeFlipkart(requests.Session):
             return FakeFlipkart.orders(kw)
         if path == "/napi/graphql":
             op = (kw.get("json") or {}).get("operationName")
+            if op not in DASHBOARD_OPS:
+                return FakeFlipkart.payments(kw)
             data = {
                 "GetBusinessSummarySalesUnits": {"getBusinessSummarySalesUnitsData": {"result": json.dumps(
                     {"today": {"gross_units": 12, "gross_gmv": 4100.5}, "yesterday": {"gross_units": 30, "gross_gmv": 9800}})}},
@@ -93,7 +95,19 @@ def _orders(kw):
                        "graphErrors": [], "dataErrors": {}})
 
 
+DASHBOARD_OPS = ("GetBusinessSummarySalesUnits", "GetBusinessSummaryImpressions", "Selection_getStockWidget")
+
+
+def _no_payments(kw):
+    """Seller Hub's Payments pages with nothing paid or coming (test_flipkart_sync scripts real ones)."""
+    op = kw["json"]["operationName"]
+    if op == "Payments_Previous_Payments_WEB_getTableData":
+        return _resp(200, {"data": {"payments_fetchPreviousPaymentTableData": {"data": [], "show_more": False, "token": "0", "total_count": 0}}})
+    return _resp(200, {"data": {"getTransactionTableData": {"transactions": [], "is_next": False, "token": 0, "total_count": 0}}})
+
+
 FakeFlipkart.orders = staticmethod(_orders)
+FakeFlipkart.payments = staticmethod(_no_payments)
 
 
 @mock.patch.dict(os.environ, {"MEESHO_SYNC_KEY": KEY})

@@ -8,6 +8,7 @@ import { CircularProgress } from "@mui/material";
  * see its dashboard as last read. The session lives on the server, encrypted;
  * the sync reads it every 10 minutes, which keeps it alive. When Flipkart ends
  * it the page says so — log in again with a new OTP. Server: flipkart_seller.py.
+ * Orders and payments go into the Flipkart tables and are reconciled: flipkart_sync.py.
  */
 
 const STATUS = {
@@ -233,6 +234,140 @@ function FlipkartOrders({ accounts, mobile }) {
   );
 }
 
+// ── Payments: what Flipkart paid, matched against what it paid for ───────────────────────
+const rupees = (v) => (v == null ? "—" : `₹${Number(v).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`);
+const day = (iso) => (iso ? new Date(`${iso}T00:00:00`).toLocaleDateString("en-IN", { day: "numeric", month: "short" }) : "—");
+const PAYOUT_STATE = {
+  matched: { icon: "✓", label: "Matches its orders", fg: "#15803D", bg: "#DCFCE7" },
+  other_charges: { icon: "!", label: "Differs — upload the Settlement Report for its ads / fines", fg: "#B45309", bg: "#FEF3C7" },
+  mismatch: { icon: "✕", label: "Doesn't add up", fg: "#B91C1C", bg: "#FEE2E2" },
+  not_read: { icon: "…", label: "Its orders not read yet", fg: "#475569", bg: "#F1F5F9" },
+  in_progress: { icon: "→", label: "On its way to the bank", fg: "#1D4ED8", bg: "#DBEAFE" },
+};
+const ORDER_STATES = [
+  ["paid", "Paid", "#15803D"], ["coming", "Payment coming", "#1D4ED8"], ["on_the_way", "Not delivered yet", "#475569"],
+  ["delivered_unpaid", "Delivered, not paid", "#B91C1C"], ["returned", "Returned", "#B45309"], ["cancelled", "Cancelled", "#64748B"],
+];
+
+function Tile({ label, value, sub, tone }) {
+  return (
+    <div style={{ border: `1px solid ${C.gray200}`, borderRadius: 12, padding: "8px 10px", minWidth: 0 }}>
+      <div style={{ fontSize: 11.5, color: tone || C.gray500, fontWeight: 800 }}>{label}</div>
+      <div style={{ fontSize: 19, fontWeight: 900, color: C.gray900, fontVariantNumeric: "tabular-nums" }}>{value}</div>
+      {sub && <div style={{ fontSize: 11.5, color: C.gray500 }}>{sub}</div>}
+    </div>
+  );
+}
+
+function FlipkartPayments({ accounts, mobile }) {
+  const [biz, setBiz] = useState(accounts[0]?.business);
+  const [d, setD] = useState(null);
+  const [err, setErr] = useState(null);
+  const [showAll, setShowAll] = useState(false);
+  const stamp = accounts.find((a) => a.business === biz)?.sync_at;   // read again when the sync has written
+  useEffect(() => {
+    if (!biz) return;
+    let live = true;
+    setErr(null);
+    call(`reconcile/?business=${biz}`).then((r) => {
+      if (!live) return;
+      if (r.ok) setD(r.data); else setErr(r.data.error || "Couldn't read the payments.");
+    });
+    return () => { live = false; };
+  }, [biz, stamp]);
+  if (!accounts.length) return null;
+  const mine = d && d.business === biz ? d : null;
+  const payouts = mine ? (showAll ? mine.payouts : mine.payouts.slice(0, 12)) : [];
+  return (
+    <section style={{ ...S.card, padding: 16, display: "flex", flexDirection: "column", gap: 12, minWidth: 0 }}>
+      <div style={{ display: "flex", gap: 10, alignItems: "baseline", flexWrap: "wrap" }}>
+        <span style={{ fontWeight: 900, fontSize: 15, color: C.gray900, flex: 1 }}>Flipkart payments</span>
+        {mine && <span style={{ fontSize: 12, color: C.gray400 }}>last {mine.days} days · written to the tables {when(mine.sync_at)}</span>}
+      </div>
+      {accounts.length > 1 && (
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {accounts.map((a) => (
+            <button key={a.business} onClick={() => setBiz(a.business)} aria-pressed={biz === a.business}
+              style={{ ...btn(biz === a.business ? "primary" : "ghost", "sm"), minHeight: 34 }}>{a.business_name}</button>
+          ))}
+        </div>
+      )}
+      {err && <div role="alert" style={{ fontSize: 13, color: C.red, fontWeight: 700 }}>✕ {err}</div>}
+      {!mine ? (!err && <div style={{ display: "flex", justifyContent: "center", padding: 20 }}><CircularProgress size={24} style={{ color: "#2874F0" }} /></div>) : (
+        <>
+          {mine.sync?.refused && <div role="alert" style={{ fontSize: 13, color: C.red, fontWeight: 700 }}>✕ {mine.sync.message}</div>}
+          <div style={{ display: "grid", gap: 8, gridTemplateColumns: mobile ? "repeat(2, minmax(0, 1fr))" : "repeat(auto-fill, minmax(170px, 1fr))" }}>
+            <Tile label="Paid to the bank" value={rupees(mine.totals.transferred)} sub={`${mine.payouts.filter((p) => p.status === "paid").length} transfers`} />
+            <Tile label="On its way" value={rupees(mine.totals.in_progress)} tone="#1D4ED8" />
+            <Tile label="Coming (next 30 days)" value={rupees(mine.totals.upcoming)} sub={`${mine.totals.upcoming_items} order items`} tone="#1D4ED8" />
+            <Tile label="Transfers that match" value={`${mine.totals.matched} of ${mine.totals.matched + mine.totals.to_check}`}
+              sub={mine.totals.to_check ? `${mine.totals.to_check} to check` : "all add up"} tone={mine.totals.to_check ? "#B45309" : "#15803D"} />
+          </div>
+
+          <div>
+            <div style={{ fontSize: 11.5, fontWeight: 800, color: C.gray500, textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 6 }}>
+              Order items since {day(mine.since)} · {mine.orders_total}</div>
+            <div style={{ display: "grid", gap: 8, gridTemplateColumns: mobile ? "repeat(2, minmax(0, 1fr))" : "repeat(6, minmax(0, 1fr))" }}>
+              {ORDER_STATES.map(([k, label, tone]) => (
+                <Tile key={k} label={label} tone={tone} value={(mine.orders[k]?.count || 0).toLocaleString("en-IN")}
+                  sub={mine.orders[k]?.amount ? rupees(mine.orders[k].amount) : null} />
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <div style={{ fontSize: 11.5, fontWeight: 800, color: C.gray500, textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 6 }}>Transfers</div>
+            <div style={{ border: `1px solid ${C.gray100}`, borderRadius: 12, overflow: "hidden" }}>
+              {payouts.length === 0 ? <div style={{ padding: 20, textAlign: "center", fontSize: 13, color: C.gray500 }}>No transfers read yet.</div> : payouts.map((p) => {
+                const st = PAYOUT_STATE[p.state] || PAYOUT_STATE.not_read;
+                return (
+                  <div key={p.advice_id} style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: mobile ? "wrap" : "nowrap", padding: "9px 12px", borderBottom: `1px solid ${C.gray100}`, minWidth: 0 }}>
+                    <div style={{ width: mobile ? "auto" : 92, flexShrink: 0 }}>
+                      <div style={{ fontSize: 13.5, fontWeight: 900, color: C.gray900 }}>{day(p.date)}</div>
+                      <div style={{ fontSize: 11.5, color: C.gray500, fontWeight: 700 }}>{p.type === "PREPAID" ? "Prepaid" : "Postpaid"}</div>
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 12, color: C.gray500, fontFamily: "monospace", wordBreak: "break-all" }}>{p.utr || `advice ${p.advice_id}`}</div>
+                      {p.status === "paid" && (
+                        <div style={{ fontSize: 12.5, color: C.gray600 }}>
+                          {p.items} order items {rupees(p.items_amount)}{p.other_charges ? ` · other charges ${rupees(p.other_charges)}` : ""}
+                          {p.difference != null && Math.abs(p.difference) > 1 ? <b style={{ color: st.fg }}> · difference {rupees(p.difference)}</b> : null}
+                        </div>
+                      )}
+                    </div>
+                    <span title={st.label} style={{ fontSize: 12, fontWeight: 800, color: st.fg, background: st.bg, padding: "3px 9px", borderRadius: 999, whiteSpace: mobile ? "normal" : "nowrap", maxWidth: mobile ? "100%" : 260, overflow: "hidden", textOverflow: "ellipsis" }}>
+                      {st.icon} {st.label}</span>
+                    <div style={{ width: 92, textAlign: "right", fontWeight: 900, fontSize: 14, color: C.gray900, fontVariantNumeric: "tabular-nums", flexShrink: 0 }}>{rupees(p.transfer)}</div>
+                  </div>
+                );
+              })}
+            </div>
+            {mine.payouts.length > 12 && <button onClick={() => setShowAll(!showAll)} style={{ ...btn("ghost", "sm"), marginTop: 6 }}>{showAll ? "Show fewer" : `Show all ${mine.payouts.length}`}</button>}
+          </div>
+
+          {mine.unpaid.length > 0 && (
+            <div>
+              <div style={{ fontSize: 11.5, fontWeight: 800, color: C.red, textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 6 }}>
+                Delivered 20+ days ago, neither paid nor coming · {mine.unpaid_count}</div>
+              <div style={{ border: `1px solid ${C.gray100}`, borderRadius: 12, overflow: "hidden" }}>
+                {mine.unpaid.slice(0, 50).map((o) => (
+                  <div key={o.order_item_id} style={{ display: "flex", gap: 10, alignItems: "center", padding: "8px 12px", borderBottom: `1px solid ${C.gray100}`, minWidth: 0 }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 13, fontWeight: 800, color: C.gray900, fontFamily: "monospace", wordBreak: "break-word" }}>{o.sku || "—"}</div>
+                      <div style={{ fontSize: 12, color: C.gray500, wordBreak: "break-all" }}>{o.order_id} · item {o.order_item_id} · ordered {day(o.order_date)}</div>
+                    </div>
+                    <div style={{ fontSize: 12.5, fontWeight: 800, color: C.red, flexShrink: 0 }}>{o.days} days</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
 const lbl = { display: "flex", flexDirection: "column", gap: 5, fontSize: 12.5, fontWeight: 800, color: C.gray600, minWidth: 0 };
 
 /** One business's Seller Hub login: where it stands, logging it in (password → OTP), and its dashboard. */
@@ -280,6 +415,11 @@ function AccountCard({ d, isAdmin, mobile, onState }) {
       )}
       {d.status_message && <div style={{ fontSize: 13, color: d.status === "OTP_SENT" || d.status === "ACTIVE" ? "#92400E" : C.red, fontWeight: 700 }}>
         {d.status === "ACTIVE" ? "Some figures couldn't be read: " : ""}{d.status_message}</div>}
+      {d.connected && d.sync_at && (d.sync?.ok ? (
+        <div style={{ fontSize: 12.5, color: C.gray500 }}>
+          Written to the Flipkart tables {when(d.sync_at)}: {d.sync.orders_added || 0} new orders, {d.sync.orders_status_changed || 0} moved on,
+          {" "}{d.sync.payments_added || 0} new payments, {d.sync.payouts_added || 0} new transfers, {d.sync.upcoming || 0} coming.</div>
+      ) : d.sync?.message ? <div style={{ fontSize: 13, color: d.sync.refused ? C.red : "#92400E", fontWeight: 700 }}>✕ Not written to the tables: {d.sync.message}</div> : null)}
       {err && <div role="alert" style={{ fontSize: 13, color: C.red, fontWeight: 700 }}>✕ {err}</div>}
       {open && d.status && (
         <div style={{ display: "grid", gap: "4px 14px", gridTemplateColumns: mobile ? "1fr" : "repeat(3, minmax(0, 1fr))", fontSize: 13, color: C.gray600 }}>
@@ -349,7 +489,8 @@ export function FlipkartSellerTab() {
           <h1 style={{ fontSize: 22, fontWeight: 900, color: C.gray900, margin: 0 }}>Flipkart Seller Hub</h1>
           <p style={{ fontSize: 13, color: C.gray500, margin: "4px 0 0", maxWidth: 760 }}>
             Each business's own Seller Hub login, held on the server (encrypted) — Flipkart asks for an OTP at every login. Once in, each is kept alive
-            and read every 10 minutes, and their orders show together below.
+            and read every 10 minutes, and their orders show together below. Every 30 minutes (or on Read now) their orders and payments are
+            written into the app's Flipkart tables — as Meesho's are — and each payment is matched against the orders it paid for.
           </p>
         </div>
         {withLogin.filter((a) => a.connected).length > 1 && (
@@ -366,6 +507,7 @@ export function FlipkartSellerTab() {
       )}
 
       <FlipkartOrders accounts={d.accounts.filter((a) => a.connected || a.orders_at)} mobile={mobile} />
+      <FlipkartPayments accounts={d.accounts.filter((a) => a.connected || a.sync_at)} mobile={mobile} />
 
       {d.is_admin && (
         <section style={{ ...S.card, padding: "12px 16px", fontSize: 13, color: C.gray600, lineHeight: 1.6 }}>

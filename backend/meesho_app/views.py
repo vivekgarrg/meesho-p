@@ -3363,7 +3363,7 @@ def flipkart_outcome(rows, report_status=None):
     types = {r.return_type.strip().upper() for r in rows if r.return_type and r.return_type.strip().upper() != "NA"}
     payment_rto = any("LOGISTIC" in t or "COURIER" in t or "RTO" in t for t in types)
     st = (report_status or "").strip().upper()
-    if st == "DELIVERED":
+    if st in ("DELIVERED", "RETURN_CANCELLED"):          # a cancelled return: the customer kept it
         return FK_DELIVERED, "orders"
     if st == "CANCELLED":
         return FK_CANCELLED, "orders"

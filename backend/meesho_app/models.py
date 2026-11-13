@@ -2846,6 +2846,10 @@ class FlipkartOrderPayment(models.Model):
     invoice_id   = models.CharField(max_length=100, null=True, blank=True)
     invoice_date = models.DateField(null=True, blank=True)
 
+    # When Seller Hub's payments last confirmed this row (flipkart_sync.py) — empty
+    # for a row only a Settlement Report upload has written.
+    synced_at = models.DateTimeField(null=True, blank=True)
+
     uploaded_at = models.DateTimeField(auto_now_add=True)
     updated_at  = models.DateTimeField(auto_now=True)
 
@@ -2910,6 +2914,10 @@ class FlipkartOrder(models.Model):
     deliver_by_date      = models.DateField(null=True, blank=True)
     delivery_date        = models.DateField(null=True, blank=True)
     delivery_sla_breached = models.BooleanField(default=False)
+
+    # When Seller Hub's orders or payments last confirmed this row (flipkart_sync.py) —
+    # empty for a row only an Orders report upload has written.
+    synced_at = models.DateTimeField(null=True, blank=True)
 
     uploaded_at = models.DateTimeField(auto_now_add=True)
     updated_at  = models.DateTimeField(auto_now=True)
@@ -2982,6 +2990,76 @@ class FlipkartOtherCharge(models.Model):
 
     def __str__(self):
         return f"{self.source_sheet} {self.reference_id}"
+
+
+class FlipkartPayout(models.Model):
+    """
+    One payment Flipkart made (or is making) to the seller's bank — a row of
+    Seller Hub's Payments > Previous payments, as the sync last read it
+    (flipkart_sync.py). Prepaid and postpaid orders are paid in separate
+    transfers, each with its own advice id and, once the bank has it, its UTR.
+
+    The UTR is the "NEFT ID" of a Settlement Report, so a payout joins to its
+    order rows (FlipkartOrderPayment.neft_id) and its non-order charges
+    (FlipkartOtherCharge.neft_id): transfer = order items + other charges, which
+    is what the reconciliation checks. `items_*` is what Seller Hub itself listed
+    under the payout when it was read.
+    """
+    STATUS_IN_PROGRESS = "in_progress"     # approved, money not at the bank yet (no UTR)
+    STATUS_PAID = "paid"
+
+    business = models.ForeignKey("accounts.Business", on_delete=models.CASCADE, related_name="flipkart_payouts")
+    advice_id = models.CharField(max_length=40)
+    utr = models.CharField(max_length=100, blank=True, default="", db_index=True)
+    payment_date = models.DateField(db_index=True)
+    settlement_type = models.CharField(max_length=10)               # PREPAID | POSTPAID
+    status = models.CharField(max_length=20, default=STATUS_IN_PROGRESS)
+    flipkart_status = models.CharField(max_length=40, blank=True, default="")   # approved / completed, as Flipkart says
+    transfer_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    items_count = models.IntegerField(null=True, blank=True)
+    items_amount = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    items_read_at = models.DateTimeField(null=True, blank=True)
+    read_at = models.DateTimeField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "flipkart_payouts"
+        ordering = ["-payment_date", "settlement_type"]
+        unique_together = [("business", "advice_id")]
+
+    def __str__(self):
+        return f"{self.payment_date} {self.settlement_type} {self.transfer_amount}"
+
+
+class FlipkartOutstandingPayment(models.Model):
+    """
+    An order item Flipkart will pay (or recover) on a coming date — Seller Hub's
+    Payments > Upcoming, as the sync last read it. Replaced on every read, and
+    kept apart from FlipkartOrderPayment on purpose (as Meesho's outstanding
+    payments are): a FlipkartOrderPayment row is money that has landed.
+    """
+    business = models.ForeignKey("accounts.Business", on_delete=models.CASCADE, related_name="flipkart_outstanding")
+    order_item_id = models.CharField(max_length=100, db_index=True)
+    order_id = models.CharField(max_length=100, blank=True, default="")
+    sku = models.CharField(max_length=200, blank=True, default="")
+    settlement_type = models.CharField(max_length=10)
+    description = models.CharField(max_length=100, blank=True, default="")   # Sale / Return / Promotions…
+    order_status = models.CharField(max_length=50, blank=True, default="")
+    order_date = models.DateField(null=True, blank=True)
+    dispatch_date = models.DateField(null=True, blank=True)
+    due_date = models.DateField(null=True, blank=True, db_index=True)
+    sale_amount = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    settlement_value = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    details = models.JSONField(default=dict, blank=True)               # every field Seller Hub gave
+    read_at = models.DateTimeField()
+
+    class Meta:
+        db_table = "flipkart_outstanding_payments"
+        ordering = ["due_date", "order_item_id"]
+
+    def __str__(self):
+        return f"{self.order_item_id} {self.due_date}"
 
 
 class ListingImage(models.Model):
@@ -3769,6 +3847,10 @@ class FlipkartSellerAccount(models.Model):
     # The Forward Orders page as last read: {"counts": {tab: n}, "tabs": {tab: [shipment]}, "cut": [tabs not read in full]}.
     orders = models.JSONField(default=dict, blank=True)
     orders_at = models.DateTimeField(null=True, blank=True)
+    # What the last sync wrote into the Flipkart tables (orders, payments, payouts,
+    # upcoming), or why it wrote nothing — see flipkart_sync.py.
+    sync = models.JSONField(default=dict, blank=True)
+    sync_at = models.DateTimeField(null=True, blank=True)
     created_by = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
