@@ -2849,6 +2849,9 @@ class FlipkartOrderPayment(models.Model):
     # When Seller Hub's payments last confirmed this row (flipkart_sync.py) — empty
     # for a row only a Settlement Report upload has written.
     synced_at = models.DateTimeField(null=True, blank=True)
+    # Who wrote its figures: a Settlement Report upload, or Seller Hub's payments (the sync).
+    SOURCE_REPORT, SOURCE_SELLER_HUB = "report", "seller_hub"
+    source = models.CharField(max_length=12, default=SOURCE_REPORT)
 
     uploaded_at = models.DateTimeField(auto_now_add=True)
     updated_at  = models.DateTimeField(auto_now=True)
@@ -2977,6 +2980,10 @@ class FlipkartOtherCharge(models.Model):
     reference_id = models.CharField(max_length=200, blank=True, default="")
     description  = models.CharField(max_length=255, blank=True, default="")
     amount       = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    # A Settlement Report upload, or Seller Hub's payments (the sync). A report uploaded
+    # later for the same NEFT id replaces the sync's rows: it says the same, in more detail.
+    SOURCE_REPORT, SOURCE_SELLER_HUB = "report", "seller_hub"
+    source = models.CharField(max_length=12, default=SOURCE_REPORT)
 
     uploaded_at = models.DateTimeField(auto_now_add=True)
     updated_at  = models.DateTimeField(auto_now=True)
@@ -3019,6 +3026,9 @@ class FlipkartPayout(models.Model):
     items_count = models.IntegerField(null=True, blank=True)
     items_amount = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     items_read_at = models.DateTimeField(null=True, blank=True)
+    # Seller Hub's own split of the transfer: [{"group": "orderItem", "label": "Orders", "amount": …}, …]
+    # (orders, MP fee rebate, services & fines, protection fund, taxation) — they add up to it.
+    breakdown = models.JSONField(default=list, blank=True)
     read_at = models.DateTimeField()
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

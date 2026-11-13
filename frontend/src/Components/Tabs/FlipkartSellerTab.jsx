@@ -331,6 +331,7 @@ function FlipkartPayments({ accounts, mobile }) {
                       {p.status === "paid" && (
                         <div style={{ fontSize: 12.5, color: C.gray600 }}>
                           {p.items} order items {rupees(p.items_amount)}{p.other_charges ? ` · other charges ${rupees(p.other_charges)}` : ""}
+                          {(p.breakdown || []).filter((g) => g.group !== "orderItem" && g.amount).map((g) => ` · ${g.label} ${rupees(g.amount)}`).join("")}
                           {p.difference != null && Math.abs(p.difference) > 1 ? <b style={{ color: st.fg }}> · difference {rupees(p.difference)}</b> : null}
                         </div>
                       )}
@@ -418,7 +419,8 @@ function AccountCard({ d, isAdmin, mobile, onState }) {
       {d.connected && d.sync_at && (d.sync?.ok ? (
         <div style={{ fontSize: 12.5, color: C.gray500 }}>
           Written to the Flipkart tables {when(d.sync_at)}: {d.sync.orders_added || 0} new orders, {d.sync.orders_status_changed || 0} moved on,
-          {" "}{d.sync.payments_added || 0} new payments, {d.sync.payouts_added || 0} new transfers, {d.sync.upcoming || 0} coming.</div>
+          {" "}{d.sync.payments_added || 0} new payments, {d.sync.charges_added || 0} charges (ads, fines, TDS…), {d.sync.payouts_added || 0} new transfers,
+          {" "}{d.sync.upcoming || 0} coming.{d.sync.payouts_left ? ` ${d.sync.payouts_left} older transfers still to read — they follow on the next runs.` : ""}</div>
       ) : d.sync?.message ? <div style={{ fontSize: 13, color: d.sync.refused ? C.red : "#92400E", fontWeight: 700 }}>✕ Not written to the tables: {d.sync.message}</div> : null)}
       {err && <div role="alert" style={{ fontSize: 13, color: C.red, fontWeight: 700 }}>✕ {err}</div>}
       {open && d.status && (
@@ -490,7 +492,8 @@ export function FlipkartSellerTab() {
           <p style={{ fontSize: 13, color: C.gray500, margin: "4px 0 0", maxWidth: 760 }}>
             Each business's own Seller Hub login, held on the server (encrypted) — Flipkart asks for an OTP at every login. Once in, each is kept alive
             and read every 10 minutes, and their orders show together below. Every 30 minutes (or on Read now) their orders and payments are
-            written into the app's Flipkart tables — as Meesho's are — and each payment is matched against the orders it paid for.
+            written into the app's Flipkart tables — as Meesho's are — every payment with its orders, ads, fines, protection fund and taxes,
+            which the Flipkart profit and loss uses; each payment is matched against what it paid for.
           </p>
         </div>
         {withLogin.filter((a) => a.connected).length > 1 && (

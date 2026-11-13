@@ -3194,6 +3194,7 @@ def flipkart_profit_upload(request, business_id):
     invalid_rows = 0
     created = 0
     updated = 0
+    report_nefts = set()
 
     with transaction.atomic():
         for row in ws.iter_rows(min_row=header_row_num + 1, values_only=True):
@@ -3241,8 +3242,11 @@ def flipkart_profit_upload(request, business_id):
                     "item_return_status":  safe_str(get(row, "item return status")),
                     "invoice_id":           safe_str(get(row, "invoice id")),
                     "invoice_date":         safe_date(get(row, "invoice date")),
+                    # The report speaks for this row now, even where Seller Hub's payments wrote it first.
+                    "source":               FlipkartOrderPayment.SOURCE_REPORT,
                 },
             )
+            report_nefts.add(safe_str(get(row, "neft id")) or "")
             if was_created:
                 created += 1
             else:
@@ -3251,7 +3255,7 @@ def flipkart_profit_upload(request, business_id):
         # The report's non-order sheets (ads, fines, SPF...) — same NEFT
         # batches, so they land in the same transaction as the order rows.
         from .flipkart_views import import_flipkart_other_charges
-        other_charges = import_flipkart_other_charges(wb, business)
+        other_charges = import_flipkart_other_charges(wb, business, report_nefts)
 
     date_from = request.GET.get("date_from", "") or None
     date_to = request.GET.get("date_to", "") or None

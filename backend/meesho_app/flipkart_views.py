@@ -237,14 +237,25 @@ _OTHER_SHEETS = {
 }
 
 
-def import_flipkart_other_charges(wb, business):
+def import_flipkart_other_charges(wb, business, nefts=()):
     """
     Save the non-order sheets of a Settlement Report workbook as
     FlipkartOtherCharge rows. Re-importing the same report updates in place.
     Returns {"created": n, "updated": n} counting only rows with a non-zero
     settlement value (an ads "redeem" row moves wallet balance, not cash).
+
+    The charges Seller Hub's payments wrote (flipkart_sync.py) for the report's
+    transfers — `nefts` (its Orders sheet's) and every NEFT id on these sheets —
+    are replaced by the report's own rows, so nothing is counted twice.
     """
     created = updated = 0
+    covered = {n for n in nefts if n}
+    for sheet in _OTHER_SHEETS:
+        if sheet in wb.sheetnames:
+            covered |= {safe_str(r[0]) for r in wb[sheet].iter_rows(values_only=True) if r and safe_str(r[0])} - {"NEFT ID"}
+    if covered:
+        FlipkartOtherCharge.objects.filter(business=business, neft_id__in=covered,
+                                           source=FlipkartOtherCharge.SOURCE_SELLER_HUB).delete()
     for sheet, (category, ref_header, desc_headers) in _OTHER_SHEETS.items():
         if sheet not in wb.sheetnames:
             continue
@@ -279,6 +290,7 @@ def import_flipkart_other_charges(wb, business):
                     "category": category,
                     "payment_date": _date(get(row, "payment date")),
                     "amount": amount,
+                    "source": FlipkartOtherCharge.SOURCE_REPORT,
                 },
             )
             if was_created:

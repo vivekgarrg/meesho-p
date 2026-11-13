@@ -55,7 +55,14 @@ class Hub:
         self.upcoming = {"POSTPAID": [_line("OI31", "80.5", status="IN_TRANSIT", due_date=(TODAY + timedelta(days=4)).strftime("%d-%b-%Y"),
                                             transaction_type="Upcoming")],
                          "PREPAID": []}
+        # The rest of a transfer: {(day, type): {group: {sub_group: [rows]}}}
+        self.charges = {}
+        self.nets = {}             # (day, type, group, sub_group): the sub-tab's total, when it isn't its rows' sum
         self.reads = []
+
+    def net(self, key, group, sub):
+        rows = self.charges.get(key, {}).get(group, {}).get(sub, [])
+        return self.nets.get((*key, group, sub), sum(float(r["amount"]) for r in rows))
 
     def __call__(self, kw):
         body = kw["json"]
@@ -64,8 +71,23 @@ class Hub:
         if op == "Payments_Previous_Payments_WEB_getTableData":
             return _resp(200, {"data": {"payments_fetchPreviousPaymentTableData": {
                 "data": self.payouts, "show_more": False, "token": str(len(self.payouts)), "total_count": len(self.payouts)}}})
+        if op == "GetPaymentOrderSearchOrchestrator":
+            i = v["input"]
+            key = (timezone.datetime.fromisoformat(i["fromDate"]).date(), i["paymentType"])
+            groups = [{"group": "orderItem", "label": "Orders", "netAmount": sum(float(r["settlement_value"]) for r in self.settled.get(key, []))}]
+            for g, subs in self.charges.get(key, {}).items():
+                groups.append({"group": g, "label": g, "netAmount": sum(self.net(key, g, k) for k in subs)})
+            return _resp(200, {"data": {"settlement": {"paymentOrderSearch": {"groupSummaryList": {
+                "groups": groups, "total": sum(g["netAmount"] for g in groups)}}}}})
+        key = (timezone.datetime.fromisoformat(v["startDate"]).date(), v["paymentType"])
+        if op == "TransactionPage_getTransactionsSubTabs":
+            subs = self.charges.get(key, {}).get(v["tabName"], {})
+            return _resp(200, {"data": {"getTransactionsSubTabs": [
+                {"sub_group": k, "label": k.title(), "net_amount": self.net(key, v["tabName"], k)} for k in subs]}})
         assert op == "TransactionPage_getTransactionsTableData", op
-        if v["settlementStatus"] == "settled":
+        if v["tabName"] != "orderItem":
+            rows = self.charges.get(key, {}).get(v["tabName"], {}).get(v["subTabName"], [])
+        elif v["settlementStatus"] == "settled":
             rows = self.settled.get((timezone.datetime.fromisoformat(v["startDate"]).date(), v["paymentType"]), [])
         else:
             rows = self.upcoming[v["paymentType"]]
@@ -101,7 +123,8 @@ class FlipkartSyncTests(TestCase):
         p = mock.patch.object(flipkart_seller, "_http", side_effect=lambda: FakeFlipkart())
         p.start()
         self.addCleanup(p.stop)
-        for name, fake in (("payments", staticmethod(self.hub)), ("orders", staticmethod(_completed))):
+        orch = lambda kw: self.hub(kw) if kw["json"]["operationName"] == "GetPaymentOrderSearchOrchestrator" else _completed(kw)
+        for name, fake in (("payments", staticmethod(self.hub)), ("orders", staticmethod(orch))):
             p = mock.patch.object(FakeFlipkart, name, fake)
             p.start()
             self.addCleanup(p.stop)
@@ -245,22 +268,95 @@ class FlipkartSyncTests(TestCase):
         flipkart_seller.refresh(A.objects.get(pk=self.account.pk))
         self.assertTrue(self.hub.reads)
 
+    def test_zero_payments_are_each_kept_apart(self):
+        for n, day in (("9101", PAID_POST - timedelta(days=7)), ("9102", PAID_POST - timedelta(days=9))):
+            self.hub.payouts.append({"utr_number": "ZERO_PAYMENT_ADVICE", "transfer_amount": 0, "advice_id": n,
+                                     "payment_date": _hub_day(day), "settlement_type": "Postpaid", "settlement_status": "completed"})
+            self.hub.settled[(day, "POSTPAID")] = [_line("OI70", "25"), _line("OI71", "-25", "Return", "RETURNED")]
+        self.sync()
+        self.assertEqual(sorted(FlipkartPayout.objects.filter(advice_id__in=["9101", "9102"]).values_list("utr", flat=True)),
+                         ["ADVICE-9101", "ADVICE-9102"])
+        self.assertEqual(FlipkartOrderPayment.objects.filter(order_item_id="OI70").count(), 2)
+        by = {p["advice_id"]: p for p in self.c.get(f"{self.base}reconcile/", {"business": self.biz.id}).data["payouts"]}
+        self.assertEqual((by["9101"]["state"], by["9101"]["items_amount"]), ("matched", 0.0))
+
+    # ── The rest of each transfer, and the profit ─────────────────────────
+    def test_each_transfers_charges_are_written_and_taken_off_the_profit(self):
+        self.hub.payouts[0]["transfer_amount"] = 205               # 300 for orders, 90 fine, 10 TDS, 5 SPF in
+        self.hub.charges[(PAID_POST, "POSTPAID")] = {
+            "serviceItem": {"fines": [{"service_order_id": "d25e", "service_name": "Fines", "amount": "-90"}]},
+            "taxation": {"tds": [{"id": "t1", "amount": "-10"}]},
+            # Seller Hub's sub-tab says +5 but lists nothing: the 5 still counts, as one line.
+            "spf": {"non_order_spf": []},
+        }
+        self.hub.nets[(PAID_POST, "POSTPAID", "spf", "non_order_spf")] = 5
+        out = self.sync()
+        self.assertEqual(out["charges_added"], 3, out)
+        rows = {(c.category, c.source_sheet, c.reference_id): c.amount for c in FlipkartOtherCharge.objects.filter(neft_id="NFT-/XUTR/DEUTH0001X")}
+        self.assertEqual(rows, {("fines", "Fines", "d25e"): Decimal("-90.00"), ("tax", "TDS", "t1"): Decimal("-10.00"),
+                                ("spf", "Non_Order_SPF", "spf:non_order_spf"): Decimal("5.00")})
+        self.assertTrue(all(c.source == "seller_hub" for c in FlipkartOtherCharge.objects.all()))
+        by = {p["advice_id"]: p for p in self.c.get(f"{self.base}reconcile/", {"business": self.biz.id}).data["payouts"]}
+        self.assertEqual((by["9001"]["state"], by["9001"]["difference"]), ("matched", 0.0))
+        # The profit and loss: the orders' profit, less these charges.
+        from .flipkart_views import _other_charges_summary
+        self.assertEqual(_other_charges_summary(self.biz, None, None)["total"], -95.0)
+
+    def test_a_payment_row_takes_its_units_from_its_order(self):
+        FlipkartOrder.objects.create(business=self.biz, order_item_id="OI50", order_id="OD50", order_item_status="DELIVERED",
+                                     sku="pooja-thali", quantity=3)
+        self.sync()
+        self.assertEqual(self.pay("OI50", "AXISCN0002").quantity, 3)
+        self.assertEqual(self.pay("OI30", "NFT-/XUTR/DEUTH0001X").quantity, 1)
+
+    def test_a_settlement_report_speaks_for_its_transfers(self):
+        self.hub.charges[(PAID_PRE, "PREPAID")] = {"serviceItem": {"ads": [{"campaign_id": "c1", "type": "Ads", "amount": "-30"}]}}
+        self.sync()
+        self.assertEqual(FlipkartOtherCharge.objects.filter(neft_id="AXISCN0002", source="seller_hub").count(), 1)
+        # The report for that transfer is uploaded: its Ads row replaces the sync's (no -60).
+        import openpyxl
+        from .flipkart_views import import_flipkart_other_charges
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Ads"
+        ws.append(["NEFT ID", "Payment Date", "Campaign / Transaction ID", "Type", "Settlement Value (Rs.)"])
+        ws.append(["AXISCN0002", PAID_PRE.isoformat(), "CMP-1", "Top-up", -30])
+        import_flipkart_other_charges(wb, self.biz, {"AXISCN0002"})
+        rows = list(FlipkartOtherCharge.objects.filter(neft_id="AXISCN0002").values_list("source", "amount"))
+        self.assertEqual(rows, [("report", Decimal("-30.00"))])
+        # And a later sync adds nothing of its own to a transfer a report covers.
+        FlipkartPayout.objects.filter(advice_id="9002").update(items_read_at=None)
+        out = self.sync()
+        self.assertEqual((out["charges_added"], out["charges_kept_from_report"]), (0, 1), out)
+        self.assertEqual(FlipkartOtherCharge.objects.filter(neft_id="AXISCN0002").count(), 1)
+
+    def test_the_whole_history_newest_first_a_few_transfers_a_run(self):
+        out = flipkart_sync.run(A.objects.get(pk=self.account.pk), reads=1)
+        self.assertEqual((out["payouts_items_read"], out["payouts_left"]), (1, 1), out)
+        self.assertIsNotNone(FlipkartPayout.objects.get(advice_id="9001").items_read_at)     # the newest
+        self.assertIsNone(FlipkartPayout.objects.get(advice_id="9002").items_read_at)
+        out = flipkart_sync.run(A.objects.get(pk=self.account.pk), reads=1)
+        self.assertEqual((out["payouts_items_read"], out["payouts_left"]), (1, 0), out)
+        self.assertEqual(FlipkartOrderPayment.objects.count(), 3)
+        from django.core.management import call_command
+        import io
+        buf = io.StringIO()
+        call_command("flipkart_payments", business=self.biz.id, stdout=buf)
+        self.assertIn('"ok": true', buf.getvalue())
+
     # ── Reconciliation ───────────────────────────────────────────────────
     def test_reconcile_matches_each_transfer_and_follows_each_order(self):
         self.hub.payouts[1]["transfer_amount"] = 120          # 150 paid for the item, 30 kept back (ads)
+        self.hub.charges[(PAID_PRE, "PREPAID")] = {"serviceItem": {"ads": [{"campaign_id": "c1", "type": "Ads top-up", "amount": "-30"}]}}
         self.sync()
         r = self.c.get(f"{self.base}reconcile/", {"business": self.biz.id})
         self.assertEqual(r.status_code, 200, r.data)
         by = {p["advice_id"]: p for p in r.data["payouts"]}
         self.assertEqual((by["9001"]["state"], by["9001"]["items"], by["9001"]["items_amount"], by["9001"]["difference"]),
                          ("matched", 2, 300.0, 0.0))
-        self.assertEqual((by["9002"]["state"], by["9002"]["difference"]), ("other_charges", -30.0))
-        self.assertEqual(by["9003"]["state"], "in_progress")
-        # The Settlement Report's Ads sheet explains the 30.
-        FlipkartOtherCharge.objects.create(business=self.biz, category="ads", neft_id="AXISCN0002", amount=Decimal("-30"),
-                                           source_sheet="Ads", reference_id="c1", payment_date=PAID_PRE)
-        by = {p["advice_id"]: p for p in self.c.get(f"{self.base}reconcile/", {"business": self.biz.id}).data["payouts"]}
         self.assertEqual((by["9002"]["state"], by["9002"]["other_charges"], by["9002"]["difference"]), ("matched", -30.0, 0.0))
+        self.assertEqual([g["group"] for g in by["9002"]["breakdown"]], ["orderItem", "serviceItem"])
+        self.assertEqual(by["9003"]["state"], "in_progress")
 
         # Orders: paid, coming, on the way, cancelled — and delivered long ago but neither paid nor coming.
         FlipkartOrder.objects.filter(order_item_id="OI60").update(order_date=TODAY - timedelta(days=40),

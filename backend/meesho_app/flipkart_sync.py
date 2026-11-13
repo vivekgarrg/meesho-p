@@ -11,8 +11,22 @@ scan) sees it without an upload — and an upload later still refreshes it.
             each paid transfer's order items (Payments > Transactions, settled)
             → FlipkartOrderPayment, keyed by its UTR — the Settlement Report's
             "NEFT ID", so an uploaded report and the sync land on the same rows.
+  charges   the rest of each transfer — Seller Hub splits it into Orders, MP Fee
+            Rebate, Services & Fines (ads, storage, recall, fines, VAS…),
+            Protection Fund and Taxation (TDS / TCS) — each row of those
+            → FlipkartOtherCharge under the same UTR, in the Settlement Report's
+            categories. The profit and loss takes them off the orders' profit.
   upcoming  Payments > Transactions, unsettled → FlipkartOutstandingPayment
             (replaced on every read).
+
+Every transfer Seller Hub still lists (it goes back about a year) is read once,
+newest first, up to PAYOUT_READS a run; the rest follow on the next runs (or all
+at once: manage.py flipkart_payments).
+
+When a Settlement Report has been uploaded for a transfer, the report's rows are
+kept (it splits them further: TCS, TDS, protection fund per item…) and the sync
+adds no charges of its own to that transfer; a report uploaded later replaces
+the sync's charges for its transfers. Either way each rupee is counted once.
 
 A row an uploaded report wrote keeps its figures (the report breaks them down
 further: TCS, TDS, protection fund…); the sync only fills what it lacks, moves
@@ -50,7 +64,8 @@ IST = ZoneInfo("Asia/Kolkata")
 ZERO = Decimal("0")
 CENT = Decimal("0.01")
 
-PAYOUT_DAYS = 60            # how far back Previous payments is read
+PAYOUT_DAYS = 730           # how far back Previous payments is read (Seller Hub lists about a year)
+PAYOUT_READS = 40           # transfers whose contents one run reads (each is 2–6 reads)
 UPCOMING_DAYS = 30          # how far ahead Upcoming is read (Flipkart's longest range)
 TABLE_PAGE, TABLE_PAGES = 100, 30
 COMPLETED_PAGES = 10        # of ORDER_PAGE (100) shipments
@@ -75,6 +90,37 @@ TABLE_QUERY = (
     "    transactions {\n      fields {\n        key\n        value\n        __typename\n      }\n      __typename\n    }\n"
     "    __typename\n  }\n}"
 )
+BREAKDOWN_QUERY = (
+    "query GetPaymentOrderSearchOrchestrator($input: SettlementInput!) {\n  settlement(input: $input) {\n"
+    "    paymentOrderSearch {\n      groupSummaryList {\n        groups {\n          group\n          netAmount\n"
+    "          label\n        }\n        total\n      }\n    }\n  }\n}"
+)
+SUBTABS_QUERY = (
+    "query TransactionPage_getTransactionsSubTabs($tabName: String!, $param: String, $startDate: String, $endDate: String, "
+    "$paymentType: String, $settlementStatus: String, $viewType: String, $sort: [SortInput!]) {\n  getTransactionsSubTabs(\n"
+    "    tabName: $tabName\n    param: $param\n    startDate: $startDate\n    endDate: $endDate\n    paymentType: $paymentType\n"
+    "    settlementStatus: $settlementStatus\n    viewType: $viewType\n    sort: $sort\n  ) {\n    sub_group\n    net_amount\n"
+    "    label\n    __typename\n  }\n}"
+)
+ORDER_GROUP = "orderItem"
+# Seller Hub's sub-groups of a transfer's non-order part → (category, the Settlement Report sheet that holds the same rows).
+_C = FlipkartOtherCharge
+CHARGES = {
+    "ads": (_C.CATEGORY_ADS, "Ads"), "fines": (_C.CATEGORY_FINES, "Fines"),
+    "storage": (_C.CATEGORY_STORAGE_RECALL, "Storage_Recall"), "recall": (_C.CATEGORY_STORAGE_RECALL, "Storage_Recall"),
+    "vas": (_C.CATEGORY_SERVICES, "Value Added Services"), "google_ads": (_C.CATEGORY_SERVICES, "Google Ads Services"),
+    "insight_subscription": (_C.CATEGORY_SERVICES, "Insight Subscription Services"),
+    "support_services": (_C.CATEGORY_SERVICES, "Support Services Services"),
+    "review_accelerator": (_C.CATEGORY_SERVICES, "Review Accelerator Services"),
+    "order_rewards": (_C.CATEGORY_MP_FEE_REBATE, "MP Fee Rebate"),
+    "order_spf": (_C.CATEGORY_SPF, "Order_SPF"), "non_order_spf": (_C.CATEGORY_SPF, "Non_Order_SPF"),
+    "tds": (_C.CATEGORY_TAX, "TDS"), "tcs": (_C.CATEGORY_TAX, "TCS_Recovery"),
+}
+GROUP_CATEGORY = {"rewards": _C.CATEGORY_MP_FEE_REBATE, "serviceItem": _C.CATEGORY_SERVICES, "spf": _C.CATEGORY_SPF,
+                  "taxation": _C.CATEGORY_TAX}
+_REF_KEYS = ("service_order_id", "transaction_id", "campaign_id", "claim_id", "recall_id", "order_item_id", "id")
+_AMOUNT_KEYS = ("amount", "settlement_value", "settlement_amount", "net_amount", "total_amount")
+_DESC_KEYS = ("service_name", "description", "type", "protection_reason", "reason", "sku")
 
 # Order statuses as Flipkart's Orders report spells them, and how far on each is.
 TAB_STATUS = {"pendingToAccept": "APPROVED", "pendingToPack": "APPROVED", "pendingToDispatch": "READY_TO_SHIP",
@@ -154,12 +200,12 @@ def read_payouts(account, s, today):
     return out
 
 
-def read_transactions(account, s, start, end, payment_type, settled=True):
-    """Payments > Transactions, order items (sales & returns): one dict per row, {key: value}."""
+def read_transactions(account, s, start, end, payment_type, settled=True, tab=ORDER_GROUP, sub="sale,returns"):
+    """Payments > Transactions: one dict per row, {key: value}. By default the order items (sales & returns)."""
     rows, token = [], 0
     for _ in range(TABLE_PAGES):
         d = fs.graphql(account, "TransactionPage_getTransactionsTableData",
-                       {"tabName": "orderItem", "subTabName": "sale,returns", "startDate": start.isoformat(),
+                       {"tabName": tab, "subTabName": sub, "startDate": start.isoformat(),
                         "endDate": end.isoformat(), "token": token, "size": TABLE_PAGE, "filters": {},
                         "settlementStatus": "settled" if settled else "unsettled", "paymentType": payment_type},
                        TABLE_QUERY, s=s)
@@ -168,7 +214,37 @@ def read_transactions(account, s, start, end, payment_type, settled=True):
         if not t.get("is_next") or t.get("token") in (None, token):
             break
         token = t.get("token")
-    return [r for r in rows if r.get("order_item_id")]
+    return [r for r in rows if r.get("order_item_id")] if tab == ORDER_GROUP else rows
+
+
+def read_payout(account, s, day, payment_type):
+    """Everything one transfer paid: Seller Hub's split of it, its order items, and each row of the rest."""
+    d = fs.graphql(account, "GetPaymentOrderSearchOrchestrator",
+                   {"input": {"fromDate": day.isoformat(), "toDate": day.isoformat(), "settlementStatus": "settled",
+                              "paymentType": payment_type}}, BREAKDOWN_QUERY, s=s, path=fs.ORCH,
+                   extra_headers={"x-client-id": "SD", "x-user-id": account.seller_id, "x-seller-id": account.seller_id})
+    groups = ((((d.get("settlement") or {}).get("paymentOrderSearch") or {}).get("groupSummaryList") or {}).get("groups") or [])
+    breakdown = [{"group": g.get("group"), "label": g.get("label") or g.get("group"), "amount": _f(_num(g.get("netAmount")))}
+                 for g in groups if g.get("group")]
+    orders = read_transactions(account, s, day, day, payment_type)
+    charges = []                       # (group, sub_group, label, net, rows)
+    for g in breakdown:
+        if g["group"] == ORDER_GROUP or not g["amount"]:
+            continue
+        subs = fs.graphql(account, "TransactionPage_getTransactionsSubTabs",
+                          {"tabName": g["group"], "startDate": day.isoformat(), "endDate": day.isoformat(),
+                           "paymentType": payment_type, "settlementStatus": "settled"}, SUBTABS_QUERY, s=s).get("getTransactionsSubTabs") or []
+        for sg in subs:
+            net = _num(sg.get("net_amount")) or ZERO
+            if not net:
+                continue
+            rows = read_transactions(account, s, day, day, payment_type, tab=g["group"], sub=sg.get("sub_group"))
+            charges.append((g["group"], sg.get("sub_group") or "", sg.get("label") or sg.get("sub_group") or g["label"], net, rows))
+        listed = sum((c[3] for c in charges if c[0] == g["group"]), ZERO)
+        rest = (_num(g["amount"]) or ZERO) - listed
+        if abs(rest) >= CENT:          # what Seller Hub's sub-tabs don't account for still came out of the transfer
+            charges.append((g["group"], "", g["label"], rest, []))
+    return {"breakdown": breakdown, "orders": orders, "charges": charges}
 
 
 def read_completed(account, s):
@@ -293,6 +369,10 @@ def payout_fields(r, now):
     utr = (r.get("utr_number") or "").strip()
     # Until the bank has it, Seller Hub shows "DISBURSEMENT_CREATED" where the UTR goes.
     paid = (r.get("settlement_status") or "").lower() == "completed" and bool(utr) and not utr.upper().startswith("DISBURSEMENT")
+    if paid and re.fullmatch(r"[A-Z_]+", utr):
+        # A word, not a bank reference — "ZERO_PAYMENT_ADVICE": the orders and charges netted to nothing, so no
+        # transfer was made. Many share that word; each is kept apart by its advice id.
+        utr = f"ADVICE-{r.get('advice_id')}"
     return {"utr": utr if paid else "", "payment_date": _day(r.get("payment_date")),
             "settlement_type": (r.get("settlement_type") or "").upper(),
             "status": FlipkartPayout.STATUS_PAID if paid else FlipkartPayout.STATUS_IN_PROGRESS,
@@ -319,6 +399,8 @@ def elsewhere(business, utrs, item_ids):
 def write_payment_items(business, payout, grouped, now, res):
     existing = {p.order_item_id: p for p in FlipkartOrderPayment.objects.filter(business=business, neft_id=payout.utr,
                                                                                   order_item_id__in=list(grouped))}
+    # Seller Hub's payments don't say how many units: the order does (the cost in the profit is per unit).
+    units = dict(FlipkartOrder.objects.filter(business=business, order_item_id__in=list(grouped)).values_list("order_item_id", "quantity"))
     for item_id, g in grouped.items():
         p = existing.get(item_id)
         values = {k: g[k] for k in (*_SUMS, "order_id", "seller_sku", "order_date", "dispatch_date", "fulfilment_type")}
@@ -326,6 +408,7 @@ def write_payment_items(business, payout, grouped, now, res):
             FlipkartOrderPayment.objects.create(
                 business=business, order_item_id=item_id, neft_id=payout.utr, payment_date=payout.payment_date,
                 return_type="Return" if g["returned"] else "NA", item_return_status="", synced_at=now,
+                quantity=max(1, units.get(item_id) or 1), source=FlipkartOrderPayment.SOURCE_SELLER_HUB,
                 **{k: v for k, v in values.items() if v is not None or k in _SUMS})
             res["payments_added"] += 1
             continue
@@ -353,15 +436,63 @@ def _order_items_from_payments(grouped_list):
     return out
 
 
+def _first(row, keys):
+    return next((str(row[k]).strip() for k in keys if row.get(k) not in (None, "", "null")), "")
+
+
+def charge_rows(group, sub, label, net, rows):
+    """FlipkartOtherCharge fields for one sub-group's rows; anything they leave of its net becomes one line of its own."""
+    category, sheet = CHARGES.get(sub, (GROUP_CATEGORY.get(group, _C.CATEGORY_SERVICES), label[:60]))
+    out = []
+    for r in rows:
+        amount = _num(_first(r, _AMOUNT_KEYS)) if _first(r, _AMOUNT_KEYS) else next(
+            (_num(v) for k, v in r.items() if "amount" in (k or "") and _num(v) is not None), None)
+        if not amount:
+            continue
+        ref = _first(r, _REF_KEYS) or next((str(v) for k, v in r.items() if (k or "").endswith("_id") and v not in (None, "", "null")), "")
+        out.append({"category": category, "source_sheet": sheet, "reference_id": ref[:200],
+                    "description": (" ".join(filter(None, (_first(r, (k,)) for k in _DESC_KEYS))) or label)[:255], "amount": amount})
+    rest = net - sum((x["amount"] for x in out), ZERO)
+    if abs(rest) >= CENT:
+        out.append({"category": category, "source_sheet": sheet, "reference_id": f"{group}:{sub}"[:200],
+                    "description": f"{label} (as Seller Hub totals it)"[:255], "amount": rest})
+    return out
+
+
+def has_report(business, utr):
+    """Whether a Settlement Report covering this transfer has been uploaded (its rows then speak for it)."""
+    return (FlipkartOrderPayment.objects.filter(business=business, neft_id=utr, source=FlipkartOrderPayment.SOURCE_REPORT).exists()
+            or FlipkartOtherCharge.objects.filter(business=business, neft_id=utr, source=_C.SOURCE_REPORT).exists())
+
+
+def write_charges(business, payout, charges, res):
+    if has_report(business, payout.utr):
+        res["charges_kept_from_report"] += 1
+        return
+    FlipkartOtherCharge.objects.filter(business=business, neft_id=payout.utr, source=_C.SOURCE_SELLER_HUB).delete()
+    seen = set()
+    for c in charges:
+        for row in charge_rows(*c):
+            key = (row["source_sheet"], row["reference_id"], row["description"])
+            if key in seen:                       # the table holds one row per (sheet, NEFT, reference, description)
+                row["description"] = f"{row['description']} #{len(seen)}"[:255]
+            seen.add((row["source_sheet"], row["reference_id"], row["description"]))
+            FlipkartOtherCharge.objects.create(business=business, neft_id=payout.utr, payment_date=payout.payment_date,
+                                               source=_C.SOURCE_SELLER_HUB, **row)
+            res["charges_added"] += 1
+
+
 # ── the sync ─────────────────────────────────────────────────────────────────
 
 COUNTERS = ("orders_added", "orders_status_changed", "orders_updated", "orders_kept_further_on", "payouts_added",
-            "payouts_paid", "payouts_items_read", "payments_added", "payments_confirmed", "upcoming")
+            "payouts_paid", "payouts_items_read", "payouts_left", "payments_added", "payments_confirmed", "charges_added",
+            "charges_kept_from_report", "upcoming")
 
 
-def sync(account, s=None, today=None):
+def sync(account, s=None, today=None, reads=PAYOUT_READS):
     """Read Seller Hub's orders and payments and write them into the Flipkart tables. Returns what it wrote.
-    Raises FlipkartError (a read failed) or SyncRefused (the data belongs to another business)."""
+    `reads`: how many transfers' contents to read this run (None: all). Raises FlipkartError (a read
+    failed) or SyncRefused (the data belongs to another business)."""
     s = s or fs._load(account, fs._http())
     business = account.business
     today = today or timezone.localdate()
@@ -377,14 +508,19 @@ def sync(account, s=None, today=None):
         p = known.get(str(r["advice_id"]))
         if f["status"] == FlipkartPayout.STATUS_PAID and f["payment_date"] and (p is None or p.items_read_at is None or not p.utr):
             to_read.append((str(r["advice_id"]), f))
+    to_read.sort(key=lambda x: x[1]["payment_date"], reverse=True)          # newest first
+    if reads is not None:
+        res["payouts_left"] = max(0, len(to_read) - reads)
+        to_read = to_read[:reads]
     # Two transfers of the same kind on one day can't be told apart by Seller Hub's date filter: read once, keep on the first.
-    items_by_advice, seen = {}, set()
+    contents, seen = {}, set()
     for advice, f in to_read:
         key = (f["payment_date"], f["settlement_type"])
         if key in seen:
             continue
         seen.add(key)
-        items_by_advice[advice] = read_transactions(account, s, f["payment_date"], f["payment_date"], f["settlement_type"])
+        contents[advice] = read_payout(account, s, f["payment_date"], f["settlement_type"])
+    items_by_advice = {advice: c["orders"] for advice, c in contents.items()}
     upcoming = []
     for pt in PAYMENT_TYPES:
         upcoming += [(pt, r) for r in read_transactions(account, s, today, today + timedelta(days=UPCOMING_DAYS), pt, settled=False)]
@@ -401,6 +537,12 @@ def sync(account, s=None, today=None):
                           f"nothing was written to {business.name}.")
 
     with deferred_bumps(business.pk), transaction.atomic():
+        # Orders first: a payment row takes its units from its order.
+        write_orders(business, order_items(shipments), now, res)
+        # Then what the payments say: their order status is Flipkart's latest (delivered, returned…).
+        pay_orders = _order_items_from_payments(list(grouped.values()) + [group_items([r for _, r in upcoming])])
+        write_orders(business, pay_orders, now, res)
+
         for r in payouts:
             advice, f = str(r["advice_id"]), payout_fields(r, now)
             if not f["payment_date"]:
@@ -421,13 +563,10 @@ def sync(account, s=None, today=None):
                 p.items_count = len(grouped[advice])
                 p.items_amount = sum((_num(x.get("settlement_value")) or ZERO for x in rows), ZERO)
                 p.items_read_at = now
-                p.save(update_fields=["items_count", "items_amount", "items_read_at", "updated_at"])
+                p.breakdown = contents[advice]["breakdown"]
+                p.save(update_fields=["items_count", "items_amount", "items_read_at", "breakdown", "updated_at"])
+                write_charges(business, p, contents[advice]["charges"], res)
                 res["payouts_items_read"] += 1
-
-        write_orders(business, order_items(shipments), now, res)
-        # Then what the payments say: their order status is Flipkart's latest (delivered, returned…).
-        pay_orders = _order_items_from_payments(list(grouped.values()) + [group_items([r for _, r in upcoming])])
-        write_orders(business, pay_orders, now, res)
 
         FlipkartOutstandingPayment.objects.filter(business=business).delete()
         FlipkartOutstandingPayment.objects.bulk_create([FlipkartOutstandingPayment(
@@ -441,10 +580,10 @@ def sync(account, s=None, today=None):
     return res
 
 
-def run(account, s=None):
+def run(account, s=None, reads=PAYOUT_READS):
     """sync(), with its outcome kept on the account. Returns that outcome; a read error is kept and re-raised."""
     try:
-        out = {"ok": True, **sync(account, s)}
+        out = {"ok": True, **sync(account, s, reads=reads)}
     except SyncRefused as e:
         out = {"ok": False, "refused": True, "message": str(e)}
     except fs.FlipkartError as e:
@@ -477,6 +616,8 @@ def reconcile(business, days=60, today=None):
     rows = []
     for p in payouts:
         items_v, other_v = items.get(p.utr), other.get(p.utr)
+        if items_v is None and p.items_read_at:          # read, and it paid for no order items (a zero payment, charges only)
+            items_v = ZERO
         diff = None if not p.utr or items_v is None else p.transfer_amount - items_v - (other_v or ZERO)
         state = ("in_progress" if p.status != FlipkartPayout.STATUS_PAID else
                  "not_read" if items_v is None else
@@ -485,7 +626,7 @@ def reconcile(business, days=60, today=None):
         rows.append({"advice_id": p.advice_id, "utr": p.utr, "date": p.payment_date, "type": p.settlement_type,
                      "status": p.status, "transfer": _f(p.transfer_amount), "items": item_n.get(p.utr, 0),
                      "items_amount": _f(items_v), "other_charges": _f(other_v), "difference": None if diff is None else _f(diff),
-                     "state": state, "seller_hub_items": p.items_count, "seller_hub_amount": None if p.items_amount is None else _f(p.items_amount)})
+                     "state": state, "breakdown": p.breakdown, "seller_hub_items": p.items_count, "seller_hub_amount": None if p.items_amount is None else _f(p.items_amount)})
 
     orders = list(FlipkartOrder.objects.filter(business=business, order_date__gte=since)
                   .values("order_item_id", "order_id", "order_date", "order_item_status", "sku", "quantity",
