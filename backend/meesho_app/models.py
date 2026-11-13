@@ -3752,10 +3752,85 @@ class MeeshoListing(models.Model):
     archived_at = models.CharField(max_length=40, blank=True)          # as Meesho words it: "Oct 31, 2026"
     out_of_stock_since = models.CharField(max_length=40, blank=True)
     seen_at = models.DateTimeField()
+    # When the inventory read first saw it (MeeshoInventoryJob) — empty for SKUs it saw before this was kept.
+    # A SKU this new can't have had orders yet: "pause SKUs with no orders" leaves it be.
+    first_seen_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         db_table = "meesho_inventory_listings"
         unique_together = [("account", "product_id", "variation_id")]
+
+
+class MeeshoStockHold(models.Model):
+    """
+    "Stock to 0 — and back": every live SKU of one Meesho account set to 0 stock
+    after its stock was saved here, and later each given back exactly what it had.
+
+    The sync worker does both (MeeshoStockHoldJob): it reads each active
+    catalog's SKUs fresh from Meesho and saves every live SKU's stock (items)
+    before it sets any to 0. Restoring gives a SKU its saved stock only when the
+    worker set it to 0, it is still live (a paused SKU is never touched — stock
+    would unpause it) and it is still at 0 (one restocked since is left as it is).
+
+    While a hold is open the nightly stock refill leaves the account alone, and
+    no second hold can start on top of it (it would save the zeros).
+    """
+    STATUS_QUEUED = "QUEUED"          # waiting for the worker
+    STATUS_HOLDING = "HOLDING"        # reading and saving, then setting to 0
+    STATUS_HELD = "HELD"              # set to 0 — restore when ready
+    STATUS_RESTORING = "RESTORING"
+    STATUS_RESTORED = "RESTORED"      # every SKU set to 0 has its stock back (or was left, with why)
+    STATUS_FAILED = "FAILED"          # nothing was set to 0
+    OPEN = (STATUS_QUEUED, STATUS_HOLDING, STATUS_HELD, STATUS_RESTORING)
+
+    account = models.ForeignKey(MeeshoAccount, on_delete=models.CASCADE, related_name="stock_holds")
+    status = models.CharField(max_length=12, default=STATUS_QUEUED, db_index=True)
+    message = models.TextField(blank=True)
+    hold_run = models.ForeignKey(MeeshoSyncRun, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    restore_run = models.ForeignKey(MeeshoSyncRun, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    created_by = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    created_at = models.DateTimeField(auto_now_add=True)
+    held_at = models.DateTimeField(null=True, blank=True)
+    restored_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "meesho_stock_holds"
+        ordering = ["-created_at"]
+
+
+class MeeshoStockHoldItem(models.Model):
+    """One SKU of a stock hold: the stock it had when the worker read it, and what became of it."""
+    PLANNED = "PLANNED"                  # live in the app's last read; the worker reads it fresh first
+    SAVED = "SAVED"                      # read fresh, stock saved — not set to 0 yet
+    ZEROED = "ZEROED"                    # set to 0 by the hold — the ones restored
+    ZERO_FAILED = "ZERO_FAILED"          # Meesho refused the 0: it kept its stock
+    SKIPPED_PAUSED = "SKIPPED_PAUSED"    # paused (or no longer live): never touched
+    SKIPPED_ZERO = "SKIPPED_ZERO"        # already at 0: nothing to save or give back
+    SKIPPED_UNKNOWN = "SKIPPED_UNKNOWN"  # Meesho didn't say its stock: not touched
+    READ_FAILED = "READ_FAILED"          # its catalog couldn't be read: not touched
+    RESTORED = "RESTORED"
+    RESTORE_FAILED = "RESTORE_FAILED"    # Meesho refused it — restore again
+    SKIPPED_CHANGED = "SKIPPED_CHANGED"  # its stock was changed since: left as it is
+    TO_RESTORE = (ZEROED, RESTORE_FAILED)
+
+    hold = models.ForeignKey(MeeshoStockHold, on_delete=models.CASCADE, related_name="items")
+    catalog_id = models.BigIntegerField()            # Meesho's
+    product_id = models.BigIntegerField()
+    variation_id = models.BigIntegerField()
+    sku_id = models.CharField(max_length=255, blank=True)
+    variation = models.CharField(max_length=255, blank=True)
+    previous_inventory = models.IntegerField(null=True, blank=True)
+    state = models.CharField(max_length=16, default=PLANNED, db_index=True)
+    message = models.CharField(max_length=255, blank=True)
+    saved_at = models.DateTimeField(null=True, blank=True)
+    zeroed_at = models.DateTimeField(null=True, blank=True)
+    restored_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "meesho_stock_hold_items"
+        unique_together = [("hold", "product_id", "variation_id")]
+        ordering = ["catalog_id", "sku_id", "variation_id"]
 
 
 class MeeshoReturnClaim(models.Model):

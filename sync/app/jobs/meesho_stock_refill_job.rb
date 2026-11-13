@@ -31,6 +31,8 @@ class MeeshoStockRefillJob
   def refill(account, qty)
     busy = account.runs.where(kind: MeeshoSyncRun::KIND_STOCK, status: %w[QUEUED RUNNING]).where("queued_at > ?", 2.hours.ago).exists?
     return if busy
+    # Its stock is held at 0 on purpose (MeeshoStockHoldJob): topping it up would undo that.
+    return if MeeshoStockHold.open_for?(account)
     items = self.class.items(account, qty)
     return if items.empty?
     run = account.runs.create!(kind: MeeshoSyncRun::KIND_STOCK, trigger: MeeshoSyncRun::TRIGGER_SCHEDULE, status: "QUEUED",

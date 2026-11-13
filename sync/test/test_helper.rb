@@ -150,7 +150,35 @@ ActiveRecord::Schema.define do
     t.string :archived_at, null: false
     t.string :out_of_stock_since, null: false
     t.datetime :seen_at, null: false
+    t.datetime :first_seen_at
     t.index %i[account_id product_id variation_id], unique: true
+  end
+  create_table :meesho_stock_holds do |t|
+    t.integer :account_id, null: false
+    t.string :status, null: false
+    t.text :message, null: false
+    t.integer :hold_run_id
+    t.integer :restore_run_id
+    t.integer :created_by_id
+    t.datetime :created_at, null: false
+    t.datetime :held_at
+    t.datetime :restored_at
+    t.datetime :updated_at, null: false
+  end
+  create_table :meesho_stock_hold_items do |t|
+    t.integer :hold_id, null: false
+    t.bigint :catalog_id, null: false
+    t.bigint :product_id, null: false
+    t.bigint :variation_id, null: false
+    t.string :sku_id, null: false
+    t.string :variation, null: false
+    t.integer :previous_inventory
+    t.string :state, null: false
+    t.string :message, null: false
+    t.datetime :saved_at
+    t.datetime :zeroed_at
+    t.datetime :restored_at
+    t.index %i[hold_id product_id variation_id], unique: true
   end
 end
 

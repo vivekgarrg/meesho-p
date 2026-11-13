@@ -53,4 +53,18 @@ class MeeshoStockRefillJobTest < ActiveSupport::TestCase
   ensure
     MeeshoStockJob.define_method(:perform, orig) if orig
   end
+
+  test "an account whose stock is held at 0 isn't topped up" do
+    hold = MeeshoStockHold.create!(account_id: @account.id, status: "HELD", message: "", created_at: Time.current, updated_at: Time.current)
+    sent = []
+    orig = MeeshoStockJob.instance_method(:perform)
+    MeeshoStockJob.define_method(:perform) { |aid, _run_id, its| sent << [aid, its.size] }
+    MeeshoStockRefillJob.new.perform
+    assert_equal [], sent
+    hold.update!(status: "RESTORED")                     # restored: the nightly stock goes on again
+    MeeshoStockRefillJob.new.perform
+    assert_equal [[@account.id, 2]], sent
+  ensure
+    MeeshoStockJob.define_method(:perform, orig) if orig
+  end
 end

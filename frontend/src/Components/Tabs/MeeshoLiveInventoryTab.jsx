@@ -249,6 +249,203 @@ function ParentCard({ g, view, admin, picked, toggle, onPause, onStock, showBiz,
   );
 }
 
+// ── Whole-account actions (admin): pause the SKUs with no orders; stock to 0 and back ─────
+// Server: meesho_bulk.py. The worker does the Meesho side (MeeshoArchiveJob, MeeshoStockHoldJob).
+async function api(path, method = "GET", body) {
+  const res = await fetch(`${API}/meesho-live-inventory/${path}`, {
+    method, headers: body ? { "Content-Type": "application/json" } : undefined, body: body ? JSON.stringify(body) : undefined,
+  }).catch(() => null);
+  const data = res ? await res.json().catch(() => ({})) : { error: "Couldn't reach the server." };
+  return { ok: !!res && res.ok, data };
+}
+const day = (d) => (d ? new Date(`${String(d).slice(0, 10)}T00:00:00`).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" }) : "never");
+const HOLD_STATE = {
+  ZEROED: ["At 0 — to restore", "#B45309"], RESTORE_FAILED: ["Restore refused — try again", C.red], RESTORED: ["Stock given back", "#059669"],
+  SAVED: ["Saved, not set to 0", C.gray600], ZERO_FAILED: ["Meesho refused the 0 (kept its stock)", C.red],
+  SKIPPED_PAUSED: ["Paused — not touched", C.gray500], SKIPPED_ZERO: ["Already 0 — not touched", C.gray500],
+  SKIPPED_UNKNOWN: ["Stock unknown — not touched", C.gray500], READ_FAILED: ["Catalog unreadable — not touched", C.gray500],
+  SKIPPED_CHANGED: ["Restocked since — left as is", C.gray500], PLANNED: ["Waiting to be read", C.gray500],
+};
+const HOLD_STATUS = {
+  QUEUED: "Waiting for the worker…", HOLDING: "Reading and saving each SKU's stock, then setting it to 0…", HELD: "Held at 0",
+  RESTORING: "Giving the stock back…", RESTORED: "Restored", FAILED: "Nothing was set to 0",
+};
+
+function IdlePause({ isMobile, onSent }) {
+  const [days, setDays] = useState(30);
+  const [perCatalog, setPerCatalog] = useState(false);
+  const [res, setRes] = useState(null);
+  const [off, setOff] = useState(() => new Set());       // unticked
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const find = async () => {
+    setBusy(true); setMsg(null); setOff(new Set());
+    const r = await api(`idle/?days=${days}&per_catalog=${perCatalog ? 1 : 0}`);
+    setBusy(false);
+    if (r.ok) setRes(r.data); else { setRes(null); setMsg({ bad: true, text: r.data.error || "Couldn't make the list." }); }
+  };
+  const usable = (res?.businesses || []).filter((b) => !b.stale && !b.problem);
+  const chosen = usable.flatMap((b) => b.rows.filter((x) => !off.has(x.id)).map((x) => x.id));
+  const pause = async () => {
+    if (!window.confirm(`Pause ${chosen.length} SKU${chosen.length === 1 ? "" : "s"} on Meesho that had no order in the last ${res.days} days?\n\nThey can be brought back with Set stock.`)) return;
+    setBusy(true); setMsg(null);
+    const r = await api("idle/pause/", "POST", { days: res.days, per_catalog: res.per_catalog, listings: chosen });
+    setBusy(false);
+    if (r.ok) { setMsg({ text: `Pausing ${r.data.skus} SKUs — the worker sends them catalog by catalog; the list updates when it's done.` }); setRes(null); onSent(); }
+    else setMsg({ bad: true, text: r.data.error || "Couldn't pause." });
+  };
+  const flip = (id) => setOff((o) => { const n = new Set(o); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  return (
+    <div style={{ ...S.card, padding: 14, display: "flex", flexDirection: "column", gap: 10, minWidth: 0 }}>
+      <div style={{ fontWeight: 900, color: C.gray900 }}>Pause SKUs with no orders</div>
+      <div style={{ fontSize: 12.5, color: C.gray500 }}>
+        Live SKUs without a single order in the chosen days (from the orders table). SKUs listed within those days are left alone, and nothing is
+        paused for a business whose order data isn't current.
+      </div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+        <label style={{ fontSize: 13, fontWeight: 700, color: C.gray700 }}>No orders in the last{" "}
+          <select value={days} onChange={(e) => { setDays(Number(e.target.value)); setRes(null); }} style={{ ...S.inp, width: "auto", padding: "5px 8px" }}>
+            {[7, 15, 30, 45, 60, 90, 120, 180].map((d) => <option key={d} value={d}>{d} days</option>)}
+          </select></label>
+        <label style={{ fontSize: 12.5, color: C.gray600, display: "flex", gap: 5, alignItems: "center" }}>
+          <input type="checkbox" checked={perCatalog} onChange={(e) => { setPerCatalog(e.target.checked); setRes(null); }} />
+          per catalog (a SKU's copy in a catalog that gets no orders counts as idle)</label>
+        <button onClick={find} disabled={busy} style={{ ...btn("ghost", "sm"), opacity: busy ? 0.6 : 1 }}>{busy && !res ? "Finding…" : "Find SKUs"}</button>
+      </div>
+      {msg && <div role="status" style={{ fontSize: 13, fontWeight: 700, color: msg.bad ? C.red : "#059669" }}>{msg.bad ? "✕" : "✓"} {msg.text}</div>}
+      {res && res.businesses.map((b) => (
+        <div key={b.business_id} style={{ border: `1px solid ${C.gray200}`, borderRadius: 10, padding: 10, display: "flex", flexDirection: "column", gap: 6 }}>
+          <div style={{ fontSize: 13, color: C.gray700 }}>
+            <b>{b.business_name}</b> · {b.count} idle since {day(b.since)} · kept: {b.kept_ordered} with orders, {b.kept_new} listed too recently · newest order {day(b.newest_order)}
+          </div>
+          {b.problem && <div style={{ fontSize: 12.5, color: C.red, fontWeight: 700 }}>✕ {b.problem}</div>}
+          {b.stale && <div style={{ fontSize: 12.5, color: C.red, fontWeight: 700 }}>✕ The newest order is from {day(b.newest_order)} — the order data isn't current (more than {res.fresh_days} days old), so nothing is paused here. Let the orders sync catch up first.</div>}
+          {!b.stale && !b.problem && b.rows.length > 0 && (
+            <div style={{ maxHeight: 280, overflowY: "auto", border: `1px solid ${C.gray100}`, borderRadius: 8 }}>
+              {b.rows.map((x) => (
+                <label key={x.id} style={{ display: "flex", gap: 8, alignItems: "center", padding: "6px 8px", borderBottom: `1px solid ${C.gray100}`, cursor: "pointer", minWidth: 0 }}>
+                  <input type="checkbox" checked={!off.has(x.id)} onChange={() => flip(x.id)} />
+                  <Thumb src={x.image} size={30} />
+                  <span style={{ flex: 1, minWidth: 0, fontSize: 12.5 }}>
+                    <b style={{ fontFamily: "monospace", wordBreak: "break-word" }}>{x.sku}</b>{x.variation ? ` · ${x.variation}` : ""}
+                    <span style={{ color: C.gray500 }}> · catalog {x.catalog_id}</span></span>
+                  <span style={{ fontSize: 12, color: C.gray500, whiteSpace: "nowrap" }}>last order {day(x.last_order)} · stock {x.inventory ?? "—"}</span>
+                </label>
+              ))}
+            </div>
+          )}
+        </div>
+      ))}
+      {res && chosen.length > 0 && (
+        <button onClick={pause} disabled={busy} style={{ ...btn("primary", "md"), background: "#B45309", borderColor: "#B45309", alignSelf: isMobile ? "stretch" : "flex-start", opacity: busy ? 0.6 : 1 }}>
+          {busy ? "Sending…" : `Pause ${chosen.length} SKU${chosen.length === 1 ? "" : "s"}`}</button>
+      )}
+    </div>
+  );
+}
+
+function StockHold({ isMobile, onSent }) {
+  const [d, setD] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const [open, setOpen] = useState(null);
+  const load = useCallback(async () => {
+    const r = await api("stock-hold/");
+    if (r.ok) setD(r.data); else setMsg({ bad: true, text: r.data.error || "Couldn't read the stock holds." });
+  }, []);
+  useEffect(() => { load(); }, [load]);
+  const working = (d?.businesses || []).some((b) => b.hold?.working);
+  useEffect(() => { if (!working) return undefined; const t = setInterval(load, 5000); return () => clearInterval(t); }, [working, load]);
+  const start = async (b) => {
+    const typed = window.prompt(`Set the stock of every live SKU of ${b.business_name} on Meesho to 0?\n\n`
+      + `First each SKU's stock is read from Meesho and saved; then it is set to 0. Paused SKUs are not touched. `
+      + `The nightly stock top-up skips ${b.business_name} until you restore.\n\nType ZERO to go ahead.`);
+    if ((typed || "").trim().toUpperCase() !== "ZERO") return;
+    setBusy(true); setMsg(null);
+    const r = await api("stock-hold/start/", "POST", { businesses: [b.business_id] });
+    setBusy(false);
+    if (r.ok) setMsg({ text: `${b.business_name}: saving each SKU's stock, then setting it to 0 — this page follows it.` });
+    else setMsg({ bad: true, text: r.data.error || "Couldn't start." });
+    load(); onSent();
+  };
+  const restore = async (b) => {
+    const n = (b.hold.counts.ZEROED || 0) + (b.hold.counts.RESTORE_FAILED || 0);
+    if (!window.confirm(`Give ${n} SKU${n === 1 ? "" : "s"} of ${b.business_name} their saved stock back on Meesho?\n\nOnly SKUs still live and still at 0 are changed — paused or restocked ones are left as they are.`)) return;
+    setBusy(true); setMsg(null);
+    const r = await api(`stock-hold/${b.hold.id}/restore/`, "POST", {});
+    setBusy(false);
+    if (r.ok) setMsg({ text: `${b.business_name}: giving the stock back — this page follows it.` });
+    else setMsg({ bad: true, text: r.data.error || "Couldn't restore." });
+    load(); onSent();
+  };
+  return (
+    <div style={{ ...S.card, padding: 14, display: "flex", flexDirection: "column", gap: 10, minWidth: 0 }}>
+      <div style={{ fontWeight: 900, color: C.gray900 }}>Stock to 0 — and back</div>
+      <div style={{ fontSize: 12.5, color: C.gray500 }}>
+        Every live SKU's stock is read from Meesho and saved here first, then set to 0. Restore gives each exactly its saved stock — only SKUs still
+        live and still at 0; paused SKUs and other catalogs are never touched.
+      </div>
+      {msg && <div role="status" style={{ fontSize: 13, fontWeight: 700, color: msg.bad ? C.red : "#059669" }}>{msg.bad ? "✕" : "✓"} {msg.text}</div>}
+      {!d ? <CircularProgress size={20} style={{ color: C.orange }} /> : d.businesses.map((b) => {
+        const h = b.hold;
+        return (
+          <div key={b.business_id} style={{ border: `1px solid ${C.gray200}`, borderLeft: `4px solid ${b.open ? "#B45309" : C.gray200}`, borderRadius: 10, padding: 10, display: "flex", flexDirection: "column", gap: 6 }}>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              <b style={{ flex: 1, minWidth: 0, color: C.gray900 }}>{b.business_name}</b>
+              <span style={{ fontSize: 12.5, color: C.gray500 }}>{b.live} live SKUs · {b.with_stock} with stock</span>
+            </div>
+            {b.problem && <div style={{ fontSize: 12.5, color: C.red, fontWeight: 700 }}>✕ {b.problem}</div>}
+            {h && (
+              <div style={{ fontSize: 12.5, color: C.gray700, display: "flex", flexDirection: "column", gap: 4 }}>
+                <span><b>{HOLD_STATUS[h.status] || h.status}</b>{h.working && <CircularProgress size={11} style={{ marginLeft: 6, color: C.orange }} />} · started {when(h.created_at)}{h.created_by ? ` by ${h.created_by}` : ""}{h.restored_at ? ` · restored ${when(h.restored_at)}` : ""}</span>
+                {h.message && <span style={{ color: C.gray500 }}>{h.message}</span>}
+                <span style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  {Object.entries(h.counts).map(([k, n]) => (
+                    <span key={k} style={{ fontSize: 11.5, fontWeight: 800, color: (HOLD_STATE[k] || [k, C.gray600])[1], border: `1px solid ${C.gray200}`, borderRadius: 999, padding: "1px 8px" }}>
+                      {n} · {(HOLD_STATE[k] || [k])[0]}</span>
+                  ))}
+                </span>
+                <button onClick={() => setOpen(open === h.id ? null : h.id)} style={{ ...btn("ghost", "sm"), alignSelf: "flex-start" }}>{open === h.id ? "▾ Hide SKUs" : "▸ Each SKU"}</button>
+                {open === h.id && (
+                  <div style={{ maxHeight: 260, overflowY: "auto", border: `1px solid ${C.gray100}`, borderRadius: 8 }}>
+                    {h.items.map((x) => (
+                      <div key={`${x.catalog_id}-${x.sku}-${x.variation}`} style={{ display: "flex", gap: 8, padding: "5px 8px", borderBottom: `1px solid ${C.gray100}`, fontSize: 12, flexWrap: isMobile ? "wrap" : "nowrap" }}>
+                        <span style={{ flex: 1, minWidth: 0, fontFamily: "monospace", wordBreak: "break-word" }}>{x.sku}{x.variation ? ` · ${x.variation}` : ""}</span>
+                        <span style={{ whiteSpace: "nowrap" }}>saved {x.previous ?? "—"}</span>
+                        <span style={{ color: (HOLD_STATE[x.state] || [x.state, C.gray600])[1], fontWeight: 700 }} title={x.message}>{(HOLD_STATE[x.state] || [x.state])[0]}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {!b.open && !b.problem && <button onClick={() => start(b)} disabled={busy} style={{ ...btn("ghost", "sm"), color: C.red, borderColor: C.redBorder, opacity: busy ? 0.6 : 1 }}>Set all live stock to 0…</button>}
+              {h?.can_restore && <button onClick={() => restore(b)} disabled={busy} style={{ ...btn("primary", "sm"), background: "#059669", borderColor: "#059669", opacity: busy ? 0.6 : 1 }}>Restore saved stock</button>}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function BulkActions({ isMobile, onSent }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <section style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      <button onClick={() => setOpen(!open)} aria-expanded={open} style={{ ...btn("ghost", "sm"), alignSelf: "flex-start" }}>
+        {open ? "▾" : "▸"} Whole-account actions — pause SKUs with no orders · stock to 0 and back</button>
+      {open && (
+        <div style={{ display: "grid", gap: 12, gridTemplateColumns: isMobile ? "1fr" : "repeat(2, minmax(0, 1fr))", alignItems: "start" }}>
+          <IdlePause isMobile={isMobile} onSent={onSent} />
+          <StockHold isMobile={isMobile} onSent={onSent} />
+        </div>
+      )}
+    </section>
+  );
+}
+
 export function MeeshoLiveInventoryTab({ embedded = false }) {
   const isMobile = useIsMobile();
   const [data, setData] = useState(null);
@@ -376,6 +573,7 @@ export function MeeshoLiveInventoryTab({ embedded = false }) {
       {error && <div style={{ background: C.redLight, border: `1.5px solid ${C.redBorder}`, borderRadius: 12, padding: "10px 14px", color: C.red, fontWeight: 700, fontSize: 13 }}>{error}</div>}
       <PauseStatus pauses={data.pauses} showBiz={multi} />
       <StockStatus runs={data.stock_runs} showBiz={multi} />
+      {admin && data.connected && <BulkActions isMobile={isMobile} onSent={load} />}
       {stockAsk && <StockDialog ask={stockAsk} listingById={listingById} onClose={() => setStockAsk(null)}
         onSent={() => { setStockAsk(null); setPicked(new Set()); load(); }} />}
 

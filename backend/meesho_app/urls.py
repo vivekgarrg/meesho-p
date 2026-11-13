@@ -5,7 +5,7 @@ from . import api_cache
 from . import upload_cleanup
 from . import return_desk
 from . import meesho_return_claim
-from . import flipkart_actions, flipkart_seller, flipkart_sync, parent_merge
+from . import flipkart_actions, flipkart_seller, flipkart_sync, meesho_bulk, parent_merge
 from . import meesho_linking, meesho_return_analysis, meesho_returns, meesho_search, meesho_sync, orders_panel, return_guard, scan_unshipped, sku_parents
 from . import bulk_listing_views
 from . import listing_images_views
@@ -249,6 +249,12 @@ urlpatterns = [
     path("meesho-live-inventory/refresh/", meesho_sync.meesho_live_inventory_refresh, name="meesho_live_inventory_refresh"),
     path("meesho-live-inventory/pause/",   meesho_sync.meesho_live_inventory_pause,   name="meesho_live_inventory_pause"),
     path("meesho-live-inventory/stock/",   meesho_sync.meesho_live_inventory_stock,   name="meesho_live_inventory_stock"),
+    # Whole-account actions (meesho_bulk.py): pause the SKUs with no orders; stock to 0 and back.
+    path("meesho-live-inventory/idle/",       meesho_bulk.idle_view,       name="meesho_inventory_idle"),
+    path("meesho-live-inventory/idle/pause/", meesho_bulk.idle_pause_view, name="meesho_inventory_idle_pause"),
+    path("meesho-live-inventory/stock-hold/",       meesho_bulk.holds_view,      name="meesho_stock_holds"),
+    path("meesho-live-inventory/stock-hold/start/", meesho_bulk.hold_start_view, name="meesho_stock_hold_start"),
+    path("meesho-live-inventory/stock-hold/<int:hold_id>/restore/", meesho_bulk.hold_restore_view, name="meesho_stock_hold_restore"),
     path("meesho-sync/",            meesho_sync.meesho_sync_status,     name="meesho_sync_status"),
     path("meesho-sync/connect/",    meesho_sync.meesho_sync_connect,    name="meesho_sync_connect"),
     path("meesho-sync/refresh/",    meesho_sync.meesho_sync_refresh,    name="meesho_sync_refresh"),

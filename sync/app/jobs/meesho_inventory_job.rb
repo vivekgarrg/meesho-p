@@ -201,6 +201,7 @@ class MeeshoInventoryJob
           attrs = MeeshoInventory.listing_attrs(p)
           attrs[:archived] ||= tab == "paused"
           row.assign_attributes(attrs.merge(catalog_id: cat.id, seen_at: now))
+          row.first_seen_at ||= now if row.new_record?     # how new a SKU is (Django: "pause SKUs with no orders")
           row.save!
           keep << row.id
         end

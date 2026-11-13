@@ -13,6 +13,7 @@ class MeeshoAccount < ApplicationRecord
   has_many :snapshots, class_name: "MeeshoSyncSnapshot", foreign_key: :account_id
   has_many :catalogs, class_name: "MeeshoCatalog", foreign_key: :account_id
   has_many :listings, class_name: "MeeshoListing", foreign_key: :account_id
+  has_many :stock_holds, class_name: "MeeshoStockHold", foreign_key: :account_id
 
   def password
     SecretBox.decrypt(password_enc)

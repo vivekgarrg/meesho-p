@@ -79,10 +79,10 @@ def _redis():
                                 socket_connect_timeout=2, socket_timeout=2)
 
 
-def enqueue(job_class, args, queue=QUEUE_MANUAL):
+def enqueue(job_class, args, queue=QUEUE_MANUAL, retry=2):
     """Push one job onto Sidekiq's queue — exactly what Sidekiq::Client.push writes."""
     now = time.time()
-    job = {"class": job_class, "args": args, "queue": queue, "retry": 2,
+    job = {"class": job_class, "args": args, "queue": queue, "retry": retry,
            "jid": secrets.token_hex(12), "created_at": now, "enqueued_at": now}
     r = _redis()
     with r.pipeline() as p:
