@@ -114,6 +114,17 @@ def _message(r):
     return f"HTTP {r.status_code}"
 
 
+def _warm(s):
+    """Open the panel as the browser does right after logging in: Seller Hub hands out its CSRF
+    token (the XyZ7… cookie) there — without it every graphql read is refused."""
+    for path in ("/index.html", "/getFeaturesForSeller"):
+        try:
+            s.get(f"{BASE}{path}", timeout=TIMEOUT, headers={"Referer": f"{BASE}/index.html"})
+        except requests.RequestException:
+            pass
+    return CSRF_COOKIE in {c.name for c in s.cookies}
+
+
 def _logged_in(s):
     jar = {c.name: c.value for c in s.cookies}
     return str(jar.get("is_login", "")).lower() == "true" or bool(jar.get("sellerId"))
@@ -138,6 +149,7 @@ def start_login(account, password=None):
         account.save(update_fields=["status", "status_message", "updated_at"])
         raise FlipkartError(account.status_message)
     if _logged_in(s):                                             # no OTP asked this time
+        _warm(s)
         account.status, account.status_message, account.last_login_at = A.STATUS_ACTIVE, "", timezone.now()
         account.seller_id = {c.name: c.value for c in s.cookies}.get("sellerId", account.seller_id) or ""
         _save(account, s, ["status", "status_message", "last_login_at", "seller_id"])
@@ -163,6 +175,7 @@ def verify_otp(account, otp):
         account.status_message = f"OTP not accepted: {_message(r)}"
         account.save(update_fields=["status_message", "updated_at"])
         raise FlipkartError(account.status_message)
+    _warm(s)
     jar = {c.name: c.value for c in s.cookies}
     account.status, account.status_message, account.last_login_at = A.STATUS_ACTIVE, "", timezone.now()
     account.seller_id = jar.get("sellerId", "") or account.seller_id
@@ -177,6 +190,9 @@ def graphql(account, op_name, variables, query, s=None):
     if account.status != A.STATUS_ACTIVE or not account.cookies_enc:
         raise FlipkartError("Flipkart isn't connected.", expired=account.status == A.STATUS_EXPIRED)
     s = s or _load(account, _http())
+    if CSRF_COOKIE not in {c.name for c in s.cookies} and not _warm(s):
+        raise FlipkartError("Flipkart didn't hand out its security token (CSRF) — the reads can't be sent. "
+                            "Log in again; if it keeps happening, copy the request that sets it from the Network tab.")
     jar = {c.name: c.value for c in s.cookies}
     headers = {"content-type": "application/json", "accept": "*/*", "operation": "query", "operation-name": op_name,
                "x-internal-env-type": "WEB", "fk-csrf-token": jar.get(CSRF_COOKIE, ""), "Referer": f"{BASE}/index.html"}
@@ -187,10 +203,11 @@ def graphql(account, op_name, variables, query, s=None):
                    headers=headers, timeout=TIMEOUT, allow_redirects=False)
     except requests.RequestException as e:
         raise FlipkartError(f"Couldn't reach Flipkart: {e.__class__.__name__}.")
-    if r.status_code in (301, 302, 401, 403) or "login" in (r.headers.get("location") or "").lower():
+    # Only a sign that the login itself is gone means "expired"; any other refusal is said as Flipkart said it.
+    if r.status_code in (301, 302, 401) or "login" in (r.headers.get("location") or "").lower():
         raise FlipkartError("Flipkart ended the session — log in again with a new OTP.", expired=True)
     if r.status_code >= 400:
-        raise FlipkartError(f"Flipkart said: {_message(r)}")
+        raise FlipkartError(f"Flipkart refused the read (HTTP {r.status_code}): {_message(r)}")
     try:
         body = r.json()
     except ValueError:
@@ -215,10 +232,16 @@ def _numbers(node, path=()):
     if isinstance(node, dict):
         if "key" in node and "aggregation_count" in node:
             return [(" · ".join([*path, str(node["key"])]), node["aggregation_count"])]
+        if "aggregation_name" in node:
+            # A stock widget figure: its buckets when it has them ("bring_listing_instock": 1), else its value.
+            if node.get("buckets"):
+                return _numbers(node["buckets"], path)
+            v = node.get("value")
+            return [(" · ".join([*path, str(node["aggregation_name"])]), v)] if isinstance(v, (int, float)) and not isinstance(v, bool) else []
         for k, v in node.items():
-            if k == "__typename":
+            if k in ("__typename", "date"):
                 continue
-            out += _numbers(v, path if k in ("result", "data", "buckets", "aggregations") or k.startswith("get") else (*path, k))
+            out += _numbers(v, path if k in ("result", "data", "buckets", "aggregations", "numeric") or k.startswith("get") else (*path, k))
     elif isinstance(node, list):
         for v in node:
             out += _numbers(v, path)

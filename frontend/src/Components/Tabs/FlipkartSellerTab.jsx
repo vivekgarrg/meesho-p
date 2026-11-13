@@ -19,7 +19,13 @@ const STATUS = {
 };
 const GROUPS = [["sales", "Sales"], ["impressions", "Impressions"], ["out_of_stock", "Out of stock"]];
 const when = (iso) => (iso ? new Date(iso).toLocaleString("en-IN", { day: "2-digit", month: "short", hour: "numeric", minute: "2-digit" }) : "never");
-const pretty = (label) => label.replace(/_/g, " ").replace(/\bgmv\b/i, "sales value").replace(/^gross /i, "");
+// Seller Hub's own names for its figures, in words.
+const NAMES = {
+  gross_units: "units", gross_gmv: "sales value", impressions_latest: "impressions (latest day)",
+  impressions_prev: "impressions (day before)", bring_listing_instock: "listings to bring back in stock",
+  potential_loss: "potential loss",
+};
+const pretty = (label) => label.split(" · ").map((p) => NAMES[p] || p.replace(/_/g, " ")).join(" · ");
 const value = (label, v) => (/gmv|value/i.test(label) ? `₹${Number(v).toLocaleString("en-IN")}` : Number(v).toLocaleString("en-IN"));
 
 async function call(path, method = "GET", body) {

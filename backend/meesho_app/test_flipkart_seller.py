@@ -52,10 +52,12 @@ class FakeFlipkart(requests.Session):
             op = (kw.get("json") or {}).get("operationName")
             data = {
                 "GetBusinessSummarySalesUnits": {"getBusinessSummarySalesUnitsData": {"result": json.dumps(
-                    {"gross_units": {"today": 12, "yesterday": 30}, "gross_gmv": {"today": 4100.5, "yesterday": 9800}})}},
-                "GetBusinessSummaryImpressions": {"getBusinessSummaryImpressionsData": {"result": {"impressions_latest": 5000, "impressions_prev": 4200}}},
-                "Selection_getStockWidget": {"getStockWidget": {"aggregations": [{"aggregation_name": "stock", "value": None,
-                                                                                  "buckets": [{"key": "out_of_stock", "aggregation_count": 7}]}]}},
+                    {"today": {"gross_units": 12, "gross_gmv": 4100.5}, "yesterday": {"gross_units": 30, "gross_gmv": 9800}})}},
+                "GetBusinessSummaryImpressions": {"getBusinessSummaryImpressionsData": {"result": {
+                    "impressions_latest": {"numeric": 5000, "date": "2026-11-11"}, "impressions_prev": {"numeric": 4200, "date": "2026-11-10"}}}},
+                "Selection_getStockWidget": {"getStockWidget": {"aggregations": [
+                    {"aggregation_name": "model-based", "value": 0, "buckets": [{"key": "bring_listing_instock", "aggregation_count": 7}]},
+                    {"aggregation_name": "potential_loss", "value": 130, "buckets": []}]}},
             }[op]
             return _resp(200, {"data": data})
         return _resp(200, {})
@@ -134,14 +136,49 @@ class FlipkartSellerTests(TestCase):
         r = self.connected()
         self.assertEqual(r.status_code, 200, r.data)
         s = r.data["summary"]
-        self.assertIn({"label": "gross_units · today", "value": 12}, s["sales"])
-        self.assertIn({"label": "gross_gmv · yesterday", "value": 9800}, s["sales"])
-        self.assertIn({"label": "impressions_latest", "value": 5000}, s["impressions"])
-        self.assertEqual(s["out_of_stock"], [{"label": "out_of_stock", "value": 7}])
+        self.assertIn({"label": "today · gross_units", "value": 12}, s["sales"])
+        self.assertIn({"label": "yesterday · gross_gmv", "value": 9800}, s["sales"])
+        self.assertEqual(s["impressions"], [{"label": "impressions_latest", "value": 5000}, {"label": "impressions_prev", "value": 4200}])
+        self.assertEqual(s["out_of_stock"], [{"label": "bring_listing_instock", "value": 7}, {"label": "potential_loss", "value": 130}])
         q = next(c for c in FakeFlipkart.calls if c["path"] == "/napi/graphql")
         self.assertEqual((q["headers"]["fk-csrf-token"], q["headers"]["x-location-id"], q["headers"]["operation-name"]),
                          ("csrf-1", "LOC3695231456da41de87ae9704b810e002", "GetBusinessSummarySalesUnits"))
         self.assertEqual(q["cookies"]["connect.sid"], "live")
+
+    def test_the_panel_is_opened_after_the_otp_to_get_the_csrf_token(self):
+        # As the real Seller Hub does: /verifyOtp logs in, but the CSRF cookie comes with the panel page.
+        def verify(s, kw):
+            for k, v in (("connect.sid", "live"), ("sellerId", "41ad149fa06e4194"), ("is_login", "true")):
+                s.cookies.set(k, v, domain="seller.flipkart.com")
+            return _resp(200, {})
+        def panel(s, kw):
+            s.cookies.set(flipkart_seller.CSRF_COOKIE, "csrf-from-panel", domain="seller.flipkart.com")
+            return _resp(200, {})
+        FakeFlipkart.script.update({"/verifyOtp": verify, "/index.html": panel})
+        r = self.connected()
+        self.assertEqual((r.data["status"], r.data["status_message"]), ("ACTIVE", ""), r.data)
+        q = next(c for c in FakeFlipkart.calls if c["path"] == "/napi/graphql")
+        self.assertEqual(q["headers"]["fk-csrf-token"], "csrf-from-panel")
+        self.assertLess([c["path"] for c in FakeFlipkart.calls].index("/index.html"),
+                        [c["path"] for c in FakeFlipkart.calls].index("/napi/graphql"))
+
+    def test_no_csrf_token_is_said_plainly_not_called_an_ended_session(self):
+        def verify(s, kw):
+            for k, v in (("connect.sid", "live"), ("sellerId", "41"), ("is_login", "true")):
+                s.cookies.set(k, v, domain="seller.flipkart.com")
+            return _resp(200, {})
+        FakeFlipkart.script["/verifyOtp"] = verify
+        self.connected()
+        r = self.c.post(f"{self.base}refresh/")
+        self.assertEqual((r.status_code, r.data["status"]), (200, "ACTIVE"))
+        self.assertIn("security token (CSRF)", r.data["status_message"])
+
+    def test_a_403_is_said_as_flipkart_said_it_not_called_expired(self):
+        self.connected()
+        FakeFlipkart.script["/napi/graphql"] = lambda s, kw: _resp(403, {"message": "Forbidden for location"})
+        r = self.c.post(f"{self.base}refresh/")
+        self.assertEqual(r.data["status"], "ACTIVE")
+        self.assertIn("HTTP 403): Forbidden for location", r.data["status_message"])
 
     def test_renewed_cookies_are_kept(self):
         self.connected()
