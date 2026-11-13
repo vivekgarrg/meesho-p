@@ -311,9 +311,12 @@ export function FlipkartSellerTab() {
 
   const load = useCallback(async () => {
     const r = await call("");
-    if (r.ok) setD(r.data); else setErr(r.data.error || r.data.detail || "Couldn't read the Flipkart connections.");
+    if (r.ok && Array.isArray(r.data.accounts)) setD(r.data);
+    else setErr(r.data.error || r.data.detail || "Couldn't read the Flipkart connections.");
   }, []);
-  useEffect(() => { load(); }, [load]);
+  // Read again whenever what's held isn't this page's shape (e.g. kept over from an older version of it).
+  const ready = !!d && Array.isArray(d.accounts);
+  useEffect(() => { if (!ready) load(); }, [ready, load]);
   const anyConnected = (d?.accounts || []).some((a) => a.connected);
   // While any is connected, read again every minute (the server's own refresh runs every 10).
   useEffect(() => {
@@ -330,7 +333,7 @@ export function FlipkartSellerTab() {
     if (r.data?.accounts) setD(r.data);
   };
 
-  if (!d) {
+  if (!ready) {
     return err ? <div role="alert" style={{ ...S.card, color: C.red, fontWeight: 700 }}>✕ {err}</div>
       : <div style={{ display: "flex", justifyContent: "center", padding: 60 }}><CircularProgress style={{ color: "#2874F0" }} /></div>;
   }
