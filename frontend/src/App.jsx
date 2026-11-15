@@ -46,7 +46,6 @@ const BulkLabelsTab = lazyPage(() => import('./Components/Tabs/BulkLabelsTab'), 
 const InventoryLabelsTab = lazyPage(() => import('./Components/Tabs/InventoryLabelsTab'), 'InventoryLabelsTab');
 const FraudCustomersTab = lazyPage(() => import('./Components/Tabs/FraudCustomersTab'), 'FraudCustomersTab');
 const QuadrantCropperTab = lazyPage(() => import('./Components/Tabs/QuadrantCropperTab'), 'QuadrantCropperTab');
-const MeeshoInventoryTab = lazyPage(() => import('./Components/Tabs/MeeshoInventoryTab'), 'MeeshoInventoryTab');
 const ReturnScanTab = lazyPage(() => import('./Components/Tabs/ReturnScanTab'), 'ReturnScanTab');
 const OrderScanTab = lazyPage(() => import('./Components/Tabs/OrderScanTab'), 'OrderScanTab');
 const ReturnDeskTab = lazyPage(() => import('./Components/Tabs/ReturnDeskTab'), 'ReturnDeskTab');
@@ -64,7 +63,9 @@ import { SKU_PAGE_SIZE as skuPageSize } from './lib/helper';
 import TableData from './Components/Table/TableData';
 import LoginPage from './Components/Login/LoginPage';
 import LandingPage from './Components/Landing/LandingPage';
-const BusinessProfilePage = lazyPage(() => import('./Components/BusinessProfile/BusinessProfilePage'));
+const MeeshoInventoryPage = lazyPage(() => import('./Components/Tabs/MergedPages'), 'MeeshoInventoryPage');
+const AdsPage = lazyPage(() => import('./Components/Tabs/MergedPages'), 'AdsPage');
+const BusinessSettingsPage = lazyPage(() => import('./Components/Tabs/MergedPages'), 'BusinessSettingsPage');
 import BusinessSwitcher from './Components/BusinessSwitcher';
 import CombinedViewToggle from './Components/CombinedViewToggle';
 import CombinedViewBanner from './Components/CombinedViewBanner';
@@ -1154,6 +1155,7 @@ function AppShell() {
     (loc.pathname === '/' && sp.get('section') === 'panel')
     || (loc.pathname === '/orders' && (sp.get('section') || 'live') === 'live')
     || (loc.pathname === '/return-analysis' && ['returns', 'act', null].includes(sp.get('section')))
+    || (loc.pathname === '/payments' && sp.get('section') === 'panel')
   );
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem('sidebar_collapsed') === 'true');
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -1229,7 +1231,7 @@ function AppShell() {
             business switches so it's never remounted, only its context value
             changes. Every tab reads the active range from useDateFilter(). */}
         {/* Order Scan is a live packing desk (its own noon-to-noon day), not a report — a period filter means nothing there. */}
-        {!['/order-scan', '/return-scan', '/scan-lookup', '/meesho-sync', '/meesho-orders', '/meesho-live-inventory', '/meesho', '/meesho-linking', '/return-claim', '/orders-panel'].includes(loc.pathname)
+        {!['/order-scan', '/return-scan', '/scan-lookup', '/meesho-sync', '/meesho-orders', '/meesho-live-inventory', '/meesho', '/meesho-linking', '/return-claim', '/orders-panel', '/business-profile'].includes(loc.pathname)
           && !loc.pathname.startsWith('/meesho/') && !liveView && <GlobalDateFilterBar />}
         {/* key by active business + settlement mode so switching either remounts
             the routed view, forcing every tab (dashboard included) to refetch
@@ -1263,6 +1265,11 @@ function AppShell() {
                 <Route path="/meesho-linking" element={<Navigate to="/order-scan" replace />} />
                 <Route path="/meesho/linking" element={<Navigate to="/order-scan" replace />} />
                 <Route path="/meesho" element={<MeeshoHubTab />} />
+                <Route path="/meesho/inventory" element={<MeeshoInventoryPage />} />
+                <Route path="/meesho/ads" element={<AdsPage />} />
+                <Route path="/meesho/payments" element={<Navigate to="/payments?section=panel" replace />} />
+                <Route path="/meesho/settings" element={<Navigate to="/business-profile?section=meesho" replace />} />
+                <Route path="/ads-analysis" element={<Navigate to="/meesho/ads?section=skus" replace />} />
                 <Route path="/meesho/:section" element={<MeeshoHubTab />} />
                 <Route path="/meesho/:section/:status" element={<MeeshoHubTab />} />
                 <Route path="/meesho-orders" element={<MeeshoLegacyRedirect />} />
@@ -1288,12 +1295,12 @@ function AppShell() {
                 <Route path="/employees" element={<EmployeesTab />} />
                 <Route path="/expenses" element={<ExpensesTab />} />
                 <Route path="/inventory-labels" element={<InventoryLabelsTab />} />
-                <Route path="/meesho-inventory" element={<MeeshoInventoryTab />} />
+                <Route path="/meesho-inventory" element={<Navigate to="/meesho/inventory?section=stock" replace />} />
                 <Route path="/fraud" element={<FraudCustomersTab />} />
                 <Route path="/quadrant-cropper" element={<QuadrantCropperTab />} />
                 <Route path="/extension" element={<ExtensionTab />} />
                 <Route path="/bulk-listing" element={<BulkListingTab />} />
-                <Route path="/business-profile" element={<BusinessProfilePage />} />
+                <Route path="/business-profile" element={<BusinessSettingsPage />} />
                 <Route path="/admin" element={<AdminPanel />} />
                 <Route path="*" element={<Navigate to="/" replace />} />
               </Routes>

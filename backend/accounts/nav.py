@@ -46,7 +46,7 @@ NAV_CATALOG = [
     {"path": "/tax-check",         "label": "Tax Check",         "group": "Catalog"},
     {"path": "/gst",               "label": "GST",               "group": "Catalog"},
     {"path": "/inventory-labels",  "label": "Labels & Barcodes", "group": "Catalog"},
-    {"path": "/meesho-inventory",  "label": "Meesho Stock",      "group": "Catalog"},
+    {"path": "/meesho-inventory",  "label": "Meesho Stock (a tab of Meesho Inventory)", "group": "Catalog"},
     {"path": "/expenses",          "label": "Expenses",          "group": "Catalog"},
 
     {"path": "/upload",            "label": "Upload Data",       "group": "Tools"},
@@ -54,7 +54,7 @@ NAV_CATALOG = [
     {"path": "/extension",         "label": "Browser Extension", "group": "Tools"},
     {"path": "/bulk-listing",      "label": "Bulk Listing",      "group": "Tools"},
     {"path": "/fraud",             "label": "Fraud Watch",       "group": "Tools"},
-    {"path": "/business-profile",  "label": "Business Profile",  "group": "Tools"},
+    {"path": "/business-profile",  "label": "Business Settings", "group": "Tools"},
 
     {"path": "/admin",             "label": "Admin Panel",       "group": "Administration"},
 ]
@@ -159,7 +159,7 @@ API_OWNERSHIP = {
     "tax-check/":            ["/tax-check"],
     "estimated-profit/":     ["/admin"],   # page removed: only an unrestricted account reaches it
     "flipkart-profit/":      ["/upload", "/sku-analysis"],   # the settlement upload; SKU Analysis's Flipkart view
-    "ads/":                  ["/"],
+    "ads/":                  ["/", "/meesho-orders"],   # Ads & Analysis → SKU ads analysis
     "product-photos/":       ["/admin"],   # page removed: only an unrestricted account reaches it
 
     "fraud-customers/":      ["/fraud"],

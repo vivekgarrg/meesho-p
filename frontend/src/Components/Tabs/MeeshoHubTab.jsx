@@ -9,6 +9,7 @@ import { MeeshoPaymentsTab } from "./MeeshoPaymentsTab";
 import { MeeshoAdsTab } from "./MeeshoAdsTab";
 import { MeeshoLinkingTab } from "./MeeshoLinkingTab";
 import { MeeshoReturnsTab } from "./MeeshoReturnsTab";
+import { MeeshoOtps } from "./MeeshoOtps";
 import { MeeshoReturnAnalysis } from "./MeeshoReturnAnalysis";
 import { SyncScheduleCard } from "./MeeshoSchedule";
 import { AutomationCard, LatestLabels } from "./MeeshoAutomation";
@@ -67,6 +68,8 @@ export const meeshoPath = (key) => {
   if (key === "overview") return "/?section=panel";
   if (key === "orders") return "/orders";
   if (key === "returns") return "/return-analysis";
+  if (key === "payments") return "/payments?section=panel";
+  if (key === "settings") return "/business-profile?section=meesho";
   const status = ORDER_STATUSES.find((x) => x.key === key);
   if (status) return status.key === "pending" ? "/orders" : `/orders?status=${status.slug}`;
   const sec = MEESHO_SECTIONS.find((x) => x.key === key);
@@ -186,7 +189,7 @@ export function MeeshoHubTab({ forceSection, forceStatus } = {}) {
   // Sections that moved: their old addresses land where they are now.
   if (!embedded && (tab === "overview" || tab === "linking")) return <Navigate to={meeshoPath(tab)} replace />;
   if (!embedded && tab === "orders") return <Navigate to={meeshoPath(status.key)} replace />;
-  if (!embedded && (tab === "return-analysis" || tab === "returns")) return <Navigate to="/return-analysis" replace />;
+  if (!embedded && (tab === "return-analysis" || tab === "returns" || tab === "payments" || tab === "settings")) return <Navigate to={meeshoPath(tab === "return-analysis" ? "returns" : tab)} replace />;
   if (!overview) return <div style={{ display: "flex", justifyContent: "center", padding: 80 }}><CircularProgress style={{ color: C.orange }} /></div>;
 
   return (
@@ -240,7 +243,7 @@ export function MeeshoHubTab({ forceSection, forceStatus } = {}) {
         {tab === "linking" && <MeeshoLinkingTab />}
         {tab === "returns" && <MeeshoReturnsTab part="returns" key="returns" />}
         {tab === "return-analysis" && <MeeshoReturnAnalysis key="return-analysis" />}
-        {tab === "otps" && <MeeshoReturnsTab part="otps" key="otps" />}
+        {tab === "otps" && <MeeshoOtps key="otps" />}
         {tab === "inventory" && <MeeshoLiveInventoryTab embedded />}
         {tab === "payments" && <MeeshoPaymentsTab />}
         {tab === "ads" && <MeeshoAdsTab />}

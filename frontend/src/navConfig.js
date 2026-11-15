@@ -21,10 +21,10 @@ export const NAV_GROUPS = [
     color: '#F43397',
     items: [
       { path: '/meesho/otps', label: 'Delivery OTPs', icon: '🔑', access: MEESHO, accessLabel: 'Meesho (every page in this group)' },
-      { path: '/meesho/inventory', label: 'Meesho Inventory', icon: '▤', access: MEESHO },
-      { path: '/meesho/payments', label: 'Meesho Payments', icon: '₹', access: MEESHO },
-      { path: '/meesho/ads', label: 'Meesho Ads', icon: '📣', access: MEESHO },
-      { path: '/meesho/settings', label: 'Meesho Settings', icon: '⚙', access: MEESHO },
+      // Live stock on Meesho and the stock sheets (it was Meesho Stock too).
+      { path: '/meesho/inventory', label: 'Meesho Inventory', icon: '▤', access: MEESHO, alsoBy: '/meesho-inventory' },
+      // Campaigns, true ROI and auto-pause, and the SKU ads analysis.
+      { path: '/meesho/ads', label: 'Ads & Analysis', icon: '📣', access: MEESHO, alsoBy: '/' },
     ],
   },
   {
@@ -59,6 +59,8 @@ export const NAV_GROUPS = [
       // Meesho scan (linking on Meesho, by default) and Flipkart scan. Order Linking was its own page:
       // whoever could open it, or the whole Meesho group, sees this.
       { path: '/order-scan', label: 'Order Scan', icon: '⌗', alsoBy: ['/meesho-linking', MEESHO] },
+      // Order Scan for Meesho linking only — not in the sidebar, but it can still be granted.
+      { path: '/meesho-linking', label: 'Order Scan (Meesho linking)', icon: '🔗', hidden: true },
       { path: '/scan-lookup', label: 'Listing Lookup', icon: '🔎' },
       { path: '/payments', label: 'Payments', icon: '◎' },
       // '/labels' (single-file Labels) is intentionally not listed here — the
@@ -84,7 +86,8 @@ export const NAV_GROUPS = [
       { path: '/tax-check', label: 'Tax Check', icon: '%', hidden: true },
       { path: '/gst', label: 'GST', icon: '₹' },
       { path: '/inventory-labels', label: 'Labels & Barcodes', icon: '▥' },
-      { path: '/meesho-inventory', label: 'Meesho Stock', icon: '⊞' },
+      // Meesho Stock is a tab of Meesho Inventory now; kept here so it can still be granted on its own.
+      { path: '/meesho-inventory', label: 'Meesho Stock', icon: '⊞', hidden: true },
       { path: '/expenses', label: 'Expenses', icon: '⊜' },
     ],
   },
@@ -97,7 +100,8 @@ export const NAV_GROUPS = [
       { path: '/extension', label: 'Browser Extension', icon: '⧉' },
       { path: '/bulk-listing', label: 'Bulk Listing', icon: '🧾' },
       { path: '/fraud', label: 'Fraud Watch', icon: '⊘' },
-      { path: '/business-profile', label: 'Business Profile', icon: '⌂' },
+      // The profile, Meesho setup (it was Meesho Settings) and Flipkart setup — the marketplace logins.
+      { path: '/business-profile', label: 'Business Settings', icon: '⌂', alsoBy: [MEESHO, '/flipkart-seller'] },
     ],
   },
   {

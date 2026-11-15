@@ -581,6 +581,41 @@ export function FlipkartLiveOrders() {
   );
 }
 
+/** Business Settings → Flipkart: each business's Seller Hub login (connect, OTP, log out) and nothing else. */
+export function FlipkartAccounts() {
+  const mobile = useIsMobile();
+  const [d, setD] = useState(null);
+  const [err, setErr] = useState(null);
+  const [showAll, setShowAll] = useState(false);
+  const load = useCallback(async () => {
+    const r = await call("");
+    if (r.ok && Array.isArray(r.data.accounts)) setD(r.data);
+    else setErr(r.data.error || r.data.detail || "Couldn't read the Flipkart connections.");
+  }, []);
+  useEffect(() => { load(); }, [load]);
+  if (!d) {
+    return err ? <div role="alert" style={{ ...S.card, color: C.red, fontWeight: 700 }}>✕ {err}</div>
+      : <div style={{ display: "flex", justifyContent: "center", padding: 60 }}><CircularProgress style={{ color: "#2874F0" }} /></div>;
+  }
+  const withLogin = d.accounts.filter((a) => a.status);
+  const without = d.accounts.filter((a) => !a.status);
+  const cards = showAll || withLogin.length === 0 ? [...withLogin, ...without] : withLogin;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14, maxWidth: 1100 }}>
+      <p style={{ fontSize: 13, color: C.gray500, margin: 0 }}>
+        Each business's own Flipkart Seller Hub login — Flipkart asks for an OTP at every login. Once in, it's kept alive and read every 10 minutes.
+      </p>
+      {err && <div role="alert" style={{ fontSize: 13, color: C.red, fontWeight: 700 }}>✕ {err}</div>}
+      {cards.map((a) => <AccountCard key={a.business} d={a} isAdmin={d.is_admin} mobile={mobile} onState={setD} />)}
+      {d.is_admin && without.length > 0 && withLogin.length > 0 && (
+        <button onClick={() => setShowAll(!showAll)} style={{ ...btn("ghost", "md"), alignSelf: "flex-start" }}>
+          {showAll ? "Hide businesses without Flipkart" : `+ Connect Flipkart for another business (${without.length})`}
+        </button>
+      )}
+    </div>
+  );
+}
+
 export function FlipkartSellerTab() {
   const mobile = useIsMobile();
   const [d, setD] = useState(null);

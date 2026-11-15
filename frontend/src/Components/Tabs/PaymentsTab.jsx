@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { TabbedPage } from "../shared/SubTabs";
+import { useAccess } from "../../contexts/AccessContext";
 import { MismatchTab } from "./MismatchTab";
 import { UnsettledOrdersTab } from "./UnsettledOrdersTab";
 import { UnscheduledPaymentTab } from "./UnscheduledPaymentTab";
@@ -593,13 +594,20 @@ function MeeshoPaymentsTab() {
 // Meesho by default; the Flipkart view sits beside it under ?platform=flipkart.
 // Everything about Meesho money in one place: the payments, and the checks on
 // them that used to be pages of their own (?section=mismatch|unsettled|unscheduled).
-const MeeshoPaymentsSections = () => (
+// The Meesho panel's own view — paid, upcoming, outstanding — loaded when its tab opens.
+const MeeshoPanelPayments = React.lazy(() => import("./MeeshoPaymentsTab").then((m) => ({ default: m.MeeshoPaymentsTab })));
+
+function MeeshoPaymentsSections() {
+  const { isPathVisible } = useAccess();
+  return (
   <TabbedPage tabs={[
     { key: "payments", label: "Payments", icon: "◎", Component: MeeshoPaymentsTab },
+    { key: "panel", label: "On Meesho now", icon: "₹", Component: MeeshoPanelPayments, hidden: !isPathVisible("/meesho-orders") },
     { key: "mismatch", label: "Pay Mismatch", icon: "⊝", Component: MismatchTab },
     { key: "unsettled", label: "Unsettled", icon: "⚡", Component: UnsettledOrdersTab },
     { key: "unscheduled", label: "Unscheduled Pay", icon: "◷", Component: UnscheduledPaymentTab },
   ]} />
-);
+  );
+}
 
 export const PaymentsTab = withPlatformSplit(MeeshoPaymentsSections, FlipkartPaymentsPanel, { tabbed: true });

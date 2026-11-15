@@ -19,6 +19,133 @@ from .sync_middleware.returns import (OTP_SNAPSHOT, SNAPSHOT, STATUSES, normaliz
 
 # ── API: Meesho → Returns & OTPs ──────────────────────────────────────────────
 
+def _otp_rows(account, payload, fetched_at):
+    """One row per courier from a fetchDeliveryOTPs answer."""
+    rows = []
+    for o in (payload or {}).get("supplier_delivery_otp") or [] if isinstance(payload, dict) else []:
+        details = [d for d in o.get("otp_details") or [] if isinstance(d, dict)]
+        active = next((d for d in details if d.get("active")), details[0] if details else {})
+        rows.append({
+            "business_id": account.business_id,
+            "business_name": account.business.name,
+            "courier": (o.get("carrier_details") or {}).get("name") or o.get("carrier_name") or "",
+            "courier_icon": (o.get("carrier_details") or {}).get("icon") or "",
+            "otp": active.get("otp") or o.get("otp") or "",
+            "expires_at": active.get("expiry_timestamp") or o.get("otp_expiry_timestamp"),
+            "kind": active.get("display_text") or "OTP",
+            "shipments": o.get("count") or (o.get("delivery_shipment_details") or {}).get("total_shipment_count") or 0,
+            "awbs": [a for a in o.get("awbs") or [] if a],
+            "fetched_at": fetched_at,
+        })
+    return rows
+
+
+OTP_PATH = "/api/fulfillment/returnRto/fetchDeliveryOTPs"
+OTP_FRESH_SECONDS = 15        # an answer this new is served again, not asked for again (many screens, one call)
+OTP_BACKOFF_SECONDS = 120     # a business Meesho refused isn't asked again for this long — polling never piles onto a block
+
+
+class OtpReadFailed(Exception):
+    pass
+
+
+def _read_otps_from_meesho(account):
+    """Ask Meesho for this business's delivery OTPs now, with its saved session
+    (as Order Scan's linking does). Returns the answer; raises OtpReadFailed."""
+    import json
+    import requests
+    from . import meesho_sync
+    from .meesho_linking import MEESHO_BASE, USER_AGENT, _HTTP
+    if account.status != MeeshoAccount.STATUS_ACTIVE or not account.cookies_enc:
+        raise OtpReadFailed("not connected — log in under Business Settings")
+    try:
+        cookies = json.loads(meesho_sync.decrypt(account.cookies_enc))
+    except Exception:                                               # noqa: BLE001
+        raise OtpReadFailed("its saved session can't be read — log in again under Business Settings")
+    headers = {
+        "accept": "application/json, text/plain, */*", "accept-language": "en-GB,en-US;q=0.9,en;q=0.8,hi;q=0.7",
+        "client-package-version": "1.0.4", "client-type": "d-web",
+        "content-type": "application/json", "identifier": account.supplier_identifier, "origin": MEESHO_BASE,
+        "user-agent": USER_AGENT, "cookie": "; ".join(f"{k}={v}" for k, v in cookies.items()),
+        "referer": f"{MEESHO_BASE}/panel/v3/new/fulfillment/{account.supplier_identifier}/returns/overview",
+    }
+    if account.browser_id:
+        headers["browser-id"] = account.browser_id
+    body = {"supplier_id": int(account.supplier_id or 0), "identifier": account.supplier_identifier,
+            "child_supplier_identifier": None, "child_supplier_id": None}
+    try:
+        res = _HTTP.post(MEESHO_BASE + OTP_PATH, json=body, headers=headers, timeout=(4, 10))
+    except requests.RequestException as exc:
+        raise OtpReadFailed(f"Meesho couldn't be reached ({exc.__class__.__name__})")
+    if res.status_code in (401, 403, 463):
+        blocked = "<html" in res.text[:500].lower()
+        raise OtpReadFailed("Meesho's bot protection refused the call" if blocked else "the Meesho session has expired — log in again under Business Settings")
+    try:
+        answer = res.json()
+    except ValueError:
+        answer = None
+    if res.status_code >= 400 or not isinstance(answer, dict):
+        raise OtpReadFailed(f"Meesho answered HTTP {res.status_code}")
+    return answer
+
+
+@api_view(["GET"])
+def otps_live(request, business_id):
+    """
+    Every courier's delivery OTP for every business on this desk, asked of Meesho
+    right now (one call per business, side by side) rather than waiting for the
+    worker's 10-minute read. Each answer is saved as the business's OTP snapshot,
+    so every other screen agrees. An answer under 15 s old is served again — a
+    dozen open screens still make one call a business. A business Meesho can't be
+    asked for keeps showing its last OTPs, with why.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    from datetime import timedelta
+    from .meesho_sync import _desk_accounts
+    business = _views().get_authorized_business(request, business_id)
+    _desk, accounts = _desk_accounts(request, business)
+    now = timezone.now()
+    snaps = {s.account_id: s for s in MeeshoSyncSnapshot.objects.filter(account__in=accounts, endpoint=OTP_SNAPSHOT)}
+    stale = [a for a in accounts if not (a.pk in snaps and snaps[a.pk].fetched_at > now - timedelta(seconds=OTP_FRESH_SECONDS))]
+
+    from django.core.cache import cache
+    held = {}
+    for a in list(stale):
+        why = cache.get(f"otp-backoff:{a.pk}")
+        if why:
+            held[a.pk] = why
+            stale.remove(a)
+
+    def ask(account):
+        try:
+            return account, _read_otps_from_meesho(account), None
+        except OtpReadFailed as exc:
+            return account, None, str(exc)
+
+    answers = []
+    if stale:
+        with ThreadPoolExecutor(max_workers=min(8, len(stale))) as pool:
+            answers = list(pool.map(ask, stale))
+    problems = dict(held)
+    for account, answer, problem in answers:
+        if problem:
+            problems[account.pk] = problem
+            cache.set(f"otp-backoff:{account.pk}", f"{problem} · asked again in a moment", OTP_BACKOFF_SECONDS)
+            continue
+        snaps[account.pk], _ = MeeshoSyncSnapshot.objects.update_or_create(
+            account=account, endpoint=OTP_SNAPSHOT, defaults={"payload": answer, "http_status": 200, "fetched_at": timezone.now()})
+
+    otps, businesses = [], []
+    for a in sorted(accounts, key=lambda a: a.business.name):
+        snap = snaps.get(a.pk)
+        rows = _otp_rows(a, snap.payload, snap.fetched_at) if snap else []
+        otps += rows
+        businesses.append({"business_id": a.business_id, "business_name": a.business.name,
+                           "read_at": snap.fetched_at if snap else None, "couriers": len(rows),
+                           "live": a.pk not in problems and snap is not None, "problem": problems.get(a.pk)})
+    otps.sort(key=lambda x: (x["business_name"], x["courier"]))
+    return Response({"otps": otps, "businesses": businesses, "now": timezone.now(), "fresh_seconds": OTP_FRESH_SECONDS})
+
 def _views():
     from . import views
     return views
@@ -33,27 +160,13 @@ def returns_dashboard(request, business_id):
     from .meesho_sync import _desk_accounts, KIND_RETURNS, _run_json
     business = _views().get_authorized_business(request, business_id)
     _desk, accounts = _desk_accounts(request, business)
-    names = {a.pk: a.business.name for a in accounts}
     now = timezone.now()
     otps = []
     fetched = {}
+    by_pk = {a.pk: a for a in accounts}
     for snap in MeeshoSyncSnapshot.objects.filter(account__in=accounts, endpoint=OTP_SNAPSHOT):
         fetched[snap.account_id] = snap.fetched_at
-        for o in (snap.payload or {}).get("supplier_delivery_otp") or [] if isinstance(snap.payload, dict) else []:
-            details = [d for d in o.get("otp_details") or [] if isinstance(d, dict)]
-            active = next((d for d in details if d.get("active")), details[0] if details else {})
-            expiry = active.get("expiry_timestamp") or o.get("otp_expiry_timestamp")
-            otps.append({
-                "business_id": next(a.business_id for a in accounts if a.pk == snap.account_id),
-                "business_name": names[snap.account_id],
-                "courier": (o.get("carrier_details") or {}).get("name") or o.get("carrier_name") or "",
-                "courier_icon": (o.get("carrier_details") or {}).get("icon") or "",
-                "otp": active.get("otp") or o.get("otp") or "", "expires_at": expiry,
-                "kind": active.get("display_text") or "OTP",
-                "shipments": o.get("count") or (o.get("delivery_shipment_details") or {}).get("total_shipment_count") or 0,
-                "awbs": [a for a in o.get("awbs") or [] if a],
-                "fetched_at": snap.fetched_at,
-            })
+        otps += _otp_rows(by_pk[snap.account_id], snap.payload, snap.fetched_at)
     otps.sort(key=lambda x: (x["business_name"], x["courier"]))
 
     biz_ids = [a.business_id for a in accounts]

@@ -203,6 +203,7 @@ urlpatterns = [
     path("meesho-orders/labels/batch/<str:batch>/pdf/", meesho_sync.meesho_orders_labels_batch_pdf, name="meesho_orders_labels_batch_pdf"),
     path("meesho-orders/overview/", meesho_sync.meesho_overview,        name="meesho_overview"),
     path("meesho-orders/returns/",          meesho_returns.returns_dashboard, name="meesho_returns_dashboard"),
+    path("meesho-orders/otps/live/",        meesho_returns.otps_live, name="meesho_otps_live"),
     path("meesho-orders/returns/refresh/",  meesho_returns.returns_refresh,   name="meesho_returns_refresh"),
     path("meesho-orders/returns/list/",     meesho_returns.returns_list,      name="meesho_returns_list"),
     path("meesho-orders/return-analysis/",  meesho_return_analysis.return_analysis, name="meesho_return_analysis"),
