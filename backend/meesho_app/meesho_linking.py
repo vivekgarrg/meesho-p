@@ -539,7 +539,8 @@ def _counts(request, desk, accounts, day_param=None):
     live = _live(desk, day, start, end, accounts, ships)
     return {"day": day, "count": live["packed"], "cancelled_after": live["cancelled"],
             "by_courier": sorted(({"courier": k, "count": n} for k, n in live["by_courier"].items()), key=lambda x: -x["count"]),
-            "plan": _plan(request, desk, day, ships, live, details=False), "at": timezone.now()}
+            "plan": _plan(request, desk, day, ships, live, details=False),
+            "with_us": with_us(desk, accounts, details=False), "at": timezone.now()}
 
 
 @api_view(["GET"])
@@ -603,6 +604,7 @@ def linking(request, business_id):
         "is_admin": v._is_admin(request.user),
         "syncing": _syncing(_),
         "plan": _plan(request, desk, day, ships, live),
+        "with_us": with_us(desk, _),
     })
 
 
@@ -742,7 +744,9 @@ def _plan(request, desk, day, ships, live=None, details=True):
         seen.add(key)
         mine = live["links"].get(key)
         if (l.business_id, l.order_id) in cancelled or (mine and mine["cancelled"]):
-            c["cancelled"] += 1
+            if key in linked or mine:
+                c["cancelled"] += 1                  # packed, then cancelled: the parcel is here — kept aside
+            continue                                 # cancelled before it was scanned: not counted at all
         elif key in linked:
             c["total"] += 1
             c["linked"] += 1
@@ -774,6 +778,169 @@ def _plan(request, desk, day, ships, live=None, details=True):
                          "image_url": photos.get((l.business_id, l.order_id), (None, None))[0],
                          "image_fallback_url": photos.get((l.business_id, l.order_id), (None, None))[1]} for l in left[:LEFT_LISTED]],
     }
+
+
+# ── With us: every Meesho parcel still here, whatever day it is from ─────────
+# Meesho's Ready to ship list is the truth for "with us": an order leaves it only
+# when the courier picks it up (Shipped) or it is cancelled. Each order on it is
+#   packed      scanned and linked here (counted the moment Meesho took the scan),
+#               by the day it was packed;
+#   to_pack     label made (an AWB), not scanned here;
+#   no_label    no label downloaded yet;
+#   meesho_only Meesho shows a packet for it, but it wasn't scanned here.
+# A link made since the list was last read counts as packed too (the parcel can't
+# have moved on yet). An order cancelled after it was packed here is listed apart —
+# the parcel is still here, keep it aside; one cancelled before it was scanned
+# isn't shown or counted at all.
+CANCELLED_AFTER_DAYS = 15
+WITH_US_LISTED = 3000
+
+
+def _rts(accounts):
+    """Meesho's Ready to ship rows (as last read) and when each business's list was read."""
+    def build(ids):
+        rows, read_at = [], {}
+        for snap in MeeshoSyncSnapshot.objects.filter(pk__in=ids).select_related("account"):
+            biz = snap.account.business_id
+            read_at[biz] = snap.fetched_at
+            for r in snap.payload if isinstance(snap.payload, list) else []:
+                if isinstance(r, dict) and r.get("sub_order_num"):
+                    rows.append({"business_id": biz, "sub": r["sub_order_num"], "awb": _clean(r.get("awb")),
+                                 "packet_id": _clean(r.get("packet_id")), "carrier_id": r.get("carrier_id"),
+                                 "dispatch_by": str(r.get("dispatch_by") or "")[:10], "created": r.get("created_iso") or "",
+                                 "sku": r.get("sku") or "", "size": r.get("variation") or "", "qty": r.get("quantity") or 1,
+                                 "image": r.get("image") or "", "product": r.get("product_name") or ""})
+        return {"rows": rows, "read_at": read_at}
+    return _cached("rts", accounts, ("orders_ready_to_ship",), build)
+
+
+def _courier_label(name):
+    return " ".join(str(name or "").split()) or "Courier not known"
+
+
+def with_us(desk, accounts, details=True, today=None):
+    """The board of every Meesho parcel still here (see above): totals, per courier, and the orders."""
+    from .meesho_images import photo_map
+    v = _views()
+    today = today or v._current_business_date()
+    ids = [b.pk for b in desk]
+    names = {b.pk: b.name for b in desk}
+    rts = _rts(accounts)
+    shipped = _awbs_in(accounts, "orders_shipped")
+    cancelled = _cancelled_subs(accounts)
+    couriers = _courier_names()
+    rows = [r for r in rts["rows"] if r["business_id"] in ids]
+    # Labels give an AWB (and courier) to a row Meesho listed before its label was made.
+    need = [r["sub"] for r in rows if not r["awb"]]
+    labels = {}
+    for i in range(0, len(need), 500):
+        for l in (LabelOrder.objects.filter(business_id__in=ids, order_id__in=need[i:i + 500]).exclude(platform="flipkart")
+                  .order_by("uploaded_date").values("business_id", "order_id", "awb_number", "courier_name")):
+            labels[(l["business_id"], l["order_id"])] = l
+    awbs = {r["awb"] for r in rows if r["awb"]} | {_clean(l["awb_number"]) for l in labels.values() if l["awb_number"]}
+    since = timezone.now() - timedelta(days=CANCELLED_AFTER_DAYS)
+    links = list(MeeshoPacketLink.objects.filter(business__in=desk)
+                 .filter(Q(awb_number__in=list(awbs)[:20000]) | Q(linked_at__gte=since))
+                 .select_related("scanned_order"))
+    by_awb = {l.awb_number: l for l in links}
+    by_sub = {(l.business_id, l.sub_order_no): l for l in links if l.sub_order_no}
+    used = set()
+    out = {"packed": [], "to_pack": [], "no_label": [], "meesho_only": [], "cancelled_after": []}
+
+    def gone(l):
+        so = l.scanned_order
+        return (l.business_id, l.sub_order_no) in cancelled or bool(so and so.status == ScannedOrder.STATUS_CANCELLED)
+
+    def entry(biz, sub, awb, courier, **kw):
+        return {"business_id": biz, "business_name": names.get(biz, ""), "sub_order_no": sub, "awb": awb,
+                "courier": _courier_label(courier), **kw}
+
+    for r in rows:
+        lab = labels.get((r["business_id"], r["sub"])) or {}
+        awb = r["awb"] or _clean(lab.get("awb_number"))
+        link = by_awb.get(awb) if awb else None
+        link = link or by_sub.get((r["business_id"], r["sub"]))
+        courier = couriers.get(r["carrier_id"], "") or lab.get("courier_name") or (link.courier_name if link else "")
+        e = entry(r["business_id"], r["sub"], awb, courier, sku=r["sku"], size=r["size"], qty=r["qty"],
+                  dispatch_by=r["dispatch_by"], overdue=bool(r["dispatch_by"] and r["dispatch_by"] < str(today)),
+                  image=r["image"])
+        if (r["business_id"], r["sub"]) in cancelled:
+            if link:
+                used.add(link.pk)
+                out["cancelled_after"].append({**e, "packet_id": link.packet_id, "packed_on": link.pack_day, "linked_at": link.linked_at})
+            continue                                            # cancelled before it was scanned: not shown, not counted
+        if link:
+            used.add(link.pk)
+            if gone(link):
+                out["cancelled_after"].append({**e, "packet_id": link.packet_id, "packed_on": link.pack_day, "linked_at": link.linked_at})
+            else:
+                out["packed"].append({**e, "packet_id": link.packet_id, "packed_on": link.pack_day, "linked_at": link.linked_at})
+        elif r["packet_id"]:
+            out["meesho_only"].append({**e, "packet_id": r["packet_id"]})
+        elif awb:
+            out["to_pack"].append(e)
+        else:
+            out["no_label"].append(e)
+
+    # Links not on the list as read: packed since it was read, or packed and cancelled since.
+    for l in links:
+        if l.pk in used or l.awb_number in shipped:
+            continue
+        e = entry(l.business_id, l.sub_order_no, l.awb_number, l.courier_name or couriers.get(l.carrier_id, ""),
+                  sku=l.sku, size="", qty=1, dispatch_by="", overdue=False, image="",
+                  packet_id=l.packet_id, packed_on=l.pack_day, linked_at=l.linked_at)
+        if gone(l):
+            out["cancelled_after"].append(e)
+        elif l.linked_at and l.linked_at >= (rts["read_at"].get(l.business_id) or l.linked_at):
+            out["packed"].append(e)
+
+    per = {}
+
+    def c(name):
+        return per.setdefault(name.casefold(), {"courier": name, "packed": 0, "packed_by_day": {}, "to_pack": 0, "no_label": 0,
+                                                "meesho_only": 0, "cancelled_after": 0, "overdue": 0})
+    for k in out:
+        for e in out[k]:
+            x = c(e["courier"])
+            x[k] += 1
+            if k == "packed":
+                d = str(e["packed_on"] or "")
+                x["packed_by_day"][d] = x["packed_by_day"].get(d, 0) + 1
+            if k in ("to_pack", "no_label") and e["overdue"]:
+                x["overdue"] += 1
+    by_day = {}
+    for e in out["packed"]:
+        d = str(e["packed_on"] or "")
+        by_day[d] = by_day.get(d, 0) + 1
+    by_courier = []
+    for x in per.values():
+        x["with_us"] = x["packed"] + x["to_pack"] + x["no_label"] + x["meesho_only"]
+        x["packed_by_day"] = [{"day": d, "count": n} for d, n in sorted(x["packed_by_day"].items(), reverse=True)]
+        by_courier.append(x)
+    by_courier.sort(key=lambda x: (-x["with_us"], x["courier"]))
+    totals = {k: len(out[k]) for k in out}
+    totals["with_us"] = totals["packed"] + totals["to_pack"] + totals["no_label"] + totals["meesho_only"]
+    totals["overdue"] = sum(1 for k in ("to_pack", "no_label") for e in out[k] if e["overdue"])
+    read = [t for b, t in rts["read_at"].items() if b in ids]
+    board = {"totals": totals, "by_courier": by_courier,
+             "packed_by_day": [{"day": d, "count": n} for d, n in sorted(by_day.items(), reverse=True)],
+             "read_at": min(read) if read else None,
+             "to_pack_awbs": sorted(e["awb"] for e in out["to_pack"] if e["awb"])}
+    if details:
+        for k in ("to_pack", "no_label", "meesho_only"):
+            out[k].sort(key=lambda e: (e["dispatch_by"] or "9999", e["courier"], e["sku"]))
+        out["packed"].sort(key=lambda e: (str(e["packed_on"] or ""), str(e["linked_at"] or "")), reverse=True)
+        need_photo = [e for k in ("to_pack", "no_label", "meesho_only", "cancelled_after") for e in out[k] if not e["image"]][:LEFT_PHOTOS]
+        from types import SimpleNamespace
+        photos = photo_map([SimpleNamespace(business_id=e["business_id"], sku=e["sku"], sub=e["sub_order_no"]) for e in need_photo],
+                           sub_of=lambda r: r.sub, own=lambda r: "") if need_photo else {}
+        for k in out:
+            for e in out[k]:
+                ph = photos.get((e["business_id"], e["sub_order_no"])) if not e["image"] else None
+                e["image_url"], e["image_fallback_url"] = (e["image"] or (ph[0] if ph else None)), (ph[1] if ph else None)
+                e.pop("image", None)
+        board["orders"] = {k: v[:WITH_US_LISTED] for k, v in out.items()}
+    return board
 
 
 def _checked_at(accounts):

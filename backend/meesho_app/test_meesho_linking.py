@@ -161,7 +161,7 @@ class OrderLinkingTests(TestCase):
         MeeshoSyncSnapshot.objects.create(account=acct, endpoint="orders_cancelled", http_status=200, fetched_at=timezone.now(),
                                           payload=[{"sub_order_num": "13_1"}])
         plan = self.c.get(self.base).data["plan"]
-        self.assertEqual((plan["total"], plan["left"], plan["cancelled"]), (2, 2, 1))       # 13_1 cancelled; the other two not scanned yet
+        self.assertEqual((plan["total"], plan["left"], plan["cancelled"]), (2, 2, 0))       # 13_1 cancelled before it was scanned: not counted at all
         self.assertEqual(self.link("DL2001", "KP9ZZZZ12345678").data["code"], "cancelled")
 
     def test_the_kept_alive_connection_keeps_no_cookies(self):
@@ -405,3 +405,73 @@ class LinkingOnlyAccessTests(TestCase):
         self.assertEqual((r.status_code, r.data["queued"]), (200, 1))
         self.assertEqual(queued.call_count, 1)
         self.assertEqual(self.c.get(f"{self.api}/meesho-orders/overview/").status_code, 403)
+
+
+@mock.patch.dict(os.environ, {"MEESHO_SYNC_KEY": KEY})
+class WithUsTests(TestCase):
+    """The board of every Meesho parcel still here — whatever day it's from — from Meesho's Ready to ship and our links."""
+    setUp = OrderLinkingTests.setUp
+    link = OrderLinkingTests.link
+
+    def board(self):
+        return self.c.get(self.base).data["with_us"]
+
+    def snap(self, endpoint, payload):
+        acct = MeeshoAccount.objects.get(business=self.biz)
+        MeeshoSyncSnapshot.objects.update_or_create(account=acct, endpoint=endpoint, defaults={
+            "http_status": 200, "fetched_at": timezone.now(), "payload": payload})
+
+    def test_every_order_still_here_whatever_day_it_is_from(self):
+        old = (views._current_business_date() - timedelta(days=6)).isoformat()
+        snap = MeeshoSyncSnapshot.objects.get(endpoint="orders_ready_to_ship")
+        snap.payload = snap.payload + [{"sub_order_num": "40_1", "sku": "kadai", "awb": "VL5001", "carrier_id": 19, "dispatch_by": old},
+                                       {"sub_order_num": "41_1", "sku": "tawa", "carrier_id": 19}]       # no label yet
+        snap.save()
+        b = self.board()
+        t = b["totals"]
+        self.assertEqual((t["with_us"], t["packed"], t["to_pack"], t["no_label"], t["meesho_only"], t["overdue"]), (5, 0, 2, 1, 2, 1))
+        self.assertEqual({o["sub_order_no"] for o in b["orders"]["to_pack"]}, {"13_1", "40_1"})
+        self.assertTrue(next(o for o in b["orders"]["to_pack"] if o["sub_order_no"] == "40_1")["overdue"])
+
+    def test_a_scan_is_packed_at_once_in_its_own_answer_and_by_the_day_it_was_packed(self):
+        r = self.link("DL2001", "KP9ZZZZ12345678")
+        self.assertEqual(r.status_code, 201, r.data)
+        w = r.data["counts"]["with_us"]
+        self.assertEqual((w["totals"]["packed"], w["totals"]["to_pack"]), (1, 0))
+        today = str(views._current_business_date())
+        self.assertEqual(w["packed_by_day"], [{"day": today, "count": 1}])
+        # Packed an earlier day, still not picked up: still here, under that day.
+        r = self.link("VL1001", "KP4AUSE32034836")
+        MeeshoPacketLink.objects.filter(awb_number="VL1001").update(pack_day=views._current_business_date() - timedelta(days=2))
+        b = self.board()
+        self.assertEqual(b["totals"]["packed"], 2)
+        self.assertEqual([d["count"] for d in b["packed_by_day"]], [1, 1])
+        valmo = next(c for c in b["by_courier"] if c["courier"] == "Valmo")
+        self.assertEqual((valmo["packed"], valmo["meesho_only"], len(valmo["packed_by_day"])), (1, 1, 1))
+
+    def test_once_every_parcel_is_scanned_nothing_is_left(self):
+        for awb, packet in (("VL1001", "KP4AUSE32034836"), ("VL1002", "KP2SECT43976500"), ("DL2001", "KP9ZZZZ12345678")):
+            self.assertEqual(self.link(awb, packet).status_code, 201)
+        t = self.board()["totals"]
+        self.assertEqual((t["packed"], t["to_pack"], t["no_label"], t["meesho_only"], t["with_us"]), (3, 0, 0, 0, 3))
+
+    def test_picked_up_leaves_the_board(self):
+        self.link("DL2001", "KP9ZZZZ12345678")
+        self.snap("orders_ready_to_ship", [r for r in MeeshoSyncSnapshot.objects.get(endpoint="orders_ready_to_ship").payload
+                                           if r["sub_order_num"] != "13_1"])
+        self.snap("orders_shipped", [{"sub_order_num": "13_1", "awb": "DL2001", "packet_id": "KP9ZZZZ12345678", "carrier_id": 4}])
+        t = self.board()["totals"]
+        self.assertEqual((t["packed"], t["with_us"]), (0, 2))
+
+    def test_cancelled_before_the_scan_is_gone_cancelled_after_is_kept_aside(self):
+        self.link("DL2001", "KP9ZZZZ12345678")
+        rts = [r for r in MeeshoSyncSnapshot.objects.get(endpoint="orders_ready_to_ship").payload if r["sub_order_num"] not in ("13_1", "12_1")]
+        self.snap("orders_ready_to_ship", rts)
+        self.snap("orders_cancelled", [{"sub_order_num": "13_1"}, {"sub_order_num": "12_1"}])       # 13_1 packed first; 12_1 never scanned
+        b = self.board()
+        t = b["totals"]
+        self.assertEqual((t["cancelled_after"], t["packed"], t["with_us"]), (1, 0, 1))
+        self.assertEqual([o["awb"] for o in b["orders"]["cancelled_after"]], ["DL2001"])
+        self.assertNotIn("12_1", json.dumps(b["orders"], default=str))
+        # The day's packed count leaves it out too.
+        self.assertEqual(self.c.get(f"{self.base}counts/").data["count"], 0)

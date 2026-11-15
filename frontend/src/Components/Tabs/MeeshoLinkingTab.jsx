@@ -90,145 +90,6 @@ function LinkedCard({ r }) {
   );
 }
 
-/** The day's Meesho parcels: linked against the total, per courier and overall, and what's left. */
-function Progress({ plan, isMobile, courier, setCourier }) {
-  if (!plan) return null;
-  const pct = (a, b) => (b ? Math.min(100, (a / b) * 100) : 0);
-  const done = plan.total > 0 && plan.left === 0;
-  return (
-    <div style={{ ...S.card, padding: 14, display: "flex", flexDirection: "column", gap: 12 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap", alignItems: "baseline" }}>
-        <span style={{ fontSize: 14, fontWeight: 800, color: C.gray800 }}>
-          <span style={{ fontFamily: "monospace", fontSize: 26, color: C.gray900 }}>{plan.linked}</span>
-          <span style={{ color: C.gray500 }}> of {plan.total} packed</span>
-          <span style={{ display: "block", color: C.gray500, fontWeight: 600, fontSize: 12.5 }}>
-            {plan.downloaded ?? plan.total + plan.cancelled} labels downloaded for this packing day (1 pm to 1 pm)
-            {plan.cancelled ? ` · ${plan.cancelled} cancelled` : ""}
-            {plan.not_on_labels ? ` · ${plan.not_on_labels} more scanned that aren't on these labels` : ""}
-          </span>
-        </span>
-        <span style={{ fontSize: 15, fontWeight: 900, color: plan.total === 0 ? C.gray500 : done ? C.green : C.orange }}>
-          {plan.total === 0 ? "No Meesho labels downloaded for this day yet" : done ? "✓ All packed" : `${plan.left} left to scan`}
-        </span>
-      </div>
-      {plan.on_meesho_only > 0 && (
-        <div style={{ fontSize: 12.5, color: "#92400E", fontWeight: 600 }}>
-          {plan.on_meesho_only} of those left show linked on Meesho already but weren't scanned here — they count only once scanned here.
-        </div>
-      )}
-      <div role="progressbar" aria-label="Linked" aria-valuemin={0} aria-valuemax={plan.total} aria-valuenow={plan.linked}
-        style={{ height: 10, borderRadius: 99, background: C.gray100, overflow: "hidden" }}>
-        <div style={{ height: "100%", width: `${pct(plan.linked, plan.total)}%`, background: C.green, transition: "width .25s" }} />
-      </div>
-      {plan.by_courier.length > 0 && (
-        <div style={{ display: "grid", gap: 8, gridTemplateColumns: isMobile ? "repeat(2, minmax(0, 1fr))" : "repeat(auto-fill, minmax(180px, 1fr))" }}>
-          {plan.by_courier.map((c) => {
-            const t = courierTone(c.courier);
-            const on = courier === c.courier;
-            const cdone = c.total > 0 && c.left === 0;
-            return (
-              <button key={c.courier} onClick={() => setCourier(on ? null : c.courier)} aria-pressed={on}
-                style={{ textAlign: "left", cursor: "pointer", fontFamily: "inherit", minWidth: 0, background: on ? t.bg : C.white,
-                  border: `2px solid ${on ? t.solid : t.border}`, borderTop: `5px solid ${t.solid}`, borderRadius: 12, padding: "8px 12px",
-                  display: "flex", flexDirection: "column", gap: 3 }}>
-                <span style={{ fontSize: 13, fontWeight: 900, color: t.fg, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.courier}</span>
-                <span><span style={{ fontFamily: "monospace", fontWeight: 900, fontSize: 26, color: C.gray900 }}>{c.linked}</span>
-                  <span style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 14, color: C.gray400 }}> / {c.total}</span></span>
-                <span style={{ height: 5, borderRadius: 99, background: C.gray100, overflow: "hidden" }}>
-                  <span style={{ display: "block", height: "100%", width: `${pct(c.linked, c.total)}%`, background: cdone ? C.green : t.solid }} /></span>
-                <span style={{ fontSize: 12, fontWeight: 800, color: cdone ? "#15803D" : C.red }}>{cdone ? "✓ all packed" : `${c.left} left`}</span>
-              </button>
-            );
-          })}
-        </div>
-      )}
-      {plan.left > 0 && (
-        <button onClick={() => document.getElementById("not-scanned")?.scrollIntoView({ behavior: "smooth", block: "start" })}
-          style={{ ...btn("ghost", "sm"), minHeight: 36, alignSelf: "flex-start" }}>↓ See the {plan.left} not scanned yet</button>
-      )}
-    </div>
-  );
-}
-
-/**
- * The day's parcels not scanned (linked) yet — always open at the bottom of the
- * page, by courier, as cards that fit a phone, an iPad or a desktop. A parcel
- * leaves the list the moment its scan goes green (here or at another desk).
- */
-function NotScanned({ plan, courier, setCourier, isMobile }) {
-  const [q, setQ] = useState("");
-  if (!plan) return null;
-  const needle = q.trim().toLowerCase();
-  const all = plan.left_orders;
-  const rows = all.filter((o) => (!courier || o.courier === courier)
-    && (!needle || [o.sku, o.awb, o.sub_order_no, o.business_name].some((v) => String(v || "").toLowerCase().includes(needle))));
-  const couriers = plan.by_courier.filter((c) => c.left > 0);
-  const groups = {};
-  for (const o of rows) (groups[o.courier] = groups[o.courier] || []).push(o);
-  return (
-    <section id="not-scanned" style={{ ...S.card, padding: 0, overflow: "hidden", scrollMarginTop: 12 }}>
-      <div style={{ padding: "12px 14px", display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", borderBottom: `1px solid ${C.gray100}` }}>
-        <span style={{ fontWeight: 900, fontSize: 15, flex: "1 1 200px", color: C.gray900 }}>
-          Not scanned yet <span style={{ fontFamily: "monospace", color: plan.left ? C.red : C.green }}>{plan.left}</span>
-          <span style={{ fontSize: 12, fontWeight: 600, color: C.gray500, marginLeft: 8 }}>labels downloaded for the day, not linked here</span>
-        </span>
-        <input type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search SKU, AWB, sub-order…" aria-label="Search not scanned"
-          style={{ ...S.inp, width: isMobile ? "100%" : 240, minHeight: 40 }} />
-      </div>
-      {couriers.length > 1 && (
-        <div style={{ padding: "8px 14px", display: "flex", gap: 6, flexWrap: "wrap", borderBottom: `1px solid ${C.gray100}` }}>
-          <button onClick={() => setCourier(null)} style={{ ...btn(courier ? "ghost" : "ghostOrange", "sm"), minHeight: 36 }}>All · {plan.left}</button>
-          {couriers.map((c) => {
-            const t = courierTone(c.courier);
-            const on = courier === c.courier;
-            return (
-              <button key={c.courier} onClick={() => setCourier(on ? null : c.courier)} aria-pressed={on}
-                style={{ minHeight: 36, borderRadius: 999, padding: "4px 12px", fontFamily: "inherit", fontSize: 13, fontWeight: 800, cursor: "pointer",
-                  border: `1.5px solid ${on ? t.solid : t.border}`, background: on ? t.bg : C.white, color: t.fg }}>{c.courier} · {c.left}</button>
-            );
-          })}
-        </div>
-      )}
-      {plan.left === 0 ? (
-        <div style={{ padding: 22, textAlign: "center", fontSize: 14, fontWeight: 800, color: plan.total ? C.green : C.gray500 }}>
-          {plan.total ? "✓ Every parcel for the day is scanned." : "No Meesho labels downloaded for this day yet."}</div>
-      ) : rows.length === 0 ? (
-        <div style={{ padding: 22, textAlign: "center", fontSize: 13.5, color: C.gray500 }}>Nothing matches.</div>
-      ) : (
-        <div style={{ maxHeight: isMobile ? "none" : 620, overflowY: isMobile ? "visible" : "auto" }}>
-          {Object.entries(groups).map(([name, list]) => {
-            const t = courierTone(name);
-            return (
-              <div key={name}>
-                <div style={{ position: "sticky", top: 0, zIndex: 1, padding: "6px 14px", background: t.bg, color: t.fg, fontWeight: 900, fontSize: 13,
-                  borderTop: `1px solid ${t.border}`, borderBottom: `1px solid ${t.border}` }}>{name} · {list.length}</div>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(min(100%, 280px), 1fr))" }}>
-                  {list.map((o) => (
-                    <div key={`${o.business_name}-${o.sub_order_no}`} style={{ display: "flex", gap: 10, alignItems: "center", padding: "9px 12px",
-                      borderBottom: `1px solid ${C.gray100}`, borderRight: `1px solid ${C.gray100}`, minWidth: 0 }}>
-                      <Photo url={o.image_url} fallback={o.image_fallback_url} size={48} />
-                      <div style={{ minWidth: 0, flex: 1 }}>
-                        <div style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 14, color: C.gray900, wordBreak: "break-all" }}>
-                          {o.sku}{o.size ? <span style={{ fontWeight: 700, color: C.gray500, fontSize: 12 }}> · {o.size}</span> : null}
-                          <span style={{ marginLeft: 6, color: (o.qty || 1) > 1 ? "#fff" : C.orange, background: (o.qty || 1) > 1 ? C.red : C.orangeLight, borderRadius: 6, padding: "0 6px" }}>×{o.qty || 1}</span>
-                        </div>
-                        <div style={{ fontSize: 12, color: C.gray600, marginTop: 2, wordBreak: "break-all" }}>
-                          <span style={{ fontFamily: "monospace" }}>{o.awb || "no AWB"}</span>{o.business_name ? ` · ${o.business_name}` : ""}</div>
-                        <div style={{ fontSize: 11.5, color: C.gray400, fontFamily: "monospace" }}>{o.sub_order_no}</div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            );
-          })}
-          {plan.left > all.length && !courier && !needle && <div style={{ padding: 10, fontSize: 12, color: C.gray500 }}>…and {plan.left - all.length} more.</div>}
-        </div>
-      )}
-    </section>
-  );
-}
-
 function Logs({ onChanged }) {
   const [errorsOnly, setErrorsOnly] = useState(true);
   const [q, setQ] = useState("");
@@ -362,6 +223,223 @@ function BlockingError({ e, onOk, onOverride }) {
   );
 }
 
+const dayName = (d) => {
+  if (!d) return "Day not known";
+  const t = new Date(); const k = (x) => x.toISOString().slice(0, 10);
+  const y = new Date(Date.now() - 86400000);
+  if (d === k(t)) return "Today";
+  if (d === k(y)) return "Yesterday";
+  return new Date(`${d}T00:00:00`).toLocaleDateString("en-IN", { day: "numeric", month: "short" });
+};
+// The board's kinds of parcel, in the order a desk deals with them.
+const KINDS = [
+  { k: "to_pack", label: "To pack", hint: "Label made, not scanned here yet", color: C.orange },
+  { k: "no_label", label: "No label yet", hint: "On Meesho's Ready to ship, label not downloaded", color: "#64748B" },
+  { k: "meesho_only", label: "Linked on Meesho only", hint: "Meesho has a packet for it, but it wasn't scanned here — scan it to count it", color: "#B45309" },
+  { k: "packed", label: "Packed · waiting pickup", hint: "Scanned here; the courier hasn't picked it up yet", color: "#15803D" },
+  { k: "cancelled_after", label: "Packed, then cancelled", hint: "Cancelled after packing — the parcel is here: keep it aside", color: C.red },
+];
+
+/** One big number with its label — the board's tiles. */
+function Tile({ label, value, sub, color, on, onClick, big }) {
+  return (
+    <button onClick={onClick} aria-pressed={on} title={sub}
+      style={{ textAlign: "left", fontFamily: "inherit", cursor: onClick ? "pointer" : "default", minWidth: 0,
+        background: on ? `${color}14` : C.white, border: `2px solid ${on ? color : C.gray200}`, borderLeft: `6px solid ${color}`,
+        borderRadius: 12, padding: big ? "12px 14px" : "9px 12px", display: "flex", flexDirection: "column", gap: 2 }}>
+      <span style={{ fontSize: 12, fontWeight: 800, color: C.gray600 }}>{label}</span>
+      <span style={{ fontFamily: "monospace", fontWeight: 900, fontSize: big ? 34 : 26, color: value ? color : C.gray300, lineHeight: 1.1,
+        fontVariantNumeric: "tabular-nums", transition: "color .2s" }}>{value ?? "—"}</span>
+      {sub && <span style={{ fontSize: 11.5, color: C.gray500, lineHeight: 1.3 }}>{sub}</span>}
+    </button>
+  );
+}
+
+/** The scanner's own counters: packed today, this session, pace, last scan. */
+function LiveCounters({ count, cancelledAfter, session, at, lastAt }) {
+  const [, tick] = useState(0);
+  useEffect(() => { const t = setInterval(() => tick((n) => n + 1), 1000); return () => clearInterval(t); }, []);
+  const recent = session.filter((t) => Date.now() - t < 10 * 60000).length;
+  const since = lastAt ? Math.round((Date.now() - lastAt) / 1000) : null;
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 10 }}>
+      <div style={{ background: C.greenLight, border: `2px solid ${C.greenBorder}`, borderRadius: 12, padding: "10px 14px" }}>
+        <div style={{ fontSize: 12, fontWeight: 800, color: "#15803D", display: "flex", gap: 6, alignItems: "center" }}>Packed today <LiveDot at={at} /></div>
+        <div style={{ fontFamily: "monospace", fontWeight: 900, fontSize: 40, color: "#166534", lineHeight: 1.05 }}>{count ?? 0}</div>
+        {cancelledAfter ? <div style={{ fontSize: 11.5, color: C.gray600 }}>{cancelledAfter} cancelled after packing — not counted</div> : null}
+      </div>
+      <div style={{ background: C.white, border: `1px solid ${C.gray200}`, borderRadius: 12, padding: "10px 14px" }}>
+        <div style={{ fontSize: 12, fontWeight: 800, color: C.gray600 }}>This session</div>
+        <div style={{ fontFamily: "monospace", fontWeight: 900, fontSize: 30, color: C.gray900 }}>{session.length}</div>
+        <div style={{ fontSize: 11.5, color: C.gray500 }}>{recent} in the last 10 min{recent ? ` · ${(recent / 10).toFixed(1)}/min` : ""}</div>
+      </div>
+      <div style={{ background: C.white, border: `1px solid ${C.gray200}`, borderRadius: 12, padding: "10px 14px" }}>
+        <div style={{ fontSize: 12, fontWeight: 800, color: C.gray600 }}>Last scan</div>
+        <div style={{ fontFamily: "monospace", fontWeight: 900, fontSize: 24, color: C.gray900 }}>
+          {since == null ? "—" : since < 60 ? `${since}s ago` : since < 3600 ? `${Math.floor(since / 60)}m ago` : time(new Date(lastAt).toISOString())}</div>
+      </div>
+    </div>
+  );
+}
+
+/** Everything still here: the totals, and each courier with its packed parcels by the day they were packed. */
+function WithUsBoard({ w, kind, setKind, courier, setCourier, isMobile }) {
+  if (!w) return null;
+  const t = w.totals;
+  const done = t.with_us > 0 && t.to_pack + t.no_label + t.meesho_only === 0;
+  return (
+    <section style={{ ...S.card, padding: 14, display: "flex", flexDirection: "column", gap: 12 }}>
+      <div style={{ display: "flex", gap: 10, alignItems: "baseline", flexWrap: "wrap" }}>
+        <span style={{ fontSize: 16, fontWeight: 900, color: C.gray900 }}>With us now</span>
+        <span style={{ fontSize: 12.5, color: C.gray500, flex: 1, minWidth: 200 }}>
+          Every Meesho order not picked up by the courier yet, whatever day it's from — from Meesho's Ready to ship
+          {w.read_at ? ` (read ${when(w.read_at)})` : ""} and every scan here, counted the moment it's linked.
+        </span>
+        <span style={{ fontSize: 14, fontWeight: 900, color: done ? C.green : C.orange }}>
+          {t.with_us === 0 ? "Nothing waiting" : done ? "✓ Everything here is packed" : `${t.to_pack + t.no_label + t.meesho_only} still to pack`}
+        </span>
+      </div>
+      <div style={{ display: "grid", gap: 10, gridTemplateColumns: isMobile ? "repeat(2, minmax(0, 1fr))" : "repeat(auto-fit, minmax(150px, 1fr))" }}>
+        <Tile big label="With us" value={t.with_us} color={C.gray900} sub="packed + to pack" on={!kind} onClick={() => setKind(null)} />
+        {KINDS.map((x) => (
+          <Tile key={x.k} label={x.label} value={t[x.k]} color={x.color} on={kind === x.k}
+            sub={x.k === "to_pack" && t.overdue ? `${t.overdue} past dispatch-by` : x.hint} onClick={() => setKind(kind === x.k ? null : x.k)} />
+        ))}
+      </div>
+      {w.packed_by_day.length > 0 && (
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", fontSize: 12.5 }}>
+          <span style={{ fontWeight: 800, color: C.gray600 }}>Packed, waiting pickup:</span>
+          {w.packed_by_day.map((d) => (
+            <span key={d.day} style={{ background: C.greenLight, color: "#166534", borderRadius: 999, padding: "2px 10px", fontWeight: 800 }}>
+              {dayName(d.day)} · {d.count}</span>
+          ))}
+        </div>
+      )}
+      {w.by_courier.length > 0 && (
+        <div style={{ display: "grid", gap: 10, gridTemplateColumns: isMobile ? "minmax(0, 1fr)" : "repeat(auto-fill, minmax(250px, 1fr))" }}>
+          {w.by_courier.map((c) => {
+            const tone = courierTone(c.courier);
+            const on = courier === c.courier;
+            const left = c.to_pack + c.no_label + c.meesho_only;
+            const pct = c.with_us ? (100 * c.packed) / c.with_us : 0;
+            return (
+              <button key={c.courier} onClick={() => setCourier(on ? null : c.courier)} aria-pressed={on}
+                style={{ textAlign: "left", fontFamily: "inherit", cursor: "pointer", minWidth: 0, background: on ? tone.bg : C.white,
+                  border: `2px solid ${on ? tone.solid : tone.border}`, borderTop: `5px solid ${tone.solid}`, borderRadius: 12, padding: "10px 12px",
+                  display: "flex", flexDirection: "column", gap: 6 }}>
+                <span style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                  <span style={{ fontWeight: 900, color: tone.fg, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.courier}</span>
+                  <span style={{ fontFamily: "monospace", fontWeight: 900, color: C.gray900 }}>{c.with_us} with us</span>
+                </span>
+                <span style={{ display: "flex", gap: 12, alignItems: "baseline" }}>
+                  <span><span style={{ fontFamily: "monospace", fontWeight: 900, fontSize: 26, color: "#15803D" }}>{c.packed}</span>
+                    <span style={{ fontSize: 12, color: C.gray500 }}> packed</span></span>
+                  <span><span style={{ fontFamily: "monospace", fontWeight: 900, fontSize: 26, color: left ? C.orange : C.gray300 }}>{left}</span>
+                    <span style={{ fontSize: 12, color: C.gray500 }}> to pack</span></span>
+                </span>
+                <span style={{ height: 6, borderRadius: 99, background: C.gray100, overflow: "hidden" }}>
+                  <span style={{ display: "block", height: "100%", width: `${pct}%`, background: left ? tone.solid : C.green, transition: "width .3s" }} /></span>
+                {c.packed_by_day.length > 0 && (
+                  <span style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                    {c.packed_by_day.map((d) => <span key={d.day} style={{ fontSize: 11.5, fontWeight: 800, background: C.greenLight, color: "#166534",
+                      borderRadius: 999, padding: "1px 8px" }}>{dayName(d.day)} {d.count}</span>)}
+                  </span>
+                )}
+                <span style={{ fontSize: 11.5, color: C.gray500 }}>
+                  {[c.to_pack && `${c.to_pack} labelled`, c.no_label && `${c.no_label} no label`, c.meesho_only && `${c.meesho_only} on Meesho only`,
+                    c.overdue && `${c.overdue} overdue`, c.cancelled_after && `${c.cancelled_after} cancelled after packing`].filter(Boolean).join(" · ") || (left ? "" : "✓ all packed")}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
+/** The parcels of one kind (or every kind still to pack), by courier — cards that fit a phone or a desk. */
+function BoardOrders({ w, kind, setKind, courier, setCourier, isMobile }) {
+  const [q, setQ] = useState("");
+  if (!w?.orders) return null;
+  const k = kind || "to_pack_all";
+  const list = k === "to_pack_all" ? [...w.orders.to_pack, ...w.orders.meesho_only, ...w.orders.no_label] : w.orders[k] || [];
+  const needle = q.trim().toLowerCase();
+  const rows = list.filter((o) => (!courier || o.courier === courier)
+    && (!needle || [o.sku, o.awb, o.sub_order_no, o.business_name, o.packet_id].some((v) => String(v || "").toLowerCase().includes(needle))));
+  const groups = {};
+  for (const o of rows) {
+    const g = k === "packed" ? `${o.courier} · packed ${dayName(String(o.packed_on || ""))}` : o.courier;
+    (groups[g] = groups[g] || []).push(o);
+  }
+  const meta = KINDS.find((x) => x.k === k);
+  const kindOf = new Map();
+  KINDS.forEach((x) => (w.orders[x.k] || []).forEach((o) => kindOf.set(o, x)));
+  const tabs = [{ k: null, label: "Still to pack", n: w.totals.to_pack + w.totals.no_label + w.totals.meesho_only }, ...KINDS.map((x) => ({ k: x.k, label: x.label, n: w.totals[x.k] }))];
+  return (
+    <section id="not-scanned" style={{ ...S.card, padding: 0, overflow: "hidden", scrollMarginTop: 12 }}>
+      <div style={{ padding: "10px 14px", display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", borderBottom: `1px solid ${C.gray100}` }}>
+        {tabs.map((t) => (
+          <button key={t.k || "all"} onClick={() => setKind(t.k)} aria-pressed={kind === t.k}
+            style={{ ...btn(kind === t.k ? "ghostOrange" : "ghost", "sm"), minHeight: 36 }}>{t.label} · {t.n}</button>
+        ))}
+        <input type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search SKU, AWB, sub-order, packet…"
+          style={{ ...S.inp, width: isMobile ? "100%" : 240, minHeight: 38, marginLeft: isMobile ? 0 : "auto" }} />
+      </div>
+      {courier && (
+        <div style={{ padding: "6px 14px", fontSize: 12.5, borderBottom: `1px solid ${C.gray100}` }}>
+          Showing {courier} only · <button onClick={() => setCourier(null)} style={{ ...btn("ghost", "sm"), padding: "0 8px" }}>All couriers</button>
+        </div>
+      )}
+      {meta && <div style={{ padding: "6px 14px", fontSize: 12, color: C.gray500 }}>{meta.hint}</div>}
+      {rows.length === 0 ? (
+        <div style={{ padding: 22, textAlign: "center", fontSize: 14, fontWeight: 800, color: list.length ? C.gray500 : C.green }}>
+          {list.length ? "Nothing matches." : k === "to_pack_all" ? "✓ Every parcel here is packed." : "None."}</div>
+      ) : (
+        <div style={{ maxHeight: isMobile ? "none" : 640, overflowY: isMobile ? "visible" : "auto" }}>
+          {Object.entries(groups).map(([name, items]) => {
+            const t = courierTone(items[0].courier);
+            return (
+              <div key={name}>
+                <div style={{ position: "sticky", top: 0, zIndex: 1, padding: "6px 14px", background: t.bg, color: t.fg, fontWeight: 900, fontSize: 13,
+                  borderTop: `1px solid ${t.border}`, borderBottom: `1px solid ${t.border}` }}>{name} · {items.length}</div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(min(100%, 290px), 1fr))" }}>
+                  {items.map((o) => {
+                    const ko = kindOf.get(o);
+                    return (
+                      <div key={`${o.business_id}-${o.sub_order_no}-${o.awb}`} style={{ display: "flex", gap: 10, alignItems: "center", padding: "9px 12px",
+                        borderBottom: `1px solid ${C.gray100}`, borderRight: `1px solid ${C.gray100}`, minWidth: 0,
+                        background: o.overdue ? "#FFF7ED" : undefined }}>
+                        <Photo url={o.image_url} fallback={o.image_fallback_url} size={48} />
+                        <div style={{ minWidth: 0, flex: 1 }}>
+                          <div style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 14, color: C.gray900, wordBreak: "break-all" }}>
+                            {o.sku || "—"}{o.size && o.size !== "Free Size" ? <span style={{ fontWeight: 700, color: C.gray500, fontSize: 12 }}> · {o.size}</span> : null}
+                            {(o.qty || 1) > 1 && <span style={{ marginLeft: 6, color: "#fff", background: C.red, borderRadius: 6, padding: "0 6px" }}>×{o.qty}</span>}
+                          </div>
+                          <div style={{ fontSize: 12, color: C.gray600, marginTop: 2, wordBreak: "break-all" }}>
+                            <span style={{ fontFamily: "monospace" }}>{o.awb || "no AWB yet"}</span>
+                            {o.packet_id ? <> ↔ <span style={{ fontFamily: "monospace" }}>{o.packet_id}</span></> : null}
+                            {o.business_name ? ` · ${o.business_name}` : ""}</div>
+                          <div style={{ fontSize: 11.5, color: C.gray400, display: "flex", gap: 6, flexWrap: "wrap" }}>
+                            <span style={{ fontFamily: "monospace" }}>{o.sub_order_no}</span>
+                            {o.dispatch_by && <span style={{ color: o.overdue ? C.red : C.gray500, fontWeight: o.overdue ? 800 : 600 }}>dispatch by {dayName(o.dispatch_by)}</span>}
+                            {o.linked_at && <span>packed {when(o.linked_at)}</span>}
+                            {k === "to_pack_all" && ko && ko.k !== "to_pack" && <span style={{ color: ko.color, fontWeight: 800 }}>{ko.label.toLowerCase()}</span>}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
 /** "● Live" — the counts are read every few seconds; grey if they haven't been for a while. */
 function LiveDot({ at }) {
   const [, tick] = useState(0);
@@ -394,6 +472,9 @@ export function MeeshoLinkingTab() {
   const [courier, setCourier] = useState(null);
   const [muted, setMute] = useState(isMuted());
   const [countsAt, setCountsAt] = useState(null);     // when the counts on screen were read
+  const [kind, setKind] = useState(null);             // the board's list: null = everything still to pack
+  const [session, setSession] = useState([]);         // when each green scan of this session was made
+  const [showLinks, setShowLinks] = useState(false);
   const inFlight = useRef(false);
   const reloadTimer = useRef(null);
   const awbRef = useRef(null);
@@ -418,7 +499,13 @@ export function MeeshoLinkingTab() {
       const left = c.plan.left_awbs ? new Set(c.plan.left_awbs) : null;
       const plan = prev.plan && { ...prev.plan, ...c.plan, left_awbs: undefined,
         left_orders: left ? prev.plan.left_orders.filter((o) => left.has(o.awb)) : prev.plan.left_orders };
-      return { ...prev, count: c.count, cancelled_after: c.cancelled_after, by_courier: c.by_courier, plan };
+      let with_us = prev.with_us;
+      if (c.with_us && with_us) {
+        const still = new Set(c.with_us.to_pack_awbs || []);
+        with_us = { ...with_us, ...c.with_us, orders: with_us.orders && { ...with_us.orders,
+          to_pack: with_us.orders.to_pack.filter((o) => still.has(o.awb)) } };
+      }
+      return { ...prev, count: c.count, cancelled_after: c.cancelled_after, by_courier: c.by_courier, plan, with_us };
     });
     setCountsAt(new Date());
     return sameDay;
@@ -516,6 +603,7 @@ export function MeeshoLinkingTab() {
       sounds.ok();
       navigator.vibrate?.(60);
       setResult({ ok: true, ...r.data });
+      if (!data?.links.some((x) => x.id === r.data.link?.id)) setSession((xs) => [...xs, Date.now()]);
       applyLinked(r.data);
       setAwb(""); setPacket("");
       typed.current = { awb: null, packet: null, awbAt: null };
@@ -653,23 +741,22 @@ export function MeeshoLinkingTab() {
           </div>
         )}
         {!sending && r?.ok && <LinkedCard r={r} />}
+        <LiveCounters count={data.count} cancelledAfter={data.cancelled_after} session={session} at={countsAt}
+          lastAt={session.length ? session[session.length - 1] : null} />
+        {data.open_errors > 0 && (
+          <button onClick={() => document.getElementById("link-log")?.scrollIntoView({ behavior: "smooth" })}
+            style={{ ...btn("ghost", "sm"), color: C.red, alignSelf: "flex-start" }}>⚠ {data.open_errors} scan problem{data.open_errors === 1 ? "" : "s"} to look at — see the log</button>
+        )}
       </div>
 
-      <Progress plan={data.plan} isMobile={isMobile} courier={courier} setCourier={setCourier} />
-
-      <div style={{ display: "grid", gap: 10, gridTemplateColumns: "repeat(3, minmax(0, 1fr))" }}>
-        <div style={{ ...S.card, padding: "10px 12px" }}><div style={{ fontSize: 12, fontWeight: 800, color: C.green, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-          Packed today <LiveDot at={countsAt} /></div>
-          <div style={{ fontFamily: "monospace", fontSize: 24, fontWeight: 900 }}>{data.count}</div>
-          {data.cancelled_after ? <div style={{ fontSize: 11.5, color: C.gray500 }}>{data.cancelled_after} cancelled after packing — not counted</div> : null}</div>
-        <div style={{ ...S.card, padding: "10px 12px" }}><div style={{ fontSize: 12, fontWeight: 800, color: "#2563EB" }}>Match Meesho</div><div style={{ fontFamily: "monospace", fontSize: 24, fontWeight: 900 }}>{data.matched}</div></div>
-        <div style={{ ...S.card, padding: "10px 12px" }}><div style={{ fontSize: 12, fontWeight: 800, color: C.red }}>Open problems</div><div style={{ fontFamily: "monospace", fontSize: 24, fontWeight: 900 }}>{data.open_errors}</div></div>
-      </div>
+      <WithUsBoard w={data.with_us} kind={kind} setKind={setKind} courier={courier} setCourier={setCourier} isMobile={isMobile} />
+      <BoardOrders w={data.with_us} kind={kind} setKind={setKind} courier={courier} setCourier={setCourier} isMobile={isMobile} />
 
       <div style={{ ...S.card, padding: 0, overflow: "hidden" }}>
         <div style={{ padding: "12px 14px", display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", borderBottom: `1px solid ${C.gray100}` }}>
+          <button onClick={() => setShowLinks((x) => !x)} style={{ ...btn("ghost", "sm"), minHeight: 32 }}>{showLinks ? "▾" : "▸"}</button>
           <span style={{ fontWeight: 800, fontSize: 14.5, flex: 1 }}>
-            Today's links
+            Today's links · {data.links.length}
             {data.states && <span style={{ fontSize: 12, fontWeight: 600, color: C.gray500, marginLeft: 8 }}>
               {Object.entries(data.states).map(([k, n]) => `${n} ${(STATE[k]?.label || k).toLowerCase()}`).join(" · ")}
               {data.checked_at ? ` · Meesho checked ${when(data.checked_at)}` : ""}
@@ -682,7 +769,7 @@ export function MeeshoLinkingTab() {
         </div>
         {rowNote && <div role="status" style={{ padding: "8px 14px", fontSize: 13, fontWeight: 700, color: rowNote.ok ? "#15803D" : C.red, borderBottom: `1px solid ${C.gray100}` }}>
           {rowNote.ok ? "✓ " : "✕ "}{rowNote.text}</div>}
-        <div style={{ overflowX: "auto", maxHeight: 460, overflowY: "auto" }}>
+        {showLinks && <div style={{ overflowX: "auto", maxHeight: 460, overflowY: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
             <thead><tr>{["Time", "AWB", "Packet", "Business", "Sub-order / SKU", "Courier", "On Meesho now", "Order Scan", ""].map((h) => <th key={h} style={S.th}>{h}</th>)}</tr></thead>
             <tbody>
@@ -723,10 +810,8 @@ export function MeeshoLinkingTab() {
               ))}
             </tbody>
           </table>
-        </div>
+        </div>}
       </div>
-
-      <NotScanned plan={data.plan} courier={courier} setCourier={setCourier} isMobile={isMobile} />
 
       <div style={{ ...S.card, padding: "12px 14px", display: "flex", flexDirection: "column", gap: 8 }}>
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
@@ -746,7 +831,7 @@ export function MeeshoLinkingTab() {
         </div>
       </div>
 
-      <Logs key={logKey} onChanged={load} />
+      <div id="link-log"><Logs key={logKey} onChanged={load} /></div>
     </div>
   );
 }
