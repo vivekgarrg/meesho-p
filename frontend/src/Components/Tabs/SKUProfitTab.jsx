@@ -611,20 +611,22 @@ const statusStyle = (s) => {
 const num = (v) => Number(v || 0);
 const moneyCell = (v) => (num(v) === 0 ? "—" : fmt(num(v)));
 
-function SKUPaymentsPanel({ skuId, range, label }) {
-  const [data, setData] = useState(null);
+function SKUPaymentsPanel({ skuId, range, label, base, cache }) {
+  const key = `${range.date_from || ""}|${range.date_to || ""}`;
+  const [data, setData] = useState(() => cache.get(key) || null);
   const [error, setError] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
 
   useEffect(() => {
+    if (cache.has(key)) { setData(cache.get(key)); setError(""); return; }
     const ctrl = new AbortController();
     setData(null); setError("");
     const params = new URLSearchParams({ sku: skuId });
     if (range.date_from) params.set("date_from", range.date_from);
     if (range.date_to) params.set("date_to", range.date_to);
-    fetch(`${API}/profit/sku-orders/?${params}`, { signal: ctrl.signal })
+    fetch(`${base}/profit/sku-orders/?${params}`, { signal: ctrl.signal })
       .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
-      .then(setData)
+      .then(d => { cache.set(key, d); setData(d); })
       .catch(e => { if (e.name !== "AbortError") setError(e.message || "Failed to load payments"); });
     return () => ctrl.abort();
   }, [skuId, JSON.stringify(range)]); // eslint-disable-line
@@ -752,7 +754,15 @@ function SKUPaymentsPanel({ skuId, range, label }) {
 }
 
 // ── SKU Detail Modal ──────────────────────────────────────────────────────────
-function SKUDetailModal({ sku, months, initialRange, initialMonth, onClose }) {
+function SKUDetailModal({ sku, bizId, months, initialRange, initialMonth, onClose }) {
+  // The SKU's own business (combined view: the row's), and only this SKU's figures —
+  // /profit/sku/ works out one SKU instead of every SKU like /profit/ does.
+  const base = bizId ? `/api/business/${bizId}` : API;
+  const rangeKey = (r) => `${r?.date_from || ""}|${r?.date_to || ""}`;
+  // Figures already read, per period: the page's own row needs no call at all, and
+  // a period looked at once isn't read again while the dialog is open.
+  const periodCache = useRef(new Map([[rangeKey(initialRange), sku]]));
+  const paymentsCache = useRef(new Map());
   const [selMonth, setSelMonth] = useState(initialMonth);
   const [range, setRange] = useState(initialRange || {});
   const [label, setLabel] = useState(
@@ -762,10 +772,11 @@ function SKUDetailModal({ sku, months, initialRange, initialMonth, onClose }) {
   );
   const [activeTab, setActiveTab] = useState("overview");
   const [fullView, setFullView] = useState(false);
-  const [periodData, setPeriodData] = useState(null);
-  const [periodLoading, setPeriodLoading] = useState(true);
-  const [monthly, setMonthly] = useState([]);
-  const [monthlyLoading, setMonthlyLoading] = useState(months.length > 0);
+  const [periodData, setPeriodData] = useState(sku);
+  const [periodLoading, setPeriodLoading] = useState(false);
+  const [periodError, setPeriodError] = useState("");
+  const [monthly, setMonthly] = useState(null);       // null: not read yet — read the first time Monthly History opens
+  const [monthlyError, setMonthlyError] = useState("");
 
   useEffect(() => {
     const h = e => e.key === "Escape" && onClose();
@@ -774,24 +785,42 @@ function SKUDetailModal({ sku, months, initialRange, initialMonth, onClose }) {
   }, [onClose]);
 
   useEffect(() => {
+    const k = rangeKey(range);
+    setPeriodError("");
+    if (periodCache.current.has(k)) { setPeriodData(periodCache.current.get(k)); setPeriodLoading(false); return; }
+    // A month picked from history that's already been read: its row is there.
+    const ym = range.date_from?.slice(0, 7);
+    const fromHistory = monthly && ym && rangeKey(toRange(ym)) === k ? monthly.find(m => m.month === ym) : null;
+    if (fromHistory) { periodCache.current.set(k, fromHistory.raw); setPeriodData(fromHistory.raw); setPeriodLoading(false); return; }
+    const ctrl = new AbortController();
     setPeriodLoading(true); setPeriodData(null);
-    const params = new URLSearchParams();
+    const params = new URLSearchParams({ sku: sku.sku_id });
     if (range.date_from) params.set("date_from", range.date_from);
     if (range.date_to) params.set("date_to", range.date_to);
-    fetch(`${API}/profit/?${params}`).then(r => r.json()).then(d => {
-      setPeriodData((d.sku_wise_profit || {})[sku.sku_id] || {});
-      setPeriodLoading(false);
-    }).catch(() => { setPeriodData({}); setPeriodLoading(false); });
-  }, [JSON.stringify(range)]); // eslint-disable-line
+    fetch(`${base}/profit/sku/?${params}`, { signal: ctrl.signal })
+      .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+      .then(d => { const row = d.row || {}; periodCache.current.set(k, row); setPeriodData(row); setPeriodLoading(false); })
+      .catch(e => { if (e.name !== "AbortError") { setPeriodData({}); setPeriodError(e.message || "Failed"); setPeriodLoading(false); } });
+    return () => ctrl.abort();
+  }, [rangeKey(range)]); // eslint-disable-line
 
+  // Monthly History: read once, in one call, and only when that tab is opened.
   useEffect(() => {
-    if (months.length === 0) { setMonthlyLoading(false); return; }
-    Promise.all(months.map(m =>
-      fetch(`${API}/profit/?${new URLSearchParams(toRange(m))}`).then(r => r.json()).then(d => ({
-        month: m, raw: (d.sku_wise_profit || {})[sku.sku_id] || {},
-      })).catch(() => ({ month: m, raw: {} }))
-    )).then(res => { setMonthly(res.sort((a, b) => a.month.localeCompare(b.month))); setMonthlyLoading(false); });
-  }, []); // eslint-disable-line
+    if (activeTab !== "history" || monthly) return;
+    const ctrl = new AbortController();
+    setMonthlyError("");
+    fetch(`${base}/profit/sku/?${new URLSearchParams({ sku: sku.sku_id, months: 1 })}`, { signal: ctrl.signal })
+      .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+      .then(d => {
+        const got = new Map((d.months || []).map(m => [m.month, m.row]));
+        // Every month on file, as before — a month this SKU sold nothing in shows as empty.
+        const all = [...new Set([...months, ...got.keys()])].sort();
+        setMonthly(all.map(m => ({ month: m, raw: got.get(m) || {} })));
+      })
+      .catch(e => { if (e.name !== "AbortError") setMonthlyError(e.message || "Failed"); });
+    return () => ctrl.abort();
+  }, [activeTab, monthly]); // eslint-disable-line
+  const monthlyLoading = activeTab === "history" && !monthly && !monthlyError;
 
   // ── Derived ───────────────────────────────────────────────────────────────
   const d = periodData || {};
@@ -852,7 +881,7 @@ function SKUDetailModal({ sku, months, initialRange, initialMonth, onClose }) {
     ...(nOther > 0 ? [{ s: "Other", v: otherNet }] : []),
   ];
 
-  const monthlyChartData = monthly.map(({ month, raw }) => ({
+  const monthlyChartData = (monthly || []).map(({ month, raw }) => ({
     month: fmtShort(month),
     Delivered: Number(raw.delivered_profit || 0),
     Return: Math.abs(Number(raw.return_loss || 0)),
@@ -949,7 +978,9 @@ function SKUDetailModal({ sku, months, initialRange, initialMonth, onClose }) {
       </Box>
 
       <DialogContent sx={{ p: 0, overflowY: "auto", flex: 1 }}>
-        {periodLoading ? (
+        {periodError ? (
+          <Box sx={{ p: 3 }}><Alert severity="error">Couldn't load {label}: {periodError}</Alert></Box>
+        ) : periodLoading ? (
           <Box sx={{ display: "flex", flexDirection: "column", alignItems: "center", py: 10, gap: 2 }}>
             <CircularProgress sx={{ color: accentColor }} />
             <Typography sx={{ color: "#94A3B8", fontSize: 14 }}>Loading data for {label}…</Typography>
@@ -1085,7 +1116,7 @@ function SKUDetailModal({ sku, months, initialRange, initialMonth, onClose }) {
 
             {/* ── PAYMENTS ───────────────────────────────────────────────── */}
             {activeTab === "payments" && (
-              <SKUPaymentsPanel skuId={sku.sku_id} range={range} label={label} />
+              <SKUPaymentsPanel skuId={sku.sku_id} range={range} label={label} base={base} cache={paymentsCache.current} />
             )}
 
             {/* ── CHARTS ─────────────────────────────────────────────────── */}
@@ -1122,7 +1153,11 @@ function SKUDetailModal({ sku, months, initialRange, initialMonth, onClose }) {
             {/* ── HISTORY ────────────────────────────────────────────────── */}
             {activeTab === "history" && (
               <Box sx={{ display: "flex", flexDirection: "column", gap: 2.5 }}>
-                {monthlyLoading ? (
+                {monthlyError ? (
+                  <Alert severity="error" action={<Button size="small" onClick={() => { setMonthlyError(""); setMonthly(null); }}>Retry</Button>}>
+                    Couldn't load the monthly history: {monthlyError}
+                  </Alert>
+                ) : monthlyLoading ? (
                   <Box sx={{ textAlign: "center", py: 6 }}><CircularProgress size={28} /></Box>
                 ) : (
                   <>
@@ -1155,7 +1190,7 @@ function SKUDetailModal({ sku, months, initialRange, initialMonth, onClose }) {
                             </TableRow>
                           </TableHead>
                           <TableBody>
-                            {monthly.map(({ month, raw }) => {
+                            {(monthly || []).map(({ month, raw }) => {
                               const mNet = Number(raw.net_profit || 0);
                               const mDel = Number(raw.delivered_profit || 0);
                               const mRet = Number(raw.return_loss || 0);
@@ -2240,6 +2275,7 @@ function MeeshoSKUAnalysisTab() {
       {selSKU && (
         <SKUDetailModal
           sku={selSKU}
+          bizId={bizOf(selSKU)}
           months={months}
           initialRange={range}
           initialMonth={globalMode === "month" ? globalMonth : null}

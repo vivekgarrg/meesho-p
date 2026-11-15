@@ -34,6 +34,7 @@ urlpatterns = [
     path("profit/overall/", views.profit_overall, name="profit_overall"),
     path("profit/", views.profit_summary, name="profit_summary"),
     path("profit/sku-orders/", views.sku_order_payments, name="sku_order_payments"),
+    path("profit/sku/", views.sku_profit, name="sku_profit"),
     path("estimated-profit/", views.estimated_profit_summary, name="estimated_profit_summary"),
     path("estimated-profit/upload/", views.estimated_profit_upload, name="estimated_profit_upload"),
     path("flipkart-profit/", views.flipkart_profit_summary, name="flipkart_profit_summary"),

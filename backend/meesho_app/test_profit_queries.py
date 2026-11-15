@@ -49,3 +49,51 @@ class ProfitQueryCountTests(TestCase):
             self.orders(25)
             many, r = self.queries(path)
             self.assertLessEqual(many, few + 2, f"{path}: {few} queries for {self.n - 25} orders, {many} for {self.n}")
+
+
+class SkuProfitTests(ProfitQueryCountTests):
+    """/profit/sku/ — one SKU's row, as /profit/ gives it, without working out every SKU."""
+
+    def test_profit_and_ads_analysis_dont_query_per_order(self):
+        pass                                    # the parent's; not run twice
+
+    def setUp(self):
+        super().setUp()
+        FinalPrice.objects.create(business=self.biz, sku_id="Diya", final_price=50, item_price=50, packaging_cost=2, tax_percent=0)
+        self.orders(6)                          # lota, October
+        for i, (month, sku, status, amount) in enumerate(((9, "diya", "Delivered", 90), (10, "diya", "RTO", -20), (11, "DIYA", "Return", -35))):
+            sub = f"d{i}"
+            when = datetime(2026, month, 5, 10, tzinfo=tz.utc)
+            Order.objects.create(business=self.biz, sub_order_no=sub, sku=sku, quantity=1, order_date=when.date())
+            OrderPayment.objects.create(business=self.biz, sub_order_no=sub, supplier_sku=sku, quantity=1, order_date=when,
+                                        payment_date=date(2026, month, 20), live_order_status=status, final_settlement_amount=amount)
+        # Not in the orders table: goes by its own order date (October).
+        OrderPayment.objects.create(business=self.biz, sub_order_no="x1", supplier_sku="diya", quantity=1,
+                                    order_date=datetime(2026, 10, 9, 10, tzinfo=tz.utc), payment_date=date(2026, 11, 2),
+                                    live_order_status="Delivered", final_settlement_amount=95)
+        self.base = f"/api/business/{self.biz.id}/profit/"
+
+    def get(self, path, **q):
+        r = self.c.get(path, q)
+        self.assertEqual(r.status_code, 200, getattr(r, "data", r.content[:300]))
+        return r.json()
+
+    def test_the_row_is_profits_own_for_any_range(self):
+        for rng in ({}, {"date_from": "2026-10-01", "date_to": "2026-10-31"}, {"date_from": "2026-11-01", "date_to": "2026-11-30"}):
+            full = self.get(self.base, **rng)["sku_wise_profit"]
+            for sku in ("lota", "Diya"):
+                self.assertEqual(self.get(f"{self.base}sku/", sku=sku.lower(), **rng)["row"], full.get(sku, {}), (rng, sku))
+
+    def test_history_in_one_call_matches_profit_month_by_month(self):
+        months = self.get(f"{self.base}sku/", sku="diya", months=1)["months"]
+        self.assertEqual([m["month"] for m in months], ["2026-09", "2026-10", "2026-11"])
+        for m in months:
+            y, mo = map(int, m["month"].split("-"))
+            last = 30 if mo in (9, 11) else 31
+            full = self.get(self.base, date_from=f"{m['month']}-01", date_to=f"{m['month']}-{last}")["sku_wise_profit"]
+            self.assertEqual(m["row"], full["Diya"], m["month"])
+        self.assertEqual(months[1]["row"]["order_count"], 2)          # the RTO and the order not on file
+
+    def test_a_sku_with_nothing_and_a_missing_param(self):
+        self.assertEqual(self.get(f"{self.base}sku/", sku="nope")["row"], {})
+        self.assertEqual(self.c.get(f"{self.base}sku/").status_code, 400)

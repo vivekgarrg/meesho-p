@@ -2049,6 +2049,108 @@ def sku_order_payments(request, business_id):
     return Response({"sku": sku_param, "count": len(orders), "orders": orders})
 
 
+def _sku_profit_row(business, groups, target, pricing, cost_setting):
+    """
+    One SKU's row of profit_summary's sku_wise_profit, over these payment
+    groups ({sub_order_no: [rows, newest payment first]}). The same steps as
+    profit_summary — the order's SKU (Order.sku over the sheet's), its price on
+    the order's date, orders with no unit price left out — so the row matches
+    that SKU's row there exactly. {} when no order of the SKU counts.
+    """
+    orders_by_sub = _orders_by_sub(business, groups)
+    statuses = list(_PROFIT_STATUSES)
+    out = {}
+    for sub_no, payments in groups.items():
+        order = orders_by_sub.get(sub_no) or {}
+        primary = next((p for p in payments if p.live_order_status), payments[0])
+        sku = order.get("sku") or primary.supplier_sku
+        if _sku_key(sku) != target or sku not in pricing.price_map:
+            continue
+        eff_price, eff_pkg, eff_item_price, eff_tax_pct = pricing.effective_price(sku, primary.order_date)
+        if not _has_unit_price(eff_item_price):
+            continue
+        qty = order.get("quantity") or primary.quantity
+        result = compute_order_net(payments, eff_price, eff_pkg, qty, statuses,
+                                   eff_item_price, eff_tax_pct, cost_setting=cost_setting)
+        accumulate_sku_profit(pricing.canonical_sku.get(sku, sku), out, result,
+                              pricing.price_map, pricing.packaging_map, statuses)
+    if not out:
+        return {}
+    key, row = next(iter(out.items()))
+    pid = pricing.sku_parent_map.get(key)
+    parent = next((p.item_id for p in pricing.parent_rows if p.id == pid), None) if pid else None
+    row["parent_item_id"] = parent
+    return row
+
+
+def _sku_payment_rows(business, qs, sku_param):
+    """The payment rows of every order that names this SKU in either table, newest payment first."""
+    candidates = qs.filter(
+        DQ(supplier_sku__iexact=sku_param)
+        | DQ(sub_order_no__in=Order.objects.filter(business=business, sku__iexact=sku_param).values("sub_order_no"))
+    ).values("sub_order_no")
+    return qs.filter(sub_order_no__in=candidates).only(*_PROFIT_FIELDS).order_by("-payment_date")
+
+
+def _payment_month(row, placed):
+    """
+    The month a payment row counts in — the same rule as _profit_payments_qs:
+    its order's placed date when the order is on file, else the order date on
+    the row (local day), else the day it was paid. None: in no month.
+    """
+    if row.sub_order_no in placed:
+        day = placed[row.sub_order_no]
+    elif row.order_date:
+        day = timezone.localtime(row.order_date).date() if timezone.is_aware(row.order_date) else row.order_date.date()
+    else:
+        day = row.payment_date
+    return day.strftime("%Y-%m") if day else None
+
+
+@api_view(["GET"])
+def sku_profit(request, business_id):
+    """
+    One SKU's profit for the SKU Analysis detail view, without working out
+    every other SKU's: the same row /profit/ gives it in sku_wise_profit.
+    Params: sku (required), date_from / date_to; months=1 adds the row for
+    every month it has orders in — one read for the whole history instead of
+    one /profit/ call a month.
+    """
+    business = get_authorized_business(request, business_id)
+    sku_param = (request.GET.get("sku") or "").strip()
+    if not sku_param:
+        return Response({"error": "sku is required"}, status=status.HTTP_400_BAD_REQUEST)
+    from collections import defaultdict
+    target = _sku_key(sku_param)
+    cost_setting = _cost_setting(business)
+    pricing = _PriceResolver(business)
+    date_from = request.GET.get("date_from", "")
+    date_to = request.GET.get("date_to", "")
+
+    if request.GET.get("months") in ("1", "true"):
+        rows = list(_sku_payment_rows(business, _profit_payments_qs(business, "", "", request), sku_param))
+        from django.db.models import Min
+        placed = {o["sub_order_no"]: o["placed"] for o in
+                  Order.objects.filter(business=business, sub_order_no__in={r.sub_order_no for r in rows})
+                  .values("sub_order_no").annotate(placed=Min("order_date"))}
+        by_month = defaultdict(lambda: defaultdict(list))
+        for r in rows:
+            m = _payment_month(r, placed)
+            if m:
+                by_month[m][r.sub_order_no].append(r)
+        months = []
+        for m in sorted(by_month):
+            row = _sku_profit_row(business, by_month[m], target, pricing, cost_setting)
+            if row:
+                months.append({"month": m, "row": row})
+        return Response({"sku": sku_param, "months": months})
+
+    groups = defaultdict(list)
+    for r in _sku_payment_rows(business, _profit_payments_qs(business, date_from, date_to, request), sku_param):
+        groups[r.sub_order_no].append(r)
+    return Response({"sku": sku_param, "row": _sku_profit_row(business, groups, target, pricing, cost_setting)})
+
+
 @api_view(["GET"])
 def profit_summary(request, business_id):
     """
