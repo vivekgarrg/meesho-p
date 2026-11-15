@@ -1,4 +1,8 @@
 import React, { useState, useEffect } from 'react';
+import { TabbedPage } from "../shared/SubTabs";
+import { useAccess } from "../../contexts/AccessContext";
+// Loaded only when its tab is opened: it brings every Meesho section with it.
+const MeeshoHubTab = React.lazy(() => import("./MeeshoHubTab").then((m) => ({ default: m.MeeshoHubTab })));
 import { withPlatformSplit } from '../Flipkart/FlipkartShared';
 import { FlipkartOverviewPanel } from '../Flipkart/FlipkartOverviewPanel';
 import { useNavigate } from 'react-router-dom';
@@ -2994,4 +2998,21 @@ const FlipkartOverviewView = () => (
     parts={{ T, SectionCard, KPICard, StatRow, RateBar, FormulaStep, OutcomeCard, SettlementTable, DeductionRow, LifetimeTotals, Delta, previousRange }}
   />
 );
-export const OverviewTab = withPlatformSplit(MeeshoOverviewTab, FlipkartOverviewView);
+// Meesho: the business's profit and sales, and the live Meesho panel — what needs
+// doing now, orders, money, stock and accounts (?section=panel; it was its own
+// "Meesho Overview" page). Each shows to whoever may see it.
+function MeeshoPanelOverview() {
+  return <MeeshoHubTab forceSection="" />;
+}
+
+function MeeshoOverviewSections() {
+  const { isPathVisible } = useAccess();
+  return (
+    <TabbedPage tabs={[
+      { key: "business", label: "Profit & sales", icon: "◈", Component: MeeshoOverviewTab, hidden: !isPathVisible("/") },
+      { key: "panel", label: "Meesho panel", icon: "◧", Component: MeeshoPanelOverview, hidden: !isPathVisible("/meesho-orders") },
+    ]} />
+  );
+}
+
+export const OverviewTab = withPlatformSplit(MeeshoOverviewSections, FlipkartOverviewView);

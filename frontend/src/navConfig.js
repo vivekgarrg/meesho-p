@@ -20,14 +20,11 @@ export const NAV_GROUPS = [
     label: 'Meesho',
     color: '#F43397',
     items: [
-      { path: '/meesho', label: 'Meesho Overview', icon: '◧', end: true, access: MEESHO, accessLabel: 'Meesho (every page in this group)' },
-      // Pending, Ready to ship, Shipped and Cancelled — tabs of one page.
-      { path: '/meesho/orders', label: 'Meesho Orders', icon: '📦', access: MEESHO },
       // Its own permission, so it can be given alone; the whole-Meesho permission shows it too.
       { path: '/meesho-linking', label: 'Order Linking', icon: '🔗', alsoBy: MEESHO },
       // Every order and its state by dispatch day — its own permission too, like Order Linking.
       { path: '/orders-panel', label: 'Orders Panel', icon: '🗂', alsoBy: MEESHO },
-      { path: '/meesho/returns', label: 'Meesho Returns', icon: '↩', access: MEESHO },
+      { path: '/meesho/returns', label: 'Meesho Returns', icon: '↩', access: MEESHO, accessLabel: 'Meesho (every page in this group)' },
       // Return rate by parent SKU / SKU / flag / reason from Meesho's own returns data, and how to stop the loss.
       { path: '/meesho/return-analysis', label: 'Return Analysis (Meesho)', icon: '📉', access: MEESHO },
       { path: '/meesho/otps', label: 'Delivery OTPs', icon: '🔑', access: MEESHO },
@@ -49,7 +46,8 @@ export const NAV_GROUPS = [
     label: 'Analytics',
     color: '#A78BFA',
     items: [
-      { path: '/', label: 'Overview', icon: '◈', end: true },
+      // Meesho tab: profit & sales, and the live Meesho panel (it was Meesho Overview).
+      { path: '/', label: 'Overview', icon: '◈', end: true, alsoBy: MEESHO },
       { path: '/sku-analysis', label: 'SKU Analysis', icon: '↗' },
       { path: '/daily-profit', label: 'Daily Profit', icon: '📅' },
       { path: '/return-analysis', label: 'Return Analysis', icon: '⤺' },
@@ -59,13 +57,11 @@ export const NAV_GROUPS = [
     label: 'Operations',
     color: '#34D399',
     items: [
-      { path: '/orders', label: 'Orders', icon: '⊡' },
+      // Meesho tab: live on the panel (it was Meesho Orders) and every order uploaded.
+      { path: '/orders', label: 'Orders', icon: '⊡', alsoBy: MEESHO },
       { path: '/order-scan', label: 'Order Scan', icon: '⌗' },
       { path: '/scan-lookup', label: 'Listing Lookup', icon: '🔎' },
       { path: '/payments', label: 'Payments', icon: '◎' },
-      { path: '/unscheduled', label: 'Unscheduled Pay', icon: '◷' },
-      { path: '/unsettled', label: 'Unsettled', icon: '⚡' },
-      { path: '/mismatch', label: 'Pay Mismatch', icon: '⊝' },
       // '/labels' (single-file Labels) is intentionally not listed here — the
       // route still works if linked to directly, but Bulk Labels (now just
       // "Labels" below) covers the same job and is the one the sidebar shows.
@@ -75,7 +71,6 @@ export const NAV_GROUPS = [
       { path: '/return-claim', label: 'Raise Return Claim', icon: '📨' },
       // What's on each labels PDF (automatic or generated) — also for anyone with Order Scan.
       { path: '/label-items', label: 'Labels Downloaded', icon: '📋', alsoBy: '/order-scan' },
-      { path: '/claims', label: 'Claim Sheet', icon: '₹' },
       { path: '/employees', label: 'Employees', icon: '🧑‍💼' },
     ],
   },

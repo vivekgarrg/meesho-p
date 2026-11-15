@@ -1955,7 +1955,8 @@ function CreateParentFromSkuModal({ sku, onSaved, onCancel }) {
         const name = form.parent_id.trim();
         if (img.file) {
           const up = await uploadParentImage(name, img.file);
-          if (!up.ok) notify("err", `"${name}" was created, but its image didn't upload (${up.error}). Paste a link in Direct Price Override to finish.`);
+          // Created all the same: say so, and leave the dialog open on the message.
+          if (!up.ok) { setErr(`"${name}" was created, but its image didn't upload (${up.error}). Paste a link in Direct Price Override to finish.`); setSaving(false); return; }
         }
         onSaved(name);
         return;

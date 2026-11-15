@@ -32,16 +32,12 @@ NAV_CATALOG = [
     {"path": "/order-scan",        "label": "Order Scan",        "group": "Operations"},
     {"path": "/scan-lookup",       "label": "Listing Lookup",    "group": "Operations"},
     {"path": "/payments",          "label": "Payments",          "group": "Operations"},
-    {"path": "/unscheduled",       "label": "Unscheduled Pay",   "group": "Operations"},
-    {"path": "/unsettled",         "label": "Unsettled",         "group": "Operations"},
-    {"path": "/mismatch",          "label": "Pay Mismatch",      "group": "Operations"},
     {"path": "/labels",            "label": "Labels",            "group": "Operations"},
     {"path": "/bulk-labels",       "label": "Labels (Bulk)",     "group": "Operations"},
     {"path": "/returns",           "label": "Returns & Claims",  "group": "Operations"},
     {"path": "/return-scan",       "label": "Return Scan",       "group": "Operations"},
     {"path": "/return-claim",      "label": "Raise Return Claim", "group": "Operations"},
     {"path": "/label-items",       "label": "Labels Downloaded", "group": "Operations"},
-    {"path": "/claims",            "label": "Claim Sheet",       "group": "Operations"},
     {"path": "/employees",         "label": "Employees",         "group": "Operations"},
 
     {"path": "/listing-hub",       "label": "Listing Hub",       "group": "Catalog"},
@@ -128,7 +124,7 @@ API_OWNERSHIP = {
     # The claim sheet writes back onto returns, so either screen may reach it.
     # Business Insights has its own "Upload claims sheet" button, so it may
     # post the same export too.
-    "claims/":               ["/claims", "/returns", "/upload"],
+    "claims/":               ["/upload", "/returns"],   # the Claim Sheet is a tab of Upload Data
     # The tasks screen is the one thing a worker account needs; the API enforces
     # per-user scoping on top, so granting it exposes only their own tasks.
     "worker-tasks/":         ["/tasks"],

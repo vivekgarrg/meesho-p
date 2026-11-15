@@ -60,12 +60,16 @@ export const ORDER_STATUSES = [
   { key: "shipped", slug: "shipped", label: "Shipped", icon: "🚚" },
   { key: "cancelled", slug: "cancelled", label: "Cancelled", icon: "✕" },
 ];
+// Where each section lives now: the panel overview is a tab of Overview, the
+// orders a tab of Orders, and linking is part of Order Scan.
 export const meeshoPath = (key) => {
-  if (key === "linking") return "/meesho-linking";      // its own page, with its own permission
+  if (key === "linking") return "/order-scan";
+  if (key === "overview") return "/?section=panel";
+  if (key === "orders") return "/orders";
   const status = ORDER_STATUSES.find((x) => x.key === key);
-  if (status) return `/meesho/orders/${status.slug}`;
+  if (status) return status.key === "pending" ? "/orders" : `/orders?status=${status.slug}`;
   const sec = MEESHO_SECTIONS.find((x) => x.key === key);
-  return sec?.slug ? `/meesho/${sec.slug}` : "/meesho";
+  return sec?.slug ? `/meesho/${sec.slug}` : "/?section=panel";
 };
 // Old ?tab= values (and keys) → a section.
 const ALIASES = { sync: "settings", orders: "pending", rts: "ready_to_ship" };
@@ -108,9 +112,14 @@ function Badge({ n, tone }) {
   );
 }
 
-export function MeeshoHubTab() {
+// forceSection / forceStatus: shown inside another page (Overview's Meesho panel
+// tab, Orders' live tab) rather than at its own /meesho/<section> address.
+export function MeeshoHubTab({ forceSection, forceStatus } = {}) {
   const navigate = useNavigate();
-  const { section, status: statusSlug } = useParams();
+  const params = useParams();
+  const embedded = forceSection != null;
+  const section = embedded ? forceSection : params.section;
+  const statusSlug = embedded ? forceStatus : params.status;
   // /meesho/pending … (when each status was its own page) → the Orders tab.
   const oldStatus = ORDER_STATUSES.find((x) => x.slug === section);
   const current = MEESHO_SECTIONS.find((x) => x.slug === (section || "")) || MEESHO_SECTIONS[0];
@@ -173,7 +182,9 @@ export function MeeshoHubTab() {
   };
 
   if (oldStatus) return <Navigate to={meeshoPath(oldStatus.key)} replace />;
-  if (tab === "linking") return <Navigate to="/meesho-linking" replace />;
+  // Sections that moved: their old addresses land where they are now.
+  if (!embedded && (tab === "overview" || tab === "linking")) return <Navigate to={meeshoPath(tab)} replace />;
+  if (!embedded && tab === "orders") return <Navigate to={meeshoPath(status.key)} replace />;
   if (!overview) return <div style={{ display: "flex", justifyContent: "center", padding: 80 }}><CircularProgress style={{ color: C.orange }} /></div>;
 
   return (

@@ -24,7 +24,10 @@ import { DataGrid } from "@mui/x-data-grid";
 import { AppBarChart } from "../Charts/AppBarChart";
 
 import { API, C, fmt } from "../../App";
-import { UnsettledOrdersTab } from "./UnsettledOrdersTab";
+import { TabbedPage } from "../shared/SubTabs";
+import { useAccess } from "../../contexts/AccessContext";
+// Loaded only when its tab is opened: it brings every Meesho section with it.
+const MeeshoHubTab = React.lazy(() => import("./MeeshoHubTab").then((m) => ({ default: m.MeeshoHubTab })));
 import { BreachedOrdersTab } from "./BreachedOrdersTab";
 import { PAGE_SIZE } from "../../lib/helper";
 import { colors } from "@mui/material";
@@ -235,23 +238,12 @@ function MeeshoOrdersTab() {
     <ToggleButtonGroup value={view} exclusive onChange={(_, v) => v && setView(v)} size="small"
       sx={{ "& .MuiToggleButton-root": { textTransform: "none", fontWeight: 600, fontSize: 12, px: 2, borderRadius: "8px !important" } }}>
       <ToggleButton value="all">All Orders</ToggleButton>
-      <ToggleButton value="unsettled" sx={{ color: view === "unsettled" ? "error.main" : undefined }}>
-        ⚡ Unsettled
-      </ToggleButton>
       <ToggleButton value="breached" sx={{ color: view === "breached" ? "warning.main" : undefined }}>
         ⚠ Breached
       </ToggleButton>
     </ToggleButtonGroup>
   );
 
-  if (view === "unsettled") {
-    return (
-      <Stack spacing={2.5}>
-        <Box display="flex" justifyContent="flex-end">{ViewToggle}</Box>
-        <UnsettledOrdersTab />
-      </Stack>
-    );
-  }
 
   if (view === "breached") {
     return (
@@ -522,4 +514,23 @@ function MeeshoOrdersTab() {
 }
 
 // Meesho by default; the Flipkart view sits beside it under ?platform=flipkart.
-export const OrdersTab = withPlatformSplit(MeeshoOrdersTab, FlipkartOrdersPanel);
+// What's on the Meesho panel right now — to accept, ready to ship, shipped,
+// cancelled, with its actions (?status=<slug>).
+function LiveMeeshoOrders() {
+  const [params] = useSearchParams();
+  return <MeeshoHubTab forceSection="orders" forceStatus={params.get("status") || "pending"} />;
+}
+
+// Meesho's orders in one page: live on the panel (the default — the day's work),
+// and every order ever uploaded with its outcome. Each shows to whoever may see it.
+function MeeshoOrdersHub() {
+  const { isPathVisible } = useAccess();
+  return (
+    <TabbedPage tabs={[
+      { key: "live", label: "Live on Meesho", icon: "📦", Component: LiveMeeshoOrders, hidden: !isPathVisible("/meesho-orders") },
+      { key: "history", label: "All orders", icon: "⊡", Component: MeeshoOrdersTab, hidden: !isPathVisible("/orders") },
+    ]} />
+  );
+}
+
+export const OrdersTab = withPlatformSplit(MeeshoOrdersHub, FlipkartOrdersPanel);

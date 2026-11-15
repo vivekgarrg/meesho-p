@@ -1,4 +1,6 @@
 import React, { useState } from "react";
+import { TabbedPage } from "../shared/SubTabs";
+import { ClaimSheetTab } from "./ClaimSheetTab";
 import Box from "@mui/material/Box";
 import Card from "@mui/material/Card";
 import CardContent from "@mui/material/CardContent";
@@ -329,7 +331,7 @@ function CleanupPanel() {
   );
 }
 
-export function UploadTab() {
+function UploadFiles() {
   const [cleanup, setCleanup] = useState(false);
   const TABLE_ROWS = [
     ["Order Payments",         "order_payments",        "sub_order_no",        "Update existing rows (safe to re-upload)"],
@@ -482,5 +484,15 @@ export function UploadTab() {
         </CardContent>
       </Card>
     </Box>
+  );
+}
+
+// Upload Data, and the claim sheet (?section=claims) — it was its own page.
+export function UploadTab() {
+  return (
+    <TabbedPage tabs={[
+      { key: "files", label: "Upload files", icon: "⇧", Component: UploadFiles },
+      { key: "claims", label: "Claim Sheet", icon: "₹", Component: ClaimSheetTab },
+    ]} />
   );
 }

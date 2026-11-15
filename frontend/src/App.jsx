@@ -30,10 +30,8 @@ function lazyPage(load, name) {
 
 // ── Tab components ─────────────────────────────────────────────────────────────
 const OverviewTab = lazyPage(() => import('./Components/Tabs/OverviewTab'), 'OverviewTab');
-const UnsettledOrdersTab = lazyPage(() => import('./Components/Tabs/UnsettledOrdersTab'), 'UnsettledOrdersTab');
 const OrdersTab = lazyPage(() => import('./Components/Tabs/OrdersTab'), 'OrdersTab');
 const PaymentsTab = lazyPage(() => import('./Components/Tabs/PaymentsTab'), 'PaymentsTab');
-const UnscheduledPaymentTab = lazyPage(() => import('./Components/Tabs/UnscheduledPaymentTab'), 'UnscheduledPaymentTab');
 const ExpensesTab = lazyPage(() => import('./Components/Tabs/ExpensesTab'), 'ExpensesTab');
 const EmployeesTab = lazyPage(() => import('./Components/Tabs/EmployeesTab'), 'EmployeesTab');
 const PricingTab = lazyPage(() => import('./Components/Tabs/PricingTab'), 'PricingTab');
@@ -48,7 +46,6 @@ const BulkLabelsTab = lazyPage(() => import('./Components/Tabs/BulkLabelsTab'), 
 const InventoryLabelsTab = lazyPage(() => import('./Components/Tabs/InventoryLabelsTab'), 'InventoryLabelsTab');
 const FraudCustomersTab = lazyPage(() => import('./Components/Tabs/FraudCustomersTab'), 'FraudCustomersTab');
 const QuadrantCropperTab = lazyPage(() => import('./Components/Tabs/QuadrantCropperTab'), 'QuadrantCropperTab');
-const MismatchTab = lazyPage(() => import('./Components/Tabs/MismatchTab'), 'MismatchTab');
 const MeeshoInventoryTab = lazyPage(() => import('./Components/Tabs/MeeshoInventoryTab'), 'MeeshoInventoryTab');
 const ReturnScanTab = lazyPage(() => import('./Components/Tabs/ReturnScanTab'), 'ReturnScanTab');
 const OrderScanTab = lazyPage(() => import('./Components/Tabs/OrderScanTab'), 'OrderScanTab');
@@ -63,7 +60,6 @@ const FlipkartSellerTab = lazyPage(() => import('./Components/Tabs/FlipkartSelle
 const ScanLookupTab = lazyPage(() => import('./Components/Tabs/ScanLookupTab'), 'ScanLookupTab');
 const ExtensionTab = lazyPage(() => import('./Components/Tabs/ExtensionTab'), 'ExtensionTab');
 const BulkListingTab = lazyPage(() => import('./Components/Tabs/BulkListingTab'), 'BulkListingTab');
-const ClaimSheetTab = lazyPage(() => import('./Components/Tabs/ClaimSheetTab'), 'ClaimSheetTab');
 const GstTab = lazyPage(() => import('./Components/Tabs/GstTab'), 'GstTab');
 import { SKU_PAGE_SIZE as skuPageSize } from './lib/helper';
 import TableData from './Components/Table/TableData';
@@ -1153,6 +1149,12 @@ function AppShell() {
   const isTablet = useIsTablet();
   const sidebarCompact = isTablet;
   const loc = useLocation();
+  // Tabs that show Meesho as it is now, not a period: the date filter doesn't apply to them.
+  const sp = new URLSearchParams(loc.search);
+  const liveView = sp.get('platform') !== 'flipkart' && (
+    (loc.pathname === '/' && sp.get('section') === 'panel')
+    || (loc.pathname === '/orders' && (sp.get('section') || 'live') === 'live')
+  );
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem('sidebar_collapsed') === 'true');
   const [drawerOpen, setDrawerOpen] = useState(false);
 
@@ -1228,7 +1230,7 @@ function AppShell() {
             changes. Every tab reads the active range from useDateFilter(). */}
         {/* Order Scan is a live packing desk (its own noon-to-noon day), not a report — a period filter means nothing there. */}
         {!['/order-scan', '/return-scan', '/scan-lookup', '/meesho-sync', '/meesho-orders', '/meesho-live-inventory', '/meesho', '/meesho-linking', '/return-claim', '/orders-panel'].includes(loc.pathname)
-          && !loc.pathname.startsWith('/meesho/') && <GlobalDateFilterBar />}
+          && !loc.pathname.startsWith('/meesho/') && !liveView && <GlobalDateFilterBar />}
         {/* key by active business + settlement mode so switching either remounts
             the routed view, forcing every tab (dashboard included) to refetch
             fresh data against the newly-set business-scoped API base / the
@@ -1267,10 +1269,10 @@ function AppShell() {
                 <Route path="/meesho-sync" element={<Navigate to="/meesho/settings" replace />} />
                 <Route path="/meesho-live-inventory" element={<Navigate to="/meesho/inventory" replace />} />
                 <Route path="/scan-lookup" element={<ScanLookupTab />} />
-                <Route path="/unsettled" element={<UnsettledOrdersTab />} />
+                <Route path="/unsettled" element={<Navigate to="/payments?section=unsettled" replace />} />
                 <Route path="/payments" element={<PaymentsTab />} />
-                <Route path="/unscheduled" element={<UnscheduledPaymentTab />} />
-                <Route path="/mismatch" element={<MismatchTab />} />
+                <Route path="/unscheduled" element={<Navigate to="/payments?section=unscheduled" replace />} />
+                <Route path="/mismatch" element={<Navigate to="/payments?section=mismatch" replace />} />
                 <Route path="/sku-analysis" element={<SKUAnalysisTab />} />
                 <Route path="/daily-profit" element={<DailyProfitTab />} />
                 <Route path="/return-analysis" element={<ReturnAnalysisTab />} />
@@ -1282,7 +1284,7 @@ function AppShell() {
                 <Route path="/upload" element={<UploadTab />} />
                 <Route path="/bulk-labels" element={<BulkLabelsTab />} />
                 <Route path="/returns" element={<ReturnScanTab />} />
-                <Route path="/claims" element={<ClaimSheetTab />} />
+                <Route path="/claims" element={<Navigate to="/upload?section=claims" replace />} />
                 <Route path="/employees" element={<EmployeesTab />} />
                 <Route path="/expenses" element={<ExpensesTab />} />
                 <Route path="/inventory-labels" element={<InventoryLabelsTab />} />
