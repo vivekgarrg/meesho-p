@@ -13,6 +13,7 @@ from rest_framework.response import Response
 from rest_framework.exceptions import NotFound, PermissionDenied
 from datetime import datetime, time, timedelta, date as date_cls
 import calendar
+from collections import defaultdict
 import requests as http_requests
 import base64
 import io
@@ -1742,7 +1743,25 @@ _PROFIT_FIELDS = (
     "final_settlement_amount", "live_order_status",
     "recovery_reason", "claims", "return_shipping_charge",
     "order_date", "payment_date",
+    # Read by the output-GST step (_output_gst). Left out, Django fetched both
+    # again for every payment row — two extra queries a row.
+    "total_sale_amount", "product_gst_percent",
 )
+
+
+def _orders_by_sub(business, subs):
+    """
+    {sub_order_no: {"sub_order_no", "sku", "quantity"}} for these sub-orders, in
+    as few queries as it takes — the row `.first()` picked one order at a time
+    (newest order_date first), which was one query per order.
+    """
+    subs = list(subs)
+    out = {}
+    for i in range(0, len(subs), 1000):
+        for o in (Order.objects.filter(business=business, sub_order_no__in=subs[i:i + 1000])
+                  .order_by("-order_date", "pk").values("sub_order_no", "sku", "quantity")):
+            out.setdefault(o["sub_order_no"], o)
+    return out
 
 
 SETTLEMENT_SETTLED = "settled"
@@ -2069,6 +2088,7 @@ def compute_profit_summary(business, date_from="", date_to="", request=None):
     order_groups = defaultdict(list)
     for payment in qs.only(*_PROFIT_FIELDS).order_by("-payment_date"):
         order_groups[payment.sub_order_no].append(payment)
+    orders_by_sub = _orders_by_sub(business, order_groups)
 
     order_wise_profit   = {}
     missing_sku         = []
@@ -2087,12 +2107,7 @@ def compute_profit_summary(business, date_from="", date_to="", request=None):
     resolved_revenue = Decimal("0")
 
     for sub_no, payments in order_groups.items():
-        order = (
-            Order.objects
-            .filter(business=business, sub_order_no=sub_no)
-            .values("sub_order_no", "sku", "quantity")
-            .first()
-            ) or {}
+        order = orders_by_sub.get(sub_no) or {}
         primary = next((p for p in payments if p.live_order_status), payments[0])
         sku = order.get("sku") or primary.supplier_sku
         qty = order.get("quantity") or primary.quantity
@@ -3918,16 +3933,12 @@ def ads_sku_analysis(request, business_id):
 
     unique_statuses = ["Claim", "Cancelled", "Delivered", "Return", "RTO", "Shipped", "Exchange", "Unknown"]
 
-    _FIELDS = (
-        "sub_order_no", "supplier_sku", "quantity",
-        "final_settlement_amount", "live_order_status",
-        "recovery_reason", "claims", "return_shipping_charge",
-        "order_date", "payment_date",
-    )
+    _FIELDS = _PROFIT_FIELDS
 
     order_groups = defaultdict(list)
     for payment in qs.only(*_FIELDS).order_by("-payment_date"):
         order_groups[payment.sub_order_no].append(payment)
+    orders_by_sub = _orders_by_sub(business, order_groups)
 
     ad_profit  = {}
     org_profit = {}
@@ -3935,12 +3946,7 @@ def ads_sku_analysis(request, business_id):
     org_monthly = {}
 
     for sub_no, payments in order_groups.items():
-        order = (
-            Order.objects
-            .filter(business=business, sub_order_no=sub_no)
-            .values("sub_order_no", "sku", "quantity")
-            .first()
-        ) or {}
+        order = orders_by_sub.get(sub_no) or {}
         primary = next((p for p in payments if p.live_order_status), payments[0])
         sku = order.get("sku") or primary.supplier_sku
         qty = order.get("quantity") or primary.quantity

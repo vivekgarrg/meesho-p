@@ -137,7 +137,8 @@ def catalog_economics(business, catalog_ids, request, today=None):
     for i in range(0, len(subs), 1000):
         for p in base.filter(sub_order_no__in=subs[i:i + 1000]).only(
                 "sub_order_no", "supplier_sku", "quantity", "final_settlement_amount", "live_order_status", "recovery_reason",
-                "claims", "return_shipping_charge", "order_date", "payment_date", "order_source", "catalog_id").order_by("-payment_date"):
+                "claims", "return_shipping_charge", "order_date", "payment_date", "order_source", "catalog_id",
+                "total_sale_amount", "product_gst_percent").order_by("-payment_date"):
             rows[p.sub_order_no].append(p)
     orders = {}
     for i in range(0, len(subs), 1000):

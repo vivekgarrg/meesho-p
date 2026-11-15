@@ -247,6 +247,16 @@ class OrderPayment(models.Model):
         db_table = "order_payments"
         ordering = ["-order_date"]
         unique_together = [("business", "sub_order_no", "payment_date", "live_order_status")]
+        # What the profit / SKU Analysis pages filter and sort on, always within one business.
+        indexes = [
+            models.Index(fields=["business", "order_date"], name="op_biz_order_date"),
+            models.Index(fields=["business", "payment_date"], name="op_biz_payment_date"),
+            models.Index(fields=["business", "supplier_sku"], name="op_biz_sku"),
+            models.Index(fields=["business", "catalog_id"], name="op_biz_catalog"),
+            models.Index(fields=["business", "order_source"], name="op_biz_source"),
+            models.Index(fields=["business", "transaction_id"], name="op_biz_txn"),
+            models.Index(fields=["business", "live_order_status"], name="op_biz_status"),
+        ]
 
     def __str__(self):
         return self.sub_order_no
@@ -408,6 +418,12 @@ class Order(models.Model):
         db_table = "orders"
         ordering = ["-order_date"]
         unique_together = [("business", "sub_order_no", "reason_for_credit_entry", "order_date")]
+        indexes = [
+            models.Index(fields=["business", "order_date"], name="ord_biz_order_date"),
+            models.Index(fields=["business", "sku"], name="ord_biz_sku"),
+            models.Index(fields=["business", "catalog_id"], name="ord_biz_catalog"),
+            models.Index(fields=["business", "reason_for_credit_entry"], name="ord_biz_reason"),
+        ]
 
     def __str__(self):
         return self.sub_order_no
