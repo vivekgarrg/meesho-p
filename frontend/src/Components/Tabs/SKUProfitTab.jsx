@@ -611,17 +611,21 @@ const statusStyle = (s) => {
 const num = (v) => Number(v || 0);
 const moneyCell = (v) => (num(v) === 0 ? "—" : fmt(num(v)));
 
-function SKUPaymentsPanel({ skuId, range, label, base, cache }) {
+const PAYMENTS_PAGE = 100;
+
+function SKUPaymentsPanel({ subject, range, label, base, cache, showSku }) {
   const key = `${range.date_from || ""}|${range.date_to || ""}`;
   const [data, setData] = useState(() => cache.get(key) || null);
   const [error, setError] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
+  const [skuFilter, setSkuFilter] = useState("");
+  const [limit, setLimit] = useState(PAYMENTS_PAGE);   // a parent can have thousands of orders: drawn a page at a time
 
   useEffect(() => {
     if (cache.has(key)) { setData(cache.get(key)); setError(""); return; }
     const ctrl = new AbortController();
     setData(null); setError("");
-    const params = new URLSearchParams({ sku: skuId });
+    const params = new URLSearchParams(subject);
     if (range.date_from) params.set("date_from", range.date_from);
     if (range.date_to) params.set("date_to", range.date_to);
     fetch(`${base}/profit/sku-orders/?${params}`, { signal: ctrl.signal })
@@ -629,9 +633,16 @@ function SKUPaymentsPanel({ skuId, range, label, base, cache }) {
       .then(d => { cache.set(key, d); setData(d); })
       .catch(e => { if (e.name !== "AbortError") setError(e.message || "Failed to load payments"); });
     return () => ctrl.abort();
-  }, [skuId, JSON.stringify(range)]); // eslint-disable-line
+  }, [JSON.stringify(subject), JSON.stringify(range)]); // eslint-disable-line
+  useEffect(() => { setLimit(PAYMENTS_PAGE); }, [statusFilter, skuFilter, key]);
 
-  const orders = data?.orders || [];
+  const allOrders = data?.orders || [];
+  const skuCounts = useMemo(() => {
+    const c = {};
+    for (const o of allOrders) c[o.sku] = (c[o.sku] || 0) + 1;
+    return Object.entries(c).sort((a, b) => b[1] - a[1]);
+  }, [allOrders]);
+  const orders = skuFilter ? allOrders.filter(o => o.sku === skuFilter) : allOrders;
   const statusCounts = useMemo(() => {
     const c = {};
     for (const o of orders) c[o.status] = (c[o.status] || 0) + 1;
@@ -652,7 +663,7 @@ function SKUPaymentsPanel({ skuId, range, label, base, cache }) {
       </Box>
     );
   }
-  if (orders.length === 0) {
+  if (allOrders.length === 0) {
     return <Typography sx={{ color: "#94A3B8", textAlign: "center", py: 6 }}>No settled orders for {label}.</Typography>;
   }
 
@@ -687,13 +698,25 @@ function SKUPaymentsPanel({ skuId, range, label, base, cache }) {
         </Typography>
       </Box>
 
-      {shown.map(o => {
+      {showSku && skuCounts.length > 1 && (
+        <TextField select size="small" label="SKU" value={skuFilter} onChange={e => setSkuFilter(e.target.value)}
+          sx={{ maxWidth: 360 }} SelectProps={{ native: true }} InputLabelProps={{ shrink: true }}>
+          <option value="">All {skuCounts.length} SKUs · {allOrders.length} orders</option>
+          {skuCounts.map(([k, n]) => <option key={k} value={k}>{k} · {n}</option>)}
+        </TextField>
+      )}
+
+      {shown.slice(0, limit).map(o => {
         const st = statusStyle(o.status);
         return (
           <Box key={o.sub_order_no} sx={{ ...DS.card, overflow: "hidden", borderLeft: `4px solid ${st.color}` }}>
             {/* Order header */}
             <Box sx={{ px: 2, py: 1.25, display: "flex", alignItems: "center", gap: 2, flexWrap: "wrap", bgcolor: "#F8FAFC", borderBottom: "1px solid #E8EDF3" }}>
               <Typography sx={{ fontFamily: "monospace", fontWeight: 800, fontSize: 13, color: "#0F172A" }}>{o.sub_order_no}</Typography>
+              {showSku && o.sku && (
+                <Chip label={o.sku} size="small" onClick={() => setSkuFilter(o.sku)}
+                  sx={{ fontFamily: "monospace", fontWeight: 700, fontSize: 11, bgcolor: "#FFF7ED", color: "#C2410C", border: "1px solid #FED7AA", cursor: "pointer" }} />
+              )}
               <Chip label={`${st.icon} ${o.status}`} size="small"
                 sx={{ fontWeight: 700, fontSize: 11, bgcolor: st.bg, color: st.color, border: `1px solid ${st.border}` }} />
               <Typography sx={{ fontSize: 12, color: "#64748B" }}>
@@ -749,20 +772,36 @@ function SKUPaymentsPanel({ skuId, range, label, base, cache }) {
           </Box>
         );
       })}
+      {shown.length > limit && (
+        <Button variant="outlined" onClick={() => setLimit(l => l + PAYMENTS_PAGE)} sx={{ alignSelf: "center", textTransform: "none", fontWeight: 700 }}>
+          Show {Math.min(PAYMENTS_PAGE, shown.length - limit)} more · {limit} of {shown.length} shown
+        </Button>
+      )}
     </Box>
   );
 }
 
 // ── SKU Detail Modal ──────────────────────────────────────────────────────────
-function SKUDetailModal({ sku, bizId, months, initialRange, initialMonth, onClose }) {
-  // The SKU's own business (combined view: the row's), and only this SKU's figures —
-  // /profit/sku/ works out one SKU instead of every SKU like /profit/ does.
+// sku: the SKU's row (null when a parent group is opened by itself); parent: {key, row}
+// — every SKU under the same parent, merged — when it has one. The dialog shows either,
+// and switches between the two.
+function SKUDetailModal({ sku, parent, bizId, months, initialRange, initialMonth, initialScope, onOpenSku, onClose }) {
+  // The SKU's own business (combined view: the row's), and only its figures —
+  // /profit/sku/ works out one SKU (or one parent) instead of every SKU like /profit/ does.
   const base = bizId ? `/api/business/${bizId}` : API;
+  const [scope, setScope] = useState(sku ? (initialScope || "sku") : "parent");
+  const isParent = scope === "parent";
+  const subject = isParent ? { parent: parent.key } : { sku: sku.sku_id };
+  const title = isParent ? parent.key : sku.sku_id;
   const rangeKey = (r) => `${r?.date_from || ""}|${r?.date_to || ""}`;
-  // Figures already read, per period: the page's own row needs no call at all, and
-  // a period looked at once isn't read again while the dialog is open.
-  const periodCache = useRef(new Map([[rangeKey(initialRange), sku]]));
-  const paymentsCache = useRef(new Map());
+  const cacheKey = (sc, r) => `${sc}#${rangeKey(r)}`;
+  // Figures already read, per SKU-or-parent and period: the page's own rows need no
+  // call at all, and anything looked at once isn't read again while the dialog is open.
+  const periodCache = useRef(new Map([
+    ...(sku ? [[cacheKey("sku", initialRange), sku]] : []),
+    ...(parent ? [[cacheKey("parent", initialRange), parent.row]] : []),
+  ]));
+  const paymentsCache = useRef({ sku: new Map(), parent: new Map() });
   const [selMonth, setSelMonth] = useState(initialMonth);
   const [range, setRange] = useState(initialRange || {});
   const [label, setLabel] = useState(
@@ -772,10 +811,12 @@ function SKUDetailModal({ sku, bizId, months, initialRange, initialMonth, onClos
   );
   const [activeTab, setActiveTab] = useState("overview");
   const [fullView, setFullView] = useState(false);
-  const [periodData, setPeriodData] = useState(sku);
+  const [periodData, setPeriodData] = useState(() => periodCache.current.get(cacheKey(scope, initialRange)) || null);
   const [periodLoading, setPeriodLoading] = useState(false);
   const [periodError, setPeriodError] = useState("");
-  const [monthly, setMonthly] = useState(null);       // null: not read yet — read the first time Monthly History opens
+  const [monthlyBy, setMonthlyBy] = useState({ sku: null, parent: null });   // null: not read yet — read the first time Monthly History opens
+  const monthly = monthlyBy[scope];
+  const setMonthly = (v) => setMonthlyBy(m => ({ ...m, [scope]: v }));
   const [monthlyError, setMonthlyError] = useState("");
 
   useEffect(() => {
@@ -785,16 +826,16 @@ function SKUDetailModal({ sku, bizId, months, initialRange, initialMonth, onClos
   }, [onClose]);
 
   useEffect(() => {
-    const k = rangeKey(range);
+    const k = cacheKey(scope, range);
     setPeriodError("");
     if (periodCache.current.has(k)) { setPeriodData(periodCache.current.get(k)); setPeriodLoading(false); return; }
     // A month picked from history that's already been read: its row is there.
     const ym = range.date_from?.slice(0, 7);
-    const fromHistory = monthly && ym && rangeKey(toRange(ym)) === k ? monthly.find(m => m.month === ym) : null;
+    const fromHistory = monthly && ym && rangeKey(toRange(ym)) === rangeKey(range) ? monthly.find(m => m.month === ym) : null;
     if (fromHistory) { periodCache.current.set(k, fromHistory.raw); setPeriodData(fromHistory.raw); setPeriodLoading(false); return; }
     const ctrl = new AbortController();
     setPeriodLoading(true); setPeriodData(null);
-    const params = new URLSearchParams({ sku: sku.sku_id });
+    const params = new URLSearchParams(subject);
     if (range.date_from) params.set("date_from", range.date_from);
     if (range.date_to) params.set("date_to", range.date_to);
     fetch(`${base}/profit/sku/?${params}`, { signal: ctrl.signal })
@@ -802,14 +843,14 @@ function SKUDetailModal({ sku, bizId, months, initialRange, initialMonth, onClos
       .then(d => { const row = d.row || {}; periodCache.current.set(k, row); setPeriodData(row); setPeriodLoading(false); })
       .catch(e => { if (e.name !== "AbortError") { setPeriodData({}); setPeriodError(e.message || "Failed"); setPeriodLoading(false); } });
     return () => ctrl.abort();
-  }, [rangeKey(range)]); // eslint-disable-line
+  }, [scope, rangeKey(range)]); // eslint-disable-line
 
   // Monthly History: read once, in one call, and only when that tab is opened.
   useEffect(() => {
     if (activeTab !== "history" || monthly) return;
     const ctrl = new AbortController();
     setMonthlyError("");
-    fetch(`${base}/profit/sku/?${new URLSearchParams({ sku: sku.sku_id, months: 1 })}`, { signal: ctrl.signal })
+    fetch(`${base}/profit/sku/?${new URLSearchParams({ ...subject, months: 1 })}`, { signal: ctrl.signal })
       .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
       .then(d => {
         const got = new Map((d.months || []).map(m => [m.month, m.row]));
@@ -819,7 +860,7 @@ function SKUDetailModal({ sku, bizId, months, initialRange, initialMonth, onClos
       })
       .catch(e => { if (e.name !== "AbortError") setMonthlyError(e.message || "Failed"); });
     return () => ctrl.abort();
-  }, [activeTab, monthly]); // eslint-disable-line
+  }, [activeTab, scope, monthly]); // eslint-disable-line
   const monthlyLoading = activeTab === "history" && !monthly && !monthlyError;
 
   // ── Derived ───────────────────────────────────────────────────────────────
@@ -853,7 +894,8 @@ function SKUDetailModal({ sku, bizId, months, initialRange, initialMonth, onClos
   const pkgCost = Number(d.total_packaging_cost || 0);
   const taxCost = Number(d.total_tax_cost || 0);
   const totalNet = Number(d.net_profit || 0) || (delNet + retNet + rtoNet + exchNet + claimNet + otherNet);
-  const unitCost = Number(sku.one_unit_price || 0);
+  const unitCost = isParent ? 0 : Number(sku.one_unit_price || 0);
+  const children = isParent ? (d.children || []) : [];
   const avgProfit = delQty > 0 ? delNet / delQty : null;
 
   const pos = totalNet >= 0;
@@ -929,15 +971,34 @@ function SKUDetailModal({ sku, bizId, months, initialRange, initialMonth, onClos
         <Box sx={{ display: "flex", alignItems: "flex-start", gap: 2, mb: 1.5, flexWrap: "wrap" }}>
           <Box sx={{ flex: 1 }}>
             <Box sx={{ display: "flex", alignItems: "center", gap: 1.5, flexWrap: "wrap", mb: 1 }}>
-              <Chip label={sku.sku_id} sx={{
+              <Chip label={isParent ? `▦ ${title}` : title} sx={{
                 fontFamily: "monospace", fontWeight: 800, fontSize: 15,
-                bgcolor: "#FFF7ED", color: "#C2410C", border: "1px solid #FED7AA",
+                bgcolor: isParent ? "#EEF2FF" : "#FFF7ED", color: isParent ? "#4338CA" : "#C2410C",
+                border: `1px solid ${isParent ? "#C7D2FE" : "#FED7AA"}`,
                 height: 32,
               }} />
-              <Typography sx={{ fontSize: 12, color: "#64748B" }}>
-                Unit cost: <strong style={{ fontFamily: "monospace", color: "#334155" }}>{fmt(unitCost)}</strong>
-              </Typography>
-              {sku.parent && <Typography sx={{ fontSize: 12, color: "#94A3B8" }}>Parent: {sku.parent}</Typography>}
+              {isParent ? (
+                <Typography sx={{ fontSize: 12, color: "#64748B" }}>
+                  Parent · every SKU under it merged{children.length ? <> · <strong style={{ color: "#334155" }}>{children.length} SKU{children.length === 1 ? "" : "s"}</strong> with orders in {label}</> : null}
+                </Typography>
+              ) : (
+                <Typography sx={{ fontSize: 12, color: "#64748B" }}>
+                  Unit cost: <strong style={{ fontFamily: "monospace", color: "#334155" }}>{fmt(unitCost)}</strong>
+                </Typography>
+              )}
+              {/* One SKU, or its whole parent: the same tabs either way. */}
+              {sku && parent && (
+                <Box sx={{ display: "inline-flex", bgcolor: "rgba(255,255,255,0.7)", borderRadius: "10px", p: "3px", border: "1px solid #E2E8F0" }}>
+                  {[{ id: "sku", label: "This SKU" }, { id: "parent", label: `Whole parent · ${parent.key}` }].map(o => (
+                    <Box key={o.id} onClick={() => setScope(o.id)} sx={{
+                      px: 1.5, py: 0.5, borderRadius: "8px", cursor: "pointer", maxWidth: 280,
+                      bgcolor: scope === o.id ? "#fff" : "transparent", boxShadow: scope === o.id ? "0 1px 3px rgba(0,0,0,0.12)" : "none",
+                    }}>
+                      <Typography noWrap sx={{ fontSize: 12, fontWeight: 700, color: scope === o.id ? "#0F172A" : "#64748B" }}>{o.label}</Typography>
+                    </Box>
+                  ))}
+                </Box>
+              )}
             </Box>
             {!periodLoading && (
               <Box sx={{ display: "flex", alignItems: "baseline", gap: 1.5, flexWrap: "wrap" }}>
@@ -1046,6 +1107,51 @@ function SKUDetailModal({ sku, bizId, months, initialRange, initialMonth, onClos
                     ))}
                   </Box>
                 </Box>
+                {isParent && children.length > 0 && (
+                  <Box sx={{ ...DS.card, overflow: "hidden" }}>
+                    <Box sx={{ px: 2.5, py: 1.5, borderBottom: "1px solid #E8EDF3" }}>
+                      <Typography sx={{ fontWeight: 700, fontSize: 14 }}>SKUs in this parent · {label}</Typography>
+                      <Typography sx={{ fontSize: 12, color: "#94A3B8" }}>
+                        What each SKU adds to the figures above{onOpenSku ? " · click a SKU to open it on its own" : ""}
+                      </Typography>
+                    </Box>
+                    <Box sx={{ overflowX: "auto" }}>
+                      <Table size="small">
+                        <TableHead>
+                          <TableRow sx={{ bgcolor: "#F8FAFC" }}>
+                            {["SKU", "Orders", "✅ Del", "↩ Ret", "🔄 RTO", "Delivery %", "Units", "Avg / pc", "Share of P&L", "Net P&L"].map((h, i) => (
+                              <TableCell key={h} sx={{ fontWeight: 700, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.05em", color: "#94A3B8", whiteSpace: "nowrap", py: 1.25, textAlign: i ? "right" : "left" }}>{h}</TableCell>
+                            ))}
+                          </TableRow>
+                        </TableHead>
+                        <TableBody>
+                          {children.map(c => {
+                            const net = Number(c.net_profit || 0);
+                            const orders = Number(c.order_count || 0);
+                            const units = Number(c.delivered_quantity || 0);
+                            const share = totalNet ? (net / Math.abs(totalNet)) * 100 : 0;
+                            const cell = { fontFamily: "monospace", fontSize: 12, textAlign: "right", whiteSpace: "nowrap" };
+                            return (
+                              <TableRow key={c.sku_id} hover onClick={onOpenSku ? () => onOpenSku(c.sku_id) : undefined}
+                                sx={{ cursor: onOpenSku ? "pointer" : "default" }}>
+                                <TableCell sx={{ fontFamily: "monospace", fontWeight: 700, fontSize: 12, color: "#C2410C" }}>{c.sku_id}</TableCell>
+                                <TableCell sx={cell}>{orders}</TableCell>
+                                <TableCell sx={{ ...cell, color: "#059669" }}>{c.delivered_count || "—"}</TableCell>
+                                <TableCell sx={{ ...cell, color: "#DC2626" }}>{c.return_count || "—"}</TableCell>
+                                <TableCell sx={{ ...cell, color: "#D97706" }}>{c.rto_count || "—"}</TableCell>
+                                <TableCell sx={cell}>{pct(Number(c.delivered_count || 0), orders)}%</TableCell>
+                                <TableCell sx={cell}>{units || "—"}</TableCell>
+                                <TableCell sx={cell}>{units ? fmt(Number(c.delivered_profit || 0) / units) : "—"}</TableCell>
+                                <TableCell sx={{ ...cell, color: share < 0 ? "#DC2626" : "#64748B" }}>{totalNet ? `${share.toFixed(0)}%` : "—"}</TableCell>
+                                <TableCell sx={{ textAlign: "right" }}><PLChip value={net} /></TableCell>
+                              </TableRow>
+                            );
+                          })}
+                        </TableBody>
+                      </Table>
+                    </Box>
+                  </Box>
+                )}
               </>
             )}
 
@@ -1116,7 +1222,8 @@ function SKUDetailModal({ sku, bizId, months, initialRange, initialMonth, onClos
 
             {/* ── PAYMENTS ───────────────────────────────────────────────── */}
             {activeTab === "payments" && (
-              <SKUPaymentsPanel skuId={sku.sku_id} range={range} label={label} base={base} cache={paymentsCache.current} />
+              <SKUPaymentsPanel key={scope} subject={subject} range={range} label={label} base={base}
+                cache={paymentsCache.current[scope]} showSku={isParent} />
             )}
 
             {/* ── CHARTS ─────────────────────────────────────────────────── */}
@@ -1896,7 +2003,7 @@ function MeeshoSKUAnalysisTab() {
   const [profitSummary, setProfitSummary] = useState(null);
   const [loading, setLoading] = useState(true);
   const [view, setView] = useState("all");
-  const [selSKU, setSelSKU] = useState(null);
+  const [sel, setSel] = useState(null);                 // {sku, parent, scope} — the detail dialog
   const [marginThreshold, setMarginThreshold] = useState(50);
   const [reloadTick, setReloadTick] = useState(0);
   const [groupBy, setGroupBy] = useState("sku"); // "sku" | "parent"
@@ -1970,13 +2077,14 @@ function MeeshoSKUAnalysisTab() {
       const displayKey = row.parent_item_id || row.sku_id;
       const key = row.business ? `${row.business}::${displayKey}` : displayKey;
       if (!groups[key]) {
-        groups[key] = { id: key, sku_id: displayKey, parent_item_id: row.parent_item_id || null, business: row.business, is_group: true, child_count: 0, _children: [] };
+        groups[key] = { id: key, sku_id: displayKey, parent_item_id: row.parent_item_id || null, business: row.business,
+                        _business_id: row._business_id, is_group: true, child_count: 0, _children: [] };
       }
       const g = groups[key];
       g.child_count += 1;
       g._children.push(row.sku_id);
       for (const [field, value] of Object.entries(row)) {
-        if (typeof value === "number" && field !== "avg_profit_per_piece" && field !== "avg_settlement_per_piece") {
+        if (typeof value === "number" && field !== "avg_profit_per_piece" && field !== "avg_settlement_per_piece" && field !== "_business_id") {
           g[field] = (g[field] || 0) + value;
         }
       }
@@ -2007,6 +2115,26 @@ function MeeshoSKUAnalysisTab() {
     },
     ask: (row, pause) => setPauseAsk({ row, pause, bizId: bizOf(row),
       bizName: row.business || businesses.find((b) => b.id === bizOf(row))?.name || "" }),
+  };
+
+  // A parent's merged row (as the page shows it), with each SKU's own figures in it.
+  const sameGroup = (r, key, business) => (r.parent_item_id || r.sku_id) === key && (r.business || null) === (business || null);
+  const parentOf = (key, business) => {
+    const row = groupedData.find(g => sameGroup(g, key, business));
+    if (!row?.parent_item_id) return null;
+    const children = allData.filter(r => sameGroup(r, key, business)).sort((a, b) => b.net_profit - a.net_profit);
+    return { key, row: { ...row, children } };
+  };
+  const setSelSKU = (row) => setSel(row ? { sku: row, parent: row.parent_item_id ? parentOf(row.parent_item_id, row.business) : null, scope: "sku" } : null);
+  const openParent = (key, business) => {
+    const parent = parentOf(key, business);
+    if (parent) { setSel({ sku: null, parent, scope: "parent" }); return; }
+    const one = allData.find(r => sameGroup(r, key, business));     // a SKU with no parent: a group of one
+    if (one) setSelSKU(one);
+  };
+  const openSkuOf = (business) => (skuId) => {
+    const row = allData.find(r => String(r.sku_id).toLowerCase() === String(skuId).toLowerCase() && (r.business || null) === (business || null));
+    if (row) setSelSKU(row);
   };
 
   const activeData = groupBy === "parent" ? groupedData : allData;
@@ -2234,12 +2362,19 @@ function MeeshoSKUAnalysisTab() {
                   </Typography>
                   <Typography sx={{ fontSize: 12, color: "#94A3B8", mt: 0.25 }}>Click any row to open full P&L analysis</Typography>
                 </Box>
+                <Button
+                  size="small" variant="contained" disableElevation
+                  onClick={() => openParent(drillParent.key, drillParent.business)}
+                  sx={{ ml: "auto", textTransform: "none", fontWeight: 700, borderRadius: "8px", whiteSpace: "nowrap" }}
+                >
+                  📊 Parent P&L — all SKUs merged
+                </Button>
                 {/* Acting on the parent you are already looking at — the whole
                     point is not having to go find it on another tab. */}
                 <Button
                   size="small" variant="outlined" color="error"
                   onClick={() => setStockParent(drillParent.key)}
-                  sx={{ ml: "auto", textTransform: "none", fontWeight: 700, borderRadius: "8px", whiteSpace: "nowrap" }}
+                  sx={{ textTransform: "none", fontWeight: 700, borderRadius: "8px", whiteSpace: "nowrap" }}
                 >
                   📦 Meesho stock
                 </Button>
@@ -2272,14 +2407,18 @@ function MeeshoSKUAnalysisTab() {
         </>
       )}
 
-      {selSKU && (
+      {sel && (
         <SKUDetailModal
-          sku={selSKU}
-          bizId={bizOf(selSKU)}
+          key={`${sel.scope}:${sel.sku?.id || sel.parent?.key}`}
+          sku={sel.sku}
+          parent={sel.parent}
+          initialScope={sel.scope}
+          onOpenSku={openSkuOf((sel.sku || sel.parent?.row)?.business)}
+          bizId={bizOf(sel.sku || sel.parent.row)}
           months={months}
           initialRange={range}
           initialMonth={globalMode === "month" ? globalMonth : null}
-          onClose={() => setSelSKU(null)}
+          onClose={() => setSel(null)}
         />
       )}
 

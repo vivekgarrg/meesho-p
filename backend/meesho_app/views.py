@@ -1981,24 +1981,24 @@ def sku_order_payments(request, business_id):
     Every settled order of one SKU with all of its payment rows, for the SKU
     Analysis detail view. Selection and per-order P&L go through the same code
     as profit_summary, so these orders sum to that SKU's row there.
-    Params: sku (required), date_from / date_to (YYYY-MM-DD).
+    Params: sku, or parent (the orders of every SKU under it); date_from / date_to (YYYY-MM-DD).
     """
     business = get_authorized_business(request, business_id)
-    sku_param = (request.GET.get("sku") or "").strip()
-    if not sku_param:
-        return Response({"error": "sku is required"}, status=status.HTTP_400_BAD_REQUEST)
+    scope = _profit_scope(business, request)
+    if not scope:
+        return Response({"error": "sku or parent is required"}, status=status.HTTP_400_BAD_REQUEST)
+    _kind, sku_param, skus, targets = scope
     cost_setting = _cost_setting(business)
     date_from = request.GET.get("date_from", "")
     date_to   = request.GET.get("date_to", "")
-    target = _sku_key(sku_param)
 
     qs = _profit_payments_qs(business, date_from, date_to, request)
     # Candidate orders: anything that names this SKU in either table. The exact
     # SKU per order is then resolved below the same way profit_summary does it
     # (Order.sku wins over the payment sheet's supplier_sku).
     candidates = qs.filter(
-        DQ(supplier_sku__iexact=sku_param)
-        | DQ(sub_order_no__in=Order.objects.filter(business=business, sku__iexact=sku_param).values("sub_order_no"))
+        _sku_names("supplier_sku", skus)
+        | DQ(sub_order_no__in=Order.objects.filter(_sku_names("sku", skus), business=business).values("sub_order_no"))
     ).values("sub_order_no")
     rows = list(qs.filter(sub_order_no__in=candidates).order_by("-payment_date"))
 
@@ -2021,7 +2021,7 @@ def sku_order_payments(request, business_id):
         order = order_map.get(sub_no) or {}
         primary = next((p for p in payments if p.live_order_status), payments[0])
         sku = order.get("sku") or primary.supplier_sku
-        if _sku_key(sku) != target or sku not in pricing.price_map:
+        if _sku_key(sku) not in targets or sku not in pricing.price_map:
             continue
         qty = order.get("quantity") or primary.quantity
         eff_price, eff_pkg, eff_item_price, eff_tax_pct = pricing.effective_price(sku, primary.order_date)
@@ -2032,6 +2032,7 @@ def sku_order_payments(request, business_id):
         order_date = order.get("order_date") or (primary.order_date.date() if primary.order_date else None)
         orders.append({
             "sub_order_no":        sub_no,
+            "sku":                 pricing.canonical_sku.get(sku, sku),
             "order_date":          str(order_date) if order_date else None,
             "size":                order.get("size"),
             "quantity":            int(result["quantity"]),
@@ -2049,22 +2050,46 @@ def sku_order_payments(request, business_id):
     return Response({"sku": sku_param, "count": len(orders), "orders": orders})
 
 
-def _sku_profit_row(business, groups, target, pricing, cost_setting):
+def _profit_scope(business, request):
+    """
+    What a SKU Analysis detail call is about: ?sku=X (one SKU) or ?parent=Y
+    (every SKU priced under that parent — the page's "group by parent" row).
+    A parent with no SKUs under it is taken as a SKU: the page shows a SKU
+    with no parent as a group of one, under its own name.
+    Returns (kind, name, [sku spellings], {sku keys}), or None without either.
+    """
+    parent = (request.GET.get("parent") or "").strip()
+    sku = (request.GET.get("sku") or "").strip()
+    if parent:
+        skus = list(FinalPrice.objects.filter(business=business, parent__item_id__iexact=parent)
+                    .order_by("sku_id").values_list("sku_id", flat=True))
+        if skus:
+            return "parent", parent, skus, {_sku_key(x) for x in skus}
+        sku = parent
+    if not sku:
+        return None
+    return "sku", sku, [sku], {_sku_key(sku)}
+
+
+def _sku_profit_row(business, groups, targets, pricing, cost_setting, merged=False):
     """
     One SKU's row of profit_summary's sku_wise_profit, over these payment
     groups ({sub_order_no: [rows, newest payment first]}). The same steps as
     profit_summary — the order's SKU (Order.sku over the sheet's), its price on
     the order's date, orders with no unit price left out — so the row matches
     that SKU's row there exactly. {} when no order of the SKU counts.
+
+    targets: the SKU keys taken. merged: all of them in one row (a parent's),
+    with "children" — each SKU's own figures — in it.
     """
     orders_by_sub = _orders_by_sub(business, groups)
     statuses = list(_PROFIT_STATUSES)
-    out = {}
+    out, whole = {}, {}
     for sub_no, payments in groups.items():
         order = orders_by_sub.get(sub_no) or {}
         primary = next((p for p in payments if p.live_order_status), payments[0])
         sku = order.get("sku") or primary.supplier_sku
-        if _sku_key(sku) != target or sku not in pricing.price_map:
+        if _sku_key(sku) not in targets or sku not in pricing.price_map:
             continue
         eff_price, eff_pkg, eff_item_price, eff_tax_pct = pricing.effective_price(sku, primary.order_date)
         if not _has_unit_price(eff_item_price):
@@ -2074,6 +2099,20 @@ def _sku_profit_row(business, groups, target, pricing, cost_setting):
                                    eff_item_price, eff_tax_pct, cost_setting=cost_setting)
         accumulate_sku_profit(pricing.canonical_sku.get(sku, sku), out, result,
                               pricing.price_map, pricing.packaging_map, statuses)
+        if merged:
+            accumulate_sku_profit("__parent__", whole, result, pricing.price_map, pricing.packaging_map, statuses)
+    if merged:
+        row = whole.get("__parent__")
+        if not row:
+            return {}
+        row["children"] = sorted(
+            ({"sku_id": k, "order_count": r["order_count"], "net_profit": r["net_profit"],
+              "delivered_count": r.get("delivered_count", 0), "return_count": r.get("return_count", 0),
+              "rto_count": r.get("rto_count", 0), "delivered_quantity": r.get("delivered_quantity", 0),
+              "delivered_profit": r.get("delivered_profit", 0), "one_unit_price": r["one_unit_price"]}
+             for k, r in out.items()),
+            key=lambda c: -Decimal(str(c["net_profit"])))
+        return row
     if not out:
         return {}
     key, row = next(iter(out.items()))
@@ -2083,11 +2122,19 @@ def _sku_profit_row(business, groups, target, pricing, cost_setting):
     return row
 
 
-def _sku_payment_rows(business, qs, sku_param):
-    """The payment rows of every order that names this SKU in either table, newest payment first."""
+def _sku_names(field, skus):
+    """field matches any of these SKUs, in any casing."""
+    q = DQ()
+    for x in skus:
+        q |= DQ(**{f"{field}__iexact": x})
+    return q
+
+
+def _sku_payment_rows(business, qs, skus):
+    """The payment rows of every order that names one of these SKUs in either table, newest payment first."""
     candidates = qs.filter(
-        DQ(supplier_sku__iexact=sku_param)
-        | DQ(sub_order_no__in=Order.objects.filter(business=business, sku__iexact=sku_param).values("sub_order_no"))
+        _sku_names("supplier_sku", skus)
+        | DQ(sub_order_no__in=Order.objects.filter(_sku_names("sku", skus), business=business).values("sub_order_no"))
     ).values("sub_order_no")
     return qs.filter(sub_order_no__in=candidates).only(*_PROFIT_FIELDS).order_by("-payment_date")
 
@@ -2112,23 +2159,26 @@ def sku_profit(request, business_id):
     """
     One SKU's profit for the SKU Analysis detail view, without working out
     every other SKU's: the same row /profit/ gives it in sku_wise_profit.
-    Params: sku (required), date_from / date_to; months=1 adds the row for
+    Params: sku, or parent (every SKU under it in one row, each SKU's own
+    figures in "children"); date_from / date_to; months=1 gives the row for
     every month it has orders in — one read for the whole history instead of
     one /profit/ call a month.
     """
     business = get_authorized_business(request, business_id)
-    sku_param = (request.GET.get("sku") or "").strip()
-    if not sku_param:
-        return Response({"error": "sku is required"}, status=status.HTTP_400_BAD_REQUEST)
+    scope = _profit_scope(business, request)
+    if not scope:
+        return Response({"error": "sku or parent is required"}, status=status.HTTP_400_BAD_REQUEST)
     from collections import defaultdict
-    target = _sku_key(sku_param)
+    kind, name, skus, targets = scope
+    merged = kind == "parent"
+    head = {"kind": kind, "sku": name, "skus": skus}
     cost_setting = _cost_setting(business)
     pricing = _PriceResolver(business)
     date_from = request.GET.get("date_from", "")
     date_to = request.GET.get("date_to", "")
 
     if request.GET.get("months") in ("1", "true"):
-        rows = list(_sku_payment_rows(business, _profit_payments_qs(business, "", "", request), sku_param))
+        rows = list(_sku_payment_rows(business, _profit_payments_qs(business, "", "", request), skus))
         from django.db.models import Min
         placed = {o["sub_order_no"]: o["placed"] for o in
                   Order.objects.filter(business=business, sub_order_no__in={r.sub_order_no for r in rows})
@@ -2140,15 +2190,15 @@ def sku_profit(request, business_id):
                 by_month[m][r.sub_order_no].append(r)
         months = []
         for m in sorted(by_month):
-            row = _sku_profit_row(business, by_month[m], target, pricing, cost_setting)
+            row = _sku_profit_row(business, by_month[m], targets, pricing, cost_setting, merged)
             if row:
                 months.append({"month": m, "row": row})
-        return Response({"sku": sku_param, "months": months})
+        return Response({**head, "months": months})
 
     groups = defaultdict(list)
-    for r in _sku_payment_rows(business, _profit_payments_qs(business, date_from, date_to, request), sku_param):
+    for r in _sku_payment_rows(business, _profit_payments_qs(business, date_from, date_to, request), skus):
         groups[r.sub_order_no].append(r)
-    return Response({"sku": sku_param, "row": _sku_profit_row(business, groups, target, pricing, cost_setting)})
+    return Response({**head, "row": _sku_profit_row(business, groups, targets, pricing, cost_setting, merged)})
 
 
 @api_view(["GET"])

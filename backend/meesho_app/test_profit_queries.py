@@ -9,7 +9,7 @@ from rest_framework.test import APIClient
 
 from accounts.models import Business, Membership, User
 
-from .models import FinalPrice, Order, OrderPayment
+from .models import FinalPrice, Order, OrderPayment, ParentItemPrice
 
 
 class ProfitQueryCountTests(TestCase):
@@ -97,3 +97,37 @@ class SkuProfitTests(ProfitQueryCountTests):
     def test_a_sku_with_nothing_and_a_missing_param(self):
         self.assertEqual(self.get(f"{self.base}sku/", sku="nope")["row"], {})
         self.assertEqual(self.c.get(f"{self.base}sku/").status_code, 400)
+
+    def put_under_parent(self):
+        par = ParentItemPrice.objects.create(business=self.biz, item_id="Puja Set")
+        FinalPrice.objects.filter(business=self.biz).update(parent=par)
+
+    def test_a_parent_is_every_sku_under_it_merged(self):
+        self.put_under_parent()
+        fields = ("net_profit", "order_count", "delivered_count", "return_count", "rto_count", "delivered_profit",
+                  "return_loss", "rto_loss", "total_packaging_cost", "settled_amount", "delivered_quantity")
+        for rng in ({}, {"date_from": "2026-10-01", "date_to": "2026-10-31"}):
+            full = self.get(self.base, **rng)["sku_wise_profit"]
+            kids = [full[k] for k in ("lota", "Diya") if k in full]
+            got = self.get(f"{self.base}sku/", parent="puja set", **rng)
+            self.assertEqual((got["kind"], got["skus"]), ("parent", ["Diya", "lota"]))
+            row = got["row"]
+            for f in fields:
+                self.assertAlmostEqual(float(row[f]), sum(float(k.get(f, 0) or 0) for k in kids), 2, (rng, f))
+            self.assertEqual({c["sku_id"] for c in row["children"]}, {"lota", "Diya"})
+            self.assertEqual(sum(c["order_count"] for c in row["children"]), row["order_count"])
+            # Payments: every order of every SKU under it, each saying which.
+            pay = self.get(f"{self.base}sku-orders/", parent="Puja Set", **rng)["orders"]
+            self.assertEqual(len(pay), row["order_count"])
+            self.assertEqual({o["sku"] for o in pay}, {"lota", "Diya"})
+
+    def test_a_parents_history_is_one_call(self):
+        self.put_under_parent()
+        months = self.get(f"{self.base}sku/", parent="Puja Set", months=1)["months"]
+        self.assertEqual([m["month"] for m in months], ["2026-09", "2026-10", "2026-11"])
+        self.assertEqual(months[1]["row"]["order_count"], 6 + 2)             # October: 6 lota, 2 diya
+
+    def test_a_name_with_no_skus_under_it_is_taken_as_a_sku(self):
+        r = self.get(f"{self.base}sku/", parent="lota")
+        self.assertEqual(r["kind"], "sku")
+        self.assertEqual(r["row"]["order_count"], 6)
