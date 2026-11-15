@@ -24,15 +24,9 @@ NAV_CATALOG = [
     # Every order and its state (to accept, labels to download…) by dispatch day — can be given alone.
     {"path": "/orders-panel",      "label": "Orders Panel",      "group": "Meesho"},
     {"path": "/",                  "label": "Overview",          "group": "Analytics"},
-    {"path": "/combined-dashboard", "label": "Combined Dashboard", "group": "Analytics"},
     {"path": "/sku-analysis",      "label": "SKU Analysis",      "group": "Analytics"},
-    {"path": "/ads-analysis",      "label": "Ads Analysis",      "group": "Analytics"},
-    {"path": "/estimated-profit",  "label": "Estimated Profit",  "group": "Analytics"},
-    {"path": "/flipkart-profit",   "label": "Flipkart Profit",   "group": "Analytics"},
     {"path": "/daily-profit",      "label": "Daily Profit",      "group": "Analytics"},
     {"path": "/return-analysis",   "label": "Return Analysis",   "group": "Analytics"},
-    {"path": "/customer-insights", "label": "Customer Insights", "group": "Analytics"},
-    {"path": "/insights",          "label": "Business Insights", "group": "Analytics"},
 
     {"path": "/orders",            "label": "Orders",            "group": "Operations"},
     {"path": "/order-scan",        "label": "Order Scan",        "group": "Operations"},
@@ -48,7 +42,6 @@ NAV_CATALOG = [
     {"path": "/return-claim",      "label": "Raise Return Claim", "group": "Operations"},
     {"path": "/label-items",       "label": "Labels Downloaded", "group": "Operations"},
     {"path": "/claims",            "label": "Claim Sheet",       "group": "Operations"},
-    {"path": "/tasks",             "label": "Team Tasks",        "group": "Operations"},
     {"path": "/employees",         "label": "Employees",         "group": "Operations"},
 
     {"path": "/listing-hub",       "label": "Listing Hub",       "group": "Catalog"},
@@ -56,19 +49,14 @@ NAV_CATALOG = [
     {"path": "/master-pricing",    "label": "Master Pricing",    "group": "Catalog"},
     {"path": "/tax-check",         "label": "Tax Check",         "group": "Catalog"},
     {"path": "/gst",               "label": "GST",               "group": "Catalog"},
-    {"path": "/inventory",         "label": "Inventory",         "group": "Catalog"},
     {"path": "/inventory-labels",  "label": "Labels & Barcodes", "group": "Catalog"},
     {"path": "/meesho-inventory",  "label": "Meesho Stock",      "group": "Catalog"},
-    {"path": "/meesho-pricing",    "label": "Price Update",      "group": "Catalog"},
-    {"path": "/purchases",         "label": "Purchases",         "group": "Catalog"},
     {"path": "/expenses",          "label": "Expenses",          "group": "Catalog"},
 
     {"path": "/upload",            "label": "Upload Data",       "group": "Tools"},
-    {"path": "/product-photos",    "label": "AI Photos",         "group": "Tools"},
     {"path": "/quadrant-cropper",  "label": "Quadrant Cropper",  "group": "Tools"},
     {"path": "/extension",         "label": "Browser Extension", "group": "Tools"},
     {"path": "/bulk-listing",      "label": "Bulk Listing",      "group": "Tools"},
-    {"path": "/claim-video-tool",  "label": "Claim Video Tool",  "group": "Tools"},
     {"path": "/fraud",             "label": "Fraud Watch",       "group": "Tools"},
     {"path": "/business-profile",  "label": "Business Profile",  "group": "Tools"},
 
@@ -132,7 +120,7 @@ API_OWNERSHIP = {
     # a worker on Team Tasks or the standalone Claim Video Tool can look up a
     # sub-order's AWB/packet id without needing separate Returns & Claims
     # page access.
-    "returns/lookup/":       ["/tasks", "/returns", "/claim-video-tool"],
+    "returns/lookup/":       ["/returns"],
     # Read-only aggregate of the returns table; its own Analytics tab, but the
     # Returns & Claims screen legitimately shows the same numbers too.
     "returns/analysis/":     ["/return-analysis", "/returns"],
@@ -140,7 +128,7 @@ API_OWNERSHIP = {
     # The claim sheet writes back onto returns, so either screen may reach it.
     # Business Insights has its own "Upload claims sheet" button, so it may
     # post the same export too.
-    "claims/":               ["/claims", "/returns", "/insights"],
+    "claims/":               ["/claims", "/returns", "/upload"],
     # The tasks screen is the one thing a worker account needs; the API enforces
     # per-user scoping on top, so granting it exposes only their own tasks.
     "worker-tasks/":         ["/tasks"],
@@ -173,25 +161,25 @@ API_OWNERSHIP = {
     "gst/":                  ["/gst"],
     "expenses/":             ["/expenses"],
     "tax-check/":            ["/tax-check"],
-    "estimated-profit/":     ["/estimated-profit"],
-    "flipkart-profit/":      ["/flipkart-profit"],
-    "ads/":                  ["/ads-analysis", "/"],
-    "product-photos/":       ["/product-photos"],
+    "estimated-profit/":     ["/admin"],   # page removed: only an unrestricted account reaches it
+    "flipkart-profit/":      ["/upload", "/sku-analysis"],   # the settlement upload; SKU Analysis's Flipkart view
+    "ads/":                  ["/"],
+    "product-photos/":       ["/admin"],   # page removed: only an unrestricted account reaches it
 
     "fraud-customers/":      ["/fraud"],
     "blocked-customers/":    ["/fraud", "/labels"],
-    "customer-insights/":    ["/customer-insights"],
+    "customer-insights/":    ["/admin"],   # page removed: only an unrestricted account reaches it
     # Built from the same numbers as profit/, but it is its own screen.
-    "insights/":             ["/insights"],
+    "insights/":             ["/admin"],   # page removed: only an unrestricted account reaches it
     # Everything a listing manager needs for one product: photos, sheet
     # details, SKU ids and the price to list at.
     "listing-hub/":          ["/listing-hub"],
 
-    "purchases/":            ["/purchases"],
-    "consumables/":          ["/purchases", "/expenses"],
+    "purchases/":            ["/admin"],   # page removed: only an unrestricted account reaches it
+    "consumables/":          ["/expenses"],
 
     "inventory/labels/":     ["/inventory-labels"],
-    "inventory/":            ["/inventory", "/inventory-labels"],
+    "inventory/":            ["/inventory-labels"],
 
     # The parent-level stock sheet is driven from SKU Analysis, so it needs its
     # own (longer, therefore winning) rule — without it, whoever can see SKU
@@ -205,8 +193,8 @@ API_OWNERSHIP = {
     "parent-lookup/":        ["/quadrant-cropper", "/pricing", "/bulk-listing"],
     "meesho-inventory/stock-sheet/": ["/sku-analysis", "/pricing", "/meesho-inventory"],
     "meesho-inventory/":     ["/meesho-inventory"],
-    "meesho-price-update/":  ["/meesho-pricing", "/meesho-inventory"],
-    "meesho-price-tickets/": ["/meesho-pricing", "/pricing"],
+    "meesho-price-update/":  ["/meesho-inventory"],
+    "meesho-price-tickets/": ["/pricing"],
 
     # Pricing is shared: the Labels and Inventory screens both create and link
     # parent SKUs, and SKU Analysis reads the same rows.

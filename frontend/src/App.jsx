@@ -10,61 +10,66 @@ import { Routes, Route, NavLink, useLocation, Navigate, useNavigate } from 'reac
 // "Cannot access 'C' before initialization" (TDZ) crash in the production build.
 import { API, fmt, C, CHART_COLORS, STATUS_COLORS, S, useIsMobile, useIsTablet } from './shared';
 
+// Every page is its own download, fetched the first time it's opened — the app
+// no longer downloads and parses all ~40 pages before showing the first one.
+// A page whose file can't be fetched (a deploy replaced it while the tab was
+// open) reloads the app once to pick up the new build instead of a blank screen.
+function lazyPage(load, name) {
+  return React.lazy(() => load()
+    .then((m) => {
+      try { sessionStorage.removeItem('page-reload'); } catch { /* storage blocked */ }
+      return { default: name ? m[name] : m.default };
+    })
+    .catch((e) => {
+      let tried = false;
+      try { tried = sessionStorage.getItem('page-reload') === '1'; sessionStorage.setItem('page-reload', '1'); } catch { /* storage blocked */ }
+      if (!tried) window.location.reload();
+      throw e;
+    }));
+}
+
 // ── Tab components ─────────────────────────────────────────────────────────────
-import { OverviewTab } from './Components/Tabs/OverviewTab';
-import { CombinedDashboardTab } from './Components/Tabs/CombinedDashboardTab';
-import { UnsettledOrdersTab } from './Components/Tabs/UnsettledOrdersTab';
-import { OrdersTab } from './Components/Tabs/OrdersTab';
-import { PaymentsTab } from './Components/Tabs/PaymentsTab';
-import { UnscheduledPaymentTab } from './Components/Tabs/UnscheduledPaymentTab';
-import { ExpensesTab } from './Components/Tabs/ExpensesTab';
-import { EmployeesTab } from './Components/Tabs/EmployeesTab';
-import { PricingTab } from './Components/Tabs/PricingTab';
-import { ListingHubTab } from './Components/Tabs/ListingHubTab';
-import { MasterPricingTab } from './Components/Tabs/MasterPricingTab';
-import { TaxCheckTab } from './Components/Tabs/TaxCheckTab';
-import { UploadTab } from './Components/Tabs/UploadTab';
-import { SKUAnalysisTab } from './Components/Tabs/SKUProfitTab';
-import { EstimatedProfitTab } from './Components/Tabs/EstimatedProfitTab';
-import { FlipkartProfitTab } from './Components/Tabs/FlipkartProfitTab';
-import { DailyProfitTab } from './Components/Tabs/DailyProfitTab';
-import { InsightsTab } from './Components/Tabs/InsightsTab';
-import { ReturnAnalysisTab } from './Components/Tabs/ReturnAnalysisTab';
-import { LabelsTab } from './Components/Tabs/LabelsTab';
-import { BulkLabelsTab } from './Components/Tabs/BulkLabelsTab';
-import { PurchasesTab } from './Components/Tabs/PurchasesTab';
-import { InventoryTab } from './Components/Tabs/InventoryTab';
-import { InventoryLabelsTab } from './Components/Tabs/InventoryLabelsTab';
-import { AdsAnalysisTab } from './Components/Tabs/AdsAnalysisTab';
-import { MeeshoStockTab } from './Components/Tabs/MeeshoStockTab';
-import { FraudCustomersTab } from './Components/Tabs/FraudCustomersTab';
-import { ProductPhotosTab } from './Components/Tabs/ProductPhotosTab';
-import { QuadrantCropperTab } from './Components/Tabs/QuadrantCropperTab';
-import { MismatchTab } from './Components/Tabs/MismatchTab';
-import { MeeshoInventoryTab } from './Components/Tabs/MeeshoInventoryTab';
-import { MeeshoPricingTab } from './Components/Tabs/MeeshoPricingTab';
-import { ReturnScanTab } from './Components/Tabs/ReturnScanTab';
-import { OrderScanTab } from './Components/Tabs/OrderScanTab';
-import { ReturnDeskTab } from './Components/Tabs/ReturnDeskTab';
-import { MeeshoHubTab, MeeshoLegacyRedirect } from './Components/Tabs/MeeshoHubTab';
-import { MeeshoLinkingPage } from './Components/Tabs/MeeshoLinkingTab';
-import { ReturnClaimTab } from './Components/Tabs/ReturnClaimTab';
-import { LabelsDownloadedTab } from './Components/Tabs/LabelsDownloadedTab';
-import { OrdersPanelTab } from './Components/Tabs/OrdersPanelTab';
-import { FlipkartSellerTab } from './Components/Tabs/FlipkartSellerTab';
-import { ScanLookupTab } from './Components/Tabs/ScanLookupTab';
-import { ExtensionTab } from './Components/Tabs/ExtensionTab';
-import { BulkListingTab } from './Components/Tabs/BulkListingTab';
-import { ClaimSheetTab } from './Components/Tabs/ClaimSheetTab';
-import { TeamTasksTab } from './Components/Tabs/TeamTasksTab';
-import { ClaimVideoToolTab } from './Components/Tabs/ClaimVideoToolTab';
-import { CustomerInsightsTab } from './Components/Tabs/CustomerInsightsTab';
-import { GstTab } from './Components/Tabs/GstTab';
+const OverviewTab = lazyPage(() => import('./Components/Tabs/OverviewTab'), 'OverviewTab');
+const UnsettledOrdersTab = lazyPage(() => import('./Components/Tabs/UnsettledOrdersTab'), 'UnsettledOrdersTab');
+const OrdersTab = lazyPage(() => import('./Components/Tabs/OrdersTab'), 'OrdersTab');
+const PaymentsTab = lazyPage(() => import('./Components/Tabs/PaymentsTab'), 'PaymentsTab');
+const UnscheduledPaymentTab = lazyPage(() => import('./Components/Tabs/UnscheduledPaymentTab'), 'UnscheduledPaymentTab');
+const ExpensesTab = lazyPage(() => import('./Components/Tabs/ExpensesTab'), 'ExpensesTab');
+const EmployeesTab = lazyPage(() => import('./Components/Tabs/EmployeesTab'), 'EmployeesTab');
+const PricingTab = lazyPage(() => import('./Components/Tabs/PricingTab'), 'PricingTab');
+const ListingHubTab = lazyPage(() => import('./Components/Tabs/ListingHubTab'), 'ListingHubTab');
+const MasterPricingTab = lazyPage(() => import('./Components/Tabs/MasterPricingTab'), 'MasterPricingTab');
+const TaxCheckTab = lazyPage(() => import('./Components/Tabs/TaxCheckTab'), 'TaxCheckTab');
+const UploadTab = lazyPage(() => import('./Components/Tabs/UploadTab'), 'UploadTab');
+const SKUAnalysisTab = lazyPage(() => import('./Components/Tabs/SKUProfitTab'), 'SKUAnalysisTab');
+const DailyProfitTab = lazyPage(() => import('./Components/Tabs/DailyProfitTab'), 'DailyProfitTab');
+const ReturnAnalysisTab = lazyPage(() => import('./Components/Tabs/ReturnAnalysisTab'), 'ReturnAnalysisTab');
+const BulkLabelsTab = lazyPage(() => import('./Components/Tabs/BulkLabelsTab'), 'BulkLabelsTab');
+const InventoryLabelsTab = lazyPage(() => import('./Components/Tabs/InventoryLabelsTab'), 'InventoryLabelsTab');
+const FraudCustomersTab = lazyPage(() => import('./Components/Tabs/FraudCustomersTab'), 'FraudCustomersTab');
+const QuadrantCropperTab = lazyPage(() => import('./Components/Tabs/QuadrantCropperTab'), 'QuadrantCropperTab');
+const MismatchTab = lazyPage(() => import('./Components/Tabs/MismatchTab'), 'MismatchTab');
+const MeeshoInventoryTab = lazyPage(() => import('./Components/Tabs/MeeshoInventoryTab'), 'MeeshoInventoryTab');
+const ReturnScanTab = lazyPage(() => import('./Components/Tabs/ReturnScanTab'), 'ReturnScanTab');
+const OrderScanTab = lazyPage(() => import('./Components/Tabs/OrderScanTab'), 'OrderScanTab');
+const ReturnDeskTab = lazyPage(() => import('./Components/Tabs/ReturnDeskTab'), 'ReturnDeskTab');
+const MeeshoHubTab = lazyPage(() => import('./Components/Tabs/MeeshoHubTab'), 'MeeshoHubTab');
+const MeeshoLegacyRedirect = lazyPage(() => import('./Components/Tabs/MeeshoHubTab'), 'MeeshoLegacyRedirect');
+const MeeshoLinkingPage = lazyPage(() => import('./Components/Tabs/MeeshoLinkingTab'), 'MeeshoLinkingPage');
+const ReturnClaimTab = lazyPage(() => import('./Components/Tabs/ReturnClaimTab'), 'ReturnClaimTab');
+const LabelsDownloadedTab = lazyPage(() => import('./Components/Tabs/LabelsDownloadedTab'), 'LabelsDownloadedTab');
+const OrdersPanelTab = lazyPage(() => import('./Components/Tabs/OrdersPanelTab'), 'OrdersPanelTab');
+const FlipkartSellerTab = lazyPage(() => import('./Components/Tabs/FlipkartSellerTab'), 'FlipkartSellerTab');
+const ScanLookupTab = lazyPage(() => import('./Components/Tabs/ScanLookupTab'), 'ScanLookupTab');
+const ExtensionTab = lazyPage(() => import('./Components/Tabs/ExtensionTab'), 'ExtensionTab');
+const BulkListingTab = lazyPage(() => import('./Components/Tabs/BulkListingTab'), 'BulkListingTab');
+const ClaimSheetTab = lazyPage(() => import('./Components/Tabs/ClaimSheetTab'), 'ClaimSheetTab');
+const GstTab = lazyPage(() => import('./Components/Tabs/GstTab'), 'GstTab');
 import { SKU_PAGE_SIZE as skuPageSize } from './lib/helper';
 import TableData from './Components/Table/TableData';
 import LoginPage from './Components/Login/LoginPage';
 import LandingPage from './Components/Landing/LandingPage';
-import BusinessProfilePage from './Components/BusinessProfile/BusinessProfilePage';
+const BusinessProfilePage = lazyPage(() => import('./Components/BusinessProfile/BusinessProfilePage'));
 import BusinessSwitcher from './Components/BusinessSwitcher';
 import CombinedViewToggle from './Components/CombinedViewToggle';
 import CombinedViewBanner from './Components/CombinedViewBanner';
@@ -74,7 +79,7 @@ import { DateFilterProvider } from './contexts/DateFilterContext';
 import { useSettlementMode } from './contexts/SettlementModeContext';
 import { GlobalDateFilterBar } from './Components/shared/GlobalDateFilterBar';
 import ChangePasswordModal from './Components/ChangePasswordModal';
-import AdminPanel from './Components/Admin/AdminPanel';
+const AdminPanel = lazyPage(() => import('./Components/Admin/AdminPanel'));
 import ErrorBoundary from './Components/shared/ErrorBoundary';
 import { NAV_GROUPS, ALL_NAV, itemVisible } from './navConfig';
 import { useAccess } from './contexts/AccessContext';
@@ -684,7 +689,7 @@ function Sidebar({ collapsed, setCollapsed, compact, mobileOpen, closeMobile }) 
     setGroupState((s) => ({ ...s, [label]: s[label] === false ? true : false }));
 
   const navGroups = NAV_GROUPS.filter((g) => !g.adminOnly || isSuperAdmin)
-    .map((g) => ({ ...g, items: g.items.filter((item) => itemVisible(item, isPathVisible)) }))
+    .map((g) => ({ ...g, items: g.items.filter((item) => !item.hidden && itemVisible(item, isPathVisible)) }))
     .filter((g) => g.items.length > 0);
 
   // Search matches a group's own name (e.g. "Operations") as well as any of
@@ -1241,9 +1246,9 @@ function AppShell() {
           <CombinedViewBanner />
           <ErrorBoundary resetKey={loc.pathname} label={loc.pathname}>
             <RouteGuard>
+              <React.Suspense fallback={<PageLoading />}>
               <Routes>
                 <Route path="/" element={<OverviewTab />} />
-                <Route path="/combined-dashboard" element={<CombinedDashboardTab />} />
                 <Route path="/orders" element={<OrdersTab />} />
                 <Route path="/order-scan" element={<OrderScanTab />} />
                 <Route path="/return-scan" element={<ReturnDeskTab />} />
@@ -1267,41 +1272,30 @@ function AppShell() {
                 <Route path="/unscheduled" element={<UnscheduledPaymentTab />} />
                 <Route path="/mismatch" element={<MismatchTab />} />
                 <Route path="/sku-analysis" element={<SKUAnalysisTab />} />
-                <Route path="/ads-analysis" element={<AdsAnalysisTab />} />
-                <Route path="/estimated-profit" element={<EstimatedProfitTab />} />
-                <Route path="/flipkart-profit" element={<FlipkartProfitTab />} />
                 <Route path="/daily-profit" element={<DailyProfitTab />} />
-                <Route path="/insights" element={<InsightsTab />} />
                 <Route path="/return-analysis" element={<ReturnAnalysisTab />} />
-                <Route path="/customer-insights" element={<CustomerInsightsTab />} />
                 <Route path="/listing-hub" element={<ListingHubTab />} />
                 <Route path="/pricing" element={<PricingTab />} />
                 <Route path="/master-pricing" element={<MasterPricingTab />} />
                 <Route path="/tax-check" element={<TaxCheckTab />} />
                 <Route path="/gst" element={<GstTab />} />
                 <Route path="/upload" element={<UploadTab />} />
-                {/* <Route path="/labels" element={<LabelsTab />} /> */}
                 <Route path="/bulk-labels" element={<BulkLabelsTab />} />
                 <Route path="/returns" element={<ReturnScanTab />} />
                 <Route path="/claims" element={<ClaimSheetTab />} />
-                <Route path="/tasks" element={<TeamTasksTab />} />
                 <Route path="/employees" element={<EmployeesTab />} />
-                <Route path="/purchases" element={<PurchasesTab />} />
                 <Route path="/expenses" element={<ExpensesTab />} />
-                <Route path="/inventory" element={<InventoryTab />} />
                 <Route path="/inventory-labels" element={<InventoryLabelsTab />} />
                 <Route path="/meesho-inventory" element={<MeeshoInventoryTab />} />
-                <Route path="/meesho-pricing" element={<MeeshoPricingTab />} />
                 <Route path="/fraud" element={<FraudCustomersTab />} />
-                <Route path="/product-photos" element={<ProductPhotosTab />} />
                 <Route path="/quadrant-cropper" element={<QuadrantCropperTab />} />
                 <Route path="/extension" element={<ExtensionTab />} />
                 <Route path="/bulk-listing" element={<BulkListingTab />} />
-                <Route path="/claim-video-tool" element={<ClaimVideoToolTab />} />
                 <Route path="/business-profile" element={<BusinessProfilePage />} />
                 <Route path="/admin" element={<AdminPanel />} />
                 <Route path="*" element={<Navigate to="/" replace />} />
               </Routes>
+              </React.Suspense>
             </RouteGuard>
           </ErrorBoundary>
         </div>
@@ -1345,6 +1339,18 @@ function RouteGuard({ children }) {
   }
 
   return children;
+}
+
+// While a page's code is on its way: a thin bar, not a blank screen.
+function PageLoading() {
+  return (
+    <div style={{ padding: '60px 0', display: 'flex', justifyContent: 'center' }}>
+      <div style={{ width: 160, height: 4, borderRadius: 99, background: C.gray100, overflow: 'hidden' }}>
+        <div style={{ width: '40%', height: '100%', background: C.orange, borderRadius: 99, animation: 'page-load 0.9s ease-in-out infinite' }} />
+      </div>
+      <style>{'@keyframes page-load{0%{transform:translateX(-100%)}100%{transform:translateX(250%)}}'}</style>
+    </div>
+  );
 }
 
 function LoadingScreen() {

@@ -593,7 +593,7 @@ const PRESETS = [
   { label: "Everything", paths: () => ALL_NAV_PATHS },
   { label: "Labels only", paths: () => ["/labels"] },
   { label: "Labels + packing", paths: () => ["/labels", "/inventory-labels"] },
-  { label: "Analytics only", paths: () => ["/", "/sku-analysis", "/ads-analysis", "/estimated-profit"] },
+  { label: "Analytics only", paths: () => ["/", "/sku-analysis", "/daily-profit", "/return-analysis"] },
   { label: "Uploads only", paths: () => ["/upload"] },
 ];
 

@@ -1,11 +1,11 @@
 import React from "react";
-import { useLocation, useNavigate } from "react-router-dom";
+import { useLocation } from "react-router-dom";
 import { C } from "../App";
 import { useCombinedView } from "../contexts/CombinedViewContext";
 
 // Pages that merge their own data when Combined is on (see lib/combinedMerge.js)
 // and so show their own "combined" indicator instead of this generic banner.
-const MERGE_AWARE_PATHS = ["/combined-dashboard", "/", "/sku-analysis", "/daily-profit", "/orders-panel"];
+const MERGE_AWARE_PATHS = ["/", "/sku-analysis", "/daily-profit", "/orders-panel"];
 
 /**
  * Shown on every screen that *isn't* merge-aware yet while the global
@@ -19,7 +19,6 @@ const MERGE_AWARE_PATHS = ["/combined-dashboard", "/", "/sku-analysis", "/daily-
 export default function CombinedViewBanner() {
   const { active, selected } = useCombinedView();
   const location = useLocation();
-  const navigate = useNavigate();
 
   if (!active || MERGE_AWARE_PATHS.includes(location.pathname)) return null;
 
@@ -35,17 +34,8 @@ export default function CombinedViewBanner() {
       <span>🧩</span>
       <span>
         Combined view is on ({selected.size} businesses) — this screen still shows only the active business.
-        Merged Profit, Orders, Payments and SKUs live on Combined Dashboard.
+        Overview, SKU Analysis, Daily Profit and Orders Panel show them merged.
       </span>
-      <button
-        onClick={() => navigate("/combined-dashboard")}
-        style={{
-          marginLeft: "auto", background: "none", border: "none", color: C.orange,
-          fontWeight: 700, cursor: "pointer", fontSize: 12.5, fontFamily: "inherit", whiteSpace: "nowrap",
-        }}
-      >
-        Open it →
-      </button>
     </div>
   );
 }

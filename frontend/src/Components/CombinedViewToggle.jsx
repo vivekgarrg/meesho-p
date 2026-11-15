@@ -1,5 +1,4 @@
 import React, { useEffect, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
 import { C } from "../App";
 import { useBusiness } from "../contexts/BusinessContext";
 import { useCombinedView } from "../contexts/CombinedViewContext";
@@ -20,7 +19,6 @@ export default function CombinedViewToggle() {
   const { enabled, setEnabled, selected, toggleBusiness, setSelected, active } = useCombinedView();
   const [open, setOpen] = useState(false);
   const ref = useRef(null);
-  const navigate = useNavigate();
 
   useEffect(() => {
     if (!open) return undefined;
@@ -95,17 +93,6 @@ export default function CombinedViewToggle() {
             onSelectNone={() => setSelected(new Set())}
           />
 
-          <button
-            onClick={() => { setOpen(false); navigate("/combined-dashboard"); }}
-            disabled={!active}
-            style={{
-              marginTop: 10, width: "100%", padding: "8px 0", borderRadius: 10, border: "none",
-              background: active ? C.orange : C.gray100, color: active ? "#fff" : C.gray400,
-              fontWeight: 700, fontSize: 12.5, cursor: active ? "pointer" : "default", fontFamily: "inherit",
-            }}
-          >
-            Open Combined Dashboard →
-          </button>
         </div>
       )}
     </div>

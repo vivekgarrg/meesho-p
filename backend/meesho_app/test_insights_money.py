@@ -101,7 +101,7 @@ class ClaimsTests(Base):
 
     def test_insights_page_may_upload_the_claims_sheet(self):
         from accounts.nav import API_OWNERSHIP
-        self.assertIn("/insights", API_OWNERSHIP["claims/"])
+        self.assertIn("/upload", API_OWNERSHIP["claims/"])
 
 
 class PaymentCheckTests(Base):

@@ -62,7 +62,7 @@ export function AccessProvider({ children }) {
 
     // Where to send someone who lands on a page they can't see. Falls back to
     // the first area they *can* see, in sidebar order.
-    const visiblePathsInOrder = ALL_ITEMS.filter((i) => itemVisible(i, isPathVisible)).map((i) => i.path);
+    const visiblePathsInOrder = ALL_ITEMS.filter((i) => !i.hidden && itemVisible(i, isPathVisible)).map((i) => i.path);
     const landingPath = visiblePathsInOrder[0] ?? null;
 
     return {
