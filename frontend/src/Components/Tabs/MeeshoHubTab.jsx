@@ -185,6 +185,7 @@ export function MeeshoHubTab({ forceSection, forceStatus } = {}) {
   // Sections that moved: their old addresses land where they are now.
   if (!embedded && (tab === "overview" || tab === "linking")) return <Navigate to={meeshoPath(tab)} replace />;
   if (!embedded && tab === "orders") return <Navigate to={meeshoPath(status.key)} replace />;
+  if (!embedded && tab === "return-analysis") return <Navigate to="/return-analysis" replace />;
   if (!overview) return <div style={{ display: "flex", justifyContent: "center", padding: 80 }}><CircularProgress style={{ color: C.orange }} /></div>;
 
   return (

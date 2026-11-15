@@ -1,4 +1,9 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { TabbedPage } from "../shared/SubTabs";
+import { useAccess } from "../../contexts/AccessContext";
+import { PLATFORMS } from "../PlatformToggle";
+// Loaded only when its tab opens.
+const FlipkartLiveOrders = React.lazy(() => import("./FlipkartSellerTab").then((m) => ({ default: m.FlipkartLiveOrders })));
 import { API, C, S, btn, Tag } from "../../App";
 import { CircularProgress } from "@mui/material";
 import { Panel, BarList, StatusDot, ago, at, dayLabel, num } from "./MeeshoUI";
@@ -333,7 +338,7 @@ function StackBar({ day, max }) {
   );
 }
 
-export function OrdersPanelTab() {
+function MeeshoOrdersPanel() {
   const [rootRef, layout] = useLayout();
   const phone = layout === "phone";
   const [d, setD] = useState(null);
@@ -630,5 +635,17 @@ export function OrdersPanelTab() {
         </div>
       </Panel>
     </div>
+  );
+}
+
+// Every marketplace's orders on one desk: Meesho (the default) and Flipkart
+// (?platform=flipkart — the same address the other pages use), each a tab.
+export function OrdersPanelTab() {
+  const { isPathVisible } = useAccess();
+  return (
+    <TabbedPage param="platform" tabs={[
+      { key: "meesho", label: "Meesho", Component: MeeshoOrdersPanel, color: PLATFORMS.meesho.color },
+      { key: "flipkart", label: "Flipkart", Component: FlipkartLiveOrders, color: PLATFORMS.flipkart.color, hidden: !isPathVisible("/flipkart-seller") },
+    ]} />
   );
 }

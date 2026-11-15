@@ -602,4 +602,4 @@ const MeeshoPaymentsSections = () => (
   ]} />
 );
 
-export const PaymentsTab = withPlatformSplit(MeeshoPaymentsSections, FlipkartPaymentsPanel);
+export const PaymentsTab = withPlatformSplit(MeeshoPaymentsSections, FlipkartPaymentsPanel, { tabbed: true });

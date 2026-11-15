@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import { API, C, S, fmt } from '../../shared';
 import { useDateFilter } from '../../contexts/DateFilterContext';
 import { PlatformToggle, PLATFORMS } from '../PlatformToggle';
+import { HeaderSlot } from '../shared/SubTabs';
 
 /*
  * Pieces shared by every Flipkart panel (Overview, SKU Analysis, Payments,
@@ -35,14 +36,18 @@ export function usePlatformParam() {
 }
 
 /** A tab that shows the Meesho view by default and the Flipkart view under ?platform=flipkart. */
-export function withPlatformSplit(MeeshoView, FlipkartView) {
+// opts.tabbed: the Meesho view is a TabbedPage, which shows the switch at the
+// right of its tabs (one row, not two).
+export function withPlatformSplit(MeeshoView, FlipkartView, opts = {}) {
   return function PlatformSplit() {
     const [platform, setPlatform] = usePlatformParam();
+    const toggle = <PlatformToggle platform={platform} onChange={setPlatform} />;
+    if (platform !== 'flipkart' && opts.tabbed) {
+      return <HeaderSlot.Provider value={toggle}><MeeshoView /></HeaderSlot.Provider>;
+    }
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-        <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-          <PlatformToggle platform={platform} onChange={setPlatform} />
-        </div>
+        <div style={{ display: 'flex', justifyContent: 'flex-end' }}>{toggle}</div>
         {platform === 'flipkart' ? <FlipkartView /> : <MeeshoView />}
       </div>
     );

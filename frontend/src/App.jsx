@@ -52,7 +52,6 @@ const OrderScanTab = lazyPage(() => import('./Components/Tabs/OrderScanTab'), 'O
 const ReturnDeskTab = lazyPage(() => import('./Components/Tabs/ReturnDeskTab'), 'ReturnDeskTab');
 const MeeshoHubTab = lazyPage(() => import('./Components/Tabs/MeeshoHubTab'), 'MeeshoHubTab');
 const MeeshoLegacyRedirect = lazyPage(() => import('./Components/Tabs/MeeshoHubTab'), 'MeeshoLegacyRedirect');
-const MeeshoLinkingPage = lazyPage(() => import('./Components/Tabs/MeeshoLinkingTab'), 'MeeshoLinkingPage');
 const ReturnClaimTab = lazyPage(() => import('./Components/Tabs/ReturnClaimTab'), 'ReturnClaimTab');
 const LabelsDownloadedTab = lazyPage(() => import('./Components/Tabs/LabelsDownloadedTab'), 'LabelsDownloadedTab');
 const OrdersPanelTab = lazyPage(() => import('./Components/Tabs/OrdersPanelTab'), 'OrdersPanelTab');
@@ -1154,6 +1153,7 @@ function AppShell() {
   const liveView = sp.get('platform') !== 'flipkart' && (
     (loc.pathname === '/' && sp.get('section') === 'panel')
     || (loc.pathname === '/orders' && (sp.get('section') || 'live') === 'live')
+    || (loc.pathname === '/return-analysis' && (sp.get('section') || 'act') === 'act')
   );
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem('sidebar_collapsed') === 'true');
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -1260,8 +1260,8 @@ function AppShell() {
                 <Route path="/flipkart-seller" element={<FlipkartSellerTab />} />
                 {/* Sync and Inventory are tabs of Meesho Orders now; old links land on the right tab. */}
                 {/* Meesho: one page per section, each in the sidebar's Meesho group. */}
-                <Route path="/meesho-linking" element={<MeeshoLinkingPage />} />
-                <Route path="/meesho/linking" element={<Navigate to="/meesho-linking" replace />} />
+                <Route path="/meesho-linking" element={<Navigate to="/order-scan" replace />} />
+                <Route path="/meesho/linking" element={<Navigate to="/order-scan" replace />} />
                 <Route path="/meesho" element={<MeeshoHubTab />} />
                 <Route path="/meesho/:section" element={<MeeshoHubTab />} />
                 <Route path="/meesho/:section/:status" element={<MeeshoHubTab />} />

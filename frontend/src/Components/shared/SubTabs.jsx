@@ -1,4 +1,4 @@
-import React from "react";
+import React, { createContext, useContext } from "react";
 import { useSearchParams } from "react-router-dom";
 import { C } from "../../shared";
 
@@ -7,6 +7,10 @@ import { C } from "../../shared";
  * bookmarked and survives a reload. The first tab is the default and leaves the
  * URL clean. Only the open tab is rendered, so only its data is fetched.
  */
+
+// A page's marketplace switch (withPlatformSplit), handed down so the first row of
+// sub-tabs can carry it at its right end instead of on a row of its own.
+export const HeaderSlot = createContext(null);
 
 export function useTabParam(param, keys) {
   const [params, setParams] = useSearchParams();
@@ -81,7 +85,9 @@ export function SubTabs({ tabs, value, onChange, right, style }) {
 }
 
 /** A page made of sub-tabs: the bar, then the open tab's own component. */
-export function TabbedPage({ param = "section", tabs, right, header }) {
+export function TabbedPage({ param = "section", tabs, right: ownRight, header }) {
+  const slot = useContext(HeaderSlot);
+  const right = ownRight || slot;
   const visible = tabs.filter((t) => !t.hidden);
   const [value, setValue] = useTabParam(param, visible.map((t) => t.key));
   const current = visible.find((t) => t.key === value);
@@ -90,7 +96,10 @@ export function TabbedPage({ param = "section", tabs, right, header }) {
       {header}
       {(visible.length > 1 || right) && <SubTabs tabs={visible} value={value} onChange={setValue} right={right} />}
       <React.Suspense fallback={<TabLoading />}>
-        {current && <current.Component key={current.key} />}
+        {/* Taken: tabs further down don't carry it again. */}
+        <HeaderSlot.Provider value={null}>
+          {current && <current.Component key={current.key} />}
+        </HeaderSlot.Provider>
       </React.Suspense>
     </div>
   );

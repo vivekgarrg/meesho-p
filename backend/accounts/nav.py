@@ -20,7 +20,7 @@ NAV_CATALOG = [
     {"path": "/meesho-orders",     "label": "Meesho (every page in this group)", "group": "Meesho"},
     {"path": "/flipkart-seller",   "label": "Flipkart Seller Hub", "group": "Flipkart"},
     # Order linking alone, for a packing-desk person who needs nothing else of Meesho.
-    {"path": "/meesho-linking",    "label": "Order Linking",     "group": "Meesho"},
+    {"path": "/meesho-linking",    "label": "Order Scan (Meesho linking)", "group": "Meesho"},
     # Every order and its state (to accept, labels to download…) by dispatch day — can be given alone.
     {"path": "/orders-panel",      "label": "Orders Panel",      "group": "Meesho"},
     {"path": "/",                  "label": "Overview",          "group": "Analytics"},
@@ -136,14 +136,14 @@ API_OWNERSHIP = {
     "products/":             ["/tasks"],
     "legacy-listings/":      ["/tasks"],
     "return-claim-batches/": ["/tasks"],
-    "order-scan/":           ["/order-scan"],
+    "order-scan/":           ["/order-scan", "/meesho-linking", "/meesho-orders"],   # Order Scan holds Meesho linking now
     # The returns desk works off the Returns & Claims sheets, so either tab opens it.
     "return-scan/":          ["/return-scan", "/returns"],
     # The lookup tab scans a code and reads the listing behind it.
-    "order-scan/lookup/":    ["/scan-lookup", "/order-scan"],
-    "order-scan/meesho-search/": ["/scan-lookup", "/order-scan"],
+    "order-scan/lookup/":    ["/scan-lookup", "/order-scan", "/meesho-linking", "/meesho-orders"],
+    "order-scan/meesho-search/": ["/scan-lookup", "/order-scan", "/meesho-linking", "/meesho-orders"],
     # The Overview dashboard shows the "orders not sent" alert too.
-    "order-scan/alerts/":    ["/order-scan", "/"],
+    "order-scan/alerts/":    ["/order-scan", "/", "/meesho-linking", "/meesho-orders"],
     # Overview carries a "salary due" reminder, so it needs this one sub-path —
     # more specific than "employees/" below, so it wins on longest-prefix-first.
     "employees/salary-due/": ["/employees", "/"],

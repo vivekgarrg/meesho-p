@@ -3015,4 +3015,4 @@ function MeeshoOverviewSections() {
   );
 }
 
-export const OverviewTab = withPlatformSplit(MeeshoOverviewSections, FlipkartOverviewView);
+export const OverviewTab = withPlatformSplit(MeeshoOverviewSections, FlipkartOverviewView, { tabbed: true });

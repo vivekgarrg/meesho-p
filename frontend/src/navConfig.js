@@ -20,13 +20,7 @@ export const NAV_GROUPS = [
     label: 'Meesho',
     color: '#F43397',
     items: [
-      // Its own permission, so it can be given alone; the whole-Meesho permission shows it too.
-      { path: '/meesho-linking', label: 'Order Linking', icon: '🔗', alsoBy: MEESHO },
-      // Every order and its state by dispatch day — its own permission too, like Order Linking.
-      { path: '/orders-panel', label: 'Orders Panel', icon: '🗂', alsoBy: MEESHO },
       { path: '/meesho/returns', label: 'Meesho Returns', icon: '↩', access: MEESHO, accessLabel: 'Meesho (every page in this group)' },
-      // Return rate by parent SKU / SKU / flag / reason from Meesho's own returns data, and how to stop the loss.
-      { path: '/meesho/return-analysis', label: 'Return Analysis (Meesho)', icon: '📉', access: MEESHO },
       { path: '/meesho/otps', label: 'Delivery OTPs', icon: '🔑', access: MEESHO },
       { path: '/meesho/inventory', label: 'Meesho Inventory', icon: '▤', access: MEESHO },
       { path: '/meesho/payments', label: 'Meesho Payments', icon: '₹', access: MEESHO },
@@ -50,7 +44,8 @@ export const NAV_GROUPS = [
       { path: '/', label: 'Overview', icon: '◈', end: true, alsoBy: MEESHO },
       { path: '/sku-analysis', label: 'SKU Analysis', icon: '↗' },
       { path: '/daily-profit', label: 'Daily Profit', icon: '📅' },
-      { path: '/return-analysis', label: 'Return Analysis', icon: '⤺' },
+      // Act now (Meesho's live return rates, pause) and Losses, reasons & trends — it was two pages.
+      { path: '/return-analysis', label: 'Return Analysis', icon: '⤺', alsoBy: MEESHO },
     ],
   },
   {
@@ -59,7 +54,11 @@ export const NAV_GROUPS = [
     items: [
       // Meesho tab: live on the panel (it was Meesho Orders) and every order uploaded.
       { path: '/orders', label: 'Orders', icon: '⊡', alsoBy: MEESHO },
-      { path: '/order-scan', label: 'Order Scan', icon: '⌗' },
+      // Every order and its state by dispatch day, Meesho and Flipkart as tabs — its own permission too.
+      { path: '/orders-panel', label: 'Orders Panel', icon: '🗂', alsoBy: MEESHO },
+      // Meesho scan (linking on Meesho, by default) and Flipkart scan. Order Linking was its own page:
+      // whoever could open it, or the whole Meesho group, sees this.
+      { path: '/order-scan', label: 'Order Scan', icon: '⌗', alsoBy: ['/meesho-linking', MEESHO] },
       { path: '/scan-lookup', label: 'Listing Lookup', icon: '🔎' },
       { path: '/payments', label: 'Payments', icon: '◎' },
       // '/labels' (single-file Labels) is intentionally not listed here — the
@@ -116,7 +115,7 @@ export const accessOf = (item) => item.access || item.path;
 
 /** Whether an item shows, given isPathVisible(permission). */
 export const itemVisible = (item, isPathVisible) =>
-  isPathVisible(accessOf(item)) || (!!item.alsoBy && isPathVisible(item.alsoBy));
+  isPathVisible(accessOf(item)) || [].concat(item.alsoBy || []).some((p) => isPathVisible(p));
 
 /** The distinct permissions, in sidebar order — what an access rule can grant. */
 export const ALL_PERMISSIONS = [...new Set(ALL_NAV.map(accessOf))];

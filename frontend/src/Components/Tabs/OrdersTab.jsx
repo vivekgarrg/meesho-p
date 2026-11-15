@@ -533,4 +533,4 @@ function MeeshoOrdersHub() {
   );
 }
 
-export const OrdersTab = withPlatformSplit(MeeshoOrdersHub, FlipkartOrdersPanel);
+export const OrdersTab = withPlatformSplit(MeeshoOrdersHub, FlipkartOrdersPanel, { tabbed: true });

@@ -540,6 +540,47 @@ function AccountCard({ d, isAdmin, mobile, onState }) {
   );
 }
 
+/**
+ * Flipkart's side of Orders Panel: what's to accept, pack and dispatch on every
+ * connected Seller Hub, as last read, with the same actions as on Seller Hub —
+ * logins and payments stay on that page.
+ */
+export function FlipkartLiveOrders() {
+  const mobile = useIsMobile();
+  const [d, setD] = useState(null);
+  const [err, setErr] = useState(null);
+  const load = useCallback(async () => {
+    const r = await call("");
+    if (r.ok && Array.isArray(r.data.accounts)) { setD(r.data); setErr(null); }
+    else setErr(r.data.error || r.data.detail || "Couldn't read Flipkart.");
+  }, []);
+  useEffect(() => {
+    load();
+    const t = setInterval(load, 60000);
+    return () => clearInterval(t);
+  }, [load]);
+  if (!d) {
+    return err ? <div role="alert" style={{ ...S.card, color: C.red, fontWeight: 700 }}>✕ {err}</div>
+      : <div style={{ display: "flex", justifyContent: "center", padding: 60 }}><CircularProgress style={{ color: "#2874F0" }} /></div>;
+  }
+  const connected = d.accounts.filter((a) => a.connected);
+  const withOrders = d.accounts.filter((a) => a.connected || a.orders_at);
+  if (!withOrders.length) {
+    return (
+      <div style={{ ...S.card, padding: 24, textAlign: "center", color: C.gray500, fontSize: 13.5 }}>
+        No Flipkart Seller Hub is connected yet — connect one on <a href="/flipkart-seller" style={{ color: "#2874F0", fontWeight: 700 }}>Flipkart Seller Hub</a>.
+      </div>
+    );
+  }
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14, minWidth: 0 }}>
+      {err && <div role="alert" style={{ fontSize: 13, color: C.red, fontWeight: 700 }}>✕ {err}</div>}
+      <FlipkartActions accounts={connected} mobile={mobile} onState={setD} />
+      <FlipkartOrders accounts={withOrders} mobile={mobile} />
+    </div>
+  );
+}
+
 export function FlipkartSellerTab() {
   const mobile = useIsMobile();
   const [d, setD] = useState(null);

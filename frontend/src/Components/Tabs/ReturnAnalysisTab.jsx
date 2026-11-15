@@ -1,4 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { TabbedPage } from "../shared/SubTabs";
+// Loaded only when its tab opens.
+const MeeshoReturnAnalysis = React.lazy(() => import("./MeeshoReturnAnalysis").then((m) => ({ default: m.MeeshoReturnAnalysis })));
 import CircularProgress from '@mui/material/CircularProgress';
 import { API, C, S, fmt } from '../../App';
 import { useDateFilter } from '../../contexts/DateFilterContext';
@@ -330,7 +333,7 @@ function Detail({ row, isParent }) {
   );
 }
 
-export function ReturnAnalysisTab() {
+function ReturnLossAnalysis() {
   const { range, label: periodLabel } = useDateFilter();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -907,5 +910,32 @@ export function ReturnAnalysisTab() {
         </>
       )}
     </div>
+  );
+}
+
+/*
+ * Return Analysis, one page (Meesho's own analysis used to be a separate page):
+ *   Act now                   — Meesho's live returns: the return % of every product and SKU
+ *                                against the limit, Pause / Resume, and the auto-pause switch.
+ *   Losses, reasons & trends  — from the uploaded returns and payments, for the period picked:
+ *                                what returns cost, why they happen, what to fix first.
+ */
+export function ReturnAnalysisTab() {
+  return (
+    <TabbedPage
+      header={(
+        <div>
+          <h1 style={{ fontSize: 22, fontWeight: 900, color: C.gray900, margin: 0 }}>Return analysis</h1>
+          <p style={{ fontSize: 13, color: C.gray500, margin: "4px 0 0", maxWidth: 820 }}>
+            <b>Act now</b> stops the products customers keep sending back — from Meesho's live data, by return % against your limit.{" "}
+            <b>Losses, reasons &amp; trends</b> shows what returns cost and why, for the period picked above.
+          </p>
+        </div>
+      )}
+      tabs={[
+        { key: "act", label: "Act now", icon: "🚦", Component: MeeshoReturnAnalysis, color: "#B91C1C" },
+        { key: "deep", label: "Losses, reasons & trends", icon: "📉", Component: ReturnLossAnalysis },
+      ]}
+    />
   );
 }

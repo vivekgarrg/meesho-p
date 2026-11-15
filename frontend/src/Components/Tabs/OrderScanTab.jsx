@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
+// Lazy: it imports from this file too, and only Meesho scan with linking on needs it.
+const MeeshoLinkingTab = React.lazy(() => import("./MeeshoLinkingTab").then((m) => ({ default: m.MeeshoLinkingTab })));
 import { API, C, S, btn, Tag, useIsMobile } from "../../App";
 import { BarcodeScanner } from "../shared/BarcodeScanner";
 import { CourierSummary } from "./CourierSummary";
@@ -108,6 +110,7 @@ function useScanDesk(platform) {
   const load = useCallback(async () => {
     const p = new URLSearchParams();
     if (picked) p.set("date", picked);
+    if (platform) p.set("platform", platform);
     try {
       const res = await fetch(`${API}/order-scan/queue/?${p}`);
       if (res.ok) setQueue(await res.json());
@@ -1281,7 +1284,7 @@ function NoticeChips({ desk, alerts, onAlerts, onUnsent, onUnrec, onMovedBack })
   );
 }
 
-function MobilePack({ desk, platform, businesses, onScopeChanged, scopeTick, multi, setShow }) {
+function MobilePack({ desk, platform, businesses, onScopeChanged, scopeTick, multi, setShow, switcher }) {
   const { queue, loading, mode, setMode, latest, busy, date, setDate, record } = desk;
   const [camera, setCamera] = useState(false);
   const [showSummary, setShowSummary] = useState(false);
@@ -1365,6 +1368,7 @@ function MobilePack({ desk, platform, businesses, onScopeChanged, scopeTick, mul
         <button onClick={() => setShowSummary(true)} aria-label="Courier summary and print" className="os-btn"
           style={{ ...btn("ghost", "sm"), minHeight: 40, minWidth: 44, flexShrink: 0, fontSize: 18, padding: "4px 8px" }}>🖨</button>
       </div>
+      {switcher && <div style={{ padding: "6px 10px", background: C.white, borderBottom: `1px solid ${C.gray200}`, flexShrink: 0 }}>{switcher}</div>}
       {setShow && <div style={{ padding: "6px 10px", background: C.white, borderBottom: `1px solid ${C.gray200}`, flexShrink: 0 }}><ModeToggle mode="scanned" setMode={setShow} /></div>}
       {showSummary && (
         <div style={{ position: "fixed", inset: 0, zIndex: 3200, background: C.white, overflowY: "auto",
@@ -1576,7 +1580,7 @@ function ScanRecord({ platform, multi }) {
   );
 }
 
-function DesktopPack({ desk, platform, setPlatform, businesses, onScopeChanged, scopeTick, multi, setShow }) {
+function DesktopPack({ desk, platform, setPlatform, businesses, onScopeChanged, scopeTick, multi, setShow, switcher }) {
   const { queue, loading, mode, setMode, latest, busy, date, setDate, record, reload } = desk;
   const [view, setView] = useState("queue");          // queue | record | summary
   const [tab, setTab] = useState("pending");
@@ -1611,10 +1615,14 @@ function DesktopPack({ desk, platform, setPlatform, businesses, onScopeChanged, 
   return (
     <div className="os-desk" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <style>{DESK_CSS}</style>
+      {switcher}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
         <div>
-          <h1 style={{ fontSize: 22, fontWeight: 800, color: C.gray900, margin: 0 }}>Order scan</h1>
-          <p style={{ fontSize: 13, color: C.gray500, marginTop: 3 }}>Meesho and Flipkart together — scan each parcel to tick it off the day's list.</p>
+          <h1 style={{ fontSize: 22, fontWeight: 800, color: C.gray900, margin: 0 }}>{platform === "flipkart" ? "Flipkart scan" : "Meesho scan"}</h1>
+          <p style={{ fontSize: 13, color: C.gray500, marginTop: 3 }}>
+            {platform === "flipkart" ? "Scan each Flipkart parcel to mark it packed and tick it off the day's list."
+              : "Linking to Meesho is off: each scan only marks the parcel packed here and ticks it off the day's list."}
+          </p>
           {setShow && <div style={{ marginTop: 8 }}><ModeToggle mode="scanned" setMode={setShow} /></div>}
         </div>
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
@@ -1715,12 +1723,77 @@ function DesktopPack({ desk, platform, setPlatform, businesses, onScopeChanged, 
 }
 
 // ── Tab ───────────────────────────────────────────────────────────────────────
+function useStored(key, initial) {
+  const [v, setV] = useState(() => {
+    try { const s = localStorage.getItem(key); return s == null ? initial : JSON.parse(s); } catch { return initial; }
+  });
+  const set = (next) => { setV(next); try { localStorage.setItem(key, JSON.stringify(next)); } catch { /* not kept */ } };
+  return [v, set];
+}
+
+/**
+ * Meesho scan | Flipkart scan, and — on Meesho — "Link on Meesho" (on unless
+ * turned off): each scan links the parcel's packet on Meesho and marks it packed
+ * here; off, a scan only marks it packed here, as Order Scan always did.
+ */
+function ScanSwitch({ platform, setPlatform, link, setLink }) {
+  const opt = (key, label, color) => {
+    const on = platform === key;
+    return (
+      <button key={key} role="tab" aria-selected={on} onClick={() => setPlatform(key)} className="os-btn"
+        style={{ border: "none", borderRadius: 8, padding: "8px 16px", minHeight: 40, fontSize: 14, fontWeight: 800, fontFamily: "inherit",
+          cursor: "pointer", whiteSpace: "nowrap", background: on ? color : "transparent", color: on ? "#fff" : C.gray600 }}>{label}</button>
+    );
+  };
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+      <div role="tablist" aria-label="Marketplace" style={{ display: "flex", gap: 3, background: C.gray100, borderRadius: 10, padding: 3 }}>
+        {opt("meesho", "Meesho scan", "#9F2089")}
+        {opt("flipkart", "Flipkart scan", "#2874F0")}
+      </div>
+      {platform === "meesho" && (
+        <label style={{ display: "inline-flex", alignItems: "center", gap: 8, cursor: "pointer", userSelect: "none", padding: "6px 12px",
+          borderRadius: 10, border: `1.5px solid ${link ? "#9F2089" : C.gray200}`, background: link ? "#FDF4FF" : C.white }}>
+          <span role="switch" aria-checked={link} tabIndex={0}
+            onKeyDown={(e) => { if (e.key === " " || e.key === "Enter") { e.preventDefault(); setLink(!link); } }}
+            onClick={(e) => { e.preventDefault(); setLink(!link); }}
+            style={{ width: 38, height: 22, borderRadius: 11, background: link ? "#9F2089" : C.gray300, position: "relative", transition: "background .15s", flexShrink: 0 }}>
+            <span style={{ position: "absolute", top: 3, left: link ? 19 : 3, width: 16, height: 16, borderRadius: 8, background: "#fff", transition: "left .15s",
+              boxShadow: "0 1px 2px rgba(0,0,0,.25)" }} />
+          </span>
+          <span onClick={(e) => { e.preventDefault(); setLink(!link); }} style={{ fontSize: 13, fontWeight: 800, color: link ? "#86198F" : C.gray600 }}>
+            🔗 Link on Meesho
+            <span style={{ display: "block", fontSize: 11, fontWeight: 600, color: C.gray500 }}>
+              {link ? "Scan AWB + packet: linked on Meesho and packed here" : "Off — a scan only marks it packed here"}
+            </span>
+          </span>
+        </label>
+      )}
+    </div>
+  );
+}
+
 export function OrderScanTab() {
+  const [platform, setPlatformState] = useStored("scan-platform", "meesho");
+  const [link, setLink] = useStored("scan-link-meesho", true);
+  const setPlatform = (p) => setPlatformState(p === "flipkart" ? "flipkart" : "meesho");
+  const switcher = <ScanSwitch platform={platform} setPlatform={setPlatform} link={link} setLink={setLink} />;
+  if (platform === "meesho" && link) {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 12, maxWidth: 1440 }}>
+        {switcher}
+        <React.Suspense fallback={<div style={{ display: "flex", justifyContent: "center", padding: 60 }}><CircularProgress style={{ color: "#9F2089" }} /></div>}>
+          <MeeshoLinkingTab />
+        </React.Suspense>
+      </div>
+    );
+  }
+  return <ScanDesk key={platform} platform={platform} setPlatform={setPlatform} switcher={switcher} />;
+}
+
+// The packing desk for one marketplace: scan marks packed (or dispatched) here.
+function ScanDesk({ platform, setPlatform, switcher }) {
   const isMobile = useIsMobile();
-  // Meesho and Flipkart are one desk: every count is by courier, whichever
-  // marketplace the parcel is from.
-  const platform = "";
-  const setPlatform = () => {};
   const desk = useScanDesk(platform);
   const businesses = useDeskBusinesses();
   // Bumped when the combined businesses change, so everything re-reads.
@@ -1729,9 +1802,18 @@ export function OrderScanTab() {
   // Scanned (the day's desk) or Linked (parcels linked to a packet, by where they are on Meesho now).
   const [show, setShowState] = useState(() => { try { const v = localStorage.getItem("order-scan-show"); return v === "linked" ? "unshipped" : v || "scanned"; } catch { return "scanned"; } });
   const setShow = (m) => { setShowState(m); try { localStorage.setItem("order-scan-show", m); } catch { /* fine */ } };
-  const props = { desk, platform, setPlatform, businesses, onScopeChanged, scopeTick, setShow,
+  // Unshipped (scanned, not picked up yet) is Meesho's: Flipkart's desk is the day's list.
+  const props = { desk, platform, setPlatform, businesses, onScopeChanged, scopeTick, switcher,
+    setShow: platform === "meesho" ? setShow : null,
     multi: (businesses.info?.selected?.length || 0) > 1 };
-  if (show === "unshipped" || show === "linked") return <UnshippedOrders isMobile={isMobile} setMode={setShow} businesses={businesses} onScopeChanged={onScopeChanged} />;
+  if (platform === "meesho" && (show === "unshipped" || show === "linked")) {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        {switcher}
+        <UnshippedOrders isMobile={isMobile} setMode={setShow} businesses={businesses} onScopeChanged={onScopeChanged} />
+      </div>
+    );
+  }
   return isMobile ? <MobilePack {...props} /> : <DesktopPack {...props} />;
 }
 
