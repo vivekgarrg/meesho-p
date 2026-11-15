@@ -7,14 +7,15 @@ import { CombinedBusinessPicker } from "./CombinedBusinessPicker";
 /**
  * The global "Combined" switch, next to the business switcher — the one
  * place to turn merged-business numbers on, pick which businesses, and jump
- * to where they're actually shown (Combined Dashboard). See
+ * to where they're shown (Overview, SKU Analysis, Daily Profit, Orders Panel). See
  * CombinedViewContext for why this is a single shared setting rather than a
  * per-tab one, and CombinedDashboardTab's file-level comment for why most
  * other screens don't (yet) re-render themselves in combined mode — this
  * control still lights up everywhere so turning it on is discoverable from
  * any screen, not just that one.
  */
-export default function CombinedViewToggle() {
+// compact (phones): just 🧩 (and how many are combined); the panel opens across the screen.
+export default function CombinedViewToggle({ compact = false }) {
   const { businesses } = useBusiness();
   const { enabled, setEnabled, selected, toggleBusiness, setSelected, active } = useCombinedView();
   const [open, setOpen] = useState(false);
@@ -38,21 +39,22 @@ export default function CombinedViewToggle() {
           background: active ? C.orange : C.white,
           color: active ? "#fff" : C.gray500,
           border: `1.5px solid ${active ? C.orange : C.gray200}`,
-          borderRadius: 20, padding: "6px 12px", fontSize: 12, fontWeight: 700,
-          cursor: "pointer", fontFamily: "inherit",
+          borderRadius: 20, padding: compact ? "6px 9px" : "6px 12px", fontSize: 12, fontWeight: 700,
+          cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap", flexShrink: 0,
         }}
-        title="Merge 2+ businesses' Profit, Orders, Payments and SKUs on Combined Dashboard"
+        aria-label="Combined view"
+        title="Combined view: Overview, SKU Analysis, Daily Profit and Orders Panel for 2+ businesses together"
       >
         <span>🧩</span>
-        Combined
+        {!compact && "Combined"}
         {active && <span style={{ fontWeight: 800 }}>· {selected.size}</span>}
       </button>
 
       {open && (
         <div
           style={{
-            position: "absolute", top: "calc(100% + 8px)", left: 0, zIndex: 50,
-            width: 320, background: C.white, border: `1px solid ${C.border}`,
+            ...(compact ? { position: "fixed", top: 60, left: 12, right: 12 } : { position: "absolute", top: "calc(100% + 8px)", left: 0, width: 320 }),
+            zIndex: 50, background: C.white, border: `1px solid ${C.border}`,
             borderRadius: 14, boxShadow: "0 12px 32px rgba(0,0,0,0.14)", padding: 14,
           }}
         >
@@ -81,8 +83,8 @@ export default function CombinedViewToggle() {
           </div>
 
           <p style={{ fontSize: 11.5, color: C.gray400, marginBottom: 10, lineHeight: 1.5 }}>
-            Tick 2 or more businesses, then open Combined Dashboard to see their Profit, Orders, Payments and
-            SKUs rolled up together.
+            Tick 2 or more businesses and turn it on: Overview, SKU Analysis, Daily Profit and Orders Panel
+            then show them together.
           </p>
 
           <CombinedBusinessPicker

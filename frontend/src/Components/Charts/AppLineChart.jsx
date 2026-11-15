@@ -2,6 +2,7 @@ import React, { useMemo } from "react";
 import { ResponsiveLine } from "@nivo/line";
 import { C } from "../../shared";
 import { nivoTheme, ANIMATE, colorForKey } from "./nivoTheme";
+import { ChartLegend } from "./AppBarChart";
 
 /**
  * Multi-series trend line. Callers keep passing the flat-row shape every
@@ -25,7 +26,9 @@ export function AppLineChart({ dataset, indexKey, series, height = 260, valueFor
   }, [dataset, indexKey, maxTicks]);
 
   return (
-    <div style={{ height, width: "100%" }}>
+    <div style={{ height, width: "100%", display: "flex", flexDirection: "column" }}>
+      <ChartLegend items={lines.map((l) => ({ id: l.id, label: l.id, color: l.color || C.orange }))} />
+      <div style={{ flex: 1, minHeight: 0 }}>
       <ResponsiveLine
         data={lines}
         margin={margin || { top: 16, right: 20, bottom: manyPoints ? 56 : 40, left: 54 }}
@@ -56,12 +59,9 @@ export function AppLineChart({ dataset, indexKey, series, height = 260, valueFor
             </div>
           </div>
         )}
-        legends={lines.length > 1 ? [{
-          anchor: "top", direction: "row", translateY: -12, itemsSpacing: 14,
-          itemWidth: 90, itemHeight: 16, symbolShape: "circle", symbolSize: 9,
-          data: lines.map((l) => ({ id: l.id, label: l.id, color: l.color })),
-        }] : []}
+        legends={[]}
       />
+      </div>
     </div>
   );
 }

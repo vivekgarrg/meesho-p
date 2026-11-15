@@ -103,7 +103,7 @@ export function SyncScheduleCard({ isAdmin }) {
       {msg && <div role="status" style={{ padding: "0 16px 8px", fontSize: 12.5, fontWeight: 700, color: msg.ok ? C.green : C.red }}>{msg.text}</div>}
       <div>
         {ROWS.map((row, i) => (
-          <div key={row.key} style={{ display: "grid", gridTemplateColumns: "minmax(200px, 1fr) minmax(260px, 1.6fr)", gap: 16, padding: "14px 16px",
+          <div key={row.key} style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 240px), 1fr))", gap: 16, padding: "14px 16px",
             borderTop: `1px solid ${C.gray100}`, background: i % 2 ? C.gray50 : "transparent" }}>
             <div style={{ minWidth: 0 }}>
               <div style={{ fontWeight: 800, fontSize: 13.5, color: C.gray900 }}>{row.title}</div>

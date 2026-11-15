@@ -58,8 +58,12 @@ export function AppBarChart({
     ? { top: 10, right: 24, bottom: 32, left: 104 }
     : { top: 16, right: 16, bottom: manyCategories ? 56 : 34, left: 54 };
 
+  const legendItems = showLegend !== false && series.length > 1 && !diverging
+    ? series.map((s) => ({ id: s.dataKey, label: s.label, color: colorByKey[s.dataKey] })) : [];
   return (
-    <div style={{ height, width: "100%" }}>
+    <div style={{ height, width: "100%", display: "flex", flexDirection: "column" }}>
+      <ChartLegend items={legendItems} />
+      <div style={{ flex: 1, minHeight: 0 }}>
       <ResponsiveBar
         data={dataset}
         keys={keys}
@@ -105,12 +109,25 @@ export function AppBarChart({
             </div>
           </div>
         )}
-        legends={showLegend !== false && series.length > 1 && !diverging ? [{
-          dataFrom: "keys", data: series.map((s) => ({ id: s.dataKey, label: s.label, color: colorByKey[s.dataKey] })),
-          anchor: "top", direction: "row", translateY: -12, itemsSpacing: 14,
-          itemWidth: 84, itemHeight: 16, symbolShape: "circle", symbolSize: 9,
-        }] : []}
+        legends={[]}
       />
+      </div>
+    </div>
+  );
+}
+
+// The legend as HTML above the chart: it wraps on a narrow screen, where nivo's
+// one-row SVG legend ran off the edge and over the axis.
+export function ChartLegend({ items }) {
+  if (!items || items.length < 2) return null;
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: "4px 14px", padding: "0 4px 6px", fontSize: 12, color: C.gray600, fontWeight: 600 }}>
+      {items.map((i) => (
+        <span key={i.id} style={{ display: "inline-flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
+          <span aria-hidden style={{ width: 9, height: 9, borderRadius: "50%", background: i.color, flexShrink: 0 }} />
+          {i.label}
+        </span>
+      ))}
     </div>
   );
 }

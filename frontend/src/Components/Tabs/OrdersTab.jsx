@@ -347,7 +347,7 @@ function MeeshoOrdersTab() {
       </Box>
 
       {/* ── Metric band ──────────────────────────────────────────────────────── */}
-      <Box sx={{ ...card, p: 0, display: "flex", overflow: "hidden" }}>
+      <Box sx={{ ...card, p: 0, display: "flex", flexWrap: { xs: "wrap", md: "nowrap" }, overflow: "hidden" }}>
         {[
           { label: "Total", value: totalOrders, icon: "📦", color: C.blue, sub: periodLabel, clickKey: null },
           { label: "Delivered", value: delCount, icon: "✅", color: C.green, sub: `${pct(delCount, totalOrders)}% of total`, clickKey: "DELIVERED" },
@@ -359,7 +359,7 @@ function MeeshoOrdersTab() {
             <Box key={m.label}
               onClick={() => m.clickKey && (setStatusFilter(active ? "" : m.clickKey), resetPage())}
               sx={{
-                flex: 1, p: "18px 20px",
+                flex: { xs: "1 1 33%", md: 1 }, minWidth: { xs: 104, md: 0 }, p: { xs: "14px 12px", md: "18px 20px" },
                 borderRight: i < 3 ? `1px solid ${C.gray100}` : "none",
                 cursor: m.clickKey ? "pointer" : "default",
                 bgcolor: active ? m.color : "#fff",
@@ -381,7 +381,7 @@ function MeeshoOrdersTab() {
         })}
 
         {/* Delivery rate — visual panel */}
-        <Box sx={{ flex: 1, p: "18px 20px", borderLeft: `1px solid ${C.gray100}`, display: "flex", flexDirection: "column", justifyContent: "center" }}>
+        <Box sx={{ flex: { xs: "1 1 100%", md: 1 }, p: { xs: "14px 12px", md: "18px 20px" }, borderLeft: { md: `1px solid ${C.gray100}` }, borderTop: { xs: `1px solid ${C.gray100}`, md: "none" }, display: "flex", flexDirection: "column", justifyContent: "center" }}>
           <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", mb: 1 }}>
             <Typography sx={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: C.gray400 }}>
               📊 Delivery Rate

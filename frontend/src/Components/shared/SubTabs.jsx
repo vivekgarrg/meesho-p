@@ -98,7 +98,11 @@ export function TabbedPage({ param = "section", tabs, right: ownRight, header })
       <React.Suspense fallback={<TabLoading />}>
         {/* Taken: tabs further down don't carry it again. */}
         <HeaderSlot.Provider value={null}>
-          {current && <current.Component key={current.key} />}
+          {/* A block box of its own: a page that centres itself with auto margins
+              would otherwise shrink to its widest child, wider than a phone. */}
+          <div style={{ minWidth: 0, width: "100%" }}>
+            {current && <current.Component key={current.key} />}
+          </div>
         </HeaderSlot.Provider>
       </React.Suspense>
     </div>

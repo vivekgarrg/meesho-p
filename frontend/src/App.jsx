@@ -1114,8 +1114,8 @@ function TopBar({ isMobile, showMenuButton, onOpenMenu }) {
           </button>
         )}
         <BusinessSwitcher />
-        <SettlementModeSwitch />
-        <CombinedViewToggle />
+        <SettlementModeSwitch compact={isMobile} />
+        <CombinedViewToggle compact={isMobile} />
         {/* The breadcrumb duplicates the page's own <h1> — drop it on mobile
             where the row has no room to spare. */}
         {!isMobile && (

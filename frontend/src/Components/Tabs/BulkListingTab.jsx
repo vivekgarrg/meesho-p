@@ -1964,7 +1964,7 @@ export function BulkListingTab() {
   const rowCount = rows.length;
 
   return (
-    <div style={{ display: "flex", gap: 16, alignItems: "flex-start", flexDirection: isMobile ? "column" : "row" }}>
+    <div style={{ display: "flex", gap: 16, alignItems: isMobile ? "stretch" : "flex-start", flexDirection: isMobile ? "column" : "row" }}>
     <div style={{ display: "flex", flexDirection: "column", gap: 14, flex: 1, minWidth: 0 }}>
       <div>
         <div style={{ display: "flex", alignItems: "center", gap: 9 }}>

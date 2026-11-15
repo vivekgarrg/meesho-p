@@ -25,7 +25,7 @@ import Collapse from "@mui/material/Collapse";
 import { DataGrid } from "@mui/x-data-grid";
 import { AppBarChart } from "../Charts/AppBarChart";
 import { AppPieChart } from "../Charts/AppPieChart";
-import { API, fmt } from "../../App";
+import { API, fmt, useIsMobile } from "../../App";
 import { useDateFilter } from "../../contexts/DateFilterContext";
 import { useBusiness } from "../../contexts/BusinessContext";
 import { useCombinedView } from "../../contexts/CombinedViewContext";
@@ -786,6 +786,7 @@ function SKUPaymentsPanel({ subject, range, label, base, cache, showSku }) {
 // — every SKU under the same parent, merged — when it has one. The dialog shows either,
 // and switches between the two.
 function SKUDetailModal({ sku, parent, bizId, months, initialRange, initialMonth, initialScope, onOpenSku, onClose }) {
+  const isMobile = useIsMobile();
   // The SKU's own business (combined view: the row's), and only its figures —
   // /profit/sku/ works out one SKU (or one parent) instead of every SKU like /profit/ does.
   const base = bizId ? `/api/business/${bizId}` : API;
@@ -956,8 +957,8 @@ function SKUDetailModal({ sku, parent, bizId, months, initialRange, initialMonth
   const accentColor = pos ? "#059669" : "#E11D48";
 
   return (
-    <Dialog open maxWidth="lg" fullWidth fullScreen={fullView} onClose={onClose}
-      PaperProps={{ sx: { borderRadius: fullView ? 0 : "20px", maxHeight: fullView ? "none" : "94vh", overflow: "hidden", display: "flex", flexDirection: "column" } }}>
+    <Dialog open maxWidth="lg" fullWidth fullScreen={fullView || isMobile} onClose={onClose}
+      PaperProps={{ sx: { borderRadius: fullView || isMobile ? 0 : "20px", maxHeight: fullView || isMobile ? "none" : "94vh", overflow: "hidden", display: "flex", flexDirection: "column" } }}>
 
       {/* ── Gradient header ────────────────────────────────────────────────── */}
       <Box sx={{
@@ -988,10 +989,10 @@ function SKUDetailModal({ sku, parent, bizId, months, initialRange, initialMonth
               )}
               {/* One SKU, or its whole parent: the same tabs either way. */}
               {sku && parent && (
-                <Box sx={{ display: "inline-flex", bgcolor: "rgba(255,255,255,0.7)", borderRadius: "10px", p: "3px", border: "1px solid #E2E8F0" }}>
+                <Box sx={{ display: "inline-flex", bgcolor: "rgba(255,255,255,0.7)", borderRadius: "10px", p: "3px", border: "1px solid #E2E8F0", maxWidth: "100%", minWidth: 0 }}>
                   {[{ id: "sku", label: "This SKU" }, { id: "parent", label: `Whole parent · ${parent.key}` }].map(o => (
                     <Box key={o.id} onClick={() => setScope(o.id)} sx={{
-                      px: 1.5, py: 0.5, borderRadius: "8px", cursor: "pointer", maxWidth: 280,
+                      px: 1.5, py: 0.5, borderRadius: "8px", cursor: "pointer", maxWidth: 280, minWidth: 0, flexShrink: o.id === "sku" ? 0 : 1,
                       bgcolor: scope === o.id ? "#fff" : "transparent", boxShadow: scope === o.id ? "0 1px 3px rgba(0,0,0,0.12)" : "none",
                     }}>
                       <Typography noWrap sx={{ fontSize: 12, fontWeight: 700, color: scope === o.id ? "#0F172A" : "#64748B" }}>{o.label}</Typography>
@@ -1017,8 +1018,8 @@ function SKUDetailModal({ sku, parent, bizId, months, initialRange, initialMonth
           <IconButton onClick={onClose} sx={{ color: "#64748B", "&:hover": { bgcolor: "rgba(0,0,0,0.06)" } }}>✕</IconButton>
         </Box>
 
-        {/* Tab navigation */}
-        <Box sx={{ display: "flex" }}>
+        {/* Tab navigation — scrolls sideways on a phone */}
+        <Box sx={{ display: "flex", overflowX: "auto", mx: { xs: -1, sm: 0 }, "& > *": { flexShrink: 0 } }}>
           {TABS.map(t => (
             <Box key={t.id} onClick={() => setActiveTab(t.id)} sx={{
               px: 2.5, py: 1.25, cursor: "pointer",

@@ -41,13 +41,22 @@ input, select { font-family: inherit; }
     font-size: 16px !important;
   }
 
-  /* Long SKUs, product names and tracking URLs must wrap rather than force a
-     card wider than the screen. */
-  body { overflow-wrap: anywhere; }
+  /* Long SKUs, product names and tracking URLs wrap rather than force a card
+     wider than the screen — but only when a whole word can't fit. ("anywhere"
+     also let the browser size every column, tab and pill to one letter wide,
+     which stacked labels letter by letter.) */
+  body { overflow-wrap: break-word; }
 
-  /* Wide tables keep their natural width and scroll inside their wrapper
-     instead of being squeezed into an unreadable column. */
-  table { width: auto !important; min-width: 100%; }
+  /* A wide table scrolls sideways inside its own box — never squeezed into
+     unreadable columns, never cut off by the page. */
+  table {
+    display: block;
+    width: auto !important;
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  th { white-space: nowrap; }
 
   /* Comfortable touch targets, without affecting layout width. */
   button { min-height: 34px; }

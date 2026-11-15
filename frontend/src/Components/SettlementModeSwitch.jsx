@@ -12,20 +12,23 @@ import { useSettlementMode } from "../contexts/SettlementModeContext";
  * one shared filter (_apply_settlement_filter) is what every money-touching
  * endpoint runs through.
  */
-export default function SettlementModeSwitch() {
+// compact (phones): just the switch — the label is its tooltip and accessible name.
+export default function SettlementModeSwitch({ compact = false }) {
   const { isSettled, toggle } = useSettlementMode();
 
   return (
     <button
       onClick={toggle}
+      aria-label={isSettled ? "Settled only: on" : "Settled only: off"}
+      aria-pressed={isSettled}
       title="On: settled profit — only payments Meesho has paid (with a bank transfer). Off (default): overall profit — paid payments plus outstanding ones (Meesho's outstanding file, not paid yet)."
       style={{
         display: "flex", alignItems: "center", gap: 7,
         background: isSettled ? C.greenLight : C.white,
         color: isSettled ? C.green : C.gray500,
         border: `1.5px solid ${isSettled ? C.greenBorder : C.gray200}`,
-        borderRadius: 20, padding: "6px 12px", fontSize: 12, fontWeight: 700,
-        cursor: "pointer", fontFamily: "inherit",
+        borderRadius: 20, padding: compact ? "8px 8px" : "6px 12px", fontSize: 12, fontWeight: 700,
+        cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap", flexShrink: 0,
       }}
     >
       <span
@@ -42,7 +45,7 @@ export default function SettlementModeSwitch() {
           }}
         />
       </span>
-      <span>{isSettled ? "✅ Settled only" : "Settled only"}</span>
+      {!compact && <span>{isSettled ? "✅ Settled only" : "Settled only"}</span>}
     </button>
   );
 }

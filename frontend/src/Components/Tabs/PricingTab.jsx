@@ -863,7 +863,7 @@ function ParentCard({ parent, notify, onLink, dragging, unlinked = [], onOptOut,
             </span>
           )}
 
-          <span style={{ fontFamily: "monospace", fontSize: 13.5, fontWeight: 700, color: C.orange, background: C.orangeLight, border: `1px solid ${C.orangeBorder}`, padding: "3px 10px", borderRadius: 6, whiteSpace: "nowrap" }}>
+          <span title={parent.item_id} style={{ fontFamily: "monospace", fontSize: 13.5, fontWeight: 700, color: C.orange, background: C.orangeLight, border: `1px solid ${C.orangeBorder}`, padding: "3px 10px", borderRadius: 6, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: 0, maxWidth: "100%" }}>
             📦 {parent.item_id}
           </span>
 

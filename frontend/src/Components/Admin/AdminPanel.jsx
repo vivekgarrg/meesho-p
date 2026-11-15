@@ -1035,9 +1035,9 @@ export default function AdminPanel() {
 
   return (
     <div>
-      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 18 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 18, flexWrap: "wrap" }}>
         <h1 style={{ fontSize: 20, fontWeight: 800, color: C.gray900 }}>Admin Panel</h1>
-        <div style={{ display: "flex", gap: 8, marginLeft: 12 }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <TabBtn id="businesses" label="Businesses & Members" />
           <TabBtn id="users" label="Users" />
           <TabBtn id="access" label="Access Control" />
