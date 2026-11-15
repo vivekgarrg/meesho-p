@@ -666,6 +666,13 @@ def bulk_listing_generate(request, business_id):
         shared[wdrp_field["key"]] = bl.resolve_wrong_defective_price(
             base_price, shared_in.get(wdrp_field["key"]),
         )
+        # A row with its own Meesho Price (a random price per listing) gets its own
+        # Wrong/Defective price from it — unless the seller gave one, shared or for that row.
+        if meesho_price_field and not str(shared_in.get(wdrp_field["key"]) or "").strip():
+            for overrides in row_overrides:
+                own = overrides.get(meesho_price_field["key"])
+                if str(own or "").strip() and not str(overrides.get(wdrp_field["key"]) or "").strip():
+                    overrides[wdrp_field["key"]] = bl.resolve_wrong_defective_price(own, None)
 
     country_field = bl.find_field(spec, role="country_of_origin")
     imp_name_f = bl.find_field(spec, role="importer_name")
@@ -691,10 +698,15 @@ def bulk_listing_generate(request, business_id):
         if imp_pin_f:
             shared[imp_pin_f["key"]] = pin
 
+    # A required field is filled when the shared form has it, or when every row
+    # gives its own (a description per listing, a price per listing).
+    def _every_row_has(key):
+        return bool(row_overrides) and all(str(o.get(key) or "").strip() for o in row_overrides)
+
     missing = [
         f["label"] for f in spec["fields"]
         if f["required"] and f["role"] not in bl.PER_ROW_ROLES
-        and not str(shared.get(f["key"], "")).strip()
+        and not str(shared.get(f["key"], "")).strip() and not _every_row_has(f["key"])
     ]
     if missing:
         return Response({"error": f"Required: {', '.join(missing)}."}, status=status.HTTP_400_BAD_REQUEST)

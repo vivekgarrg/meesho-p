@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from "react";
+import React, { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { API, C, S, btn, Tag, useIsMobile } from "../../App";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
 import DownloadIcon from "@mui/icons-material/Download";
@@ -117,6 +117,30 @@ function parseTitlesPaste(text) {
   const bracketed = [...raw.matchAll(/\[([^[\]]*)\]/g)].map((m) => m[1].trim()).filter(Boolean);
   if (bracketed.length) return bracketed;
   return raw.split(/\n+/).map((s) => s.trim()).filter(Boolean);
+}
+
+/**
+ * `n` whole-rupee prices between min and max — all different while the range
+ * has room for that many (so no two listings look like copies), repeating only
+ * when it hasn't. `taken` are prices other rows already have.
+ */
+function randomPrices(n, min, max, taken = new Set()) {
+  const lo = Math.ceil(min);
+  const hi = Math.floor(max);
+  const out = [];
+  if (hi < lo) return out;
+  const span = hi - lo + 1;
+  const used = new Set(taken);
+  for (let k = 0; k < n; k++) {
+    let p = lo + Math.floor(Math.random() * span);
+    if (used.size < span) {
+      let tries = 0;
+      while (used.has(p) && tries++ < 5000) p = lo + Math.floor(Math.random() * span);
+    }
+    used.add(p);
+    out.push(p);
+  }
+  return out;
 }
 
 function emptyRow() {
@@ -1163,6 +1187,12 @@ export function BulkListingTab() {
   const [prefilledImages, setPrefilledImages] = useState([]); // "Prefilled Sheet" mode input
   const [prefix, setPrefix] = useState("");
   const [titlesPaste, setTitlesPaste] = useState("");
+  const [descPaste, setDescPaste] = useState("");
+  // Random Meesho Price per listing: the range typed, and the one applied (rows
+  // added later get a price from it too).
+  const [priceMin, setPriceMin] = useState("");
+  const [priceMax, setPriceMax] = useState("");
+  const [priceRange, setPriceRange] = useState(null);
   const [listingType, setListingType] = useState("unique");
   const [groupIdBase, setGroupIdBase] = useState("Group");
   const [rows, setRows] = useState([]);
@@ -1599,6 +1629,79 @@ export function BulkListingTab() {
     () => sharedFields.find((f) => /meesho price/i.test(f.label)),
     [sharedFields]
   );
+  // Each listing (each catalog, in a unique listing) has its own description —
+  // set per row below, not once in Product Details.
+  const descField = useMemo(
+    () => sharedFields.find((f) => /description/i.test(f.label) && !f.role) || null,
+    [sharedFields]
+  );
+  const mrpField = useMemo(() => sharedFields.find((f) => /\bmrp\b/i.test(f.label)) || null, [sharedFields]);
+  // Every row gives its own non-blank value for this field.
+  const allRowsHave = useCallback(
+    (key) => rows.length > 0 && rows.every((r) => String(r.overrides?.[key] ?? "").trim() !== ""),
+    [rows]
+  );
+  const rowDesc = (r) => (descField ? String(r.overrides?.[descField.key] ?? shared[descField.key] ?? "") : "");
+  const descMissingRows = useMemo(
+    () => (descField?.required ? rows.map((r, i) => (rowDesc(r).trim() ? -1 : i)).filter((i) => i >= 0) : []),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [rows, descField, shared]
+  );
+  const descRepeats = useMemo(() => {
+    if (!descField || rows.length < 2) return 0;
+    const seen = new Set();
+    let n = 0;
+    rows.forEach((r) => { const d = rowDesc(r).trim().toLowerCase(); if (!d) return; if (seen.has(d)) n++; seen.add(d); });
+    return n;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rows, descField, shared]);
+
+  const applyDescriptions = () => {
+    const descs = parseTitlesPaste(descPaste);
+    if (!descs.length || !descField) return;
+    setRows((rs) => rs.map((r, i) => (descs[i] ? { ...r, overrides: { ...r.overrides, [descField.key]: descs[i] } } : r)));
+  };
+
+  const priceRangeError = useMemo(() => {
+    if (!meeshoPriceField || (!String(priceMin).trim() && !String(priceMax).trim())) return null;
+    const lo = Number(priceMin), hi = Number(priceMax);
+    const cap = meeshoPriceField.money_max ?? Infinity;
+    if (!validateMoney(priceMin, cap) || !validateMoney(priceMax, cap)) return "Enter both prices — positive numbers, at most 2 decimals.";
+    if (Math.floor(hi) < Math.ceil(lo)) return "Max must be at least Min (whole rupees).";
+    const mrp = mrpField ? Number(shared[mrpField.key]) : NaN;
+    if (Number.isFinite(mrp) && mrp > 0 && hi > mrp) return `Max is above the ${mrpField.label} (₹${mrp}) — Meesho refuses a price over MRP.`;
+    return null;
+  }, [priceMin, priceMax, meeshoPriceField, mrpField, shared]);
+
+  // Every row a new random price from the range.
+  const applyPriceRange = () => {
+    if (!meeshoPriceField || priceRangeError || !String(priceMin).trim()) return;
+    const range = { min: Number(priceMin), max: Number(priceMax) };
+    const prices = randomPrices(rows.length, range.min, range.max);
+    const k = meeshoPriceField.key;
+    setRows((rs) => rs.map((r, i) => ({ ...r, overrides: { ...r.overrides, [k]: String(prices[i]) } })));
+    setPriceRange(range);
+  };
+  const clearPriceRange = () => {
+    if (!meeshoPriceField) return;
+    const k = meeshoPriceField.key;
+    setRows((rs) => rs.map((r) => { const o = { ...r.overrides }; delete o[k]; return { ...r, overrides: o }; }));
+    setPriceRange(null);
+  };
+  // Rows added after the range was applied get a price from it too (never one a row was given by hand).
+  useEffect(() => {
+    if (!priceRange || !meeshoPriceField) return;
+    const k = meeshoPriceField.key;
+    const need = rows.map((r, i) => (r.overrides?.[k] === undefined ? i : -1)).filter((i) => i >= 0);
+    if (!need.length) return;
+    const taken = new Set(rows.map((r) => Number(r.overrides?.[k])).filter(Number.isFinite));
+    const fresh = randomPrices(need.length, priceRange.min, priceRange.max, taken);
+    setRows((rs) => rs.map((r, i) => {
+      const at = need.indexOf(i);
+      return at >= 0 && r.overrides?.[k] === undefined ? { ...r, overrides: { ...r.overrides, [k]: String(fresh[at]) } } : r;
+    }));
+  }, [rows, priceRange, meeshoPriceField]);
+
 
   const country = String(countryField ? shared[countryField.key] ?? "" : "")
     .trim()
@@ -1615,7 +1718,8 @@ export function BulkListingTab() {
   // own conditional block below), and not tucked away by a loaded preset.
   const excludedFromGrid = useMemo(() => new Set(importerFields.map((f) => f.key)), [importerFields]);
 
-  const visibleFields = sharedFields.filter((f) => !excludedFromGrid.has(f.key) && !coveredKeys.has(f.key));
+  const visibleFields = sharedFields.filter((f) => !excludedFromGrid.has(f.key) && !coveredKeys.has(f.key)
+    && !(descField && f.key === descField.key));
   const hiddenByPreset = sharedFields.filter((f) => coveredKeys.has(f.key));
 
   // Caught here, before the network call, so a required field that's empty
@@ -1627,9 +1731,11 @@ export function BulkListingTab() {
     () => sharedFields.filter((f) => {
       if (!f.required) return false;
       if (importerFields.some((imp) => imp.key === f.key) && !needsImporter) return false;
+      if (descField && f.key === descField.key) return false;          // per row: descMissingRows
+      if (allRowsHave(f.key)) return false;                             // every row has its own
       return !String(shared[f.key] ?? "").trim();
     }),
-    [sharedFields, importerFields, needsImporter, shared]
+    [sharedFields, importerFields, needsImporter, shared, descField, allRowsHave]
   );
 
   // Money-shaped fields (Meesho Price, MRP, …) get checked whenever they
@@ -1672,8 +1778,9 @@ export function BulkListingTab() {
     [sharedFields, excludedFromGrid, needsImporter]
   );
   const fieldsFilled = useMemo(
-    () => countableFields.filter((f) => String(shared[f.key] ?? "").trim() !== "").length,
-    [countableFields, shared]
+    () => countableFields.filter((f) => String(shared[f.key] ?? "").trim() !== "" || allRowsHave(f.key)
+      || (descField && f.key === descField.key && rows.length > 0 && descMissingRows.length === 0)).length,
+    [countableFields, shared, allRowsHave, descField, rows.length, descMissingRows]
   );
   const skusSet = useMemo(
     () => rows.filter((r) => String(r.sku ?? "").trim() !== "").length,
@@ -1778,6 +1885,10 @@ export function BulkListingTab() {
     }
     if (frontImageField?.required && rows.some((r) => !(r.images && r.images[0]))) {
       setMsg({ type: "error", text: `Every row needs a ${frontImageField.label} — check the highlighted row(s) below.` });
+      return;
+    }
+    if (descMissingRows.length) {
+      setMsg({ type: "error", text: `Every listing needs its own ${descField.label} — missing on row${descMissingRows.length === 1 ? "" : "s"} ${descMissingRows.slice(0, 8).map((i) => i + 1).join(", ")}${descMissingRows.length > 8 ? "…" : ""}.` });
       return;
     }
     if (rowOverrideErrors.some((e) => e.length)) {
@@ -2094,9 +2205,39 @@ export function BulkListingTab() {
                     <Field key={f.key} def={f} value={shared[f.key]} onChange={setField(f.key)} />
                   ))}
                 </FieldGrid>
-                {wdrpField && !shared[wdrpField.key] && wdrpPlaceholder && (
+                {wdrpField && !shared[wdrpField.key] && (priceRange ? (
+                  <div style={{ fontSize: 11, color: C.gray400, marginTop: 8 }}>
+                    Leave "{wdrpField.label}" blank to use each listing's own Meesho Price − 20.
+                  </div>
+                ) : wdrpPlaceholder && (
                   <div style={{ fontSize: 11, color: C.gray400, marginTop: 8 }}>
                     Leave "{wdrpField.label}" blank to use {wdrpPlaceholder} (Meesho Price − 20).
+                  </div>
+                ))}
+                {meeshoPriceField && (
+                  <div style={{ marginTop: 14, padding: 12, borderRadius: 10, background: C.gray50, border: `1px solid ${C.border}` }}>
+                    <label style={S.label}>Random {meeshoPriceField.label} per listing — each listing gets its own price between these</label>
+                    <div style={{ display: "flex", alignItems: "flex-end", gap: 8, flexWrap: "wrap" }}>
+                      <div style={{ width: 120 }}>
+                        <label style={{ ...S.label, fontSize: 11 }}>Min ₹</label>
+                        <input value={priceMin} onChange={(e) => setPriceMin(e.target.value)} inputMode="decimal" placeholder="e.g. 199" style={S.inp} />
+                      </div>
+                      <div style={{ width: 120 }}>
+                        <label style={{ ...S.label, fontSize: 11 }}>Max ₹</label>
+                        <input value={priceMax} onChange={(e) => setPriceMax(e.target.value)} inputMode="decimal" placeholder="e.g. 249" style={S.inp} />
+                      </div>
+                      <button onClick={applyPriceRange} disabled={!rows.length || !!priceRangeError || !String(priceMin).trim() || !String(priceMax).trim()}
+                        style={btn("secondary", "sm")}>
+                        <AutoAwesomeIcon style={{ fontSize: 15, verticalAlign: "-3px" }} />&nbsp;{priceRange ? "Shuffle prices again" : `Set random prices for all ${rows.length}`}
+                      </button>
+                      {priceRange && <button onClick={clearPriceRange} style={btn("ghost", "sm")}>Use one price for all</button>}
+                    </div>
+                    {priceRangeError ? <div style={{ fontSize: 11, color: C.red, marginTop: 6, fontWeight: 600 }}>{priceRangeError}</div>
+                      : priceRange ? <div style={{ fontSize: 11, color: C.gray500, marginTop: 6 }}>
+                        Every listing has its own price from ₹{Math.ceil(priceRange.min)} to ₹{Math.floor(priceRange.max)} (shown on each row in step 4, where it can be changed).
+                        {" "}Listings added later get one too. The {meeshoPriceField.label} above is used only for a row without its own.
+                      </div>
+                      : <div style={{ fontSize: 11, color: C.gray400, marginTop: 6 }}>Whole rupees; all different while the range allows.</div>}
                   </div>
                 )}
               </Section>
@@ -2179,6 +2320,38 @@ export function BulkListingTab() {
                             </div>
                           );
                         })()}
+                      </div>
+                    )}
+
+                    {descField && (
+                      <div style={{ marginBottom: 14 }}>
+                        <label style={S.label}>Paste descriptions ([description] [description] format) — every listing gets its own {descField.label}</label>
+                        <div style={{ display: "flex", alignItems: "flex-end", gap: 8, flexWrap: "wrap" }}>
+                          <textarea value={descPaste} onChange={(e) => setDescPaste(e.target.value)} rows={3}
+                            placeholder="[Handmade brass diya, 4 inch, for puja and gifting…] [Pure copper lota with lid, 500 ml…] …"
+                            style={{ ...S.inp, resize: "vertical", flex: "1 1 260px", minWidth: 220 }} />
+                          <button onClick={applyDescriptions} disabled={!descPaste.trim()} style={btn("secondary", "sm")}>
+                            <AutoAwesomeIcon style={{ fontSize: 15, verticalAlign: "-3px" }} />&nbsp;Fill descriptions for all {rowCount}
+                          </button>
+                        </div>
+                        <div style={{ fontSize: 11, color: C.gray400, marginTop: 6 }}>
+                          Same as titles: each description in square brackets, one after another, in the order of the rows below.
+                          A description can have its own commas and full stops.
+                        </div>
+                        {descPaste.trim() && (() => {
+                          const n = parseTitlesPaste(descPaste).length;
+                          return (
+                            <div style={{ fontSize: 11, color: n === rowCount ? C.gray400 : C.amber, marginTop: 4 }}>
+                              {n} description{n === 1 ? "" : "s"} pasted
+                              {n !== rowCount && ` — ${rowCount} row${rowCount === 1 ? "" : "s"} to fill, applied in order`}
+                            </div>
+                          );
+                        })()}
+                        {descRepeats > 0 && (
+                          <div style={{ fontSize: 11, color: C.amber, marginTop: 4 }}>
+                            {descRepeats} listing{descRepeats === 1 ? " repeats" : "s repeat"} another's description — each catalog reads better with its own.
+                          </div>
+                        )}
                       </div>
                     )}
 
@@ -2299,6 +2472,14 @@ export function BulkListingTab() {
                                 <input value={row.style} onChange={(e) => setRow(i, "style")(e.target.value)}
                                   style={{ ...S.inp, fontFamily: "monospace" }} placeholder="defaults to SKU id" />
                               </div>
+                              {meeshoPriceField && (priceRange || row.overrides?.[meeshoPriceField.key] !== undefined) && (
+                                <div style={{ width: 110 }}>
+                                  <label style={S.label}>{meeshoPriceField.label}</label>
+                                  <input value={row.overrides?.[meeshoPriceField.key] ?? ""} inputMode="decimal"
+                                    onChange={(e) => setRowOverride(i, meeshoPriceField.key)(e.target.value)}
+                                    placeholder={String(shared[meeshoPriceField.key] ?? "")} style={S.inp} />
+                                </div>
+                              )}
                               {groupIdField && (
                                 <div style={{ flex: 1, minWidth: 120 }}>
                                   <label style={S.label}>Group ID</label>
@@ -2307,6 +2488,16 @@ export function BulkListingTab() {
                                 </div>
                               )}
                             </div>
+
+                            {descField && (
+                              <div style={{ marginTop: 10 }}>
+                                <label style={S.label}>{descField.label}{descField.required ? " *" : ""} — this listing's own</label>
+                                <textarea value={rowDesc(row)} rows={2}
+                                  onChange={(e) => setRowOverride(i, descField.key)(e.target.value)}
+                                  placeholder={`Description for listing ${i + 1}`}
+                                  style={{ ...S.inp, resize: "vertical", ...(descMissingRows.includes(i) ? { borderColor: C.red } : {}) }} />
+                              </div>
+                            )}
 
                             <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${C.border}` }}>
                               <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
