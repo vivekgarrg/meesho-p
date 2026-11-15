@@ -1,5 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { TabbedPage } from "../shared/SubTabs";
+import { useAccess } from "../../contexts/AccessContext";
+import { withPlatformSplit } from "../Flipkart/FlipkartShared";
 // Loaded only when its tab opens.
 const MeeshoReturnAnalysis = React.lazy(() => import("./MeeshoReturnAnalysis").then((m) => ({ default: m.MeeshoReturnAnalysis })));
 import CircularProgress from '@mui/material/CircularProgress';
@@ -914,28 +916,52 @@ function ReturnLossAnalysis() {
 }
 
 /*
- * Return Analysis, one page (Meesho's own analysis used to be a separate page):
- *   Act now                   — Meesho's live returns: the return % of every product and SKU
- *                                against the limit, Pause / Resume, and the auto-pause switch.
- *   Losses, reasons & trends  — from the uploaded returns and payments, for the period picked:
- *                                what returns cost, why they happen, what to fix first.
+ * Returns — Meesho's and Flipkart's in one page (Meesho Returns, Return Analysis
+ * and Flipkart's returns used to be apart). Meesho:
+ *   Returns                   every Meesho return by status, live from the panel
+ *   Act now                   the return % of every product and SKU against the limit,
+ *                             Pause / Resume, and the auto-pause switch
+ *   Losses, reasons & trends  from the uploaded returns and payments, for the period picked
+ * Flipkart (?platform=flipkart): who sent items back, the worst SKUs, why, every returned item.
  */
-export function ReturnAnalysisTab() {
+// Loaded only when their tab opens.
+const MeeshoHubTab = React.lazy(() => import("./MeeshoHubTab").then((m) => ({ default: m.MeeshoHubTab })));
+const FlipkartReturns = React.lazy(() => import("../Flipkart/FlipkartReturns").then((m) => ({ default: m.FlipkartReturns })));
+
+const MeeshoReturnsLive = () => <MeeshoHubTab forceSection="returns" />;
+
+function MeeshoReturnsSections() {
+  const { isPathVisible } = useAccess();
+  const analysis = !isPathVisible("/return-analysis") && !isPathVisible("/meesho-orders");
   return (
-    <TabbedPage
-      header={(
-        <div>
-          <h1 style={{ fontSize: 22, fontWeight: 900, color: C.gray900, margin: 0 }}>Return analysis</h1>
-          <p style={{ fontSize: 13, color: C.gray500, margin: "4px 0 0", maxWidth: 820 }}>
-            <b>Act now</b> stops the products customers keep sending back — from Meesho's live data, by return % against your limit.{" "}
-            <b>Losses, reasons &amp; trends</b> shows what returns cost and why, for the period picked above.
-          </p>
-        </div>
-      )}
-      tabs={[
-        { key: "act", label: "Act now", icon: "🚦", Component: MeeshoReturnAnalysis, color: "#B91C1C" },
-        { key: "deep", label: "Losses, reasons & trends", icon: "📉", Component: ReturnLossAnalysis },
-      ]}
-    />
+    <TabbedPage tabs={[
+      { key: "returns", label: "Returns", icon: "↩", Component: MeeshoReturnsLive, hidden: !isPathVisible("/meesho-orders") },
+      { key: "act", label: "Act now", icon: "🚦", Component: MeeshoReturnAnalysis, color: "#B91C1C", hidden: analysis },
+      { key: "deep", label: "Losses, reasons & trends", icon: "📉", Component: ReturnLossAnalysis, hidden: !isPathVisible("/return-analysis") },
+    ]} />
+  );
+}
+
+const FlipkartReturnsView = () => (
+  <React.Suspense fallback={<div style={{ padding: 40, textAlign: "center", color: C.gray400 }}>Loading…</div>}>
+    <FlipkartReturns />
+  </React.Suspense>
+);
+const ReturnsSplit = withPlatformSplit(MeeshoReturnsSections, FlipkartReturnsView, { tabbed: true });
+
+export function ReturnAnalysisTab() {
+  const { isPathVisible } = useAccess();
+  // Someone given only Flipkart sees Flipkart's returns, without a Meesho side.
+  const meesho = isPathVisible("/return-analysis") || isPathVisible("/meesho-orders");
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <div>
+        <h1 style={{ fontSize: 22, fontWeight: 900, color: C.gray900, margin: 0 }}>Returns</h1>
+        <p style={{ fontSize: 13, color: C.gray500, margin: "4px 0 0", maxWidth: 860 }}>
+          Every return from Meesho and Flipkart — what came back, which products to stop, and what returns cost.
+        </p>
+      </div>
+      {meesho ? <ReturnsSplit /> : <FlipkartReturnsView />}
+    </div>
   );
 }

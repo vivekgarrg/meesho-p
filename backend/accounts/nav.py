@@ -199,6 +199,7 @@ API_OWNERSHIP = {
     # Merging two parents into one can't be undone: SKU Pricing only.
     "parent-merge/":         ["/pricing"],
     "flipkart-seller/":      ["/flipkart-seller"],
+    "flipkart-returns/":     ["/return-analysis", "/flipkart-seller"],   # Returns → Flipkart
     "parent-from-sku/":      ["/pricing", "/labels", "/inventory"],
     "parent-linking/":       ["/pricing", "/labels", "/inventory"],
     "link-sku/":             ["/pricing", "/labels", "/inventory"],

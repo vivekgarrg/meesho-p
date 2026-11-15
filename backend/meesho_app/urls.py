@@ -41,6 +41,7 @@ urlpatterns = [
     path("flipkart-profit/upload/", views.flipkart_profit_upload, name="flipkart_profit_upload"),
     path("flipkart-profit/sku-payments/", views.flipkart_profit_sku_payments, name="flipkart_profit_sku_payments"),
     path("flipkart-orders/", flipkart_views.flipkart_orders_list, name="flipkart_orders_list"),
+    path("flipkart-returns/", flipkart_views.flipkart_returns, name="flipkart_returns"),
     path("flipkart-orders/upload/", flipkart_views.flipkart_orders_upload, name="flipkart_orders_upload"),
     path("flipkart-payments/grouped/", flipkart_views.flipkart_payments_grouped, name="flipkart_payments_grouped"),
     path("flipkart-other-charges/", flipkart_views.flipkart_other_charges_list, name="flipkart_other_charges_list"),

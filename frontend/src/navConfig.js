@@ -20,8 +20,7 @@ export const NAV_GROUPS = [
     label: 'Meesho',
     color: '#F43397',
     items: [
-      { path: '/meesho/returns', label: 'Meesho Returns', icon: '↩', access: MEESHO, accessLabel: 'Meesho (every page in this group)' },
-      { path: '/meesho/otps', label: 'Delivery OTPs', icon: '🔑', access: MEESHO },
+      { path: '/meesho/otps', label: 'Delivery OTPs', icon: '🔑', access: MEESHO, accessLabel: 'Meesho (every page in this group)' },
       { path: '/meesho/inventory', label: 'Meesho Inventory', icon: '▤', access: MEESHO },
       { path: '/meesho/payments', label: 'Meesho Payments', icon: '₹', access: MEESHO },
       { path: '/meesho/ads', label: 'Meesho Ads', icon: '📣', access: MEESHO },
@@ -44,8 +43,9 @@ export const NAV_GROUPS = [
       { path: '/', label: 'Overview', icon: '◈', end: true, alsoBy: MEESHO },
       { path: '/sku-analysis', label: 'SKU Analysis', icon: '↗' },
       { path: '/daily-profit', label: 'Daily Profit', icon: '📅' },
-      // Act now (Meesho's live return rates, pause) and Losses, reasons & trends — it was two pages.
-      { path: '/return-analysis', label: 'Return Analysis', icon: '⤺', alsoBy: MEESHO },
+      // Meesho (its returns, Act now, Losses, reasons & trends) and Flipkart — it was Meesho Returns,
+      // Return Analysis and Return Analysis (Meesho).
+      { path: '/return-analysis', label: 'Returns', icon: '↩', alsoBy: [MEESHO, '/flipkart-seller'] },
     ],
   },
   {

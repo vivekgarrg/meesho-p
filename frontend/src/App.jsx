@@ -1153,7 +1153,7 @@ function AppShell() {
   const liveView = sp.get('platform') !== 'flipkart' && (
     (loc.pathname === '/' && sp.get('section') === 'panel')
     || (loc.pathname === '/orders' && (sp.get('section') || 'live') === 'live')
-    || (loc.pathname === '/return-analysis' && (sp.get('section') || 'act') === 'act')
+    || (loc.pathname === '/return-analysis' && ['returns', 'act', null].includes(sp.get('section')))
   );
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem('sidebar_collapsed') === 'true');
   const [drawerOpen, setDrawerOpen] = useState(false);

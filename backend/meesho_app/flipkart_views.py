@@ -20,6 +20,7 @@ ads and recoveries.
 """
 
 import re
+from datetime import date
 from collections import Counter, defaultdict
 from decimal import Decimal
 
@@ -1090,3 +1091,145 @@ def flipkart_sku_analysis(request, business_id):
         "missing_price_count": summary["missing_price_count"],
         "skus": skus,
     })
+
+
+# ── Returns ──────────────────────────────────────────────────────────────────
+RETURN_STATUSES = ("RETURNED", "RETURN_REQUESTED")
+FLIPKART_RETURN_LIST = 500
+
+# Flipkart's payments say who sent an item back: the customer, or the courier
+# (a "Logistics Return" — it never reached the customer, Meesho's RTO).
+_COURIER_TYPES = {"LOGISTICS RETURN", "COURIER RETURN"}
+_CUSTOMER_TYPES = {"CUSTOMER RETURN"}
+
+
+def _return_kind(types, row=None):
+    """customer | courier | unknown. The payment's return type when there is one;
+    otherwise whether the item was ever delivered — returned after delivery, the
+    customer sent it back; never delivered, the courier brought it back."""
+    up = {t.strip().upper() for t in types if t}
+    if up & _COURIER_TYPES:
+        return "courier"
+    if up & _CUSTOMER_TYPES:
+        return "customer"
+    if row is not None:
+        if row.delivery_date:
+            return "customer"
+        if row.dispatched_date:
+            return "courier"
+    return "unknown"
+
+
+@api_view(["GET"])
+def flipkart_returns(request, business_id):
+    """
+    Flipkart's returns for the orders placed in the period (date_from / date_to):
+
+      totals    items ordered, delivered, returned (done, and still on the way
+                back), returns cancelled, customer vs courier returns, and the
+                return rate — returned ÷ (delivered + returned): of the items that
+                reached an end, how many came back
+      by_sku    the same per SKU, worst rate first (with at least `min` = 3 ended)
+      reasons   why, by Flipkart's reason and sub-reason
+      returns   every returned item, newest first, with what its payments came to
+    """
+    business = get_authorized_business(request, business_id)
+    date_from, date_to = _date_params(request)
+    qs = FlipkartOrder.objects.filter(business=business)
+    if date_from:
+        qs = qs.filter(order_date__gte=date_from)
+    if date_to:
+        qs = qs.filter(order_date__lte=date_to)
+    rows = list(qs.only(
+        "order_item_id", "order_id", "order_date", "order_item_status", "sku", "product_title", "quantity",
+        "logistics_partner", "delivery_tracking_id", "return_id", "return_reason", "return_sub_reason",
+        "return_approval_date", "delivery_date", "dispatched_date",
+    ))
+    returned = [r for r in rows if r.order_item_status in RETURN_STATUSES]
+
+    # What each returned item's payments came to, and who sent it back (one query).
+    pays = defaultdict(lambda: {"net": ZERO, "types": set(), "rows": 0})
+    ids = [r.order_item_id for r in returned]
+    for i in range(0, len(ids), 1000):
+        for item_id, value, rtype in FlipkartOrderPayment.objects.filter(
+                business=business, order_item_id__in=ids[i:i + 1000]).values_list("order_item_id", "settlement_value", "return_type"):
+            p = pays[item_id]
+            p["net"] += value or ZERO
+            p["rows"] += 1
+            if _is_return(rtype):
+                p["types"].add(rtype)
+
+    def rate(ret, delivered):
+        ended = ret + delivered
+        return round(100 * ret / ended, 1) if ended else None
+
+    kinds = Counter(_return_kind(pays[r.order_item_id]["types"], r) for r in returned)
+    status_n = Counter(r.order_item_status for r in rows)
+    delivered = status_n["DELIVERED"]
+    n_ret = len(returned)
+    totals = {
+        "items": len(rows),
+        "delivered": delivered,
+        "returned": status_n["RETURNED"],
+        "return_requested": status_n["RETURN_REQUESTED"],
+        "return_cancelled": status_n["RETURN_CANCELLED"],
+        "cancelled": status_n["CANCELLED"],
+        "in_progress": sum(status_n[s] for s in ("APPROVED", "READY_TO_SHIP", "SHIPPED")),
+        "returns": n_ret,
+        "customer": kinds["customer"], "courier": kinds["courier"], "unknown": kinds["unknown"],
+        "return_rate": rate(n_ret, delivered),
+        # As Meesho's: customer returns ÷ items that reached a customer — kept (delivered) + sent back (courier returns never did).
+        "customer_rate": rate(kinds["customer"], delivered),
+        "returns_net": _to_num(sum((pays[r.order_item_id]["net"] for r in returned), ZERO)),
+    }
+
+    min_ended = 3
+    sku = defaultdict(lambda: {"items": 0, "delivered": 0, "returns": 0, "customer": 0, "courier": 0, "net": ZERO, "title": ""})
+    for r in rows:
+        s = sku[r.sku or "—"]
+        s["items"] += 1
+        s["title"] = s["title"] or (r.product_title or "")
+        if r.order_item_status == "DELIVERED":
+            s["delivered"] += 1
+        elif r.order_item_status in RETURN_STATUSES:
+            s["returns"] += 1
+            k = _return_kind(pays[r.order_item_id]["types"], r)
+            if k in ("customer", "courier"):
+                s[k] += 1
+            s["net"] += pays[r.order_item_id]["net"]
+    by_sku = [
+        {"sku": k, "title": v["title"], "items": v["items"], "delivered": v["delivered"], "returns": v["returns"],
+         "customer": v["customer"], "courier": v["courier"], "returns_net": _to_num(v["net"]),
+         "return_rate": rate(v["returns"], v["delivered"]), "customer_rate": rate(v["customer"], v["delivered"]), "enough": v["returns"] + v["delivered"] >= min_ended}
+        for k, v in sku.items() if v["returns"] or v["delivered"]
+    ]
+    by_sku.sort(key=lambda x: (not x["enough"], -(x["return_rate"] or 0), -x["returns"]))
+
+    reasons = Counter((r.return_reason or "Not given", r.return_sub_reason or "") for r in returned)
+    by_reason = defaultdict(lambda: {"count": 0, "subs": Counter()})
+    for (reason, sub), n in reasons.items():
+        by_reason[reason]["count"] += n
+        if sub and sub != reason:
+            by_reason[reason]["subs"][sub] += n
+    reason_list = sorted(
+        ({"reason": k, "count": v["count"], "subs": [{"sub": s, "count": c} for s, c in v["subs"].most_common(5)]}
+         for k, v in by_reason.items()), key=lambda x: -x["count"])
+
+    returned.sort(key=lambda r: (r.return_approval_date or r.order_date or date.min, r.order_item_id), reverse=True)
+    listed = [
+        {
+            "order_item_id": r.order_item_id, "order_id": r.order_id, "sku": r.sku, "title": r.product_title,
+            "quantity": r.quantity, "status": r.order_item_status,
+            "order_date": str(r.order_date) if r.order_date else None,
+            "delivery_date": str(r.delivery_date) if r.delivery_date else None,
+            "return_date": str(r.return_approval_date) if r.return_approval_date else None,
+            "return_id": r.return_id, "reason": r.return_reason, "sub_reason": r.return_sub_reason,
+            "courier": r.logistics_partner, "tracking_id": r.delivery_tracking_id,
+            "kind": _return_kind(pays[r.order_item_id]["types"], r),
+            "paid_rows": pays[r.order_item_id]["rows"],
+            "net": _to_num(pays[r.order_item_id]["net"]) if pays[r.order_item_id]["rows"] else None,
+        }
+        for r in returned[:FLIPKART_RETURN_LIST]
+    ]
+    return Response({"totals": totals, "by_sku": by_sku, "reasons": reason_list, "returns": listed,
+                     "listed": len(listed), "min_ended": min_ended})
