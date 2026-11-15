@@ -9,6 +9,7 @@ class MeeshoSyncRun < ApplicationRecord
   KIND_PAYMENTS  = "PAYMENTS"
   KIND_RETURNS   = "RETURNS"
   KIND_STOCK     = "STOCK"
+  KIND_ADS       = "ADS"
   TRIGGER_SCHEDULE = "SCHEDULE"
   TRIGGER_MANUAL   = "MANUAL"
 

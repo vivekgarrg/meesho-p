@@ -1,7 +1,7 @@
 # Runs every minute (config/schedule.yml): queues a pull for each account whose
 # interval (5 minutes by default) has passed since its last one, and an
 # inventory pull every half hour, payments every two hours, returns and OTPs
-# every ten minutes, and the
+# every ten minutes, Meesho Ads (and its auto-pause) every five, and the
 # automation set on Meesho Orders (accept every N minutes, labels at set times).
 class MeeshoScheduleJob
   include Sidekiq::Job
@@ -21,6 +21,7 @@ class MeeshoScheduleJob
     queue_inventory(now)
     queue_payments(now)
     queue_every(now, MeeshoSyncRun::KIND_RETURNS, MeeshoReturnsJob)
+    queue_every(now, MeeshoSyncRun::KIND_ADS, MeeshoAdsJob)
     queue_automation(now)
     queue_stock_refill(now)
   end
@@ -62,7 +63,7 @@ class MeeshoScheduleJob
 
   # Minutes between reads of each kind, from the Sync schedule (0 = paused).
   EVERY = { MeeshoSyncRun::KIND_INVENTORY => :inventory_every, MeeshoSyncRun::KIND_PAYMENTS => :payments_every,
-            MeeshoSyncRun::KIND_RETURNS => :returns_every }.freeze
+            MeeshoSyncRun::KIND_RETURNS => :returns_every, MeeshoSyncRun::KIND_ADS => :ads_every }.freeze
 
   # A job with a STAGGER (seconds) has each further account's read start that
   # much later — Meesho rate-limits the server's address, not each account.

@@ -87,3 +87,5 @@ backend/claim_uploads/
 
 # Flipkart seller-panel calls copied from the browser: carry live session cookies / tokens.
 flipkart-api.py
+# Meesho ads requests copied from the panel (live session cookies) — never committed.
+meesho-api.py

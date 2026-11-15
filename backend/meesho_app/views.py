@@ -3789,27 +3789,13 @@ def flipkart_profit_sku_payments(request, business_id):
     return Response({"sku": sku_param, "count": len(orders), "orders": orders})
 
 
-@api_view(["GET"])
-def ads_sku_analysis(request, business_id):
+def _pricing_engine(business):
     """
-    Per-SKU breakdown of orders placed through Meesho Ads (OrderPayment.order_source
-    == "Ad order") vs organic — order counts, delivery outcome, and profit, computed
-    with the same P&L engine as /profit/. Also reports total ads spend for the period.
-
-    Meesho's Ads Cost export only has a campaign_id (no SKU/catalog link), so ad
-    spend can only be compared in aggregate against total ad-driven profit — not
-    attributed to individual SKUs.
+    The per-SKU price lookups profit is worked out with — SKU price, parent price
+    (dated history first), master price — as ads_sku_analysis and the Ads
+    dashboard (meesho_ads.py) use them. get_eff_price(sku, order_date) gives
+    (final_price, packaging_cost, item_price, tax_percent).
     """
-    business = get_authorized_business(request, business_id)
-    cost_setting = _cost_setting(business)
-    date_from = request.GET.get("date_from", "")
-    date_to   = request.GET.get("date_to", "")
-
-    qs = _profit_payments_qs(business, date_from, date_to, request)
-
-    # sub_order_nos where any row is flagged as coming through ads
-    ad_sub_orders = set(qs.filter(order_source="Ad order").values_list("sub_order_no", flat=True))
-
     # Pricing lookups — mirrors profit_summary
     _fp_all        = list(FinalPrice.objects.filter(business=business).only("sku_id", "final_price", "packaging_cost", "parent_id", "item_price", "tax_percent"))
     price_map      = _SkuMap((fp.sku_id, fp.final_price    or Decimal("0")) for fp in _fp_all)
@@ -3899,6 +3885,36 @@ def ads_sku_analysis(request, business_id):
             item_price_map.get(sku_id, Decimal("0")),
             tax_map.get(sku_id, 0),
         )
+
+
+    return {"price_map": price_map, "packaging_map": packaging_map, "canonical_sku": canonical_sku,
+            "sku_parent_map": sku_parent_map, "parent_name_map": parent_name_map, "get_eff_price": get_eff_price}
+
+
+@api_view(["GET"])
+def ads_sku_analysis(request, business_id):
+    """
+    Per-SKU breakdown of orders placed through Meesho Ads (OrderPayment.order_source
+    == "Ad order") vs organic — order counts, delivery outcome, and profit, computed
+    with the same P&L engine as /profit/. Also reports total ads spend for the period.
+
+    Meesho's Ads Cost export only has a campaign_id (no SKU/catalog link), so ad
+    spend can only be compared in aggregate against total ad-driven profit — not
+    attributed to individual SKUs.
+    """
+    business = get_authorized_business(request, business_id)
+    cost_setting = _cost_setting(business)
+    date_from = request.GET.get("date_from", "")
+    date_to   = request.GET.get("date_to", "")
+
+    qs = _profit_payments_qs(business, date_from, date_to, request)
+
+    # sub_order_nos where any row is flagged as coming through ads
+    ad_sub_orders = set(qs.filter(order_source="Ad order").values_list("sub_order_no", flat=True))
+
+    _pe = _pricing_engine(business)
+    price_map, packaging_map, canonical_sku = _pe["price_map"], _pe["packaging_map"], _pe["canonical_sku"]
+    sku_parent_map, parent_name_map, get_eff_price = _pe["sku_parent_map"], _pe["parent_name_map"], _pe["get_eff_price"]
 
     unique_statuses = ["Claim", "Cancelled", "Delivered", "Return", "RTO", "Shipped", "Exchange", "Unknown"]
 

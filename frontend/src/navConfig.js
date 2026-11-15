@@ -33,6 +33,7 @@ export const NAV_GROUPS = [
       { path: '/meesho/otps', label: 'Delivery OTPs', icon: '🔑', access: MEESHO },
       { path: '/meesho/inventory', label: 'Meesho Inventory', icon: '▤', access: MEESHO },
       { path: '/meesho/payments', label: 'Meesho Payments', icon: '₹', access: MEESHO },
+      { path: '/meesho/ads', label: 'Meesho Ads', icon: '📣', access: MEESHO },
       { path: '/meesho/settings', label: 'Meesho Settings', icon: '⚙', access: MEESHO },
     ],
   },

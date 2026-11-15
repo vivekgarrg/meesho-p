@@ -6,6 +6,7 @@ import { MeeshoOrdersTab } from "./MeeshoOrdersTab";
 import { MeeshoLiveInventoryTab } from "./MeeshoLiveInventoryTab";
 import { MeeshoSyncTab } from "./MeeshoSyncTab";
 import { MeeshoPaymentsTab } from "./MeeshoPaymentsTab";
+import { MeeshoAdsTab } from "./MeeshoAdsTab";
 import { MeeshoLinkingTab } from "./MeeshoLinkingTab";
 import { MeeshoReturnsTab } from "./MeeshoReturnsTab";
 import { MeeshoReturnAnalysis } from "./MeeshoReturnAnalysis";
@@ -32,6 +33,7 @@ import { Panel, ago } from "./MeeshoUI";
  *   OTPs           couriers' delivery OTPs
  *   Inventory      every SKU by parent; pause
  *   Payments       paid, upcoming, outstanding
+ *   Ads            campaigns, spend, true ROI per catalog, auto-pause
  *   Settings       automation, Meesho accounts and their sessions
  *
  * Old links (/meesho-orders?tab=…) land on the matching page. A broken
@@ -48,6 +50,7 @@ export const MEESHO_SECTIONS = [
   { key: "otps", slug: "otps", label: "Delivery OTPs", icon: "🔑" },
   { key: "inventory", slug: "inventory", label: "Inventory", icon: "▤" },
   { key: "payments", slug: "payments", label: "Payments", icon: "₹" },
+  { key: "ads", slug: "ads", label: "Ads", icon: "📣" },
   { key: "settings", slug: "settings", label: "Settings", icon: "⚙" },
 ];
 // The Orders page's tabs, one per Meesho order status.
@@ -227,6 +230,7 @@ export function MeeshoHubTab() {
         {tab === "otps" && <MeeshoReturnsTab part="otps" key="otps" />}
         {tab === "inventory" && <MeeshoLiveInventoryTab embedded />}
         {tab === "payments" && <MeeshoPaymentsTab />}
+        {tab === "ads" && <MeeshoAdsTab />}
         {tab === "settings" && (
           <div style={{ display: "flex", flexDirection: "column", gap: 16, maxWidth: 1100 }}>
             <AutomationCard />

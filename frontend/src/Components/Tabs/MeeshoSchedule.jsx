@@ -33,6 +33,8 @@ const ROWS = [
       { f: "returns_every", label: "Read", every: [0, 5, 10, 15, 30, 60, 120, 240] },
       { f: "returns_window", label: "Delivered and lost returns from the", window: true },
     ] },
+  { key: "ads", title: "Ads", what: "Campaigns, each live catalog's spend and orders today, and the auto-pause check (Meesho → Ads).",
+    last: "ads", fields: [{ f: "ads_every", label: "Read", every: [0, 5, 10, 15, 30, 60] }] },
 ];
 
 export function SyncScheduleCard({ isAdmin }) {

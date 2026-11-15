@@ -1754,12 +1754,13 @@ SYNC_LIMITS = {
     "payments_paid_days": (1, 90, False),
     "payments_upcoming_days": (1, 14, False),
     "returns_every": (5, 240, True),
+    "ads_every": (5, 60, True),
 }
 
 
 def _sync_settings_json(s, accounts):
     last = {}
-    for kind in (MeeshoSyncRun.KIND_SYNC, KIND_INVENTORY, KIND_PAYMENTS, KIND_RETURNS):
+    for kind in (MeeshoSyncRun.KIND_SYNC, KIND_INVENTORY, KIND_PAYMENTS, KIND_RETURNS, "ADS"):
         r = MeeshoSyncRun.objects.filter(account__in=accounts, kind=kind, status=MeeshoSyncRun.STATUS_OK).order_by("-finished_at").first()
         last[kind.lower()] = r.finished_at if r else None
     return {

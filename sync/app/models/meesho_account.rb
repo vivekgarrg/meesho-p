@@ -14,6 +14,7 @@ class MeeshoAccount < ApplicationRecord
   has_many :catalogs, class_name: "MeeshoCatalog", foreign_key: :account_id
   has_many :listings, class_name: "MeeshoListing", foreign_key: :account_id
   has_many :stock_holds, class_name: "MeeshoStockHold", foreign_key: :account_id
+  has_many :ad_campaigns, class_name: "MeeshoAdCampaign", foreign_key: :account_id
 
   def password
     SecretBox.decrypt(password_enc)

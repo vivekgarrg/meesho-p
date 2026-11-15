@@ -96,7 +96,7 @@ ActiveRecord::Schema.define do
   end
   create_table :meesho_sync_settings do |t|
     %i[orders_every shipped_every inventory_every inventory_sku_reads payments_every payments_paid_days
-       payments_upcoming_days returns_every].each { |c| t.integer c, null: false }
+       payments_upcoming_days returns_every ads_every].each { |c| t.integer c, null: false }
     t.string :returns_window, null: false
     t.integer :updated_by_id
     t.datetime :updated_at, null: false
@@ -109,6 +109,9 @@ ActiveRecord::Schema.define do
     t.boolean :stock_refill_enabled, null: false, default: false
     t.string :stock_refill_time, null: false, default: "21:00"
     t.integer :stock_refill_qty, null: false, default: 5000
+    t.boolean :ads_auto_pause, null: false, default: false
+    t.decimal :ads_pause_spend, precision: 8, scale: 2, null: false, default: 35
+    t.integer :ads_pause_orders, null: false, default: 0
     t.datetime :last_stock_refill_at
     t.datetime :last_accept_at
     t.datetime :last_labels_at
@@ -180,6 +183,66 @@ ActiveRecord::Schema.define do
     t.datetime :restored_at
     t.index %i[hold_id product_id variation_id], unique: true
   end
+  figures = ->(t) {
+    t.decimal :spend, precision: 12, scale: 2, null: false
+    t.decimal :revenue, precision: 14, scale: 2, null: false
+    %i[orders views clicks].each { |c| t.integer c, null: false }
+  }
+  create_table :meesho_ad_campaigns do |t|
+    t.integer :account_id, null: false
+    t.bigint :campaign_id, null: false
+    %i[name status reason campaign_type budget_type bid_type image feedback_state].each { |c| t.string c, null: false }
+    t.decimal :bid, precision: 10, scale: 2
+    t.decimal :total_budget, precision: 12, scale: 2
+    t.datetime :start_at
+    t.datetime :end_at
+    t.integer :catalog_count, null: false
+    t.bigint :lead_catalog_id
+    figures.(t)
+    t.datetime :read_at
+    t.datetime :details_read_at
+    t.date :days_read_through
+    t.index %i[account_id campaign_id], unique: true
+  end
+  create_table :meesho_ad_catalogs do |t|
+    t.integer :account_id, null: false
+    t.bigint :campaign_id, null: false
+    t.bigint :catalog_id, null: false
+    %i[name category image status status_reason].each { |c| t.string c, null: false }
+    t.decimal :bid, precision: 10, scale: 2
+    figures.(t)
+    t.datetime :read_at
+    t.index %i[account_id campaign_id catalog_id], unique: true
+  end
+  create_table :meesho_ad_catalog_days do |t|
+    t.integer :account_id, null: false
+    t.bigint :campaign_id, null: false
+    t.bigint :catalog_id, null: false
+    t.date :date, null: false
+    figures.(t)
+    t.datetime :read_at
+    t.index %i[account_id campaign_id catalog_id date], unique: true, name: "ad_cat_day"
+  end
+  create_table :meesho_ad_days do |t|
+    t.integer :account_id, null: false
+    t.date :date, null: false
+    figures.(t)
+    t.datetime :read_at
+    t.index %i[account_id date], unique: true
+  end
+  create_table :meesho_ad_pauses do |t|
+    t.integer :account_id, null: false
+    t.bigint :campaign_id, null: false
+    t.bigint :catalog_id, null: false
+    %i[catalog_name action trigger status message].each { |c| t.string c, null: false }
+    t.date :date, null: false
+    t.decimal :spend, precision: 12, scale: 2, null: false
+    t.integer :orders, null: false
+    t.decimal :limit, precision: 8, scale: 2
+    t.integer :created_by_id
+    t.datetime :created_at, null: false
+    t.datetime :done_at
+  end
 end
 
 # No Django in tests: its commands are never started from here (tests that
@@ -187,7 +250,7 @@ end
 DjangoCommand.define_singleton_method(:run) { |*_args, **_opts| {} }
 
 # No Redis in tests: the per-account lock always succeeds.
-[MeeshoSyncJob, MeeshoInventoryJob, MeeshoPaymentsJob, MeeshoReturnsJob].each do |job|
+[MeeshoSyncJob, MeeshoInventoryJob, MeeshoPaymentsJob, MeeshoReturnsJob, MeeshoAdsJob].each do |job|
   job.class_eval do
     private
     def lock(_account) = true

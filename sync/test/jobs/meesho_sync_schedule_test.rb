@@ -13,7 +13,7 @@ class MeeshoSyncScheduleTest < ActiveSupport::TestCase
 
   def schedule(**over)
     MeeshoSyncSetting.create!({ orders_every: 5, shipped_every: 15, inventory_every: 30, inventory_sku_reads: 300,
-                                payments_every: 120, payments_paid_days: 30, payments_upcoming_days: 7, returns_every: 10,
+                                payments_every: 120, payments_paid_days: 30, payments_upcoming_days: 7, returns_every: 10, ads_every: 5,
                                 returns_window: "last_2_week", updated_at: Time.current }.merge(over))
   end
 
@@ -55,5 +55,19 @@ class MeeshoSyncScheduleTest < ActiveSupport::TestCase
     MeeshoInventoryJob.new.perform(account.id)
     assert_requested(:post, "#{base}fetchAllStockV2Products", times: 1)
     assert_match(/2 more on the next pulls/, account.runs.last.message)
+  end
+
+  test "Meesho Ads is read every five minutes, or as set, and 0 stops it" do
+    account
+    schedule
+    MeeshoScheduleJob.new.perform
+    assert_equal 1, MeeshoAdsJob.jobs.size
+    travel(3.minutes) { MeeshoScheduleJob.new.perform }
+    assert_equal 1, MeeshoAdsJob.jobs.size
+    travel(6.minutes) { MeeshoScheduleJob.new.perform }
+    assert_equal 2, MeeshoAdsJob.jobs.size
+    MeeshoSyncSetting.update_all(ads_every: 0)
+    travel(20.minutes) { MeeshoScheduleJob.new.perform }
+    assert_equal 2, MeeshoAdsJob.jobs.size
   end
 end

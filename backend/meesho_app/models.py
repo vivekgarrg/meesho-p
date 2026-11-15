@@ -3513,6 +3513,12 @@ class MeeshoAutoSetting(models.Model):
     last_stock_refill_at = models.DateTimeField(null=True, blank=True)
     # Return Guard: pause products over the returns limit by itself every morning. Off unless an admin turns it on.
     return_guard_auto = models.BooleanField(default=False)
+    # Ads auto-pause (MeeshoAdsJob, every ads read): a catalog in a live campaign that has spent more than
+    # `ads_pause_spend` today (IST) with no more than `ads_pause_orders` orders today is paused in that campaign.
+    # Off unless an admin turns it on.
+    ads_auto_pause = models.BooleanField(default=False)
+    ads_pause_spend = models.DecimalField(max_digits=8, decimal_places=2, default=35)
+    ads_pause_orders = models.PositiveIntegerField(default=0)
     last_accept_at = models.DateTimeField(null=True, blank=True)
     last_labels_at = models.DateTimeField(null=True, blank=True)
     updated_by = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
@@ -3546,6 +3552,7 @@ class MeeshoSyncSetting(models.Model):
     payments_upcoming_days = models.PositiveIntegerField(default=7)
     returns_every = models.PositiveIntegerField(default=10)
     returns_window = models.CharField(max_length=20, default="last_2_week")   # delivered / lost returns read for
+    ads_every = models.PositiveIntegerField(default=5)                    # Meesho Ads: campaigns, spend, auto-pause check
     updated_by = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -3945,3 +3952,130 @@ class FlipkartSellerAccount(models.Model):
 
     def __str__(self):
         return f"Flipkart {self.username} ({self.business_id}) {self.status}"
+
+
+# ── Meesho Ads (supplier panel → Advertisement) ─────────────────────────────
+# Written by the sync worker (MeeshoAdsJob) from the panel's own ads requests;
+# read by meesho_ads.py for the Ads dashboard. Money is Meesho's ad spend
+# before GST (the payment file's Ads Cost sheet adds 18%).
+
+class MeeshoAdCampaign(models.Model):
+    """One ad campaign, with its lifetime figures from the campaign list."""
+    account = models.ForeignKey(MeeshoAccount, on_delete=models.CASCADE, related_name="ad_campaigns")
+    campaign_id = models.BigIntegerField()
+    name = models.CharField(max_length=255, blank=True)
+    status = models.CharField(max_length=20, blank=True, db_index=True)     # LIVE / PAUSED / UPCOMING
+    reason = models.CharField(max_length=40, blank=True)                     # SUPPLIER_ABORTED, TIME_LAPSED…
+    campaign_type = models.CharField(max_length=40, blank=True)
+    budget_type = models.CharField(max_length=40, blank=True)
+    bid_type = models.CharField(max_length=20, blank=True)
+    bid = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    total_budget = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    start_at = models.DateTimeField(null=True, blank=True)
+    end_at = models.DateTimeField(null=True, blank=True)
+    catalog_count = models.PositiveIntegerField(default=0)
+    lead_catalog_id = models.BigIntegerField(null=True, blank=True)
+    image = models.URLField(max_length=500, blank=True)
+    feedback_state = models.CharField(max_length=30, blank=True)             # LEARNING…
+    spend = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    revenue = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    orders = models.PositiveIntegerField(default=0)
+    views = models.PositiveBigIntegerField(default=0)
+    clicks = models.PositiveIntegerField(default=0)
+    read_at = models.DateTimeField(null=True, blank=True)
+    details_read_at = models.DateTimeField(null=True, blank=True)            # its catalogs' lifetime figures
+    days_read_through = models.DateField(null=True, blank=True)             # every day up to this one read after it ended
+
+    class Meta:
+        db_table = "meesho_ad_campaigns"
+        unique_together = [("account", "campaign_id")]
+        ordering = ["-start_at"]
+
+
+class MeeshoAdCatalog(models.Model):
+    """One catalog in one campaign: its state there and its lifetime figures in it."""
+    account = models.ForeignKey(MeeshoAccount, on_delete=models.CASCADE, related_name="ad_catalogs")
+    campaign_id = models.BigIntegerField()
+    catalog_id = models.BigIntegerField(db_index=True)
+    name = models.CharField(max_length=255, blank=True)
+    category = models.CharField(max_length=255, blank=True)
+    image = models.URLField(max_length=500, blank=True)
+    status = models.CharField(max_length=20, blank=True)                     # ACTIVE / PAUSED in the campaign
+    status_reason = models.CharField(max_length=40, blank=True)
+    bid = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    spend = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    revenue = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    orders = models.PositiveIntegerField(default=0)
+    views = models.PositiveBigIntegerField(default=0)
+    clicks = models.PositiveIntegerField(default=0)
+    read_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "meesho_ad_catalogs"
+        unique_together = [("account", "campaign_id", "catalog_id")]
+
+
+class MeeshoAdCatalogDay(models.Model):
+    """One catalog's figures in one campaign on one day (IST) — what the auto-pause goes by."""
+    account = models.ForeignKey(MeeshoAccount, on_delete=models.CASCADE, related_name="ad_catalog_days")
+    campaign_id = models.BigIntegerField()
+    catalog_id = models.BigIntegerField()
+    date = models.DateField(db_index=True)
+    spend = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    revenue = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    orders = models.PositiveIntegerField(default=0)
+    views = models.PositiveBigIntegerField(default=0)
+    clicks = models.PositiveIntegerField(default=0)
+    read_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "meesho_ad_catalog_days"
+        unique_together = [("account", "campaign_id", "catalog_id", "date")]
+
+
+class MeeshoAdDay(models.Model):
+    """The whole account's ad figures on one day (IST), from the panel's overall performance."""
+    account = models.ForeignKey(MeeshoAccount, on_delete=models.CASCADE, related_name="ad_days")
+    date = models.DateField()
+    spend = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    revenue = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    orders = models.PositiveIntegerField(default=0)
+    views = models.PositiveBigIntegerField(default=0)
+    clicks = models.PositiveIntegerField(default=0)
+    read_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "meesho_ad_days"
+        unique_together = [("account", "date")]
+        ordering = ["date"]
+
+
+class MeeshoAdPause(models.Model):
+    """Every pause or resume of a catalog in a campaign — by the auto-pause rule or by hand — and how it went."""
+    PAUSED = "PAUSED"            # Meesho took it (and a fresh read shows it paused)
+    FAILED = "FAILED"            # Meesho refused it, or it still shows active
+    QUEUED = "QUEUED"            # by hand: waiting for the worker
+    RESUMED = "RESUMED"          # set active again by hand
+    ACTION_PAUSE, ACTION_RESUME = "PAUSE", "RESUME"
+    TRIGGER_AUTO, TRIGGER_MANUAL = "AUTO", "MANUAL"
+
+    account = models.ForeignKey(MeeshoAccount, on_delete=models.CASCADE, related_name="ad_pauses")
+    campaign_id = models.BigIntegerField()
+    catalog_id = models.BigIntegerField()
+    catalog_name = models.CharField(max_length=255, blank=True)
+    action = models.CharField(max_length=10, default=ACTION_PAUSE)
+    trigger = models.CharField(max_length=10, default=TRIGGER_AUTO)
+    status = models.CharField(max_length=10, default=QUEUED)
+    date = models.DateField()                                                  # the IST day the figures are for
+    spend = models.DecimalField(max_digits=12, decimal_places=2, default=0)    # that day's spend when it was decided
+    orders = models.PositiveIntegerField(default=0)
+    limit = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
+    message = models.CharField(max_length=500, blank=True)
+    created_by = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    created_at = models.DateTimeField(auto_now_add=True)
+    done_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "meesho_ad_pauses"
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["account", "campaign_id", "catalog_id", "date"], name="meesho_adpause_idx")]
