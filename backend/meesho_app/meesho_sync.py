@@ -873,7 +873,7 @@ def _save_label_file(batch, trigger, runs, pdf, sorted_ok, pages=0, summary="", 
         "business_ids": sorted({r.account.business_id for r in runs}),
         "business_names": sorted({r.account.business.name for r in runs}),
     })
-    stale = list(MeeshoLabelFile.objects.order_by("-created_at").values_list("pk", flat=True)[MeeshoLabelFile.KEEP:])
+    stale = list(MeeshoLabelFile.objects.filter(platform="meesho").order_by("-created_at").values_list("pk", flat=True)[MeeshoLabelFile.KEEP:])
     if stale:
         MeeshoLabelFile.objects.filter(pk__in=stale).delete()
     return f
@@ -1354,21 +1354,38 @@ def meesho_automation(request, business_id):
     return Response(_automation_json(setting))
 
 
-def _label_files_for(accounts):
-    biz = {a.business_id for a in accounts}
-    return [f for f in MeeshoLabelFile.objects.defer("pdf")[:MeeshoLabelFile.KEEP] if biz & set(f.business_ids or [])]
+def _label_file_businesses(desk, accounts):
+    """The desk's businesses whose kept labels files can be seen: those with a Meesho account, or a Flipkart one."""
+    from .models import FlipkartSellerAccount
+    return {a.business_id for a in accounts} | set(
+        FlipkartSellerAccount.objects.filter(business__in=desk).values_list("business_id", flat=True))
+
+
+def _label_files_for(accounts, platform=None, extra_business_ids=()):
+    """The kept labels files of these businesses — one marketplace's (platform) or both."""
+    biz = {a.business_id for a in accounts} | set(extra_business_ids)
+    qs = MeeshoLabelFile.objects.defer("pdf")
+    if platform:
+        qs = qs.filter(platform=platform)
+    return [f for f in qs[:MeeshoLabelFile.KEEP * 2] if biz & set(f.business_ids or [])]
 
 
 @api_view(["GET"])
 def meesho_label_files(request, business_id):
-    """The newest labels PDFs (automatic and generated), ready to print — for the businesses on this desk."""
+    """The newest labels PDFs (automatic and generated), ready to print — for the businesses on this desk.
+    ?platform=meesho|flipkart for one marketplace's; both by default (Flipkart's are kept by flipkart_auto)."""
     business = _views().get_authorized_business(request, business_id)
-    _desk, accounts = _desk_accounts(request, business, LABEL_FILES_PATH)
+    desk, accounts = _desk_accounts(request, business, LABEL_FILES_PATH)
+    platform = request.GET.get("platform") if request.GET.get("platform") in ("meesho", "flipkart") else None
+    try:
+        limit = max(1, min(60, int(request.GET.get("limit") or 10)))
+    except ValueError:
+        limit = 10
     return Response({"send_channels": notify.channels(), "is_admin": _views()._is_admin(request.user), "files": [{
         "id": f.pk, "created_at": f.created_at, "trigger": f.trigger, "labels": f.labels, "pages": f.pages,
-        "sorted": f.sorted, "businesses": f.business_names, "summary": f.summary,
-        "file_name": f"meesho-labels-{timezone.localtime(f.created_at):%Y-%m-%d-%H%M}.pdf",
-    } for f in _label_files_for(accounts)[:10]]})
+        "sorted": f.sorted, "businesses": f.business_names, "summary": f.summary, "platform": f.platform,
+        "file_name": f"{f.platform}-labels-{timezone.localtime(f.created_at):%Y-%m-%d-%H%M}.pdf",
+    } for f in _label_files_for(accounts, platform, extra_business_ids=_label_file_businesses(desk, accounts))[:limit]]})
 
 
 def _order_ids_from_pdf(pdf):
@@ -1500,7 +1517,7 @@ def meesho_label_file_items(request, business_id, file_id):
     business = v.get_authorized_business(request, business_id)
     _desk, accounts = _desk_accounts(request, business, LABEL_FILES_PATH)
     f = MeeshoLabelFile.objects.filter(pk=file_id).first()
-    mine = {a.business_id for a in accounts}
+    mine = _label_file_businesses(_desk, accounts)
     if not f or not (mine & set(f.business_ids or [])):
         return Response({"error": "No such labels file."}, status=status.HTTP_404_NOT_FOUND)
     names = {a.business_id: a.business.name for a in accounts}
@@ -1531,7 +1548,7 @@ def meesho_label_file_send(request, business_id, file_id):
         return Response({"error": "Only an admin can send labels."}, status=status.HTTP_403_FORBIDDEN)
     _desk, accounts = _desk_accounts(request, business, LABEL_FILES_PATH)
     f = MeeshoLabelFile.objects.filter(pk=file_id).first()
-    if not f or not ({a.business_id for a in accounts} & set(f.business_ids or [])):
+    if not f or not (_label_file_businesses(_desk, accounts) & set(f.business_ids or [])):
         return Response({"error": "No such labels file."}, status=status.HTTP_404_NOT_FOUND)
     if not notify.channels():
         return Response({"error": "No channel is set up — add the Telegram (or email / WhatsApp) settings to the server's .env."},
@@ -1540,12 +1557,12 @@ def meesho_label_file_send(request, business_id, file_id):
     if what not in ("both", "pdf", "items"):
         return Response({"error": "Send what — both, pdf or items?"}, status=status.HTTP_400_BAD_REQUEST)
     when = timezone.localtime(f.created_at)
-    title = f"Meesho labels — {when:%-I:%M %p, %-d %b}"
+    title = f"{f.platform.capitalize()} labels — {when:%-I:%M %p, %-d %b}"
     sent, out = {}, {}
     if what in ("both", "pdf"):
         caption = (f"{f.labels} label{'' if f.labels == 1 else 's'} from {', '.join(f.business_names or [])}"
                    f"{', sorted by parent SKU' if f.sorted else ''}.")
-        sent = notify.send(title, caption, filename=f"meesho-labels-{when:%Y-%m-%d-%H%M}.pdf", data=bytes(f.pdf))
+        sent = notify.send(title, caption, filename=f"{f.platform}-labels-{when:%Y-%m-%d-%H%M}.pdf", data=bytes(f.pdf))
         out["pdf"] = sent
     if what in ("both", "items"):
         picks = pick_list_text(f)
@@ -1593,9 +1610,9 @@ def meesho_label_file_pdf(request, business_id, file_id):
     business = _views().get_authorized_business(request, business_id)
     _desk, accounts = _desk_accounts(request, business, LABEL_FILES_PATH)
     f = MeeshoLabelFile.objects.filter(pk=file_id).first()
-    if not f or not ({a.business_id for a in accounts} & set(f.business_ids or [])):
+    if not f or not (_label_file_businesses(_desk, accounts) & set(f.business_ids or [])):
         return Response({"error": "No such labels file."}, status=status.HTTP_404_NOT_FOUND)
-    name = f"meesho-labels-{timezone.localtime(f.created_at):%Y-%m-%d-%H%M}.pdf"
+    name = f"{f.platform}-labels-{timezone.localtime(f.created_at):%Y-%m-%d-%H%M}.pdf"
     resp = HttpResponse(bytes(f.pdf), content_type="application/pdf")
     resp["Content-Disposition"] = f'{"attachment" if request.GET.get("download") else "inline"}; filename="{name}"'
     return resp

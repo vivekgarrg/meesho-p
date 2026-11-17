@@ -216,7 +216,7 @@ export function LatestLabels({ emptyHint = false }) {
   const [itemsOf, setItemsOf] = useState(null);       // the file whose items table is open
 
   const load = useCallback(async () => {
-    const res = await fetch(`${API}/meesho-orders/label-files/`).catch(() => null);
+    const res = await fetch(`${API}/meesho-orders/label-files/?platform=meesho`).catch(() => null);
     if (res?.ok) {
       const d = await res.json();
       setFiles(d.files);

@@ -119,9 +119,10 @@ class MeeshoAutoLabelsJobTest < ActiveSupport::TestCase
   test "only the minute scheduler is in the cron schedule — times come from the setting" do
     schedule = YAML.load_file(Rails.root.join("config/schedule.yml"))
     # Labels and accepting run from the minute scheduler only (besides it: daily housekeeping, the
-    # Return Guard, and the Flipkart session keep-alive — none of them Meesho labels or accepting).
+    # Return Guard, the Flipkart session keep-alive and Flipkart's own automation — none of them Meesho's).
     assert_equal({ "meesho_schedule" => "MeeshoScheduleJob", "housekeeping" => "HousekeepingJob",
-                   "return_guard" => "ReturnGuardJob", "flipkart_refresh" => "FlipkartRefreshJob" },
+                   "return_guard" => "ReturnGuardJob", "flipkart_refresh" => "FlipkartRefreshJob",
+                   "flipkart_auto" => "FlipkartAutoJob" },
                  schedule.transform_values { |v| v["class"] })
   end
 end

@@ -3592,6 +3592,8 @@ class MeeshoLabelFile(models.Model):
 
     batch = models.CharField(max_length=64, unique=True)
     trigger = models.CharField(max_length=10, default=TRIGGER_MANUAL)
+    # "meesho" or "flipkart": Flipkart's labels (printed by flipkart_auto) are kept here too, to print again.
+    platform = models.CharField(max_length=10, default="meesho", db_index=True)
     business_ids = models.JSONField(default=list)
     business_names = models.JSONField(default=list)
     labels = models.PositiveIntegerField(default=0)
@@ -3603,11 +3605,40 @@ class MeeshoLabelFile(models.Model):
     pdf = models.BinaryField()
     created_at = models.DateTimeField(auto_now_add=True)
 
-    KEEP = 30                     # the newest files kept; older ones are dropped
+    KEEP = 30                     # the newest files kept, for each marketplace; older ones are dropped
 
     class Meta:
         db_table = "meesho_label_files"
         ordering = ["-created_at"]
+
+
+class FlipkartAutoSetting(models.Model):
+    """
+    Flipkart's automation, as Meesho's (one row): accept what's waiting every
+    `accept_every` minutes, and at each label time accept, print every label
+    waiting, keep the PDF (MeeshoLabelFile, platform "flipkart"), send it to
+    Telegram, and mark those orders Ready to Dispatch. Run by the sync's
+    schedule (FlipkartAutoJob → manage.py flipkart_auto --run due).
+    """
+
+    enabled = models.BooleanField(default=False)
+    accept_every = models.PositiveIntegerField(default=30)           # minutes; 0 = no accepting between label times
+    label_times = models.JSONField(default=list, blank=True)         # ["11:00", "17:00"], India time
+    send_labels = models.BooleanField(default=True)                  # the PDF to Telegram (notify)
+    mark_rtd = models.BooleanField(default=True)                     # Ready to Dispatch once the labels are kept
+    last_accept_at = models.DateTimeField(null=True, blank=True)
+    last_labels_at = models.DateTimeField(null=True, blank=True)
+    last_result = models.JSONField(default=dict, blank=True)         # what the last run did, for the page
+    # Set while a run is going (claimed in the database, so the schedule's and an admin's runs never overlap).
+    busy_until = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "flipkart_auto_settings"
+
+    @classmethod
+    def get(cls):
+        return cls.objects.order_by("pk").first() or cls.objects.create()
 
 
 class MeeshoCourier(models.Model):

@@ -5,7 +5,7 @@ from . import api_cache
 from . import upload_cleanup
 from . import return_desk
 from . import meesho_return_claim
-from . import flipkart_actions, flipkart_seller, flipkart_sync, meesho_ads, meesho_bulk, parent_merge
+from . import flipkart_actions, flipkart_auto, flipkart_seller, flipkart_sync, meesho_ads, meesho_bulk, parent_merge
 from . import meesho_linking, meesho_return_analysis, meesho_returns, meesho_search, meesho_sync, orders_panel, return_guard, scan_unshipped, sku_parents
 from . import bulk_listing_views
 from . import listing_images_views
@@ -74,6 +74,8 @@ urlpatterns = [
     path("flipkart-seller/actions/",   flipkart_actions.waiting_view, name="flipkart_seller_actions"),
     path("flipkart-seller/accept/",    flipkart_actions.accept_view, name="flipkart_seller_accept"),
     path("flipkart-seller/rtd/",       flipkart_actions.rtd_view, name="flipkart_seller_rtd"),
+    path("flipkart-seller/auto/",      flipkart_auto.auto_view, name="flipkart_seller_auto"),
+    path("flipkart-seller/auto/run/",  flipkart_auto.auto_run_view, name="flipkart_seller_auto_run"),
     path("parent-prices/", views.parent_price_list, name="parent_price_list"),
     path("parent-prices/sales/", views.parent_price_sales, name="parent_price_sales"),
     path("parent-prices/<str:item_id>/", views.parent_price_detail, name="parent_item_pricing"),

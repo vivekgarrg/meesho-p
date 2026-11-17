@@ -22,9 +22,10 @@ export function LabelsDownloadedTab() {
   const [busy, setBusy] = useState(null);
   const [meta, setMeta] = useState({ channels: [], admin: false });
   const [note, setNote] = useState(null);
+  const [platform, setPlatform] = useState("");      // "" both, or one marketplace's
 
   const load = useCallback(async () => {
-    const res = await fetch(`${API}/meesho-orders/label-files/`).catch(() => null);
+    const res = await fetch(`${API}/meesho-orders/label-files/?limit=30${platform ? `&platform=${platform}` : ""}`).catch(() => null);
     if (!res) { setErr("Couldn't reach the server."); return; }
     const d = await res.json().catch(() => ({}));
     if (!res.ok) { setErr(d.error || d.detail || "Couldn't read the labels."); return; }
@@ -32,7 +33,7 @@ export function LabelsDownloadedTab() {
     setFiles(d.files || []);
     setMeta({ channels: d.send_channels || [], admin: !!d.is_admin });
     setOpen((o) => o ?? (d.files?.[0]?.id || null));
-  }, []);
+  }, [platform]);
   useEffect(() => { load(); const t = setInterval(load, 60000); return () => clearInterval(t); }, [load]);
 
   const pdf = async (f, download) => {
@@ -72,8 +73,17 @@ export function LabelsDownloadedTab() {
       <div>
         <h1 style={{ fontSize: 22, fontWeight: 900, color: C.gray900, margin: 0 }}>Labels downloaded</h1>
         <p style={{ fontSize: 13, color: C.gray500, margin: "4px 0 0" }}>
-          Every labels PDF made — each automatic run and each Generate — with what's on it, to pack from. Newest first.
+          Every labels PDF made — Meesho's and Flipkart's, each automatic run and each Generate — with what's on it, to pack from
+          and to print again. Newest first.
         </p>
+      </div>
+      <div role="tablist" aria-label="Marketplace" style={{ display: "flex", gap: 4, padding: 3, borderRadius: 10, background: C.gray100, alignSelf: "flex-start" }}>
+        {[["", "All"], ["meesho", "Meesho"], ["flipkart", "Flipkart"]].map(([k, l]) => (
+          <button key={k || "all"} role="tab" aria-selected={platform === k} onClick={() => { setPlatform(k); setFiles(null); }}
+            style={{ border: "none", borderRadius: 8, padding: "6px 14px", fontSize: 13, fontWeight: 800, cursor: "pointer", fontFamily: "inherit",
+              background: platform === k ? (k === "flipkart" ? "#2874F0" : k === "meesho" ? "#9F2089" : C.white) : "transparent",
+              color: platform === k ? (k ? "#fff" : C.gray900) : C.gray500 }}>{l}</button>
+        ))}
       </div>
       {err && <div role="alert" style={{ color: C.red, fontWeight: 700, fontSize: 13.5 }}>✕ {err}</div>}
       {note && <div role="status" style={{ color: note.ok ? "#15803D" : C.red, fontWeight: 700, fontSize: 13.5 }}>{note.ok ? "✓ " : "✕ "}{note.text}</div>}
@@ -94,7 +104,9 @@ export function LabelsDownloadedTab() {
                   style={{ flex: 1, minWidth: 200, textAlign: "left", background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit" }}>
                   <div style={{ fontWeight: 900, fontSize: 15, color: C.gray900 }}>
                     {isOpen ? "▾" : "▸"} {f.labels} label{f.labels === 1 ? "" : "s"} · {when(f.created_at)}{" "}
-                    <Tag variant={f.trigger === "AUTO" ? "blue" : "gray"}>{f.trigger === "AUTO" ? "Automatic" : "Generated"}</Tag>
+                    <span style={{ fontSize: 11, fontWeight: 900, borderRadius: 6, padding: "1px 7px", verticalAlign: "1px", color: "#fff",
+                      background: f.platform === "flipkart" ? "#2874F0" : "#9F2089" }}>{f.platform === "flipkart" ? "Flipkart" : "Meesho"}</span>{" "}
+                    <Tag variant={f.trigger === "AUTO" ? "blue" : "gray"}>{f.trigger === "AUTO" ? "Automatic" : f.platform === "flipkart" ? "Run by hand" : "Generated"}</Tag>
                     {i === 0 && <> <Tag variant="amber">Latest</Tag></>}
                   </div>
                   <div style={{ fontSize: 12.5, color: C.gray500, marginTop: 2 }}>

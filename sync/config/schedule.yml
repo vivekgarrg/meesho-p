@@ -19,3 +19,8 @@ flipkart_refresh:
   class: "FlipkartRefreshJob"
   queue: "default"
   description: "Every 10 min: read each connected Flipkart Seller Hub account (keeps its session alive)"
+flipkart_auto:
+  cron: "* * * * *"
+  class: "FlipkartAutoJob"
+  queue: "default"
+  description: "Every minute: Flipkart automation — accept every N minutes; at label times accept, print, keep, send to Telegram, mark RTD"

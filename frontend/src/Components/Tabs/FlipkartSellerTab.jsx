@@ -581,6 +581,164 @@ export function FlipkartLiveOrders() {
   );
 }
 
+const fmtAt = (iso) => (iso ? new Date(iso).toLocaleString("en-IN", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }) : "never");
+
+/** One line of what a run did, for one business. */
+function RunLine({ name, r }) {
+  if (r.error) return <div style={{ fontSize: 12.5, color: C.red }}><b>{name}</b>: ✕ {r.error}</div>;
+  const bits = r.steps || [r.accepted != null && `Accepted ${r.accepted}`, r.skipped && `${r.skipped} need package sizes`].filter(Boolean);
+  return <div style={{ fontSize: 12.5, color: C.gray700 }}><b>{name}</b>: {bits.join(" · ") || "nothing to do"}
+    {r.rtd_errors?.length ? <span style={{ color: C.red }}> — {r.rtd_errors.join("; ")}</span> : null}</div>;
+}
+
+function Switch({ on, onChange, label, sub, disabled }) {
+  return (
+    <label style={{ display: "flex", gap: 10, alignItems: "flex-start", cursor: disabled ? "default" : "pointer", opacity: disabled ? 0.6 : 1 }}>
+      <span role="switch" aria-checked={on} tabIndex={0} onClick={() => !disabled && onChange(!on)}
+        onKeyDown={(e) => { if (!disabled && (e.key === " " || e.key === "Enter")) { e.preventDefault(); onChange(!on); } }}
+        style={{ width: 38, height: 22, borderRadius: 11, background: on ? "#2874F0" : C.gray300, position: "relative", flexShrink: 0, marginTop: 1 }}>
+        <span style={{ position: "absolute", top: 3, left: on ? 19 : 3, width: 16, height: 16, borderRadius: 8, background: "#fff", transition: "left .15s" }} />
+      </span>
+      <span><span style={{ fontSize: 13.5, fontWeight: 800, color: C.gray900 }}>{label}</span>
+        {sub && <span style={{ display: "block", fontSize: 12, color: C.gray500 }}>{sub}</span>}</span>
+    </label>
+  );
+}
+
+/**
+ * Business Settings → Flipkart → Automation: accept every N minutes; at each label time accept, print every
+ * label waiting, keep the PDF (Labels Downloaded, to print again), send it to Telegram, mark RTD.
+ * And the one-order test: accept one order, print its label, mark it RTD — now.
+ */
+export function FlipkartAutomation({ accounts, isAdmin }) {
+  const [d, setD] = useState(null);
+  const [err, setErr] = useState(null);
+  const [time, setTime] = useState("17:00");
+  const [running, setRunning] = useState(null);
+  const [result, setResult] = useState(null);
+  const load = useCallback(async () => {
+    const r = await call("auto/");
+    if (r.ok) { setD(r.data); setErr(null); } else setErr(r.data.error || "Couldn't read the automation.");
+  }, []);
+  useEffect(() => { load(); }, [load]);
+  const save = async (patch) => {
+    const r = await call("auto/", "PATCH", patch);
+    if (r.ok) { setD(r.data); setErr(null); } else setErr(r.data.error || "Couldn't save.");
+  };
+  const runNow = async (business, name, limit) => {
+    const what = limit === 1
+      ? `Test with one order for ${name}: accept ONE order on Flipkart, print its label, keep it, send it to Telegram and mark it Ready to Dispatch. Go ahead?`
+      : `For ${name}: accept every order waiting, print every label waiting, keep and send the PDF, and mark them Ready to Dispatch. Go ahead?`;
+    if (!window.confirm(what)) return;
+    setRunning(`${business}-${limit || "all"}`); setResult(null);
+    const r = await call("auto/run/", "POST", { business, kind: "labels", ...(limit ? { limit } : {}) });
+    setRunning(null);
+    setResult(r.data.results ? { results: r.data.results } : { error: r.data.error || "The run failed." });
+    load();
+  };
+  const openPdf = async (id) => {
+    const res = await fetch(`${API}/meesho-orders/label-files/${id}/pdf/`);
+    if (!res.ok) { setErr("Couldn't open that labels file."); return; }
+    window.open(URL.createObjectURL(await res.blob()), "_blank");
+  };
+  if (!d) return err ? <div role="alert" style={{ color: C.red, fontWeight: 700, fontSize: 13 }}>✕ {err}</div> : null;
+  const connected = accounts.filter((a) => a.connected);
+  const last = d.last_result?.results;
+  return (
+    <section style={{ ...S.card, padding: 16, display: "flex", flexDirection: "column", gap: 14, borderTop: "4px solid #2874F0" }}>
+      <div style={{ display: "flex", gap: 10, alignItems: "flex-start", flexWrap: "wrap" }}>
+        <div style={{ flex: "1 1 280px" }}>
+          <div style={{ fontWeight: 900, fontSize: 16, color: C.gray900 }}>Automation</div>
+          <div style={{ fontSize: 12.5, color: C.gray500 }}>
+            Accept orders on a schedule, and at each label time: accept, print every label waiting, keep the PDF (Labels Downloaded — print it
+            again any time), send it to Telegram, then mark those orders Ready to Dispatch.
+          </div>
+        </div>
+        <Switch on={d.enabled} disabled={!isAdmin} onChange={(v) => save({ enabled: v })} label={d.enabled ? "On" : "Off"} />
+      </div>
+      {err && <div role="alert" style={{ color: C.red, fontWeight: 700, fontSize: 13 }}>✕ {err}</div>}
+
+      <div style={{ display: "grid", gap: 14, gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 260px), 1fr))" }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <span style={{ fontSize: 12.5, fontWeight: 800, color: C.gray600 }}>Accept new orders</span>
+          <select value={d.accept_every} disabled={!isAdmin} onChange={(e) => save({ accept_every: Number(e.target.value) })} style={{ ...S.inp, width: "auto" }}>
+            {[0, 15, 30, 45, 60, 120].map((n) => <option key={n} value={n}>{n ? `Every ${n} minutes` : "Only at label times"}</option>)}
+          </select>
+          <span style={{ fontSize: 11.5, color: C.gray500 }}>Last: {fmtAt(d.last_accept_at)}</span>
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <span style={{ fontSize: 12.5, fontWeight: 800, color: C.gray600 }}>Print labels at (India time)</span>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+            {d.label_times.length === 0 && <span style={{ fontSize: 12.5, color: C.gray400 }}>No times yet</span>}
+            {d.label_times.map((t) => (
+              <span key={t} style={{ display: "inline-flex", gap: 4, alignItems: "center", background: "#EFF6FF", color: "#1D4ED8", border: "1px solid #BFDBFE",
+                borderRadius: 999, padding: "3px 10px", fontSize: 13, fontWeight: 800 }}>
+                {t}{isAdmin && <button onClick={() => save({ label_times: d.label_times.filter((x) => x !== t) })} aria-label={`Remove ${t}`}
+                  style={{ border: "none", background: "none", color: "#1D4ED8", cursor: "pointer", padding: 0, fontSize: 14, minHeight: 0 }}>×</button>}
+              </span>
+            ))}
+          </div>
+          {isAdmin && (
+            <div style={{ display: "flex", gap: 6 }}>
+              <input type="time" value={time} onChange={(e) => setTime(e.target.value)} style={{ ...S.inp, width: 130 }} />
+              <button onClick={() => time && save({ label_times: [...d.label_times, time] })} style={btn("ghost", "sm")}>+ Add time</button>
+            </div>
+          )}
+          <span style={{ fontSize: 11.5, color: C.gray500 }}>Last: {fmtAt(d.last_labels_at)}</span>
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <Switch on={d.send_labels} disabled={!isAdmin} onChange={(v) => save({ send_labels: v })} label="Send the labels to Telegram" />
+          <Switch on={d.mark_rtd} disabled={!isAdmin} onChange={(v) => save({ mark_rtd: v })} label="Mark Ready to Dispatch after printing"
+            sub="Only orders whose labels were printed and kept" />
+        </div>
+      </div>
+
+      {last && (
+        <div style={{ background: C.gray50, borderRadius: 10, padding: "8px 12px", display: "flex", flexDirection: "column", gap: 3 }}>
+          <span style={{ fontSize: 12, fontWeight: 800, color: C.gray600 }}>Last {d.last_result.kind === "labels" ? "labels run" : "accept"} · {fmtAt(d.last_result.at)}</span>
+          {Object.entries(last).map(([n, r]) => <RunLine key={n} name={n} r={r} />)}
+        </div>
+      )}
+
+      {isAdmin && connected.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, borderTop: `1px solid ${C.gray100}`, paddingTop: 12 }}>
+          <span style={{ fontSize: 12.5, fontWeight: 800, color: C.gray600 }}>Run now</span>
+          {connected.map((a) => (
+            <div key={a.business} style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              <span style={{ fontWeight: 800, fontSize: 13.5, minWidth: 120 }}>{a.business_name}</span>
+              <button onClick={() => runNow(a.business, a.business_name, 1)} disabled={!!running} style={btn("ghost", "sm")}>
+                {running === `${a.business}-1` ? "Testing…" : "🧪 Test with one order"}</button>
+              <button onClick={() => runNow(a.business, a.business_name, null)} disabled={!!running} style={btn("ghost", "sm")}>
+                {running === `${a.business}-all` ? "Running…" : "Accept, print & RTD everything"}</button>
+            </div>
+          ))}
+          {running && <span style={{ fontSize: 12.5, color: C.gray500 }}>Working on Flipkart — accepting waits about a minute for Seller Hub to make the labels…</span>}
+          {result?.error && <div role="alert" style={{ color: C.red, fontWeight: 700, fontSize: 13 }}>✕ {result.error}</div>}
+          {result?.results && Object.entries(result.results).map(([n, r]) => (
+            <div key={n} style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              <RunLine name={n} r={r} />
+              {r.file_id && <button onClick={() => openPdf(r.file_id)} style={btn("primary", "sm")}>🖨 Print the labels</button>}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {d.files.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6, borderTop: `1px solid ${C.gray100}`, paddingTop: 12 }}>
+          <span style={{ fontSize: 12.5, fontWeight: 800, color: C.gray600 }}>Labels printed — print again <a href="/label-items" style={{ color: "#2874F0", fontWeight: 700, marginLeft: 6 }}>All in Labels Downloaded →</a></span>
+          {d.files.map((f) => (
+            <div key={f.id} style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", fontSize: 13 }}>
+              <span style={{ minWidth: 0, flex: 1 }}><b>{f.labels} label{f.labels === 1 ? "" : "s"}</b> · {fmtAt(f.created_at)} · {f.businesses.join(", ")}
+                <span style={{ color: C.gray500 }}> · {f.trigger === "AUTO" ? "automatic" : "run by hand"}</span></span>
+              <button onClick={() => openPdf(f.id)} style={btn("ghost", "sm")}>🖨 Reprint</button>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
 /** Business Settings → Flipkart: each business's Seller Hub login (connect, OTP, log out) and nothing else. */
 export function FlipkartAccounts() {
   const mobile = useIsMobile();
@@ -612,6 +770,7 @@ export function FlipkartAccounts() {
           {showAll ? "Hide businesses without Flipkart" : `+ Connect Flipkart for another business (${without.length})`}
         </button>
       )}
+      <FlipkartAutomation accounts={d.accounts} isAdmin={d.is_admin} />
     </div>
   );
 }
