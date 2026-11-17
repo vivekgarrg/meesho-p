@@ -1,4 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
+// Seller Hub as it is now — loaded only when its tab opens.
+const FlipkartLive = (name) => React.lazy(() => import("./FlipkartSellerTab").then((m) => ({ default: m[name] })));
 import { TabbedPage } from "../shared/SubTabs";
 import { useAccess } from "../../contexts/AccessContext";
 import { MismatchTab } from "./MismatchTab";
@@ -610,4 +612,17 @@ function MeeshoPaymentsSections() {
   );
 }
 
-export const PaymentsTab = withPlatformSplit(MeeshoPaymentsSections, FlipkartPaymentsPanel, { tabbed: true });
+// Flipkart's payments, as Meesho's: every payment with what it paid for, and Seller Hub's own view — paid,
+// on its way, outstanding (?section=panel).
+const FlipkartLivePayments = FlipkartLive("FlipkartLivePayments");
+function FlipkartPaymentsSections() {
+  const { isPathVisible } = useAccess();
+  return (
+    <TabbedPage tabs={[
+      { key: "payments", label: "Payments", icon: "◎", Component: FlipkartPaymentsPanel, color: "#2874F0" },
+      { key: "panel", label: "On Flipkart now", icon: "₹", Component: FlipkartLivePayments, color: "#2874F0", hidden: !isPathVisible("/flipkart-seller") },
+    ]} />
+  );
+}
+
+export const PaymentsTab = withPlatformSplit(MeeshoPaymentsSections, FlipkartPaymentsSections, { tabbed: true, flipkartTabbed: true });

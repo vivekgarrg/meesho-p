@@ -20,6 +20,16 @@ const MeeshoAdsTab = lazy(() => import("./MeeshoAdsTab"), "MeeshoAdsTab");
 const AdsAnalysisTab = lazy(() => import("./AdsAnalysisTab"), "AdsAnalysisTab");
 const BusinessProfilePage = lazy(() => import("../BusinessProfile/BusinessProfilePage"));
 const FlipkartAccounts = lazy(() => import("./FlipkartSellerTab"), "FlipkartAccounts");
+const FlipkartAutomationPage = lazy(() => import("./FlipkartSellerTab"), "FlipkartAutomationPage");
+
+// Flipkart setup, as Meesho's: the logins, and the automation — when orders are accepted, when labels are
+// printed and sent to Telegram, and RTD (?part=automation).
+const FlipkartSetup = () => (
+  <TabbedPage param="part" tabs={[
+    { key: "accounts", label: "Seller Hub accounts", icon: "🔑", Component: FlipkartAccounts, color: "#2874F0" },
+    { key: "automation", label: "Automation & Telegram", icon: "⏱", Component: FlipkartAutomationPage, color: "#2874F0" },
+  ]} />
+);
 
 const LiveInventory = () => <MeeshoHubTab forceSection="inventory" />;
 const MeeshoSetup = () => <MeeshoHubTab forceSection="settings" />;
@@ -65,7 +75,7 @@ export function BusinessSettingsPage() {
       tabs={[
         { key: "profile", label: "Business profile", icon: "⌂", Component: BusinessProfilePage, hidden: !isPathVisible("/business-profile") },
         { key: "meesho", label: "Meesho setup", icon: "🛍", Component: MeeshoSetup, color: "#9F2089", hidden: !isPathVisible(MEESHO) },
-        { key: "flipkart", label: "Flipkart setup", icon: "🛒", Component: FlipkartAccounts, color: "#2874F0", hidden: !isPathVisible("/flipkart-seller") },
+        { key: "flipkart", label: "Flipkart setup", icon: "🛒", Component: FlipkartSetup, color: "#2874F0", hidden: !isPathVisible("/flipkart-seller") },
       ]}
     />
   );

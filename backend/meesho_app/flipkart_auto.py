@@ -218,6 +218,14 @@ def labels(account, trigger="AUTO", send=True, rtd=True, limit=None, accept_firs
                    f"{', sorted by parent SKU' if f.sorted else ''}.")
         out["sent"] = notify.send(f"Flipkart labels — {when}", caption,
                                   filename=f"flipkart-labels-{timezone.localtime():%Y-%m-%d-%H%M}.pdf", data=bytes(f.pdf))
+        # Then what's on them — the pick list, as Meesho's: the desk sees the items without opening the PDF.
+        try:
+            from . import meesho_sync
+            picks = meesho_sync.pick_list_text(f)
+            if picks:
+                out["pick_list_sent"] = notify.send(f"Flipkart labels — {when} — items", picks)
+        except Exception as exc:                       # noqa: BLE001 — the PDF itself went out
+            out["pick_list_error"] = str(exc)[:200]
     if rtd:
         r = fa.act(account, "rtd", wanted=[g["groupId"] for _d, g in waiting], s=s)
         out["rtd"] = r["shipments"] - r["failed"]

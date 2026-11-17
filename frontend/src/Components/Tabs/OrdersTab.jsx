@@ -1,4 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+// Seller Hub as it is now — loaded only when its tab opens.
+const FlipkartLive = (name) => React.lazy(() => import("./FlipkartSellerTab").then((m) => ({ default: m[name] })));
 import { withPlatformSplit } from '../Flipkart/FlipkartShared';
 import { FlipkartOrdersPanel } from '../Flipkart/FlipkartOrdersPanel';
 import { useSearchParams } from "react-router-dom";
@@ -533,4 +535,17 @@ function MeeshoOrdersHub() {
   );
 }
 
-export const OrdersTab = withPlatformSplit(MeeshoOrdersHub, FlipkartOrdersPanel, { tabbed: true });
+// Flipkart's orders, as Meesho's: live on Seller Hub (to accept, to print, to dispatch — with the actions), the default,
+// and every order read or uploaded with its outcome.
+const FlipkartLiveOrders = FlipkartLive("FlipkartLiveOrders");
+function FlipkartOrdersHub() {
+  const { isPathVisible } = useAccess();
+  return (
+    <TabbedPage tabs={[
+      { key: "live", label: "Live on Flipkart", icon: "📦", Component: FlipkartLiveOrders, color: "#2874F0", hidden: !isPathVisible("/flipkart-seller") },
+      { key: "history", label: "All orders", icon: "⊡", Component: FlipkartOrdersPanel, color: "#2874F0" },
+    ]} />
+  );
+}
+
+export const OrdersTab = withPlatformSplit(MeeshoOrdersHub, FlipkartOrdersHub, { tabbed: true, flipkartTabbed: true });

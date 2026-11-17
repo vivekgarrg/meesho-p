@@ -1151,12 +1151,13 @@ function AppShell() {
   const loc = useLocation();
   // Tabs that show Meesho as it is now, not a period: the date filter doesn't apply to them.
   const sp = new URLSearchParams(loc.search);
-  const liveView = sp.get('platform') !== 'flipkart' && (
-    (loc.pathname === '/' && sp.get('section') === 'panel')
-    || (loc.pathname === '/orders' && (sp.get('section') || 'live') === 'live')
-    || (loc.pathname === '/return-analysis' && ['returns', 'act', null].includes(sp.get('section')))
-    || (loc.pathname === '/payments' && sp.get('section') === 'panel')
-  );
+  // Live on Meesho / Flipkart — the date filter doesn't apply. A tab's first key is its default (no ?section).
+  const fk = sp.get('platform') === 'flipkart';
+  const section = sp.get('section');
+  const liveView = (loc.pathname === '/' && section === 'panel')
+    || (loc.pathname === '/orders' && (section || 'live') === 'live')
+    || (loc.pathname === '/payments' && section === 'panel')
+    || (!fk && loc.pathname === '/return-analysis' && ['returns', 'act', null].includes(section));
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem('sidebar_collapsed') === 'true');
   const [drawerOpen, setDrawerOpen] = useState(false);
 

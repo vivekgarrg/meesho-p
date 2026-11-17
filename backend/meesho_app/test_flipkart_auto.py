@@ -168,6 +168,14 @@ class FlipkartAutoTests(base.FlipkartActionTests):
         self.assertFalse(MeeshoLabelFile.objects.filter(platform="flipkart").exists())
         self.assertIn("couldn't finish", self.sent[-1][0][1])               # said on Telegram
 
+    def test_telegram_gets_the_pdf_then_its_pick_list_as_meeshos(self):
+        from . import meesho_sync
+        with mock.patch.object(meesho_sync, "pick_list_text", return_value="📋 On these labels — 5 orders"):
+            out = flipkart_auto.run("labels")["Rudam"]
+        self.assertEqual([a[0] for a, _k in self.sent], [self.sent[0][0][0], self.sent[0][0][0] + " — items"])
+        self.assertEqual(self.sent[1][0][1], "📋 On these labels — 5 orders")
+        self.assertIn("pick_list_sent", out)
+
     def test_rtd_and_sending_can_be_turned_off(self):
         s = FlipkartAutoSetting.get()
         s.mark_rtd, s.send_labels = False, False

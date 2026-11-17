@@ -546,8 +546,8 @@ function AccountCard({ d, isAdmin, mobile, onState }) {
  * connected Seller Hub, as last read, with the same actions as on Seller Hub —
  * logins and payments stay on that page.
  */
-export function FlipkartLiveOrders() {
-  const mobile = useIsMobile();
+/** Seller Hub's accounts as last read — read again every minute (the server reads Flipkart every 10). */
+function useFlipkart(every = 60000) {
   const [d, setD] = useState(null);
   const [err, setErr] = useState(null);
   const load = useCallback(async () => {
@@ -557,22 +557,45 @@ export function FlipkartLiveOrders() {
   }, []);
   useEffect(() => {
     load();
-    const t = setInterval(load, 60000);
+    if (!every) return undefined;
+    const t = setInterval(load, every);
     return () => clearInterval(t);
-  }, [load]);
-  if (!d) {
-    return err ? <div role="alert" style={{ ...S.card, color: C.red, fontWeight: 700 }}>✕ {err}</div>
-      : <div style={{ display: "flex", justifyContent: "center", padding: 60 }}><CircularProgress style={{ color: "#2874F0" }} /></div>;
-  }
+  }, [load, every]);
+  return { d, setD, err, load };
+}
+
+const Loading = ({ err }) => (err ? <div role="alert" style={{ ...S.card, color: C.red, fontWeight: 700 }}>✕ {err}</div>
+  : <div style={{ display: "flex", justifyContent: "center", padding: 60 }}><CircularProgress style={{ color: "#2874F0" }} /></div>);
+
+const NotConnected = () => (
+  <div style={{ ...S.card, padding: 24, textAlign: "center", color: C.gray500, fontSize: 13.5 }}>
+    No Flipkart Seller Hub is connected yet — connect one under <a href="/business-profile?section=flipkart" style={{ color: "#2874F0", fontWeight: 700 }}>Business Settings → Flipkart setup</a>.
+  </div>
+);
+
+/** Payments → Flipkart → On Flipkart now: paid, on its way and outstanding, as Seller Hub shows them (Meesho's "On Meesho now"). */
+export function FlipkartLivePayments() {
+  const mobile = useIsMobile();
+  const { d, err } = useFlipkart();
+  if (!d) return <Loading err={err} />;
+  const accounts = d.accounts.filter((a) => a.connected || a.sync_at);
+  return accounts.length ? <FlipkartPayments accounts={accounts} mobile={mobile} /> : <NotConnected />;
+}
+
+/** Business Settings → Flipkart setup → Automation & Telegram, on its own. */
+export function FlipkartAutomationPage() {
+  const { d, err } = useFlipkart(0);
+  if (!d) return <Loading err={err} />;
+  return <FlipkartAutomation accounts={d.accounts} isAdmin={d.is_admin} />;
+}
+
+export function FlipkartLiveOrders() {
+  const mobile = useIsMobile();
+  const { d, setD, err } = useFlipkart();
+  if (!d) return <Loading err={err} />;
   const connected = d.accounts.filter((a) => a.connected);
   const withOrders = d.accounts.filter((a) => a.connected || a.orders_at);
-  if (!withOrders.length) {
-    return (
-      <div style={{ ...S.card, padding: 24, textAlign: "center", color: C.gray500, fontSize: 13.5 }}>
-        No Flipkart Seller Hub is connected yet — connect one on <a href="/flipkart-seller" style={{ color: "#2874F0", fontWeight: 700 }}>Flipkart Seller Hub</a>.
-      </div>
-    );
-  }
+  if (!withOrders.length) return <NotConnected />;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14, minWidth: 0 }}>
       {err && <div role="alert" style={{ fontSize: 13, color: C.red, fontWeight: 700 }}>✕ {err}</div>}
@@ -768,7 +791,6 @@ export function FlipkartAccounts() {
           {showAll ? "Hide businesses without Flipkart" : `+ Connect Flipkart for another business (${without.length})`}
         </button>
       )}
-      <FlipkartAutomation accounts={d.accounts} isAdmin={d.is_admin} />
     </div>
   );
 }

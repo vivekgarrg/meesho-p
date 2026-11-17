@@ -37,13 +37,14 @@ export function usePlatformParam() {
 
 /** A tab that shows the Meesho view by default and the Flipkart view under ?platform=flipkart. */
 // opts.tabbed: the Meesho view is a TabbedPage, which shows the switch at the
-// right of its tabs (one row, not two).
+// right of its tabs (one row, not two); opts.flipkartTabbed: the Flipkart view is one too.
 export function withPlatformSplit(MeeshoView, FlipkartView, opts = {}) {
   return function PlatformSplit() {
     const [platform, setPlatform] = usePlatformParam();
     const toggle = <PlatformToggle platform={platform} onChange={setPlatform} />;
-    if (platform !== 'flipkart' && opts.tabbed) {
-      return <HeaderSlot.Provider value={toggle}><MeeshoView /></HeaderSlot.Provider>;
+    if (opts.tabbed && (platform !== 'flipkart' || opts.flipkartTabbed)) {
+      const View = platform === 'flipkart' ? FlipkartView : MeeshoView;
+      return <HeaderSlot.Provider value={toggle}><View /></HeaderSlot.Provider>;
     }
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>

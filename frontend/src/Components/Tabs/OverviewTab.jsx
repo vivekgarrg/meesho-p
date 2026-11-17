@@ -1,4 +1,6 @@
 import React, { useState, useEffect } from 'react';
+// Seller Hub as it is now — loaded only when its tab opens.
+const FlipkartLive = (name) => React.lazy(() => import("./FlipkartSellerTab").then((m) => ({ default: m[name] })));
 import { TabbedPage } from "../shared/SubTabs";
 import { useAccess } from "../../contexts/AccessContext";
 // Loaded only when its tab is opened: it brings every Meesho section with it.
@@ -3015,4 +3017,17 @@ function MeeshoOverviewSections() {
   );
 }
 
-export const OverviewTab = withPlatformSplit(MeeshoOverviewSections, FlipkartOverviewView, { tabbed: true });
+// Flipkart, as Meesho: profit & sales, and Seller Hub as it is now (?section=panel) — accounts, today's numbers,
+// what's waiting to accept / print / dispatch, orders and payments.
+const FlipkartSellerPanel = FlipkartLive("FlipkartSellerTab");
+function FlipkartOverviewSections() {
+  const { isPathVisible } = useAccess();
+  return (
+    <TabbedPage tabs={[
+      { key: "business", label: "Profit & sales", icon: "◈", Component: FlipkartOverviewView, color: "#2874F0" },
+      { key: "panel", label: "Seller Hub panel", icon: "🛒", Component: FlipkartSellerPanel, color: "#2874F0", hidden: !isPathVisible("/flipkart-seller") },
+    ]} />
+  );
+}
+
+export const OverviewTab = withPlatformSplit(MeeshoOverviewSections, FlipkartOverviewSections, { tabbed: true, flipkartTabbed: true });
