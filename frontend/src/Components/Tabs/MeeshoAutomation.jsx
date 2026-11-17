@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from "react";
+import { AcceptMode } from "../shared/AcceptMode";
 import { API, C, S, btn, Tag } from "../../App";
 import { CircularProgress } from "@mui/material";
 import { ParentLinkButton } from "./ParentLink";
@@ -15,7 +16,6 @@ import { ParentLinkButton } from "./ParentLink";
  */
 
 const when = (iso) => (iso ? new Date(iso).toLocaleString("en-IN", { weekday: "short", day: "2-digit", month: "short", hour: "numeric", minute: "2-digit" }) : "—");
-const everyLabel = (m) => (m === 0 ? "Never (accept by hand)" : m < 60 ? `Every ${m} minutes` : m === 60 ? "Every hour" : `Every ${m / 60} hours`);
 const timeLabel = (t) => {
   const [h, m] = t.split(":").map(Number);
   return new Date(2000, 0, 1, h, m).toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit" });
@@ -129,8 +129,8 @@ export function AutomationCard() {
         <div>
           <div style={{ fontSize: 15, fontWeight: 800, color: C.gray900 }}>Automation</div>
           <div style={{ fontSize: 12.5, color: C.gray500, marginTop: 2 }}>
-            For every connected business: accept pending orders on a schedule, and make the labels of every ready-to-ship
-            order not downloaded yet at set times — ready to print under “Latest labels”.
+            For every connected business: accept pending orders — on an interval, or together with the labels — and at set
+            times make the labels of every ready-to-ship order not downloaded yet, ready to print under “Latest labels”.
           </div>
         </div>
         {admin ? (
@@ -141,22 +141,18 @@ export function AutomationCard() {
         ) : <Tag variant={s.enabled ? "green" : "gray"}>{s.enabled ? "On" : "Off"}</Tag>}
       </div>
 
+      <AcceptMode every={draft.accept_every_minutes} choices={s.accept_choices} disabled={!admin} labelTimes={draft.label_times}
+        onChange={(m) => setDraft({ ...draft, accept_every_minutes: m })} />
+      {s.enabled && <span style={{ fontSize: 12, color: C.gray500, marginTop: -6 }}>
+        Last accepted: {when(s.last_accept_at)}
+        {s.accept_every_minutes ? (s.next_accept_at ? ` · next: ${when(s.next_accept_at)}` : "") : " · next: with the next labels"}
+      </span>}
+
       <div style={{ display: "grid", gap: 14, gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))" }}>
-        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-          <span style={{ fontSize: 12.5, fontWeight: 700, color: C.gray600 }}>Accept pending orders</span>
-          {admin ? (
-            <select value={draft.accept_every_minutes} onChange={(e) => setDraft({ ...draft, accept_every_minutes: Number(e.target.value) })}
-              style={{ ...S.inp, maxWidth: 260 }}>
-              {s.accept_choices.map((m) => <option key={m} value={m}>{everyLabel(m)}</option>)}
-            </select>
-          ) : <b>{everyLabel(s.accept_every_minutes)}</b>}
-          {s.enabled && <span style={{ fontSize: 12, color: C.gray500 }}>
-            Last: {when(s.last_accept_at)}{s.next_accept_at ? ` · next: ${when(s.next_accept_at)}` : ""}
-          </span>}
-        </div>
 
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-          <span style={{ fontSize: 12.5, fontWeight: 700, color: C.gray600 }}>Make labels at (India time)</span>
+          <span style={{ fontSize: 12.5, fontWeight: 700, color: C.gray600 }}>
+            {draft.accept_every_minutes ? "Make labels at (India time)" : "Accept & make labels at (India time)"}</span>
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
             {draft.label_times.length === 0 && <span style={{ fontSize: 12.5, color: C.gray400 }}>No label times — labels by hand only.</span>}
             {draft.label_times.map((t) => (

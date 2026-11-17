@@ -116,6 +116,20 @@ class MeeshoAutoLabelsJobTest < ActiveSupport::TestCase
     assert_empty steps.()
   end
 
+  test "accept & print together: nothing is accepted between label times; each label time accepts and makes labels in one run" do
+    ist = ActiveSupport::TimeZone["Asia/Kolkata"]
+    MeeshoAutoSetting.create!(enabled: true, accept_every_minutes: 0, label_times: ["11:00", "17:00"])
+    tick = ->(at) { travel_to(ist.parse(at)) { MeeshoScheduleJob.new.send(:queue_automation, Time.current) } }
+    steps = -> { MeeshoAutoLabelsJob.jobs.map { |j| j["args"].first } }
+
+    %w[09:00 09:30 10:30 10:59].each { |t| tick.("2026-11-02 #{t}") }        # all morning: nothing
+    assert_empty steps.()
+    tick.("2026-11-02 11:00")                                                 # 11:00: one run — accept, then labels
+    %w[11:01 13:00 16:59].each { |t| tick.("2026-11-02 #{t}") }
+    tick.("2026-11-02 17:00")
+    assert_equal %w[labels labels], steps.()
+  end
+
   test "only the minute scheduler is in the cron schedule — times come from the setting" do
     schedule = YAML.load_file(Rails.root.join("config/schedule.yml"))
     # Labels and accepting run from the minute scheduler only (besides it: daily housekeeping, the

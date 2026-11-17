@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from "react";
+import { AcceptMode } from "../shared/AcceptMode";
 import { API, C, S, btn, useIsMobile } from "../../App";
 import { CircularProgress } from "@mui/material";
 
@@ -658,16 +659,13 @@ export function FlipkartAutomation({ accounts, isAdmin }) {
       </div>
       {err && <div role="alert" style={{ color: C.red, fontWeight: 700, fontSize: 13 }}>✕ {err}</div>}
 
+      <AcceptMode every={d.accept_every} choices={[0, 15, 30, 45, 60, 120]} disabled={!isAdmin} labelTimes={d.label_times}
+        color="#2874F0" onChange={(m) => save({ accept_every: m })} />
+      <span style={{ fontSize: 11.5, color: C.gray500, marginTop: -8 }}>Last accepted: {fmtAt(d.last_accept_at)}</span>
+
       <div style={{ display: "grid", gap: 14, gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 260px), 1fr))" }}>
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-          <span style={{ fontSize: 12.5, fontWeight: 800, color: C.gray600 }}>Accept new orders</span>
-          <select value={d.accept_every} disabled={!isAdmin} onChange={(e) => save({ accept_every: Number(e.target.value) })} style={{ ...S.inp, width: "auto" }}>
-            {[0, 15, 30, 45, 60, 120].map((n) => <option key={n} value={n}>{n ? `Every ${n} minutes` : "Only at label times"}</option>)}
-          </select>
-          <span style={{ fontSize: 11.5, color: C.gray500 }}>Last: {fmtAt(d.last_accept_at)}</span>
-        </div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-          <span style={{ fontSize: 12.5, fontWeight: 800, color: C.gray600 }}>Print labels at (India time)</span>
+          <span style={{ fontSize: 12.5, fontWeight: 800, color: C.gray600 }}>{d.accept_every ? "Print labels at (India time)" : "Accept & print at (India time)"}</span>
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
             {d.label_times.length === 0 && <span style={{ fontSize: 12.5, color: C.gray400 }}>No times yet</span>}
             {d.label_times.map((t) => (
