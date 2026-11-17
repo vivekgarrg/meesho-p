@@ -4,6 +4,7 @@ import { CircularProgress } from "@mui/material";
 import { Photo, courierTone } from "./OrderScanTab";
 import { sounds, isMuted, setMuted } from "../../lib/sounds";
 import { SubTabs, useTabParam } from "../shared/SubTabs";
+import { BarcodeScanner } from "../shared/BarcodeScanner";
 
 /*
  * Meesho Orders → Order linking: link each shipment's AWB to its packet QR
@@ -606,7 +607,15 @@ export function MeeshoLinkingTab() {
   const [showMore, setShowMore] = useState(false);
   const [pick, setPick] = useState(null);             // Scan: one courier's parcels only
   const [view, setView] = useTabParam("view", ["scan", "with-us"]);
+  // The phone's camera as the scanner: AWB, then packet QR (either order) — linked when both are in.
+  const [camera, setCamera] = useState(false);
+  const cameraRef = useRef(false);
+  cameraRef.current = camera;
+  const camPending = useRef({ awb: null, packet: null });
+  const [camStep, setCamStep] = useState(null);       // {awb} | {packet} — the half scanned so far
+  const camDone = useRef({ codes: new Set(), at: 0 }); // the last parcel's codes: the camera still sees them
   const inFlight = useRef(false);
+  const blockedRef = useRef(null);
   const reloadTimer = useRef(null);
   const awbRef = useRef(null);
   const packetRef = useRef(null);
@@ -701,7 +710,7 @@ export function MeeshoLinkingTab() {
   };
 
   // Put the cursor in a field, its text selected — a fresh scan replaces it.
-  const focusField = (ref) => setTimeout(() => { ref.current?.focus(); ref.current?.select(); }, 50);   // after the fields are enabled again
+  const focusField = (ref) => setTimeout(() => { if (cameraRef.current) return; ref.current?.focus(); ref.current?.select(); }, 50);   // after the fields are enabled again
   // Which field a refusal is about — its border shows red.
   const AWB_ERRORS = ["unknown_awb", "two_packets", "scan_failed"];
   const method = (startedAt) => (startedAt && Date.now() - startedAt < 600 ? "SCAN" : "MANUAL");
@@ -744,6 +753,8 @@ export function MeeshoLinkingTab() {
       sounds.ok();
       navigator.vibrate?.(60);
       setResult({ ok: true, ...r.data });
+      camPending.current = { awb: null, packet: null }; setCamStep(null);
+      camDone.current = { codes: new Set([a, p]), at: Date.now() };
       if (!data?.links.some((x) => x.id === r.data.link?.id)) setSession((xs) => [...xs, Date.now()]);
       applyLinked(r.data);
       setAwb(""); setPacket("");
@@ -754,6 +765,8 @@ export function MeeshoLinkingTab() {
       // Anything else — refused, already linked, not found: nothing was marked
       // packed. The screen stops until someone presses OK.
       stop({ awb: a, packet: p, ...r.data });
+      camPending.current = { awb: null, packet: null }; setCamStep(null);
+      camDone.current = { codes: new Set([a, p]), at: Date.now() };
       setLogKey((k) => k + 1);
       reloadSoon(r.data.code === "timeout" ? 500 : 4000);
     }
@@ -761,6 +774,8 @@ export function MeeshoLinkingTab() {
   // OK on the error: both fields are already empty — start again from the AWB.
   const acknowledge = () => {
     setBlocked(null);
+    // The refused parcel's codes can be read again in a few seconds (fix it and rescan), not 30.
+    camDone.current = { ...camDone.current, at: Date.now() - 25000 };
     setAwb(""); setPacket("");
     typed.current = { awb: null, packet: null, awbAt: null };
     focusField(awbRef);
@@ -791,6 +806,45 @@ export function MeeshoLinkingTab() {
     link(clean(awb), code);
   };
   const clearAll = () => { setAwb(""); setPacket(""); setResult(null); focusField(awbRef); };
+
+  // A code the camera read: the AWB or the packet QR, in either order; both in → link.
+  const onCamera = (raw) => {
+    const code = clean(raw);
+    if (!code || inFlight.current || blockedRef.current) return;          // linking, or an error to acknowledge first
+    const done = camDone.current;
+    if (done.codes.has(code) && Date.now() - done.at < 30000) return;     // the parcel just linked, still in view
+    const pend = camPending.current;
+    const now = Date.now();
+    if (isPacket(code)) {
+      if (pend.packet === code) return;
+      if (pend.awb) {
+        typed.current = { awbMethod: "SCAN", awbAt: pend.awbAt, packet: now };
+        link(pend.awb, code);
+      } else {
+        camPending.current = { awb: null, packet: code };
+        setCamStep({ packet: code });
+      }
+      return;
+    }
+    if (pend.awb === code) return;
+    if (pend.packet) {
+      typed.current = { awbMethod: "SCAN", awbAt: now, packet: now };
+      link(code, pend.packet);
+    } else {
+      camPending.current = { awb: code, packet: null, awbAt: now };
+      setCamStep({ awb: code });
+    }
+  };
+  // What the camera's panel shows: linking, the error, the parcel just linked, or the half scanned so far.
+  const camLatest = blocked ? { kind: "err", title: blocked.code?.startsWith?.("already_linked") ? "Already linked" : "Not linked — stop and look",
+                                lines: [blocked.error || "Refused.", blocked.awb && `AWB ${blocked.awb}${blocked.packet ? ` ↔ ${blocked.packet}` : ""}`].filter(Boolean) }
+    : camStep?.awb ? { kind: "warn", title: "AWB read — now the packet QR", lines: [camStep.awb] }
+    : camStep?.packet ? { kind: "warn", title: "Packet read — now the AWB", lines: [camStep.packet] }
+    : result?.ok ? { kind: "ok", title: "Linked & packed — scan the next AWB",
+                     lines: [[result.product?.sku || result.link?.sku, result.product?.qty > 1 ? `× ${result.product.qty}` : ""].filter(Boolean).join(" "),
+                             `${result.link?.awb} ↔ ${result.link?.packet_id}`, result.link?.courier].filter(Boolean),
+                     image_url: result.product?.image_url }
+    : null;
 
   // Send a link to Meesho again — the same packet, or a new one typed in.
   const relink = async (l, packetId) => {
@@ -834,13 +888,35 @@ export function MeeshoLinkingTab() {
     load();
   };
 
+  blockedRef.current = blocked;
   if (!data) return <div style={{ display: "flex", justifyContent: "center", padding: 60 }}><CircularProgress style={{ color: C.orange }} /></div>;
   const r = result;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      {blocked && <BlockingError e={blocked} onOk={acknowledge}
+      {blocked && !camera && <BlockingError e={blocked} onOk={acknowledge}
         onOverride={blocked.can_override ? () => link(blocked.awb, blocked.packet, true) : null} />}
+      {camera && (
+        <BarcodeScanner
+          continuous
+          title="Link parcels"
+          hint="Point at the label's AWB, then the packet QR — linked when both are read"
+          progress={data.with_us ? { done: data.with_us.totals.packed, total: data.with_us.totals.with_us, label: "packed" } : undefined}
+          latest={camLatest}
+          busy={sending}
+          onDetected={onCamera}
+          onClose={() => { setCamera(false); camPending.current = { awb: null, packet: null }; setCamStep(null); }}
+          latestAction={blocked ? (
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={acknowledge} style={{ ...btn("primary", "md"), flex: 1 }}>OK — next parcel</button>
+              {blocked.can_override && <button onClick={() => link(blocked.awb, blocked.packet, true)} style={{ ...btn("ghost", "md"), color: "#fff", borderColor: "rgba(255,255,255,.5)" }}>Link anyway</button>}
+            </div>
+          ) : camStep ? (
+            <button onClick={() => { camPending.current = { awb: null, packet: null }; setCamStep(null); }}
+              style={{ ...btn("ghost", "sm"), color: "#fff", borderColor: "rgba(255,255,255,.4)", alignSelf: "flex-start" }}>Start this parcel again</button>
+          ) : null}
+        />
+      )}
 
       <SubTabs value={view} onChange={setView} tabs={[
         { key: "scan", label: "Scan", icon: "⌗", count: data.with_us ? `${data.with_us.totals.packed}/${data.with_us.totals.with_us}` : null, color: "#9F2089" },
@@ -880,6 +956,11 @@ export function MeeshoLinkingTab() {
               {(awb || packet || r) && <button onClick={clearAll} style={{ ...btn("ghost", "md"), padding: "12px 14px" }}>Clear</button>}
             </div>
           </div>
+          <button onClick={() => { setResult(null); setCamera(true); }} disabled={!!blocked}
+            style={{ ...btn(isMobile ? "primary" : "ghost", isMobile ? "lg" : "sm"), alignSelf: isMobile ? "stretch" : "flex-start",
+              background: isMobile ? "#9F2089" : undefined, display: "flex", gap: 8, alignItems: "center", justifyContent: "center" }}>
+            📷 Scan with the camera
+          </button>
           {sending && (
             <div role="status" style={{ display: "flex", gap: 10, alignItems: "center", fontSize: 14, fontWeight: 800, color: C.gray600, padding: "4px 2px" }}>
               <CircularProgress size={18} style={{ color: C.orange }} /> Linking on Meesho…
