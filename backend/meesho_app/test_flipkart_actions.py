@@ -34,19 +34,36 @@ class Hub:
                         "pendingLabel": [], "pendingRTD": [_group("1_LSTDDD", 2)]}
         self.sent = []
         self.answer = None
+        self.breakdowns = []
 
     def orch(self, kw):
         body = kw["json"]
         op, inp = body["operationName"], body["variables"].get("input") or {}
         if op == "GetStateCountBreakdown":
-            n = sum(g["shipmentCount"] for g in self.waiting.get(inp["status"], []))
-            dates = [{"dispatchByDate": DBD, "shipmentCount": n}] if n else []
+            # As Seller Hub: To accept by dispatch-by date; To pack by label printed or not — each with its dates
+            # and, apart, how many are past dispatch-by ("breached", groups marked _breached here).
+            level = inp["shipmentCountBreakdownLevelParams"]
+            self.breakdowns.append((inp["status"], level))
+
+            def counts(gs, **extra):
+                dated = sum(g["shipmentCount"] for g in gs if not g.get("_breached"))
+                return {**extra, "breachedDbdShipmentCount": sum(g["shipmentCount"] for g in gs if g.get("_breached")),
+                        "dbdShipmentCountDetails": [{"dispatchByDate": DBD, "shipmentCount": dated}] if dated else []}
+            if inp["status"] == "pendingToPack":
+                assert level == {"labelPrintLevel": True}, level
+                ps = [counts(self.waiting["pendingLabel"], isLabelPrinted=False), counts(self.waiting["pendingRTD"], isLabelPrinted=True)]
+            else:
+                assert inp["status"] == "pendingToAccept" and level == {"dispatchByDateLevel": True}, inp
+                ps = [counts(self.waiting["pendingToAccept"])]
             return _resp(200, {"data": {"shipmentStatesCountAndBreakdown": {"shipmentStatesCountMetrics": {"shipmentCountBreakdown": {
-                "logisticsShipmentCountDetails": [{"printStatusShipmentCountDetails": [{"dbdShipmentCountDetails": dates}]}]}}}}})
+                "logisticsShipmentCountDetails": [{"printStatusShipmentCountDetails": ps}]}}}}})
         if op == "GetShipmentGroups":
-            assert inp["shipmentParams"]["dbd"] == DBD and inp["shipmentParams"]["location_id"] == LOC, inp
-            return _resp(200, {"data": {"filteredShipmentGroups": {"shipmentGroups": self.waiting.get(inp["status"], []),
-                                                                   "pageInfo": {"hasMore": False}}}})
+            sp = inp["shipmentParams"]
+            assert sp["location_id"] == LOC, inp
+            breached = sp["is_breached"] is True
+            assert (sp["dbd"] is None) if breached else sp["dbd"] == DBD, sp
+            gs = [g for g in self.waiting.get(inp["status"], []) if bool(g.get("_breached")) == breached]
+            return _resp(200, {"data": {"filteredShipmentGroups": {"shipmentGroups": gs, "pageInfo": {"hasMore": False}}}})
         return _orders(kw)
 
     def napi(self, kw):

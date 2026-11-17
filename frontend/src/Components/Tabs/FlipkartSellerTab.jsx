@@ -305,12 +305,12 @@ function FlipkartActions({ accounts, mobile, onState }) {
                 </div>
                 {stage === "label" && n > 0 && <div style={{ fontSize: 12.5, color: C.gray600 }}>Print these labels in Seller Hub; they then show under "Ready to mark RTD".</div>}
                 {list.length === 0 ? <div style={{ fontSize: 12.5, color: C.gray500 }}>Nothing waiting.</div> : list.map((g) => (
-                  <div key={g.group_id + g.dispatch_by} style={{ display: "flex", gap: 8, alignItems: "center", minWidth: 0 }}>
+                  <div key={`${g.group_id}-${g.dispatch_by || "breached"}`} style={{ display: "flex", gap: 8, alignItems: "center", minWidth: 0 }}>
                     {g.items[0]?.image ? <img src={g.items[0].image} alt="" loading="lazy" style={{ width: 32, height: 32, borderRadius: 6, objectFit: "cover", flexShrink: 0 }} /> : null}
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontFamily: "monospace", fontSize: 12.5, fontWeight: 800, color: C.gray900, wordBreak: "break-word" }}>{g.items.map((i) => i.sku).join(", ")} ×{g.shipments}</div>
                       <div style={{ fontSize: 11.5, color: g.missing_dimensions ? C.red : C.gray500 }}>
-                        {g.missing_dimensions ? "No package size — accept in Seller Hub" : `dispatch by ${dayTime(g.dispatch_by)}`}</div>
+                        {g.missing_dimensions ? "No package size — accept in Seller Hub" : g.breached ? "past dispatch-by — breached" : `dispatch by ${dayTime(g.dispatch_by)}`}</div>
                     </div>
                     {info.verb && !(stage === "accept" && g.missing_dimensions) && (
                       <button onClick={() => act(stage, [g])} disabled={!!busy} style={{ ...btn("ghost", "sm"), minHeight: 30, opacity: busy ? 0.6 : 1 }}>{info.verb}</button>

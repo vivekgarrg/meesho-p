@@ -22,7 +22,7 @@ RTD only groups of at most n shipments.
 
 import io
 import time
-from datetime import datetime, timedelta
+from datetime import timedelta
 from types import SimpleNamespace
 
 from django.db.models import Q
@@ -36,7 +36,8 @@ from . import flipkart_seller as fs
 
 PRINT_PATH = "/napi/my-orders/revamped-orders-print"
 PRINT_CHUNK = 50                 # groups in one print request
-WAIT_AFTER_ACCEPT = 45           # seconds: Seller Hub makes the labels of what was just accepted
+LABEL_WAIT_STEP = 15             # seconds between looks for the labels of what was just accepted,
+LABEL_WAIT_MAX = 180             # and how long to keep looking: Seller Hub takes a while to make them
 LABEL_SLOT_GRACE = timedelta(hours=2)    # a label time missed by more than this (the worker was down) isn't caught up
 LOCK_TTL = 15 * 60
 
@@ -47,15 +48,8 @@ class AutoError(Exception):
 
 # ── Seller Hub: print ────────────────────────────────────────────────────────
 
-def _is_breached(dbd):
-    """Whether a dispatch-by date (as Seller Hub writes it) has passed — Print is sent with is_breached for those, as the page does."""
-    try:
-        return datetime.fromisoformat(str(dbd).replace("Z", "+00:00")) < timezone.now()
-    except ValueError:
-        return False
-
-
-def _print_body(account, chunk, breached):
+def _print_body(account, chunk, dbd):
+    """Print's body, as the page sends it — a breached bucket's with is_breached; a dated one's groups with their date."""
     body = {
         "timestamp": fa._now(), "status": fa.STAGES["label"], "view": "group_shipment", "shipment_ids": [],
         "groups": [{"group_id": g["groupId"], "sub_group_index": g.get("subGroupIndex") or 0,
@@ -63,10 +57,10 @@ def _print_body(account, chunk, breached):
                     "price_range": {"min_price": (g.get("priceRange") or {}).get("minPrice"),
                                     "max_price": (g.get("priceRange") or {}).get("maxPrice")},
                     "channel_of_sale": g.get("channelOfSale") or "FLIPKART",
-                    "packaging_policy": g.get("packagingPolicy") or "DEFAULT"} for g in chunk],
+                    "packaging_policy": g.get("packagingPolicy") or "DEFAULT", **fa._dated(dbd)} for g in chunk],
         "location_id": account.location_id, "seller_id": account.seller_id, "printer_setting": {},
     }
-    if breached:
+    if dbd is fa.BREACHED:
         body["is_breached"] = True
     return body
 
@@ -79,11 +73,13 @@ def print_labels(account, s, chosen, reprint=False):
     headers = {"Accept": "application/pdf", "Content-Type": "application/json", "FK-CSRF-TOKEN": jar.get(fs.CSRF_COOKIE, ""),
                "Referer": f"{fs.BASE}/index.html", "Origin": fs.BASE}
     pdfs = []
-    for breached in (True, False):
-        part = [g for dbd, g in chosen if _is_breached(dbd) == breached]
+    by_bucket = {}
+    for dbd, g in chosen:
+        by_bucket.setdefault(dbd, []).append(g)
+    for dbd, part in by_bucket.items():
         for i in range(0, len(part), PRINT_CHUNK):
             try:
-                r = s.post(f"{fs.BASE}{PRINT_PATH}?reprint={'true' if reprint else 'false'}", json=_print_body(account, part[i:i + PRINT_CHUNK], breached),
+                r = s.post(f"{fs.BASE}{PRINT_PATH}?reprint={'true' if reprint else 'false'}", json=_print_body(account, part[i:i + PRINT_CHUNK], dbd),
                            headers=headers, timeout=60, allow_redirects=False)
             except requests.RequestException as e:
                 raise fs.FlipkartError(f"Couldn't reach Flipkart to print: {e.__class__.__name__}.")
@@ -111,7 +107,20 @@ def _small(groups_, limit):
 
 
 def _waiting(account, s, stage):
-    return [(dbd, g) for dbd, _n in fa.dispatch_dates(account, s, stage) for g in fa.groups(account, s, stage, dbd)]
+    return fa.waiting_groups(account, s, stage)
+
+
+def _wait_for_labels(account, s, accepted, wait_max):
+    """After accepting: look again every few seconds until every group just accepted has its label to print
+    (Seller Hub takes a while to make them), up to `wait_max` seconds. Returns what's waiting to print then."""
+    waited = 0
+    while True:
+        waiting = _waiting(account, s, "label")
+        have = {g["groupId"] for _d, g in waiting}
+        if not accepted or set(accepted) <= have or waited >= wait_max:
+            return waiting, waited
+        time.sleep(LABEL_WAIT_STEP)
+        waited += LABEL_WAIT_STEP
 
 
 def accept(account, s=None, limit=None):
@@ -181,9 +190,16 @@ def labels(account, trigger="AUTO", send=True, rtd=True, limit=None, accept_firs
         just = a.get("groups") or []
         out["steps"].append(f"Accepted {a['shipments']}" + (f" ({a['failed']} refused)" if a["failed"] else "")
                             + (f", {len(a['skipped'])} group(s) need package sizes in Seller Hub" if a.get("skipped") else ""))
-        if a["shipments"]:
-            time.sleep(WAIT_AFTER_ACCEPT if wait is None else wait)      # Seller Hub makes their labels
-    waiting = _waiting(account, s, "label")
+    if just or out["accepted"]:
+        accepted_ids = just or [gid for res in a["results"] for gid in res.get("group_ids", [])]
+        waiting, waited = _wait_for_labels(account, s, accepted_ids, LABEL_WAIT_MAX if wait is None else wait)
+        if waited:
+            out["steps"].append(f"Waited {waited}s for Seller Hub to make the labels")
+        missing = set(accepted_ids) - {g["groupId"] for _d, g in waiting}
+        if missing:
+            out["steps"].append(f"{len(missing)} accepted group(s) had no label yet — the next run prints them")
+    else:
+        waiting = _waiting(account, s, "label")
     if limit:
         mine = [x for x in waiting if x[1]["groupId"] in just]
         waiting = _small(mine or waiting, limit)

@@ -7,11 +7,21 @@ requests copied from the page (flipkart-api.py, never committed):
              with its package dimensions as Seller Hub already holds them.
   mark RTD   To pack, labels printed → MarkRTD (sfs_revampedOrderShipmentsGroupRTD).
 
-Both act on the groups GetShipmentGroups lists for one dispatch-by date (the
-counts' breakdown gives the dates), read fresh just before — never on what the
-page last showed — and only on the groups asked for (all, when none are named).
-Printing the labels in between is done in Seller Hub until its request is added.
-After acting, the orders are read again so the page shows where they are now.
+Both act on the groups GetShipmentGroups lists, read fresh just before — never
+on what the page last showed — and only on the groups asked for (all, when none
+are named). Where to look, as the page does (flipkart-api.py):
+
+  To accept  GetStateCountBreakdown(pendingToAccept, dispatchByDateLevel) → its dates.
+  To pack    GetStateCountBreakdown(pendingToPack, labelPrintLevel) — split by
+             isLabelPrinted: not printed = labels to print (pendingLabel), printed
+             = ready to mark RTD (pendingRTD); each with its dispatch-by dates AND
+             a "breached" count (past dispatch-by), which isn't under any date.
+
+A bucket is a date (groups listed with dbd, sent with dispatch_by_date, filters {})
+or "breached" (listed with is_breached and no dbd, sent without a date, filters
+{"is_breached": true}) — exactly as Seller Hub sends each. Printing is
+flipkart_auto.print_labels. After acting, the orders are read again so the page
+shows where they are now.
 """
 
 import json
@@ -51,32 +61,47 @@ def _need_location(account):
                                "or set it under More on the business's card.")
 
 
-def dispatch_dates(account, s, stage):
-    """[(dispatch-by date as Seller Hub writes it, shipments)] waiting at this stage."""
+BREACHED = None                  # the bucket of shipments past dispatch-by: no date of their own
+
+
+def buckets(account, s, stage):
+    """[(dispatch-by date, or BREACHED, shipments)] waiting at this stage — where the page looks for them (see above)."""
+    to_pack = stage in ("label", "rtd")
     d = fs.orchestrator(account, "GetStateCountBreakdown", {"input": {
-        "status": STAGES[stage],
+        "status": "pendingToPack" if to_pack else STAGES[stage],
         "params": {"location_id": account.location_id, "status": {"picked_up": "false", "dispatched": "false", "shipped": "false"},
                    "on_hold": False},
-        "shipmentCountBreakdownLevelParams": {"dispatchByDateLevel": True}}}, BREAKDOWN_QUERY, s=s)
-    out = {}
+        "shipmentCountBreakdownLevelParams": {"labelPrintLevel": True} if to_pack else {"dispatchByDateLevel": True}}},
+        BREAKDOWN_QUERY, s=s)
+    dates, breached = {}, 0
     details = (((d.get("shipmentStatesCountAndBreakdown") or {}).get("shipmentStatesCountMetrics") or {})
                .get("shipmentCountBreakdown") or {}).get("logisticsShipmentCountDetails") or []
     for lg in details:
         for p in lg.get("printStatusShipmentCountDetails") or []:
+            if to_pack and bool(p.get("isLabelPrinted")) != (stage == "rtd"):
+                continue                     # To pack: not printed = labels to print; printed = to mark RTD
+            breached += p.get("breachedDbdShipmentCount") or 0
             for x in p.get("dbdShipmentCountDetails") or []:
                 if x.get("dispatchByDate"):
-                    out[x["dispatchByDate"]] = out.get(x["dispatchByDate"], 0) + (x.get("shipmentCount") or 0)
-    return sorted(out.items())
+                    dates[x["dispatchByDate"]] = dates.get(x["dispatchByDate"], 0) + (x.get("shipmentCount") or 0)
+    out = ([(BREACHED, breached)] if breached else []) + sorted(dates.items())
+    return out
+
+
+def dispatch_dates(account, s, stage):
+    """[(dispatch-by date, shipments)] waiting at this stage — the dated buckets only."""
+    return [(dbd, n) for dbd, n in buckets(account, s, stage) if dbd is not BREACHED]
 
 
 def groups(account, s, stage, dbd):
-    """The SKU groups waiting at this stage for this dispatch-by date, as GetShipmentGroups lists them."""
+    """The SKU groups waiting at this stage in one bucket (a dispatch-by date, or BREACHED), as GetShipmentGroups lists them."""
     out = []
     for page in range(1, GROUP_PAGES + 1):
         d = fs.orchestrator(account, "GetShipmentGroups", {"input": {
             "status": STAGES[stage], "viewType": {"groupedByFsn": True},
-            "shipmentParams": {"seller_id": account.seller_id, "location_id": account.location_id, "dbd": dbd,
-                               **{k: None for k in _PARAM_NULLS}},
+            "shipmentParams": {"seller_id": account.seller_id, "location_id": account.location_id,
+                               **{k: None for k in _PARAM_NULLS}, "dbd": dbd,
+                               "is_breached": True if dbd is BREACHED else None},
             "timestamp": _now(),
             "sortInputs": [{"field": "shipment_count", "order": "desc"}, {"field": "units_count", "order": "asc"},
                            {"field": "skus_count", "order": "asc"}],
@@ -91,7 +116,7 @@ def groups(account, s, stage, dbd):
 def summary(g, dbd):
     """One group as the page shows it."""
     specs = (g.get("groupDetails") or {}).get("shipmentGroupSpecs") or []
-    return {"group_id": g["groupId"], "sub_group_index": g.get("subGroupIndex") or 0, "dispatch_by": dbd,
+    return {"group_id": g["groupId"], "sub_group_index": g.get("subGroupIndex") or 0, "dispatch_by": dbd, "breached": dbd is BREACHED,
             "shipments": g.get("shipmentCount") or 0, "missing_dimensions": bool(g.get("missingDimensions")),
             "price": (g.get("priceRange") or {}).get("maxPrice"),
             "orders": [x.get("orderId") for x in g.get("sellerInputAttributes") or [] if x.get("orderId")],
@@ -99,6 +124,15 @@ def summary(g, dbd):
                        "title": ((x.get("listing") or {}).get("product") or {}).get("title") or "",
                        "image": ((x.get("listing") or {}).get("product") or {}).get("primaryImageUrl") or "",
                        "qty": x.get("quantity") or 1} for x in specs]}
+
+
+def _dated(dbd):
+    """A group's date, as the page sends it: a dated bucket's groups carry it; breached ones don't."""
+    return {} if dbd is BREACHED else {"dispatch_by_date": dbd}
+
+
+def filters_for(dbd):
+    return {"is_breached": True} if dbd is BREACHED else {}
 
 
 def accept_group(g, dbd):
@@ -110,13 +144,26 @@ def accept_group(g, dbd):
                             "external_sub_shipment_id": p.get("packageId"), "volumetric_weight": 1} for p in packages],
             "max_price": price.get("maxPrice"), "min_price": price.get("minPrice"),
             "channel_of_sale": g.get("channelOfSale") or "FLIPKART", "packaging_policy": g.get("packagingPolicy") or "DEFAULT",
-            "dispatch_by_date": dbd}
+            **_dated(dbd)}
 
 
 def rtd_group(g, dbd):
-    return {"group_id": g["groupId"], "sub_group_index": g.get("subGroupIndex") or 0, "dispatch_by_date": dbd,
+    return {"group_id": g["groupId"], "sub_group_index": g.get("subGroupIndex") or 0, **_dated(dbd),
             "channel_of_sale": g.get("channelOfSale") or "FLIPKART", "packaging_policy": g.get("packagingPolicy") or "DEFAULT",
             "size": g.get("shipmentCount") or 0}
+
+
+def waiting_groups(account, s, stage, wanted=None):
+    """[(bucket, group)] waiting at this stage, each group once (a group in the breached bucket isn't listed again by date)."""
+    seen, out = set(), []
+    for dbd, _n in buckets(account, s, stage):
+        for g in groups(account, s, stage, dbd):
+            key = (g["groupId"], g.get("subGroupIndex") or 0)
+            if key in seen or (wanted and g["groupId"] not in wanted):
+                continue
+            seen.add(key)
+            out.append((dbd, g))
+    return out
 
 
 def waiting(account, s=None):
@@ -125,7 +172,7 @@ def waiting(account, s=None):
     s = s or fs._load(account, fs._http())
     out = {}
     for stage in STAGES:
-        out[stage] = [summary(g, dbd) for dbd, _n in dispatch_dates(account, s, stage) for g in groups(account, s, stage, dbd)]
+        out[stage] = [summary(g, dbd) for dbd, g in waiting_groups(account, s, stage)]
     return out
 
 
@@ -151,17 +198,19 @@ def act(account, stage, wanted=None, dispatch_by=None, s=None):
     s = s or fs._load(account, fs._http())
     wanted = set(wanted or [])
     results, skipped = [], []
-    for dbd, _n in dispatch_dates(account, s, stage):
+    by_bucket = {}
+    for dbd, g in waiting_groups(account, s, stage, wanted):
+        by_bucket.setdefault(dbd, []).append(g)
+    for dbd, chosen in by_bucket.items():
         if dispatch_by and dbd != dispatch_by:
             continue
-        chosen = [g for g in groups(account, s, stage, dbd) if not wanted or g["groupId"] in wanted]
         if stage == "accept":
             # Without its package's size and weight Seller Hub can't pack it: left for Seller Hub, said so.
             skipped += [summary(g, dbd) for g in chosen if g.get("missingDimensions")]
             chosen = [g for g in chosen if not g.get("missingDimensions")]
         if not chosen:
             continue
-        common = {"view_name": "group_shipment", "timestamp": _now(), "filters": {}, "shipments": [],
+        common = {"view_name": "group_shipment", "timestamp": _now(), "filters": filters_for(dbd), "shipments": [],
                   "location_id": account.location_id}
         if stage == "accept":
             body = fs.graphql(account, "AcceptOrders", {**common, "groups": [accept_group(g, dbd) for g in chosen]}, ACCEPT_MUTATION, s=s,
@@ -172,7 +221,8 @@ def act(account, stage, wanted=None, dispatch_by=None, s=None):
                                                    "groups": [rtd_group(g, dbd) for g in chosen]}, RTD_MUTATION, s=s,
                               extra_headers={"operation": "mutation", "x-client-id": "SD", "x-requested-with": "XMLHttpRequest"})
             out = _outcome(body, "sfs_revampedOrderShipmentsGroupRTD")
-        results.append({"dispatch_by": dbd, "groups": len(chosen), "shipments": sum(g.get("shipmentCount") or 0 for g in chosen), **out})
+        results.append({"dispatch_by": dbd or "breached", "groups": len(chosen), "group_ids": [g["groupId"] for g in chosen],
+                        "shipments": sum(g.get("shipmentCount") or 0 for g in chosen), **out})
     return {"stage": stage, "results": results, "skipped": skipped,
             "shipments": sum(r["shipments"] for r in results), "failed": sum(len(r["failed"]) for r in results),
             "errors": [r["error"] for r in results if r["error"]]}

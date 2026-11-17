@@ -10,7 +10,7 @@ from pypdf import PdfWriter
 from . import flipkart_auto, notify
 from .models import FlipkartAutoSetting, MeeshoLabelFile
 from . import test_flipkart_actions as base
-from .test_flipkart_actions import Hub
+from .test_flipkart_actions import DBD, Hub
 from .test_flipkart_seller import FakeFlipkart, _resp
 
 
@@ -30,6 +30,18 @@ class FlowHub(Hub):
         super().__init__()
         self.printed = []
         self.print_status = 200
+        self.label_delay = 0          # looks at To pack before an accepted order's label is there
+
+    def orch(self, kw):
+        inp = kw["json"]["variables"].get("input") or {}
+        if self.label_delay and inp.get("status") == "pendingLabel":
+            self.label_delay -= 1
+            saved, self.waiting["pendingLabel"] = self.waiting["pendingLabel"], []
+            try:
+                return super().orch(kw)
+            finally:
+                self.waiting["pendingLabel"] = saved
+        return super().orch(kw)
 
     def napi(self, kw):
         r = super().napi(kw)
@@ -70,7 +82,7 @@ class FlipkartAutoTests(base.FlipkartActionTests):
             p.start()
             self.addCleanup(p.stop)
         FakeFlipkart.script = {flipkart_auto.PRINT_PATH: self.hub.print_}
-        for target, name, value in ((flipkart_auto, "WAIT_AFTER_ACCEPT", 0),):
+        for target, name, value in ((flipkart_auto, "LABEL_WAIT_STEP", 0), (flipkart_auto.time, "sleep", lambda *_: None)):
             p = mock.patch.object(target, name, value)
             p.start()
             self.addCleanup(p.stop)
@@ -93,7 +105,10 @@ class FlipkartAutoTests(base.FlipkartActionTests):
                          ("pendingLabel", "group_shipment", "41ad149fa06e4194", self.account.location_id))
         self.assertEqual(p["body"]["groups"][0]["price_range"], {"min_price": 85, "max_price": 85})
         self.assertEqual((p["headers"]["Accept"], p["headers"]["FK-CSRF-TOKEN"]), ("application/pdf", "csrf-1"))
-        self.assertTrue(p["body"]["is_breached"])                          # DBD has passed: sent as the page does
+        self.assertNotIn("is_breached", p["body"])                          # a dated bucket: its groups carry their date
+        self.assertEqual(p["body"]["groups"][0]["dispatch_by_date"], DBD)
+        # Labels are looked for where Seller Hub looks: To pack, by label printed or not.
+        self.assertIn(("pendingToPack", {"labelPrintLevel": True}), self.hub.breakdowns)
         # Only what was printed is marked RTD — not 1_LSTDDD, waiting RTD from before.
         rtd = next(x for x in self.hub.sent if x["op"] == "MarkRTD")
         self.assertEqual(sorted(g["group_id"] for g in rtd["variables"]["groups"]), ["1_LSTAAA", "1_LSTBBB"])
@@ -115,6 +130,35 @@ class FlipkartAutoTests(base.FlipkartActionTests):
         self.assertEqual([g["group_id"] for g in accepted["variables"]["groups"]], ["1_LSTBBB"])
         self.assertEqual(self.hub.printed, ["1_LSTBBB"])
         self.assertEqual(len(self.hub.waiting["pendingToAccept"]), 2)        # the 4-order group still to accept
+
+    def test_a_breached_order_is_found_printed_and_marked_rtd_as_breached(self):
+        # The order the live test stuck on: past dispatch-by, so under no date — listed and sent as "breached".
+        self.hub.waiting["pendingToAccept"] = [dict(base._group("2_LSTPJT", 1), _breached=True)]
+        self.hub.waiting["pendingRTD"] = []
+        out = flipkart_auto.run("labels", limit=1)["Rudam"]
+        self.assertEqual((out["accepted"], out["printed"], out["rtd"]), (1, 1, 1), out)
+        acc = next(x for x in self.hub.sent if x["op"] == "AcceptOrders")
+        self.assertEqual(acc["variables"]["filters"], {"is_breached": True})
+        self.assertNotIn("dispatch_by_date", acc["variables"]["groups"][0])
+        p = next(x for x in self.hub.sent if x["op"] == "Print")
+        self.assertTrue(p["body"]["is_breached"])
+        self.assertNotIn("dispatch_by_date", p["body"]["groups"][0])
+        rtd = next(x for x in self.hub.sent if x["op"] == "MarkRTD")
+        self.assertEqual((rtd["variables"]["filters"], rtd["variables"]["groups"][0]["group_id"]), ({"is_breached": True}, "2_LSTPJT"))
+        self.assertNotIn("dispatch_by_date", rtd["variables"]["groups"][0])
+
+    def test_after_accepting_it_waits_for_seller_hub_to_make_the_labels(self):
+        self.hub.label_delay = 2                     # the label isn't there the first two looks
+        out = flipkart_auto.run("labels", limit=1)["Rudam"]
+        self.assertEqual((out["accepted"], out["printed"], out["rtd"]), (1, 1, 1), out)
+
+    def test_a_label_that_never_comes_is_left_for_the_next_run(self):
+        self.hub.label_delay = 10_000
+        with mock.patch.object(flipkart_auto, "LABEL_WAIT_MAX", 0):
+            out = flipkart_auto.run("labels", limit=1)["Rudam"]
+        self.assertEqual((out["accepted"], out["printed"]), (1, 0), out)
+        self.assertIn("next run prints them", " ".join(out["steps"]))
+        self.assertNotIn("MarkRTD", self.ops())
 
     def test_nothing_is_marked_rtd_when_the_labels_dont_come(self):
         self.hub.print_status = 500
