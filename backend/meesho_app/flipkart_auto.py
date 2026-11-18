@@ -219,10 +219,12 @@ def _keep(account, pdf, trigger, shipments, summary):
     return f
 
 
-def labels(account, trigger="AUTO", send=True, rtd=True, limit=None, accept_first=True, wait=None):
+def labels(account, trigger="AUTO", send=True, rtd=None, limit=None, accept_first=True, wait=None):
     """
     Accept (first), print every label waiting, keep the PDF, send it, mark those groups RTD.
     `limit`: only groups of at most that many shipments, the ones just accepted first (the one-order test).
+    `rtd`: mark the printed ones RTD now — by default as the business is set (rtd_mode "print"); a "scan"
+    business gets its packed groups marked RTD instead (rtd_scanned).
     Returns what happened, step by step.
     """
     from . import notify
@@ -290,6 +292,18 @@ def labels(account, trigger="AUTO", send=True, rtd=True, limit=None, accept_firs
                 out["pick_list_sent"] = notify.send(f"Flipkart labels — {when} — items", picks)
         except Exception as exc:                       # noqa: BLE001 — the PDF itself went out
             out["pick_list_error"] = str(exc)[:200]
+    if rtd is None:
+        rtd = account.rtd_mode == fs.A.RTD_PRINT
+    if not rtd and account.rtd_mode == fs.A.RTD_SCAN:
+        # Orders packed at the desk before their label was printed: marked RTD now, once their whole group is packed.
+        try:
+            done = rtd_scanned(account, s)
+            if done["marked"]:
+                out["rtd"] = done["marked"]
+            out["steps"].append(f"RTD on scan: {done['marked']} marked (every order of their group packed)"
+                                + (f", {sum(w['shipments'] - w['packed'] for w in done['waiting'])} still to pack" if done["waiting"] else ""))
+        except fs.FlipkartError as e:
+            out["steps"].append(f"RTD on scan: couldn't check now ({e}) — the next scan or minute tries again")
     if rtd:
         r = fa.act(account, "rtd", wanted=[g["groupId"] for _d, g in waiting], s=s)
         out["rtd"] = r["shipments"] - r["failed"]
@@ -303,6 +317,65 @@ def labels(account, trigger="AUTO", send=True, rtd=True, limit=None, accept_firs
     except fs.FlipkartError:
         pass
     return out
+
+
+def _order_ids(g):
+    return [x["orderId"] for x in g.get("sellerInputAttributes") or [] if x.get("orderId")]
+
+
+def rtd_scanned(account, s=None):
+    """
+    RTD on scan: every group printed and waiting RTD whose orders are ALL packed at the scan desk (Flipkart
+    scans, by Flipkart order id — the "OD…" on the label) is marked Ready to Dispatch; a group still being
+    packed waits. Seller Hub marks RTD by group (same product, same dispatch-by), so a group goes when its
+    last order is packed. Returns {"marked", "groups", "waiting": [{group, sku, shipments, packed}], "errors"}.
+    """
+    fa._need_location(account)
+    s = s or fs._load(account, fs._http())
+    look = rtd_scanned_preview(account, s)
+    ready, still = look["ready"], look["waiting"]
+    out = {"marked": 0, "groups": len(ready), "ready": ready, "waiting": still, "errors": []}
+    if ready:
+        r = fa.act(account, "rtd", wanted=[g["group_id"] for g in ready], s=s)
+        out["marked"] = r["shipments"] - r["failed"]
+        out["errors"] = r["errors"] + [x["error"] for res in r["results"] for x in res["failed"]][:5]
+    return out
+
+
+def rtd_pass(now=None):
+    """
+    Every minute (run_due): for each business set to RTD on scan, when there are Flipkart scans since it was
+    last checked, mark RTD the groups now wholly packed — claimed per account first, so two runs never do one.
+    """
+    from .models import ScannedOrder
+    now = now or timezone.now()
+    done = {}
+    for a in _accounts():
+        if a.rtd_mode != fs.A.RTD_SCAN:
+            continue
+        since = a.rtd_checked_at
+        fresh = ScannedOrder.objects.filter(platform="flipkart")
+        if since:
+            fresh = fresh.filter(last_scanned_at__gt=since)
+        if not fresh.exists():
+            continue
+        if not fs.A.objects.filter(pk=a.pk, rtd_checked_at=since).update(rtd_checked_at=now):
+            continue                                   # another run took it
+        started = timezone.now()
+        try:
+            r = rtd_scanned(a)
+        except fs.FlipkartError as e:
+            if getattr(e, "expired", False):
+                fa._expired(a, e)
+            fs.A.objects.filter(pk=a.pk).update(rtd_checked_at=since)   # not checked after all: the next minute tries again
+            done[a.business.name] = {"error": str(e)}
+            continue
+        if r["marked"] or r["errors"]:
+            _record(a, "rtd", "AUTO", started, {"rtd": r["marked"], "steps": [
+                f"Marked {r['marked']} Ready to Dispatch — every order of their group packed at the scan desk"]
+                + ([f"Refused: {'; '.join(r['errors'])}"] if r["errors"] else [])})
+        done[a.business.name] = {"marked": r["marked"], "waiting": len(r["waiting"])}
+    return done
 
 
 def reprint(account, trigger="MANUAL", wanted=None):
@@ -359,8 +432,7 @@ def run(kind, business_id=None, trigger="AUTO", limit=None, send=None, rtd=None)
     """One run of `kind` ("accept" | "labels" | "reprint") for every connected account (or one business). {business: result}."""
     from .models import FlipkartAutoSetting
     setting = FlipkartAutoSetting.get()
-    send = setting.send_labels if send is None else send
-    rtd = setting.mark_rtd if rtd is None else rtd
+    send = setting.send_labels if send is None else send       # rtd None: as each business is set (rtd_mode)
     results = {}
     # One run at a time, across every process (the schedule's, an admin's): claimed on the settings row.
     now = timezone.now()
@@ -425,7 +497,7 @@ def run_due(now=None):
     setting = FlipkartAutoSetting.get()
     kind, _slot_at = due(setting, now)
     if not kind:
-        return {"due": None}
+        return {"due": None, "rtd": _rtd_pass_locked(setting, now)}
     now = now or timezone.now()
     # A labels run accepts first, so it counts as the accept too.
     claim = {"last_labels_at": now, "last_accept_at": now} if kind == "labels" else {"last_accept_at": now}
@@ -434,7 +506,21 @@ def run_due(now=None):
         return {"due": kind, "claimed": False}
     results = run(kind)
     FlipkartAutoSetting.objects.filter(pk=setting.pk).update(last_result={"kind": kind, "at": now.isoformat(), "results": results})
-    return {"due": kind, "results": results}
+    return {"due": kind, "results": results, "rtd": _rtd_pass_locked(setting, now)}
+
+
+def _rtd_pass_locked(setting, now=None):
+    """The RTD-on-scan pass, under the same one-run-at-a-time claim as the labels runs (skipped while one is going:
+    a labels run checks the scans itself)."""
+    from .models import FlipkartAutoSetting
+    t = timezone.now()
+    if not FlipkartAutoSetting.objects.filter(Q(busy_until__isnull=True) | Q(busy_until__lt=t), pk=setting.pk) \
+            .update(busy_until=t + timedelta(minutes=5)):
+        return {"skipped": "a run is going"}
+    try:
+        return rtd_pass(now)
+    finally:
+        FlipkartAutoSetting.objects.filter(pk=setting.pk).update(busy_until=None)
 
 
 # ── API: Business Settings → Flipkart setup → Automation ─────────────────────
@@ -560,3 +646,88 @@ def label_runs_view(request, business_id):
                      "name": f"flipkart-labels-{timezone.localtime(r.file.created_at):%Y-%m-%d-%H%M}.pdf"} if r.file_id else None,
         } for r in runs],
     })
+
+
+def _rtd_target(request, business_id):
+    from . import views
+    business = views.get_authorized_business(request, business_id)
+    d = request.data if isinstance(request.data, dict) else {}
+    target = int(d.get("business") or request.GET.get("business") or business.pk)
+    if target not in {b.pk for b in views.accessible_businesses(request, include=business)}:
+        return None, Response({"error": "Not your business."}, status=status.HTTP_403_FORBIDDEN)
+    a = fs.A.objects.filter(business_id=target).select_related("business").first()
+    if not a:
+        return None, Response({"error": "Flipkart isn't connected for this business."}, status=status.HTTP_404_NOT_FOUND)
+    return a, None
+
+
+@api_view(["PATCH"])
+def rtd_mode_view(request, business_id):
+    """PATCH flipkart-seller/rtd-mode/ {business, mode: scan | print | off} — when this business's orders are marked RTD."""
+    from . import views
+    if not views._is_admin(request.user):
+        return Response({"error": "Only an admin can change this."}, status=status.HTTP_403_FORBIDDEN)
+    a, err = _rtd_target(request, business_id)
+    if err:
+        return err
+    mode = (request.data or {}).get("mode")
+    if mode not in fs.A.RTD_MODES:
+        return Response({"error": "mode is scan, print or off."}, status=status.HTTP_400_BAD_REQUEST)
+    a.rtd_mode = mode
+    a.save(update_fields=["rtd_mode", "updated_at"])
+    return Response({"business": a.business_id, "rtd_mode": a.rtd_mode})
+
+
+@api_view(["GET", "POST"])
+def rtd_scan_view(request, business_id):
+    """
+    GET flipkart-seller/rtd-scan/?business= — Order Scan → Flipkart → Ready to dispatch: each group printed and
+    waiting RTD, with how many of its orders are packed; POST — mark RTD now the groups wholly packed.
+    """
+    from .models import FlipkartLabelRun
+    a, err = _rtd_target(request, business_id)
+    if err:
+        return err
+    if a.status != fs.A.STATUS_ACTIVE:
+        return Response({"error": f"Flipkart isn't connected for {a.business.name} — log in again."}, status=status.HTTP_409_CONFLICT)
+    started = timezone.now()
+    try:
+        if request.method == "POST":
+            r = rtd_scanned(a)
+            if r["marked"] or r["errors"]:
+                _record(a, "rtd", "MANUAL", started, {"rtd": r["marked"], "steps": [f"Marked {r['marked']} Ready to Dispatch (by hand)"]})
+        else:
+            # Only look — nothing is marked: what's printed and waiting, and what of it is packed.
+            s = fs._load(a, fs._http())
+            r = rtd_scanned_preview(a, s)
+    except fs.FlipkartError as e:
+        if getattr(e, "expired", False):
+            fa._expired(a, e)
+        return Response({"error": str(e)}, status=status.HTTP_409_CONFLICT)
+    today = timezone.localdate()
+    marked_today = sum(x.rtd for x in FlipkartLabelRun.objects.filter(business_id=a.business_id, started_at__date__gte=today - timedelta(days=1))
+                       if timezone.localtime(x.started_at).date() == today)
+    return Response({"business": a.business_id, "business_name": a.business.name, "rtd_mode": a.rtd_mode,
+                     "marked": r.get("marked", 0), "ready": r.get("ready", []), "waiting": r["waiting"],
+                     "errors": r.get("errors", []), "marked_today": marked_today})
+
+
+def rtd_scanned_preview(account, s):
+    """rtd_scanned without marking: {"ready": [groups wholly packed], "waiting": [...]}."""
+    from .models import ScannedOrder
+    waiting = _waiting(account, s, "rtd")
+    ids = {o for _d, g in waiting for o in _order_ids(g)}
+    packed = set(ScannedOrder.objects.filter(platform="flipkart", sub_order_no__in=ids,
+                                             status__in=(ScannedOrder.STATUS_PACKED, ScannedOrder.STATUS_DISPATCHED))
+                 .values_list("sub_order_no", flat=True)) if ids else set()
+    ready, still = [], []
+    for dbd, g in waiting:
+        oids = set(_order_ids(g))
+        n = g.get("shipmentCount") or 0
+        specs = (g.get("groupDetails") or {}).get("shipmentGroupSpecs") or []
+        row = {"group_id": g["groupId"], "dispatch_by": dbd, "shipments": n, "packed": len(oids & packed),
+               "sku": ", ".join(((x.get("listing") or {}).get("product") or {}).get("sku") or "" for x in specs),
+               "image": next((((x.get("listing") or {}).get("product") or {}).get("primaryImageUrl") for x in specs), ""),
+               "orders": sorted(oids), "packed_orders": sorted(oids & packed)}
+        (ready if oids and oids <= packed and len(oids) >= n else still).append(row)
+    return {"ready": ready, "waiting": still}

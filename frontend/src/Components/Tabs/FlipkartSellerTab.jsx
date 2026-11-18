@@ -637,6 +637,7 @@ export function FlipkartLiveOrders() {
   );
 }
 
+const BLUE_FK = "#2874F0";
 const fmtAt = (iso) => (iso ? new Date(iso).toLocaleString("en-IN", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }) : "never");
 
 /** One line of what a run did, for one business. */
@@ -658,6 +659,124 @@ function Switch({ on, onChange, label, sub, disabled }) {
       <span><span style={{ fontSize: 13.5, fontWeight: 800, color: C.gray900 }}>{label}</span>
         {sub && <span style={{ display: "block", fontSize: 12, color: C.gray500 }}>{sub}</span>}</span>
     </label>
+  );
+}
+
+const RTD_MODES = [
+  ["scan", "When packed (scanned)", "A product group is marked RTD once every order of it is scanned at Order Scan → Flipkart scan"],
+  ["print", "When labels are printed", "Straight after the labels run prints them"],
+  ["off", "Never by itself", "Mark RTD in Seller Hub, or with Mark RTD now on Order Scan"],
+];
+
+/** When each business's Flipkart orders are marked Ready to Dispatch — its own setting. */
+function RtdModes({ accounts, isAdmin }) {
+  const [modes, setModes] = useState(() => Object.fromEntries(accounts.map((a) => [a.business, a.rtd_mode || "scan"])));
+  const [err, setErr] = useState(null);
+  const set = async (a, mode) => {
+    const before = modes[a.business];
+    setModes((m) => ({ ...m, [a.business]: mode })); setErr(null);
+    const r = await call("rtd-mode/", "PATCH", { business: a.business, mode });
+    if (!r.ok) { setModes((m) => ({ ...m, [a.business]: before })); setErr(r.data.error || "Couldn't save."); }
+  };
+  const withLogin = accounts.filter((a) => a.status);
+  if (!withLogin.length) return null;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+      <span style={{ fontSize: 13.5, fontWeight: 800, color: C.gray900 }}>Mark Ready to Dispatch</span>
+      {withLogin.map((a) => {
+        const m = RTD_MODES.find(([k]) => k === modes[a.business]) || RTD_MODES[0];
+        return (
+          <label key={a.business} style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+            <span style={{ fontSize: 12, fontWeight: 700, color: C.gray600 }}>{a.business_name}</span>
+            <select value={modes[a.business]} disabled={!isAdmin} onChange={(e) => set(a, e.target.value)} style={{ ...S.inp, width: "auto", padding: "5px 8px" }}>
+              {RTD_MODES.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+            </select>
+            <span style={{ fontSize: 11.5, color: C.gray500 }}>{m[2]}</span>
+          </label>
+        );
+      })}
+      {err && <span style={{ fontSize: 12, color: C.red, fontWeight: 700 }}>✕ {err}</span>}
+    </div>
+  );
+}
+
+/**
+ * Order Scan → Flipkart scan → Ready to dispatch: per business, the orders printed and waiting RTD — each
+ * product group with how many of its orders are packed — and Mark RTD now. With RTD on scan, a group wholly
+ * packed is marked within a minute by itself.
+ */
+export function FlipkartRtdBoard() {
+  const mobile = useIsMobile();
+  const { d, err } = useFlipkart(0);
+  const [boards, setBoards] = useState({});
+  const [busy, setBusy] = useState(null);
+  const load = useCallback(async (biz) => {
+    setBoards((b) => ({ ...b, [biz]: { ...(b[biz] || {}), loading: true } }));
+    const r = await call(`rtd-scan/?business=${biz}`);
+    setBoards((b) => ({ ...b, [biz]: r.ok ? r.data : { error: r.data.error || "Couldn't read Seller Hub." } }));
+  }, []);
+  const connected = (d?.accounts || []).filter((a) => a.connected);
+  useEffect(() => {
+    connected.forEach((a) => load(a.business));
+    const t = setInterval(() => connected.forEach((a) => load(a.business)), 60000);
+    return () => clearInterval(t);
+  }, [d]); // eslint-disable-line react-hooks/exhaustive-deps
+  const markNow = async (biz) => {
+    setBusy(biz);
+    const r = await call("rtd-scan/", "POST", { business: biz });
+    setBusy(null);
+    setBoards((b) => ({ ...b, [biz]: r.ok ? { ...r.data, note: `Marked ${r.data.marked} Ready to Dispatch.` } : { ...(b[biz] || {}), error: r.data.error || "Couldn't mark RTD." } }));
+  };
+  if (!d) return <Loading err={err} />;
+  if (!connected.length) return <NotConnected />;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      {connected.map((a) => {
+        const b = boards[a.business];
+        const mode = RTD_MODES.find(([k]) => k === (b?.rtd_mode || a.rtd_mode)) || RTD_MODES[0];
+        const groups = b && !b.error ? [...(b.ready || []).map((g) => ({ ...g, ready: true })), ...(b.waiting || [])] : [];
+        const toPack = groups.reduce((n, g) => n + g.shipments - g.packed, 0);
+        return (
+          <section key={a.business} style={{ ...S.card, padding: 0, overflow: "hidden" }}>
+            <div style={{ padding: "12px 14px", display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", borderBottom: `1px solid ${C.gray100}` }}>
+              <div style={{ flex: "1 1 220px", minWidth: 0 }}>
+                <div style={{ fontWeight: 900, fontSize: 15, color: C.gray900 }}>{a.business_name}</div>
+                <div style={{ fontSize: 12, color: C.gray500 }}>RTD: <b style={{ color: C.gray700 }}>{mode[1]}</b> — {mode[2]}</div>
+              </div>
+              {b && !b.error && <span style={{ fontSize: 12.5, color: C.gray600 }}>
+                <b style={{ color: "#15803D" }}>{b.marked_today ?? 0}</b> marked RTD today · <b style={{ color: toPack ? C.orange : "#15803D" }}>{toPack}</b> printed, still to pack</span>}
+              <button onClick={() => markNow(a.business)} disabled={busy === a.business || !(b?.ready || []).length}
+                style={{ ...btn("primary", "sm"), opacity: (b?.ready || []).length ? 1 : 0.5 }}>
+                {busy === a.business ? "Marking…" : `🚚 Mark RTD now${(b?.ready || []).length ? ` · ${(b.ready || []).reduce((n, g) => n + g.shipments, 0)}` : ""}`}</button>
+            </div>
+            {b?.note && <div role="status" style={{ padding: "6px 14px", fontSize: 12.5, fontWeight: 700, color: "#15803D" }}>✓ {b.note}</div>}
+            {b?.error ? <div role="alert" style={{ padding: 14, color: C.red, fontWeight: 700, fontSize: 13 }}>✕ {b.error}</div>
+              : !b || b.loading && !groups.length ? <div style={{ padding: 18, color: C.gray400, fontSize: 13 }}>Reading Seller Hub…</div>
+              : groups.length === 0 ? <div style={{ padding: 18, color: C.gray500, fontSize: 13 }}>Nothing printed and waiting RTD.</div>
+              : groups.map((g) => {
+                const pct = g.shipments ? (100 * g.packed) / g.shipments : 0;
+                return (
+                  <div key={g.group_id} style={{ display: "flex", gap: 10, alignItems: "center", padding: "8px 14px", borderTop: `1px solid ${C.gray100}` }}>
+                    {g.image ? <img src={g.image} alt="" loading="lazy" style={{ width: 40, height: 40, borderRadius: 8, objectFit: "cover", flexShrink: 0 }} />
+                      : <div style={{ width: 40, height: 40, borderRadius: 8, background: C.gray100, flexShrink: 0 }} />}
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 13, color: C.gray900, wordBreak: "break-word" }}>{g.sku || g.group_id}</div>
+                      <div style={{ height: 6, borderRadius: 99, background: C.gray100, marginTop: 4, overflow: "hidden", maxWidth: mobile ? "100%" : 320 }}>
+                        <div style={{ width: `${pct}%`, height: "100%", background: g.ready ? "#16A34A" : BLUE_FK }} />
+                      </div>
+                    </div>
+                    <div style={{ textAlign: "right", fontSize: 12.5, flexShrink: 0, maxWidth: "45%" }}>
+                      <div style={{ fontWeight: 900, color: g.ready ? "#15803D" : C.gray900 }}>{g.packed}/{g.shipments} packed</div>
+                      <div style={{ fontSize: 11.5, color: g.ready ? "#15803D" : C.gray500 }}>
+                        {g.ready ? (mode[0] === "scan" ? "all packed — goes RTD within a minute" : "all packed — ready to mark RTD") : "waiting for the rest to be scanned"}</div>
+                    </div>
+                  </div>
+                );
+              })}
+          </section>
+        );
+      })}
+    </div>
   );
 }
 
@@ -683,8 +802,8 @@ export function FlipkartAutomation({ accounts, isAdmin }) {
   };
   const runNow = async (business, name, limit) => {
     const what = limit === 1
-      ? `Test with one order for ${name}: accept ONE order on Flipkart, print its label, keep it, send it to Telegram and mark it Ready to Dispatch. Go ahead?`
-      : `For ${name}: accept every order waiting, print every label waiting, keep and send the PDF, and mark them Ready to Dispatch. Go ahead?`;
+      ? `Test with one order for ${name}: accept ONE order on Flipkart, print its label, keep it and send it to Telegram — RTD as ${name} is set. Go ahead?`
+      : `For ${name}: accept every order waiting, print every label waiting, keep and send the PDF — RTD as ${name} is set. Go ahead?`;
     if (!window.confirm(what)) return;
     setRunning(`${business}-${limit || "all"}`); setResult(null);
     const r = await call("auto/run/", "POST", { business, kind: "labels", ...(limit ? { limit } : {}) });
@@ -707,7 +826,8 @@ export function FlipkartAutomation({ accounts, isAdmin }) {
           <div style={{ fontWeight: 900, fontSize: 16, color: C.gray900 }}>Automation</div>
           <div style={{ fontSize: 12.5, color: C.gray500 }}>
             Accept orders on a schedule, and at each label time: accept, print every label waiting, keep the PDF (Labels Downloaded — print it
-            again any time), send it to Telegram, then mark those orders Ready to Dispatch.
+            again any time) and send it to Telegram. Orders are marked Ready to Dispatch as each business is set below — by default once
+            they're packed at Order Scan → Flipkart scan.
           </div>
         </div>
         <Switch on={d.enabled} disabled={!isAdmin} onChange={(v) => save({ enabled: v })} label={d.enabled ? "On" : "Off"} />
@@ -741,8 +861,7 @@ export function FlipkartAutomation({ accounts, isAdmin }) {
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           <Switch on={d.send_labels} disabled={!isAdmin} onChange={(v) => save({ send_labels: v })} label="Send the labels to Telegram" />
-          <Switch on={d.mark_rtd} disabled={!isAdmin} onChange={(v) => save({ mark_rtd: v })} label="Mark Ready to Dispatch after printing"
-            sub="Only orders whose labels were printed and kept" />
+          <RtdModes accounts={accounts} isAdmin={isAdmin} />
         </div>
       </div>
 
@@ -762,7 +881,7 @@ export function FlipkartAutomation({ accounts, isAdmin }) {
               <button onClick={() => runNow(a.business, a.business_name, 1)} disabled={!!running} style={btn("ghost", "sm")}>
                 {running === `${a.business}-1` ? "Testing…" : "🧪 Test with one order"}</button>
               <button onClick={() => runNow(a.business, a.business_name, null)} disabled={!!running} style={btn("ghost", "sm")}>
-                {running === `${a.business}-all` ? "Running…" : "Accept, print & RTD everything"}</button>
+                {running === `${a.business}-all` ? "Running…" : "Accept & print everything"}</button>
             </div>
           ))}
           {running && <span style={{ fontSize: 12.5, color: C.gray500 }}>Working on Flipkart — accepting waits about a minute for Seller Hub to make the labels…</span>}

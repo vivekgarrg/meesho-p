@@ -473,7 +473,7 @@ def _account_json(business, account):
             "username": account.username, "seller_id": account.seller_id, "location_id": account.location_id,
             "otp_sent_at": account.otp_sent_at, "last_login_at": account.last_login_at, "last_check_at": account.last_check_at,
             "summary": account.summary, "summary_at": account.summary_at, "orders": account.orders, "orders_at": account.orders_at,
-            "sync": account.sync, "sync_at": account.sync_at}
+            "sync": account.sync, "sync_at": account.sync_at, "rtd_mode": account.rtd_mode}
 
 
 def _state(request, business_id):

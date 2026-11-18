@@ -4008,6 +4008,14 @@ class FlipkartSellerAccount(models.Model):
     seller_id = models.CharField(max_length=64, blank=True)
     # Seller Hub's pickup location (LOC…), sent with its graphql reads.
     location_id = models.CharField(max_length=64, blank=True)
+    # When this business's Flipkart orders are marked Ready to Dispatch (flipkart_auto):
+    #   scan   once every order of a product group is packed at the scan desk (the default — it's packed when it's RTD);
+    #   print  as soon as their labels are printed;
+    #   off    never by itself (by hand in Seller Hub, or Run now).
+    RTD_SCAN, RTD_PRINT, RTD_OFF = "scan", "print", "off"
+    RTD_MODES = (RTD_SCAN, RTD_PRINT, RTD_OFF)
+    rtd_mode = models.CharField(max_length=10, default=RTD_SCAN)
+    rtd_checked_at = models.DateTimeField(null=True, blank=True)    # the scan desk was last checked for groups to mark RTD
     otp_sent_at = models.DateTimeField(null=True, blank=True)
     last_login_at = models.DateTimeField(null=True, blank=True)
     last_check_at = models.DateTimeField(null=True, blank=True)

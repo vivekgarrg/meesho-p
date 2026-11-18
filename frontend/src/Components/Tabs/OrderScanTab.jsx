@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
+// Order Scan → Flipkart scan → Ready to dispatch (loaded when opened).
+const FlipkartRtdBoard = React.lazy(() => import("./FlipkartSellerTab").then((m) => ({ default: m.FlipkartRtdBoard })));
 // Lazy: it imports from this file too, and only Meesho scan with linking on needs it.
 const MeeshoLinkingTab = React.lazy(() => import("./MeeshoLinkingTab").then((m) => ({ default: m.MeeshoLinkingTab })));
 import { API, C, S, btn, Tag, useIsMobile } from "../../App";
@@ -1620,7 +1622,7 @@ function DesktopPack({ desk, platform, setPlatform, businesses, onScopeChanged, 
         <div>
           <h1 style={{ fontSize: 22, fontWeight: 800, color: C.gray900, margin: 0 }}>{platform === "flipkart" ? "Flipkart scan" : "Meesho scan"}</h1>
           <p style={{ fontSize: 13, color: C.gray500, marginTop: 3 }}>
-            {platform === "flipkart" ? "Scan each Flipkart parcel to mark it packed and tick it off the day's list."
+            {platform === "flipkart" ? "Scan each Flipkart parcel to mark it packed and tick it off the day's list — with RTD on scan, a product's orders are marked Ready to Dispatch once all of them are packed (see Ready to dispatch)."
               : "Linking to Meesho is off: each scan only marks the parcel packed here and ticks it off the day's list."}
           </p>
           {setShow && <div style={{ marginTop: 8 }}><ModeToggle mode="scanned" setMode={setShow} /></div>}
@@ -1736,7 +1738,7 @@ function useStored(key, initial) {
  * turned off): each scan links the parcel's packet on Meesho and marks it packed
  * here; off, a scan only marks it packed here, as Order Scan always did.
  */
-function ScanSwitch({ platform, setPlatform, link, setLink }) {
+function ScanSwitch({ platform, setPlatform, link, setLink, fkView, setFkView }) {
   const opt = (key, label, color) => {
     const on = platform === key;
     return (
@@ -1751,6 +1753,16 @@ function ScanSwitch({ platform, setPlatform, link, setLink }) {
         {opt("meesho", "Meesho scan", "#9F2089")}
         {opt("flipkart", "Flipkart scan", "#2874F0")}
       </div>
+      {platform === "flipkart" && setFkView && (
+        <div role="tablist" aria-label="Flipkart" style={{ display: "flex", gap: 3, background: C.gray100, borderRadius: 10, padding: 3 }}>
+          {[["scan", "📦 Scan"], ["rtd", "🚚 Ready to dispatch"]].map(([k, l]) => (
+            <button key={k} role="tab" aria-selected={fkView === k} onClick={() => setFkView(k)} className="os-btn"
+              style={{ border: "none", borderRadius: 8, padding: "8px 14px", minHeight: 40, fontSize: 13.5, fontWeight: 800, fontFamily: "inherit", cursor: "pointer",
+                whiteSpace: "nowrap", background: fkView === k ? C.white : "transparent", color: fkView === k ? "#2874F0" : C.gray600,
+                boxShadow: fkView === k ? "0 1px 3px rgba(15,23,42,.12)" : "none" }}>{l}</button>
+          ))}
+        </div>
+      )}
       {platform === "meesho" && (
         <label style={{ display: "inline-flex", alignItems: "center", gap: 8, cursor: "pointer", userSelect: "none", padding: "6px 12px",
           borderRadius: 10, border: `1.5px solid ${link ? "#9F2089" : C.gray200}`, background: link ? "#FDF4FF" : C.white }}>
@@ -1776,8 +1788,19 @@ function ScanSwitch({ platform, setPlatform, link, setLink }) {
 export function OrderScanTab() {
   const [platform, setPlatformState] = useStored("scan-platform", "meesho");
   const [link, setLink] = useStored("scan-link-meesho", true);
+  const [fkView, setFkView] = useStored("scan-flipkart-view", "scan");
   const setPlatform = (p) => setPlatformState(p === "flipkart" ? "flipkart" : "meesho");
-  const switcher = <ScanSwitch platform={platform} setPlatform={setPlatform} link={link} setLink={setLink} />;
+  const switcher = <ScanSwitch platform={platform} setPlatform={setPlatform} link={link} setLink={setLink} fkView={fkView} setFkView={setFkView} />;
+  if (platform === "flipkart" && fkView === "rtd") {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 12, maxWidth: 1200 }}>
+        {switcher}
+        <React.Suspense fallback={<div style={{ display: "flex", justifyContent: "center", padding: 60 }}><CircularProgress style={{ color: "#2874F0" }} /></div>}>
+          <FlipkartRtdBoard />
+        </React.Suspense>
+      </div>
+    );
+  }
   if (platform === "meesho" && link) {
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: 12, maxWidth: 1440 }}>

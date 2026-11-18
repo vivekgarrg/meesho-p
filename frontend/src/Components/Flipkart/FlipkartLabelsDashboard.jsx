@@ -16,7 +16,8 @@ const STATUS = {
   FAILED: { label: "Failed", color: C.red, bg: "#FEE2E2" },
 };
 const at = (iso) => (iso ? new Date(iso).toLocaleString("en-IN", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }) : "—");
-const kindOf = (r) => (r.kind === "reprint" ? "Reprint" : r.trigger === "AUTO" ? "Automatic" : "Run by hand");
+const kindOf = (r) => (r.kind === "reprint" ? "Reprint" : r.kind === "rtd" ? (r.trigger === "AUTO" ? "RTD on scan" : "RTD by hand")
+  : r.trigger === "AUTO" ? "Automatic" : "Run by hand");
 
 async function call(path, method = "GET", body) {
   const r = await fetch(`${API}/flipkart-seller/${path}`, {
@@ -149,7 +150,8 @@ export function FlipkartLabelsDashboard() {
                 <span style={{ fontSize: 11.5, fontWeight: 800, color: C.gray600, background: C.gray100, borderRadius: 999, padding: "2px 8px" }}>{kindOf(r)}</span>
                 <span style={{ fontSize: 11.5, fontWeight: 800, color: st.color, background: st.bg, borderRadius: 999, padding: "2px 8px" }}>{st.label}</span>
                 <span style={{ fontSize: 12.5, color: C.gray600, flex: "1 1 200px" }}>
-                  {r.kind === "reprint" ? `${r.printed} reprinted` : `${r.accepted} accepted · ${r.printed} printed · ${r.rtd} marked RTD`}
+                  {r.kind === "reprint" ? `${r.printed} reprinted` : r.kind === "rtd" ? `${r.rtd} marked RTD — packed at the scan desk`
+                    : `${r.accepted} accepted · ${r.printed} printed · ${r.rtd} marked RTD`}
                   {r.not_printed ? <b style={{ color: C.red }}> · {r.not_printed} not printed</b> : null}
                 </span>
                 {r.file && (

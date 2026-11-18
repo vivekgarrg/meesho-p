@@ -89,6 +89,9 @@ class FlipkartAutoTests(base.FlipkartActionTests):
             p = mock.patch.object(target, name, value)
             p.start()
             self.addCleanup(p.stop)
+        # These tests are for RTD at print; RTD on scan (the default) has its own below.
+        self.account.rtd_mode = "print"
+        self.account.save(update_fields=["rtd_mode"])
         self.sent = []
         p = mock.patch.object(notify, "send", side_effect=lambda *a, **k: self.sent.append((a, k)) or {"telegram": True})
         p.start()
@@ -242,8 +245,10 @@ class FlipkartAutoTests(base.FlipkartActionTests):
 
     def test_rtd_and_sending_can_be_turned_off(self):
         s = FlipkartAutoSetting.get()
-        s.mark_rtd, s.send_labels = False, False
+        s.send_labels = False
         s.save()
+        self.account.rtd_mode = "off"                      # RTD is per business now
+        self.account.save(update_fields=["rtd_mode"])
         out = flipkart_auto.run("labels")["Rudam"]
         self.assertEqual((out["printed"], out["rtd"]), (5, 0))
         self.assertNotIn("MarkRTD", self.ops())
@@ -300,3 +305,84 @@ class FlipkartAutoTests(base.FlipkartActionTests):
 for _name in [n for n in vars(base.FlipkartActionTests) if n.startswith("test_")]:
     if _name not in vars(FlipkartAutoTests):
         setattr(FlipkartAutoTests, _name, None)
+
+
+class FlipkartRtdOnScanTests(FlipkartAutoTests):
+    """RTD on scan: a group is marked Ready to Dispatch once every order of it is packed at the scan desk."""
+
+    def setUp(self):
+        super().setUp()
+        self.account.rtd_mode = "scan"
+        self.account.save(update_fields=["rtd_mode"])
+
+    def pack(self, *order_ids, status="PACKED"):
+        from .models import ScannedOrder
+        for oid in order_ids:
+            ScannedOrder.objects.update_or_create(business=self.biz, sub_order_no=oid, defaults={
+                "scanned_code": f"FMPC{oid}", "platform": "flipkart", "status": status, "last_scanned_at": timezone.now()})
+
+    def rtd_groups(self):
+        return [sorted(g["group_id"] for g in x["variables"]["groups"]) for x in self.hub.sent if x["op"] == "MarkRTD"]
+
+    def test_a_labels_run_prints_but_leaves_rtd_to_the_scan(self):
+        out = flipkart_auto.run("labels")["Rudam"]
+        self.assertEqual((out["printed"], out["rtd"]), (5, 0), out)
+        self.assertEqual(self.rtd_groups(), [])
+        self.assertIn("RTD on scan: 0 marked", " ".join(out["steps"]))
+
+    def test_a_group_is_marked_rtd_when_its_last_order_is_packed(self):
+        flipkart_auto.run("labels")                                  # 1_LSTAAA (4 orders), 1_LSTBBB (1) printed
+        self.hub.sent.clear()
+        self.pack("ODBBB0", "ODAAA0", "ODAAA1", "ODAAA2")            # BBB whole; AAA 3 of 4
+        self.assertEqual(flipkart_auto.rtd_pass()["Rudam"]["marked"], 1)
+        self.assertEqual(self.rtd_groups(), [["1_LSTBBB"]])
+        self.hub.sent.clear()
+        self.assertEqual(flipkart_auto.rtd_pass(), {})                 # no new scan: Flipkart isn't even asked
+        self.assertEqual(self.hub.sent, [])
+        self.pack("ODAAA3")
+        self.assertEqual(flipkart_auto.rtd_pass()["Rudam"]["marked"], 4)
+        self.assertEqual(self.rtd_groups(), [["1_LSTAAA"]])
+        from .models import FlipkartLabelRun
+        self.assertEqual(sum(r.rtd for r in FlipkartLabelRun.objects.filter(kind="rtd")), 5)   # in the history
+
+    def test_orders_packed_before_their_label_was_printed_are_marked_rtd_in_that_run(self):
+        self.pack("ODBBB0")
+        out = flipkart_auto.run("labels")["Rudam"]
+        self.assertEqual(out["rtd"], 1, out)
+        self.assertEqual(self.rtd_groups(), [["1_LSTBBB"]])
+
+    def test_a_business_set_to_off_or_print_is_left_to_its_own_way(self):
+        flipkart_auto.run("labels")
+        self.account.rtd_mode = "off"
+        self.account.save(update_fields=["rtd_mode"])
+        self.pack("ODBBB0")
+        self.assertEqual(flipkart_auto.rtd_pass(), {})
+        self.assertNotIn("MarkRTD", self.ops())
+
+    def test_the_desk_sees_what_is_packed_and_can_mark_it_now(self):
+        flipkart_auto.run("labels")
+        self.pack("ODAAA0", "ODAAA1")
+        look = self.c.get(f"{self.base}rtd-scan/", {"business": self.biz.id}).data
+        self.assertEqual(look["rtd_mode"], "scan")
+        by = {g["group_id"]: g for g in look["waiting"] + look["ready"]}
+        self.assertEqual((by["1_LSTAAA"]["packed"], by["1_LSTAAA"]["shipments"]), (2, 4))
+        self.assertNotIn("MarkRTD", self.ops())                                    # looking marks nothing
+        self.pack("ODBBB0")
+        r = self.c.post(f"{self.base}rtd-scan/", {"business": self.biz.id}, format="json")
+        self.assertEqual((r.status_code, r.data["marked"]), (200, 1), r.data)
+
+    def test_the_mode_is_set_per_business_by_an_admin(self):
+        r = self.c.patch(f"{self.base}rtd-mode/", {"business": self.biz.id, "mode": "print"}, format="json")
+        self.assertEqual((r.status_code, r.data["rtd_mode"]), (200, "print"))
+        self.assertEqual(self.c.patch(f"{self.base}rtd-mode/", {"business": self.biz.id, "mode": "x"}, format="json").status_code, 400)
+        from accounts.models import User, Membership
+        u = User.objects.create_user(username="desk", password="pw", role=User.ROLE_BUSINESS_USER)
+        Membership.objects.create(user=u, business=self.biz)
+        c = __import__("rest_framework.test", fromlist=["APIClient"]).APIClient()
+        c.force_authenticate(u)
+        self.assertEqual(c.patch(f"{self.base}rtd-mode/", {"business": self.biz.id, "mode": "off"}, format="json").status_code, 403)
+
+
+for _name in [n for n in vars(FlipkartAutoTests) if n.startswith("test_")]:
+    if _name not in vars(FlipkartRtdOnScanTests):
+        setattr(FlipkartRtdOnScanTests, _name, None)
