@@ -10,8 +10,21 @@ class MeeshoAutoLabelsJobTest < ActiveSupport::TestCase
     end
   end
 
-  def snapshot(endpoint, rows)
-    MeeshoSyncSnapshot.create!(account_id: account.id, endpoint: endpoint, http_status: 200, payload: rows, fetched_at: Time.current)
+  def snapshot(endpoint, rows, acc = account)
+    MeeshoSyncSnapshot.find_or_initialize_by(account_id: acc.id, endpoint: endpoint)
+                      .update!(http_status: 200, payload: rows, fetched_at: Time.current)
+  end
+
+  # A second business, with its own Meesho account.
+  def rudam
+    @rudam ||= begin
+      Business.create!(id: 2, name: "Rudam")
+      a = make_account(business_id: 2, phone_number: "9000000002", status: "ACTIVE", supplier_id: "4313711", supplier_identifier: "rudam1",
+                       supplier_name: "Rudam")
+      a.cookies = { "connect.sid" => "sess2" }
+      a.save!
+      a
+    end
   end
 
   def row(n, label: false, key: "g#{n}")
@@ -19,12 +32,40 @@ class MeeshoAutoLabelsJobTest < ActiveSupport::TestCase
   end
 
   # The real jobs talk to Meesho; here they record what they were asked to do.
-  def with_fake_jobs
-    calls = { pulls: 0, accept: [], labels: [], django: [] }
+  def with_fake_jobs(ready_after: Hash.new(0), short_once: [])
+    calls = { pulls: 0, accept: [], labels: [], django: [], label_accounts: [] }
+    moving = Hash.new { |h, k| h[k] = [] }            # account id => [[reads left, row]]
+    short = short_once.dup
+    pull = lambda do |id, *|
+      calls[:pulls] += 1
+      arrived, still = moving[id].map { |n, r| [n - 1, r] }.partition { |n, _| n <= 0 }
+      moving[id] = still
+      next if arrived.empty?
+      snap = MeeshoSyncSnapshot.find_or_initialize_by(account_id: id, endpoint: "orders_ready_to_ship")
+      snap.update!(http_status: 200, payload: Array(snap.payload) + arrived.map(&:last), fetched_at: Time.current)
+    end
     swaps = {
-      [MeeshoSyncJob, :perform] => ->(*) { calls[:pulls] += 1 },
-      [MeeshoAcceptJob, :perform] => ->(_id, run_id, groups) { calls[:accept] << groups; MeeshoSyncRun.find(run_id).finish!(true, "ok", records: groups.sum { |g| g["sub_order_ids"].size }) },
-      [MeeshoLabelJob, :perform] => ->(_id, run_id, groups) { calls[:labels] << [groups, MeeshoSyncRun.find(run_id).result["batch"]]; MeeshoSyncRun.find(run_id).finish!(true, "ok", records: groups.sum { |g| g["sub_order_ids"].size }) },
+      [MeeshoSyncJob, :perform] => pull,
+      [MeeshoAcceptJob, :perform] => lambda do |id, run_id, groups|
+        calls[:accept] << groups
+        groups.flat_map { |g| g["sub_order_ids"] }.each do |sid|
+          moving[id] << [ready_after[id] + 1, { "sub_order_id" => sid, "grouping_key" => "a-#{sid}", "shipment_type" => "forward", "label" => false }]
+        end
+        MeeshoSyncRun.find(run_id).finish!(true, "ok", records: groups.sum { |g| g["sub_order_ids"].size })
+      end,
+      [MeeshoLabelJob, :perform] => lambda do |id, run_id, groups|
+        calls[:labels] << [groups, MeeshoSyncRun.find(run_id).result["batch"]]
+        calls[:label_accounts] << id
+        n = groups.sum { |g| g["sub_order_ids"].size }
+        if short.delete(id)                             # Meesho made none of them this time
+          MeeshoSyncRun.find(run_id).finish!(false, "Meesho couldn't make the labels", records: 0)
+        else
+          MeeshoSyncRun.find(run_id).finish!(true, "ok", records: n)
+          snap = MeeshoSyncSnapshot.find_by(account_id: id, endpoint: "orders_ready_to_ship")
+          done = groups.flat_map { |g| g["sub_order_ids"] }
+          snap&.update!(payload: snap.payload.map { |r| done.include?(r["sub_order_id"]) ? r.merge("label" => "Downloaded") : r })
+        end
+      end,
     }
     originals = swaps.keys.to_h { |(k, m)| [[k, m], k.instance_method(m)] }
     swaps.each { |(k, m), fn| k.define_method(m) { |*a| fn.call(*a) } }
@@ -72,12 +113,59 @@ class MeeshoAutoLabelsJobTest < ActiveSupport::TestCase
       assert_equal 1, calls[:accept].size
       assert_equal 2, calls[:pulls]                                              # before accepting, and after
       (groups, batch), = calls[:labels]
-      assert_equal %w[5_1_FORWARD 6_1_FORWARD], groups.flat_map { |g| g["sub_order_ids"] }   # 7's label was downloaded already
+      # 7's label was downloaded already; 1, just accepted, is labelled with the rest.
+      assert_equal %w[1_1_FORWARD 5_1_FORWARD 6_1_FORWARD], groups.flat_map { |g| g["sub_order_ids"] }.sort
       assert_match(/\Aauto-\d{8}-\d{4}-/, batch)                                 # one batch: one "Download merged labels"
-      assert_equal ["Cosmify: 1 of 1 pending accepted, labels for 2 of 2 ready to ship"], summary
+      assert_equal ["Cosmify: 1 of 1 pending accepted, labels for 3 of 3 ready to ship"], summary
       # The labels are merged, sorted and kept for "Latest labels" — not sent anywhere.
       assert_equal [["meesho_save_labels", "--batch", batch, "--summary", summary.join("\n")]], calls[:django]
       assert_equal %w[ACCEPT LABELS], account.runs.order(:id).pluck(:kind)
+    end
+  end
+
+  test "two businesses: both accepted, both waited for, both labelled — then one PDF" do
+    Business.create!(id: account.business_id, name: "Cosmify")
+    snapshot("orders_pending", [row(1)])
+    snapshot("orders_ready_to_ship", [])
+    snapshot("orders_pending", [row(21), row(22)], rudam)
+    snapshot("orders_ready_to_ship", [], rudam)
+    # Meesho moves Rudam's accepted orders to Ready to ship only after three more reads.
+    with_fake_jobs(ready_after: { rudam.id => 3 }.tap { |h| h.default = 0 }) do |calls|
+      MeeshoAutoSetting.create!(enabled: true, label_times: ["17:00"])
+      summary = MeeshoAutoLabelsJob.new.perform("labels")
+      assert_equal [account.id, rudam.id].sort, calls[:label_accounts].uniq.sort
+      assert_includes summary, "Cosmify: 1 of 1 pending accepted, labels for 1 of 1 ready to ship"
+      assert_includes summary, "Rudam: 2 of 2 pending accepted, labels for 2 of 2 ready to ship"
+      batches = calls[:labels].map(&:last).uniq
+      assert_equal 1, batches.size                                               # one batch, one PDF
+      assert_equal 1, calls[:django].size                                        # kept / sent once, after both
+    end
+  end
+
+  test "a business whose labels come back short is tried again before the PDF is made" do
+    Business.create!(id: account.business_id, name: "Cosmify")
+    snapshot("orders_pending", [])
+    snapshot("orders_ready_to_ship", [row(5)])
+    with_fake_jobs(short_once: [account.id]) do |calls|
+      MeeshoAutoSetting.create!(enabled: true, label_times: ["17:00"])
+      summary = MeeshoAutoLabelsJob.new.perform("labels")
+      assert_equal 2, calls[:labels].size                                        # tried, then again
+      assert_equal ["Cosmify: 0 of 0 pending accepted, labels for 1 of 1 ready to ship"], summary
+    end
+  end
+
+  test "orders Meesho never moves to Ready to ship, and a business not logged in, are said — not left out silently" do
+    Business.create!(id: account.business_id, name: "Cosmify")
+    Business.create!(id: 3, name: "Rudam")
+    make_account(business_id: 3, phone_number: "9000000003", status: "FAILED", supplier_id: "77", supplier_identifier: "x", sync_enabled: true)
+    snapshot("orders_pending", [row(1)])
+    snapshot("orders_ready_to_ship", [])
+    with_fake_jobs(ready_after: Hash.new(1000)) do |calls|
+      MeeshoAutoSetting.create!(enabled: true, label_times: ["17:00"])
+      summary = MeeshoAutoLabelsJob.new.perform("labels")
+      assert_match(/Cosmify: 1 of 1 pending accepted, labels for 0 of 0 ready to ship \(1 accepted but not in Ready to ship yet/, summary.first)
+      assert_match(/Rudam: not connected/, summary.last)
+      assert_includes calls[:django].first.last, "Rudam: not connected"           # in the Telegram message too
     end
   end
 
