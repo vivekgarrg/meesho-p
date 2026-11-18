@@ -36,6 +36,10 @@ from . import flipkart_seller as fs
 
 PRINT_PATH = "/napi/my-orders/revamped-orders-print"
 PRINT_CHUNK = 50                 # groups in one print request
+PRINT_TRIES = 7                  # Seller Hub answers 500 while it still makes the documents: try again,
+PRINT_RETRY_WAIT = 45            # this many seconds apart (about 5 minutes in all)
+SINGLE_TRIES = 2                 # then group by group — the batch has waited already,
+SINGLE_RETRY_WAIT = 5            # so a quick second try each (50 groups stay well inside the job's 15 minutes)
 LABEL_WAIT_STEP = 15             # seconds between looks for the labels of what was just accepted,
 LABEL_WAIT_MAX = 180             # and how long to keep looking: Seller Hub takes a while to make them
 LABEL_SLOT_GRACE = timedelta(hours=2)    # a label time missed by more than this (the worker was down) isn't caught up
@@ -65,32 +69,73 @@ def _print_body(account, chunk, dbd):
     return body
 
 
-def print_labels(account, s, chosen, reprint=False):
-    """One PDF of the labels of these groups ([(dispatch-by, group)]), as Seller Hub's Print sends it."""
+class PrintRefused(Exception):
+    """Seller Hub answered, but not with the labels (e.g. HTTP 500 "All batches failed during document generation")."""
+
+
+def _print_once(account, s, groups_, dbd, reprint):
     import requests
-    from . import meesho_sync
     jar = {c.name: c.value for c in s.cookies}
     headers = {"Accept": "application/pdf", "Content-Type": "application/json", "FK-CSRF-TOKEN": jar.get(fs.CSRF_COOKIE, ""),
                "Referer": f"{fs.BASE}/index.html", "Origin": fs.BASE}
-    pdfs = []
+    try:
+        r = s.post(f"{fs.BASE}{PRINT_PATH}?reprint={'true' if reprint else 'false'}", json=_print_body(account, groups_, dbd),
+                   headers=headers, timeout=90, allow_redirects=False)
+    except requests.RequestException as e:
+        raise PrintRefused(f"couldn't reach Flipkart ({e.__class__.__name__})")
+    if r.status_code in (301, 302, 401) or "login" in (r.headers.get("location") or "").lower():
+        raise fs.FlipkartError("Flipkart ended the session — log in again with a new OTP.", expired=True)
+    if r.status_code >= 400 or not (r.content or b"").startswith(b"%PDF"):
+        raise PrintRefused(f"HTTP {r.status_code}: {fs._message(r)}")
+    return r.content
+
+
+def _print_retrying(account, s, groups_, dbd, reprint, tries=None, wait=None):
+    """Print, and when Seller Hub isn't ready (it answers 500 "All batches failed during document generation"
+    while it still makes the documents of orders just accepted) wait and try again — PRINT_TRIES times."""
+    last = None
+    for attempt in range(tries or PRINT_TRIES):
+        if attempt:
+            time.sleep(PRINT_RETRY_WAIT if wait is None else wait)
+        try:
+            return _print_once(account, s, groups_, dbd, reprint), None
+        except PrintRefused as e:
+            last = str(e)
+    return None, last
+
+
+def print_labels(account, s, chosen, reprint=False):
+    """
+    The labels of these groups ([(bucket, group)]), as Seller Hub's Print sends them — retried while Seller Hub
+    is still making the documents; a batch that keeps failing is printed group by group, so one group Seller
+    Hub can't do never holds the others back. Returns (one PDF or None, [(bucket, group) printed], [(group, why)]).
+    """
+    from . import meesho_sync
+    pdfs, printed, failed = [], [], []
     by_bucket = {}
     for dbd, g in chosen:
         by_bucket.setdefault(dbd, []).append(g)
     for dbd, part in by_bucket.items():
         for i in range(0, len(part), PRINT_CHUNK):
-            try:
-                r = s.post(f"{fs.BASE}{PRINT_PATH}?reprint={'true' if reprint else 'false'}", json=_print_body(account, part[i:i + PRINT_CHUNK], dbd),
-                           headers=headers, timeout=60, allow_redirects=False)
-            except requests.RequestException as e:
-                raise fs.FlipkartError(f"Couldn't reach Flipkart to print: {e.__class__.__name__}.")
-            if r.status_code in (301, 302, 401) or "login" in (r.headers.get("location") or "").lower():
-                raise fs.FlipkartError("Flipkart ended the session — log in again with a new OTP.", expired=True)
-            if r.status_code >= 400 or not (r.content or b"").startswith(b"%PDF"):
-                raise fs.FlipkartError(f"Flipkart didn't send the labels (HTTP {r.status_code}): {fs._message(r)}")
-            pdfs.append(r.content)
+            chunk = part[i:i + PRINT_CHUNK]
+            pdf, why = _print_retrying(account, s, chunk, dbd, reprint)
+            if pdf:
+                pdfs.append(pdf)
+                printed += [(dbd, g) for g in chunk]
+                continue
+            if len(chunk) == 1:
+                failed.append((chunk[0], why))
+                continue
+            for g in chunk:                            # one by one: which group is it?
+                one, why_one = _print_retrying(account, s, [g], dbd, reprint, tries=SINGLE_TRIES, wait=SINGLE_RETRY_WAIT)
+                if one:
+                    pdfs.append(one)
+                    printed.append((dbd, g))
+                else:
+                    failed.append((g, why_one))
     if not pdfs:
-        return None
-    return pdfs[0] if len(pdfs) == 1 else meesho_sync._merge_pdfs(pdfs)
+        return None, [], failed
+    return (pdfs[0] if len(pdfs) == 1 else meesho_sync._merge_pdfs(pdfs)), printed, failed
 
 
 # ── A run ────────────────────────────────────────────────────────────────────
@@ -215,14 +260,25 @@ def labels(account, trigger="AUTO", send=True, rtd=True, limit=None, accept_firs
                             + (f"; {printed} order(s) there already have their label printed — printed in Seller Hub, "
                                "they're not kept here" if printed else ""))
         return out
-    pdf = print_labels(account, s, waiting)
+    pdf, waiting, failed = print_labels(account, s, waiting)
+    not_printed = sum(g.get("shipmentCount") or 0 for g, _w in failed)
+    if not pdf:
+        why = failed[0][1] if failed else "no answer"
+        raise fs.FlipkartError(f"Flipkart didn't make the labels of {not_printed} order(s) after {PRINT_TRIES} tries over "
+                               f"{PRINT_TRIES * PRINT_RETRY_WAIT // 60} minutes ({why}) — nothing marked RTD; the next run tries again.")
+    shipments = sum(g.get("shipmentCount") or 0 for _d, g in waiting)
     out["printed"] = shipments
     out["steps"].append(f"Printed {shipments} label{'' if shipments == 1 else 's'}")
+    if failed:
+        out["not_printed"] = [{"group_id": g["groupId"], "orders": g.get("shipmentCount") or 0, "why": w} for g, w in failed]
+        out["steps"].append(f"{not_printed} order(s) Flipkart couldn't make labels for ({failed[0][1]}) — left, not marked RTD; "
+                            "the next run tries again")
     f = _keep(account, pdf, trigger, shipments, " · ".join(out["steps"]))
     out["file_id"] = f.pk
     if send:
         caption = (f"{shipments} Flipkart label{'' if shipments == 1 else 's'} — {account.business.name}"
-                   f"{', sorted by parent SKU' if f.sorted else ''}.")
+                   f"{', sorted by parent SKU' if f.sorted else ''}."
+                   + (f"\n⚠ {not_printed} order(s) Flipkart couldn't make labels for yet — the next run tries again." if failed else ""))
         out["sent"] = notify.send(f"Flipkart labels — {when}", caption,
                                   filename=f"flipkart-labels-{timezone.localtime():%Y-%m-%d-%H%M}.pdf", data=bytes(f.pdf))
         # Then what's on them — the pick list, as Meesho's: the desk sees the items without opening the PDF.

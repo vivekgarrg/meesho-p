@@ -30,6 +30,8 @@ class FlowHub(Hub):
         super().__init__()
         self.printed = []
         self.print_status = 200
+        self.fail_next = 0            # prints answered 500 "All batches failed…" before Seller Hub is ready
+        self.never = set()            # groups Seller Hub can never make a label for
         self.label_delay = 0          # looks at To pack before an accepted order's label is there
 
     def orch(self, kw):
@@ -58,9 +60,10 @@ class FlowHub(Hub):
     def print_(self, session, kw):
         body = kw["json"]
         self.sent.append({"op": "Print", "body": body, "headers": kw.get("headers") or {}})
-        if self.print_status != 200:
-            return _resp(self.print_status, {"message": "Labels not ready"})
         ids = {g["group_id"] for g in body["groups"]}
+        if self.print_status != 200 or self.fail_next or ids & self.never:
+            self.fail_next = max(0, self.fail_next - 1)
+            return _resp(500, {"message": "All batches failed during document generation"})
         moved = [g for g in self.waiting["pendingLabel"] if g["groupId"] in ids]
         self.printed += [g["groupId"] for g in moved]
         self.waiting["pendingLabel"] = [g for g in self.waiting["pendingLabel"] if g["groupId"] not in ids]
@@ -171,10 +174,29 @@ class FlipkartAutoTests(base.FlipkartActionTests):
         self.assertEqual(out["printed"], 0)
         self.assertIn("2 order(s) there already have their label printed", " ".join(out["steps"]))
 
+    def test_while_seller_hub_is_making_the_documents_it_waits_and_tries_again(self):
+        self.hub.fail_next = 3                     # "All batches failed during document generation", three times
+        out = flipkart_auto.run("labels")["Rudam"]
+        self.assertEqual((out["printed"], out["rtd"]), (5, 5), out)
+        self.assertEqual(self.ops().count("Print"), 4)
+        self.assertTrue(MeeshoLabelFile.objects.filter(platform="flipkart", labels=5).exists())
+
+    def test_a_group_seller_hub_cant_do_never_holds_the_others_back(self):
+        self.hub.never = {"1_LSTAAA"}
+        out = flipkart_auto.run("labels")["Rudam"]
+        self.assertEqual((out["printed"], out["rtd"]), (1, 1), out)            # 1_LSTBBB printed, kept and marked RTD
+        self.assertEqual([x["group_id"] for x in out["not_printed"]], ["1_LSTAAA"])
+        rtd = next(x for x in self.hub.sent if x["op"] == "MarkRTD")
+        self.assertEqual([g["group_id"] for g in rtd["variables"]["groups"]], ["1_LSTBBB"])
+        self.assertIn("couldn't make labels for yet", self.sent[0][0][1])      # said on Telegram with the PDF
+
     def test_nothing_is_marked_rtd_when_the_labels_dont_come(self):
         self.hub.print_status = 500
         out = flipkart_auto.run("labels")["Rudam"]
-        self.assertIn("didn't send the labels", out["error"])
+        self.assertIn("didn't make the labels", out["error"])
+        self.assertIn("All batches failed during document generation", out["error"])
+        # The batch tried PRINT_TRIES times, then each of its two groups alone SINGLE_TRIES times.
+        self.assertEqual(self.ops().count("Print"), flipkart_auto.PRINT_TRIES + 2 * flipkart_auto.SINGLE_TRIES)
         self.assertNotIn("MarkRTD", self.ops())
         self.assertFalse(MeeshoLabelFile.objects.filter(platform="flipkart").exists())
         self.assertIn("couldn't finish", self.sent[-1][0][1])               # said on Telegram

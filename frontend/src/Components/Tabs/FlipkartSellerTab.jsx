@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from "react";
+import { LatestLabels } from "./MeeshoAutomation";
 import { AcceptMode } from "../shared/AcceptMode";
 import { API, C, S, btn, useIsMobile } from "../../App";
 import { CircularProgress } from "@mui/material";
@@ -218,7 +219,7 @@ function FlipkartOrders({ accounts, mobile }) {
                       {[read.length > 1 && !biz && r.business_name, r.order_id, r.tracking_id && `${r.courier || "Courier"} ${r.tracking_id}`, r.tier].filter(Boolean).join(" · ")}
                     </div>
                   </div>
-                  <div style={{ textAlign: "right", flexShrink: 0, fontSize: 12, color: C.gray600, lineHeight: 1.5 }}>
+                  <div style={{ textAlign: "right", flexShrink: 0, maxWidth: "38%", fontSize: 12, color: C.gray600, lineHeight: 1.5 }}>
                     {r.price != null && <div style={{ fontWeight: 900, fontSize: 13.5, color: C.gray900 }}>₹{Number(r.price).toLocaleString("en-IN")}</div>}
                     {r.tab === "pendingToAccept" && isUpcoming(r)
                       ? <div>from {dayTime(r.dispatch_after)}</div>
@@ -589,6 +590,34 @@ export function FlipkartAutomationPage() {
   return <FlipkartAutomation accounts={d.accounts} isAdmin={d.is_admin} />;
 }
 
+const timeOf = (t) => { const [h, m] = t.split(":").map(Number); return new Date(2000, 0, 1, h, m).toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit" }); };
+
+/** Orders → Live on Flipkart: the automation at a glance — on or off, when it accepts and prints, what the last run did. */
+function FlipkartAutoStatus() {
+  const [a, setA] = useState(null);
+  useEffect(() => { call("auto/").then((r) => r.ok && setA(r.data)); }, []);
+  if (!a) return null;
+  const times = a.label_times.map(timeOf).join(", ");
+  const how = !a.enabled ? "Off — nothing is accepted or printed by itself."
+    : !a.label_times.length ? "On, but no label times — add one."
+      : a.accept_every ? `Accepts every ${a.accept_every} min · prints at ${times}` : `Accepts & prints together at ${times}`;
+  const last = a.last_result?.results;
+  return (
+    <div style={{ ...S.card, padding: "10px 14px", display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", borderLeft: `5px solid ${a.enabled ? "#2874F0" : C.gray300}` }}>
+      <span style={{ fontWeight: 900, fontSize: 13.5, color: C.gray900 }}>⏱ Automation</span>
+      <span style={{ fontSize: 13, color: a.enabled ? C.gray700 : C.gray500 }}>{how}
+        {a.enabled && a.mark_rtd ? " · marks RTD once printed" : ""}{a.enabled && a.send_labels ? " · sends to Telegram" : ""}</span>
+      {last && (
+        <span style={{ fontSize: 12, color: C.gray500, flexBasis: "100%" }}>
+          Last {a.last_result.kind === "labels" ? "labels run" : "accept"} {fmtAt(a.last_result.at)}:{" "}
+          {Object.entries(last).map(([n, r]) => `${n} — ${r.error ? `✕ ${r.error}` : (r.steps || []).join(" · ") || `accepted ${r.accepted ?? 0}`}`).join("  |  ")}
+        </span>
+      )}
+      <a href="/business-profile?section=flipkart&part=automation" style={{ marginLeft: "auto", fontSize: 12.5, fontWeight: 800, color: "#2874F0" }}>Change →</a>
+    </div>
+  );
+}
+
 export function FlipkartLiveOrders() {
   const mobile = useIsMobile();
   const { d, setD, err } = useFlipkart();
@@ -599,7 +628,10 @@ export function FlipkartLiveOrders() {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14, minWidth: 0 }}>
       {err && <div role="alert" style={{ fontSize: 13, color: C.red, fontWeight: 700 }}>✕ {err}</div>}
+      <FlipkartAutoStatus />
       <FlipkartActions accounts={connected} mobile={mobile} onState={setD} />
+      {/* The labels printed (automatically or by Run now) — print again, download, send, see what's on them. */}
+      <LatestLabels platform="flipkart" emptyHint />
       <FlipkartOrders accounts={withOrders} mobile={mobile} />
     </div>
   );

@@ -202,7 +202,8 @@ export async function fetchPdf(file, download) {
   return URL.createObjectURL(await res.blob());
 }
 
-export function LatestLabels({ emptyHint = false }) {
+// platform: "meesho" (Orders → Ready to ship) or "flipkart" (Orders → Live on Flipkart) — each its own kept PDFs.
+export function LatestLabels({ emptyHint = false, platform = "meesho" }) {
   const [files, setFiles] = useState(null);
   const [meta, setMeta] = useState({ channels: [], admin: false });
   const [sent, setSent] = useState(null);
@@ -212,13 +213,13 @@ export function LatestLabels({ emptyHint = false }) {
   const [itemsOf, setItemsOf] = useState(null);       // the file whose items table is open
 
   const load = useCallback(async () => {
-    const res = await fetch(`${API}/meesho-orders/label-files/?platform=meesho`).catch(() => null);
+    const res = await fetch(`${API}/meesho-orders/label-files/?platform=${platform}`).catch(() => null);
     if (res?.ok) {
       const d = await res.json();
       setFiles(d.files);
       setMeta({ channels: d.send_channels || [], admin: !!d.is_admin });
     }
-  }, []);
+  }, [platform]);
   useEffect(() => {
     load();
     const t = setInterval(load, 60000);
@@ -272,7 +273,10 @@ export function LatestLabels({ emptyHint = false }) {
     return (
       <div style={{ ...S.card, padding: "14px 16px", display: "flex", flexDirection: "column", gap: 6, height: "100%", boxSizing: "border-box" }}>
         <span style={{ fontSize: 14, fontWeight: 800, color: C.gray900 }}>Latest labels</span>
-        <span style={{ fontSize: 12.5, color: C.gray500 }}>No labels yet. Generate them on Orders → Ready to ship, or set label times under Settings — they'll be here, sorted and ready to print.</span>
+        <span style={{ fontSize: 12.5, color: C.gray500 }}>
+          {platform === "flipkart"
+            ? "No Flipkart labels yet. They're printed at the label times set under Business Settings → Flipkart setup → Automation & Telegram (or by its Run now) — kept here, sorted, to print again any time."
+            : "No labels yet. Generate them on Orders → Ready to ship, or set label times under Settings — they'll be here, sorted and ready to print."}</span>
       </div>
     );
   }
