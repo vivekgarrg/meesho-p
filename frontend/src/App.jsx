@@ -1154,7 +1154,7 @@ function AppShell() {
   // Live on Meesho / Flipkart — the date filter doesn't apply. A tab's first key is its default (no ?section).
   const fk = sp.get('platform') === 'flipkart';
   const section = sp.get('section');
-  const liveView = (loc.pathname === '/' && section === 'panel')
+  const liveView = (loc.pathname === '/' && (section === 'panel' || (fk && section === 'labels')))
     || (loc.pathname === '/orders' && (section || 'live') === 'live')
     || (loc.pathname === '/payments' && section === 'panel')
     || (!fk && loc.pathname === '/return-analysis' && ['returns', 'act', null].includes(section));

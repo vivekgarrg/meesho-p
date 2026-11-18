@@ -52,10 +52,11 @@ class AutoError(Exception):
 
 # ── Seller Hub: print ────────────────────────────────────────────────────────
 
-def _print_body(account, chunk, dbd):
-    """Print's body, as the page sends it — a breached bucket's with is_breached; a dated one's groups with their date."""
+def _print_body(account, chunk, dbd, reprint=False):
+    """Print's body, as the page sends it — a breached bucket's with is_breached; a dated one's groups with their date.
+    A reprint (labels printed already, waiting RTD) is sent with status pendingRTD, as Seller Hub's Reprint does."""
     body = {
-        "timestamp": fa._now(), "status": fa.STAGES["label"], "view": "group_shipment", "shipment_ids": [],
+        "timestamp": fa._now(), "status": fa.STAGES["rtd" if reprint else "label"], "view": "group_shipment", "shipment_ids": [],
         "groups": [{"group_id": g["groupId"], "sub_group_index": g.get("subGroupIndex") or 0,
                     "shipment_count": g.get("shipmentCount") or 0,
                     "price_range": {"min_price": (g.get("priceRange") or {}).get("minPrice"),
@@ -79,7 +80,7 @@ def _print_once(account, s, groups_, dbd, reprint):
     headers = {"Accept": "application/pdf", "Content-Type": "application/json", "FK-CSRF-TOKEN": jar.get(fs.CSRF_COOKIE, ""),
                "Referer": f"{fs.BASE}/index.html", "Origin": fs.BASE}
     try:
-        r = s.post(f"{fs.BASE}{PRINT_PATH}?reprint={'true' if reprint else 'false'}", json=_print_body(account, groups_, dbd),
+        r = s.post(f"{fs.BASE}{PRINT_PATH}?reprint={'true' if reprint else 'false'}", json=_print_body(account, groups_, dbd, reprint),
                    headers=headers, timeout=90, allow_redirects=False)
     except requests.RequestException as e:
         raise PrintRefused(f"couldn't reach Flipkart ({e.__class__.__name__})")
@@ -212,7 +213,7 @@ def _keep(account, pdf, trigger, shipments, summary):
         business_ids=[account.business_id], business_names=[account.business.name], labels=shipments, pages=pages,
         sorted=not note, summary="\n".join(x for x in (note, summary) if x), order_ids=order_ids, pdf=kept)
     stale = list(MeeshoLabelFile.objects.filter(platform="flipkart").order_by("-created_at")
-                 .values_list("pk", flat=True)[MeeshoLabelFile.KEEP:])
+                 .values_list("pk", flat=True)[MeeshoLabelFile.KEEP_FLIPKART:])
     if stale:
         MeeshoLabelFile.objects.filter(pk__in=stale).delete()
     return f
@@ -304,6 +305,49 @@ def labels(account, trigger="AUTO", send=True, rtd=True, limit=None, accept_firs
     return out
 
 
+def reprint(account, trigger="MANUAL", wanted=None):
+    """
+    The labels of orders already printed and waiting to be marked RTD, again — Seller Hub's Reprint
+    (?reprint=true, status pendingRTD) — kept as a labels file, like any other. Nothing is marked RTD.
+    `wanted`: only these groups.
+    """
+    fa._need_location(account)
+    s = fs._load(account, fs._http())
+    out = {"business": account.business.name, "accepted": 0, "printed": 0, "rtd": 0, "file_id": None, "steps": []}
+    waiting = _waiting(account, s, "rtd")
+    if wanted:
+        waiting = [(d, g) for d, g in waiting if g["groupId"] in set(wanted)]
+    if not waiting:
+        out["steps"].append("Nothing to reprint — no order is printed and waiting to be marked RTD")
+        return out
+    pdf, waiting, failed = print_labels(account, s, waiting, reprint=True)
+    if not pdf:
+        raise fs.FlipkartError(f"Flipkart didn't send the labels again ({failed[0][1] if failed else 'no answer'}).")
+    out["printed"] = sum(g.get("shipmentCount") or 0 for _d, g in waiting)
+    out["not_printed"] = [{"group_id": g["groupId"], "orders": g.get("shipmentCount") or 0, "why": w} for g, w in failed]
+    out["steps"].append(f"Reprinted {out['printed']} label{'' if out['printed'] == 1 else 's'}")
+    f = _keep(account, pdf, trigger, out["printed"], " · ".join(out["steps"]))
+    out["file_id"] = f.pk
+    return out
+
+
+def _record(account, kind, trigger, started, out=None, error=None):
+    """Keep how one labels run went, for the history (FlipkartLabelRun)."""
+    from .models import FlipkartLabelRun, MeeshoLabelFile
+    out = out or {}
+    not_printed = sum(x["orders"] for x in out.get("not_printed") or [])
+    status = (FlipkartLabelRun.STATUS_FAILED if error else FlipkartLabelRun.STATUS_PARTIAL if not_printed
+              else FlipkartLabelRun.STATUS_OK if out.get("printed") else FlipkartLabelRun.STATUS_EMPTY)
+    try:
+        FlipkartLabelRun.objects.create(
+            business_id=account.business_id, kind=kind, trigger=trigger, status=status, started_at=started,
+            finished_at=timezone.now(), accepted=out.get("accepted") or 0, printed=out.get("printed") or 0,
+            rtd=out.get("rtd") or 0, not_printed=not_printed, error=str(error or "")[:2000], steps=out.get("steps") or [],
+            file=MeeshoLabelFile.objects.filter(pk=out.get("file_id")).first() if out.get("file_id") else None)
+    except Exception:                                  # noqa: BLE001 — the history never stops a run
+        pass
+
+
 def _accounts(business_id=None):
     qs = fs.A.objects.filter(status=fs.A.STATUS_ACTIVE).select_related("business").order_by("business__name")
     if business_id:
@@ -312,7 +356,7 @@ def _accounts(business_id=None):
 
 
 def run(kind, business_id=None, trigger="AUTO", limit=None, send=None, rtd=None):
-    """One run of `kind` ("accept" | "labels") for every connected account (or one business). {business: result}."""
+    """One run of `kind` ("accept" | "labels" | "reprint") for every connected account (or one business). {business: result}."""
     from .models import FlipkartAutoSetting
     setting = FlipkartAutoSetting.get()
     send = setting.send_labels if send is None else send
@@ -333,14 +377,19 @@ def run(kind, business_id=None, trigger="AUTO", limit=None, send=None, rtd=None)
 
 def _run_one(a, kind, trigger, limit, send, rtd):
     from . import notify
+    started = timezone.now()
     try:
         if kind == "accept":
             r = accept(a, limit=limit)
             return {"accepted": r["shipments"], "failed": r["failed"], "errors": r["errors"], "skipped": len(r.get("skipped") or [])}
-        return labels(a, trigger=trigger, send=send, rtd=rtd, limit=limit)
+        out = reprint(a, trigger=trigger) if kind == "reprint" else labels(a, trigger=trigger, send=send, rtd=rtd, limit=limit)
+        _record(a, kind, trigger, started, out)
+        return out
     except (fs.FlipkartError, AutoError) as e:
         if getattr(e, "expired", False):
             fa._expired(a, e)
+        if kind != "accept":
+            _record(a, kind, trigger, started, error=e)
         if kind == "labels" and send:
             notify.send(f"Flipkart labels — {a.business.name}", f"The labels run couldn't finish: {e}")
         return {"error": str(e)}
@@ -455,3 +504,59 @@ def auto_run_view(request, business_id):
         return Response({"error": "Flipkart isn't connected for this business."}, status=status.HTTP_404_NOT_FOUND)
     failed = any("error" in r for r in results.values())
     return Response({"results": results}, status=status.HTTP_207_MULTI_STATUS if failed else status.HTTP_200_OK)
+
+
+@api_view(["POST"])
+def reprint_view(request, business_id):
+    """POST flipkart-seller/auto/reprint/ {business} — the labels of orders printed and waiting RTD, again; kept."""
+    from . import views
+    business = views.get_authorized_business(request, business_id)
+    d = request.data if isinstance(request.data, dict) else {}
+    target = int(d.get("business") or business.pk)
+    if target not in {b.pk for b in views.accessible_businesses(request, include=business)}:
+        return Response({"error": "Not your business."}, status=status.HTTP_403_FORBIDDEN)
+    results = run("reprint", business_id=target, trigger="MANUAL")
+    if not results:
+        return Response({"error": "Flipkart isn't connected for this business."}, status=status.HTTP_404_NOT_FOUND)
+    failed = any("error" in r for r in results.values())
+    return Response({"results": results}, status=status.HTTP_207_MULTI_STATUS if failed else status.HTTP_200_OK)
+
+
+@api_view(["GET"])
+def label_runs_view(request, business_id):
+    """
+    GET flipkart-seller/label-runs/?days=30 — every Flipkart labels run of the businesses this person sees,
+    newest first, each with its PDF (when one was made), and the totals — Overview → Flipkart → Labels.
+    """
+    from datetime import timedelta as _td
+    from . import views
+    from .models import FlipkartLabelRun, FlipkartSellerAccount
+    business = views.get_authorized_business(request, business_id)
+    try:
+        days = max(1, min(120, int(request.GET.get("days") or 30)))
+    except ValueError:
+        days = 30
+    biz = [b.pk for b in views.accessible_businesses(request, include=business)]
+    since = timezone.now() - _td(days=days)
+    runs = list(FlipkartLabelRun.objects.filter(business_id__in=biz, started_at__gte=since)
+                .select_related("business", "file").defer("file__pdf")[:500])
+    today = timezone.localdate()
+    def total(rs):
+        return {"runs": len(rs), "printed": sum(r.printed for r in rs), "rtd": sum(r.rtd for r in rs),
+                "accepted": sum(r.accepted for r in rs), "not_printed": sum(r.not_printed for r in rs),
+                "failed": sum(1 for r in rs if r.status == FlipkartLabelRun.STATUS_FAILED)}
+    accounts = FlipkartSellerAccount.objects.filter(business_id__in=biz).select_related("business")
+    return Response({
+        "days": days,
+        "totals": total(runs),
+        "today": total([r for r in runs if timezone.localtime(r.started_at).date() == today]),
+        "businesses": [{"business": a.business_id, "business_name": a.business.name, "connected": a.status == fs.A.STATUS_ACTIVE}
+                       for a in accounts],
+        "runs": [{
+            "id": r.id, "business": r.business_id, "business_name": r.business.name, "kind": r.kind, "trigger": r.trigger,
+            "status": r.status, "started_at": r.started_at, "finished_at": r.finished_at, "accepted": r.accepted,
+            "printed": r.printed, "rtd": r.rtd, "not_printed": r.not_printed, "error": r.error, "steps": r.steps,
+            "file": {"id": r.file.pk, "labels": r.file.labels, "pages": r.file.pages, "sorted": r.file.sorted,
+                     "name": f"flipkart-labels-{timezone.localtime(r.file.created_at):%Y-%m-%d-%H%M}.pdf"} if r.file_id else None,
+        } for r in runs],
+    })

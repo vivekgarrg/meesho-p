@@ -190,6 +190,37 @@ class FlipkartAutoTests(base.FlipkartActionTests):
         self.assertEqual([g["group_id"] for g in rtd["variables"]["groups"]], ["1_LSTBBB"])
         self.assertIn("couldn't make labels for yet", self.sent[0][0][1])      # said on Telegram with the PDF
 
+    def test_reprint_gives_the_labels_waiting_rtd_again_and_keeps_them(self):
+        r = self.c.post(f"{self.base}auto/reprint/", {"business": self.biz.id}, format="json")
+        self.assertEqual(r.status_code, 200, r.data)
+        out = r.data["results"]["Rudam"]
+        self.assertEqual((out["printed"], out["rtd"]), (2, 0), out)            # 1_LSTDDD: printed, waiting RTD
+        p = next(x for x in self.hub.sent if x["op"] == "Print")
+        self.assertEqual(p["body"]["status"], "pendingRTD")                    # as Seller Hub's Reprint sends it
+        self.assertEqual([g["group_id"] for g in p["body"]["groups"]], ["1_LSTDDD"])
+        self.assertEqual(p["body"]["groups"][0]["dispatch_by_date"], DBD)
+        self.assertNotIn("MarkRTD", self.ops())                                # a reprint never marks RTD
+        self.assertNotIn("AcceptOrders", self.ops())
+        self.assertTrue(MeeshoLabelFile.objects.filter(pk=out["file_id"], platform="flipkart", labels=2).exists())
+
+    def test_every_run_is_kept_in_the_history_with_its_pdf(self):
+        from .models import FlipkartLabelRun
+        flipkart_auto.run("labels")
+        self.hub.print_status = 500
+        self.hub.waiting["pendingToAccept"] = [base._group("1_LSTEEE", 1)]
+        flipkart_auto.run("labels")
+        ok, failed = FlipkartLabelRun.objects.order_by("started_at")
+        self.assertEqual((ok.status, ok.accepted, ok.printed, ok.rtd, ok.business_id), ("OK", 5, 5, 5, self.biz.id))
+        self.assertIsNotNone(ok.file)
+        self.assertEqual((failed.status, failed.printed, failed.file), ("FAILED", 0, None))
+        self.assertIn("didn't make the labels", failed.error)
+        d = self.c.get(f"{self.base}label-runs/", {"days": 7}).data
+        self.assertEqual([x["status"] for x in d["runs"]], ["FAILED", "OK"])                 # newest first
+        self.assertEqual((d["totals"]["printed"], d["totals"]["rtd"], d["totals"]["failed"]), (5, 5, 1))
+        self.assertEqual(d["runs"][1]["file"]["labels"], 5)
+        self.assertEqual(d["today"]["runs"], 2)
+        self.assertEqual(d["businesses"][0]["business_name"], "Rudam")
+
     def test_nothing_is_marked_rtd_when_the_labels_dont_come(self):
         self.hub.print_status = 500
         out = flipkart_auto.run("labels")["Rudam"]

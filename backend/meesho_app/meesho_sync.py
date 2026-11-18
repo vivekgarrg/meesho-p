@@ -1367,7 +1367,7 @@ def _label_files_for(accounts, platform=None, extra_business_ids=()):
     qs = MeeshoLabelFile.objects.defer("pdf")
     if platform:
         qs = qs.filter(platform=platform)
-    return [f for f in qs[:MeeshoLabelFile.KEEP * 2] if biz & set(f.business_ids or [])]
+    return [f for f in qs[:MeeshoLabelFile.KEEP + MeeshoLabelFile.KEEP_FLIPKART] if biz & set(f.business_ids or [])]
 
 
 @api_view(["GET"])

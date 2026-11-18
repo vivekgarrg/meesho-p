@@ -3605,11 +3605,42 @@ class MeeshoLabelFile(models.Model):
     pdf = models.BinaryField()
     created_at = models.DateTimeField(auto_now_add=True)
 
-    KEEP = 30                     # the newest files kept, for each marketplace; older ones are dropped
+    KEEP = 30                     # the newest Meesho files kept; older ones are dropped
+    KEEP_FLIPKART = 90            # Flipkart's: about three months of runs, for the labels history
 
     class Meta:
         db_table = "meesho_label_files"
         ordering = ["-created_at"]
+
+
+class FlipkartLabelRun(models.Model):
+    """
+    One Flipkart labels run for one business — automatic (a label time), by hand
+    (Run now / the one-order test) or a reprint — and how it went, kept as the
+    labels history (Overview → Flipkart → Labels). Its PDF, when one was made, is
+    the MeeshoLabelFile (platform "flipkart") it points to.
+    """
+
+    KIND_LABELS, KIND_REPRINT = "labels", "reprint"
+    STATUS_OK, STATUS_PARTIAL, STATUS_EMPTY, STATUS_FAILED = "OK", "PARTIAL", "EMPTY", "FAILED"
+
+    business = models.ForeignKey("accounts.Business", on_delete=models.CASCADE, related_name="flipkart_label_runs")
+    kind = models.CharField(max_length=10, default=KIND_LABELS)
+    trigger = models.CharField(max_length=10, default="AUTO")       # AUTO | MANUAL
+    status = models.CharField(max_length=10, default=STATUS_OK)
+    started_at = models.DateTimeField(db_index=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    accepted = models.PositiveIntegerField(default=0)
+    printed = models.PositiveIntegerField(default=0)
+    rtd = models.PositiveIntegerField(default=0)
+    not_printed = models.PositiveIntegerField(default=0)
+    error = models.TextField(blank=True, default="")
+    steps = models.JSONField(default=list, blank=True)
+    file = models.ForeignKey("MeeshoLabelFile", on_delete=models.SET_NULL, null=True, blank=True, related_name="flipkart_runs")
+
+    class Meta:
+        db_table = "flipkart_label_runs"
+        ordering = ["-started_at"]
 
 
 class FlipkartAutoSetting(models.Model):

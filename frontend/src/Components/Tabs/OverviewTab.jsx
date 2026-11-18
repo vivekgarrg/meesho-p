@@ -3020,12 +3020,15 @@ function MeeshoOverviewSections() {
 // Flipkart, as Meesho: profit & sales, and Seller Hub as it is now (?section=panel) — accounts, today's numbers,
 // what's waiting to accept / print / dispatch, orders and payments.
 const FlipkartSellerPanel = FlipkartLive("FlipkartSellerTab");
+// Every labels run, its PDF to print / download again, and Reprint (?section=labels).
+const FlipkartLabelsDashboard = React.lazy(() => import("../Flipkart/FlipkartLabelsDashboard").then((m) => ({ default: m.FlipkartLabelsDashboard })));
 function FlipkartOverviewSections() {
   const { isPathVisible } = useAccess();
   return (
     <TabbedPage tabs={[
       { key: "business", label: "Profit & sales", icon: "◈", Component: FlipkartOverviewView, color: "#2874F0" },
       { key: "panel", label: "Seller Hub panel", icon: "🛒", Component: FlipkartSellerPanel, color: "#2874F0", hidden: !isPathVisible("/flipkart-seller") },
+      { key: "labels", label: "Labels", icon: "🏷", Component: FlipkartLabelsDashboard, color: "#2874F0", hidden: !isPathVisible("/flipkart-seller") },
     ]} />
   );
 }
