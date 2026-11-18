@@ -35,6 +35,7 @@ class Hub:
         self.sent = []
         self.answer = None
         self.breakdowns = []
+        self.flag = lambda v: v          # how Seller Hub writes isLabelPrinted (a test may send it as text)
 
     def orch(self, kw):
         body = kw["json"]
@@ -51,7 +52,7 @@ class Hub:
                         "dbdShipmentCountDetails": [{"dispatchByDate": DBD, "shipmentCount": dated}] if dated else []}
             if inp["status"] == "pendingToPack":
                 assert level == {"labelPrintLevel": True}, level
-                ps = [counts(self.waiting["pendingLabel"], isLabelPrinted=False), counts(self.waiting["pendingRTD"], isLabelPrinted=True)]
+                ps = [counts(self.waiting["pendingLabel"], isLabelPrinted=self.flag(False)), counts(self.waiting["pendingRTD"], isLabelPrinted=self.flag(True))]
             else:
                 assert inp["status"] == "pendingToAccept" and level == {"dispatchByDateLevel": True}, inp
                 ps = [counts(self.waiting["pendingToAccept"])]

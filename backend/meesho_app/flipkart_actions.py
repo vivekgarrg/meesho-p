@@ -64,6 +64,11 @@ def _need_location(account):
 BREACHED = None                  # the bucket of shipments past dispatch-by: no date of their own
 
 
+def _truthy(v):
+    """Seller Hub's flags may come as true/false or as "true"/"false" — "false" must not read as true."""
+    return v is True or str(v).strip().lower() in ("true", "1", "yes")
+
+
 def buckets(account, s, stage):
     """[(dispatch-by date, or BREACHED, shipments)] waiting at this stage — where the page looks for them (see above)."""
     to_pack = stage in ("label", "rtd")
@@ -78,7 +83,7 @@ def buckets(account, s, stage):
                .get("shipmentCountBreakdown") or {}).get("logisticsShipmentCountDetails") or []
     for lg in details:
         for p in lg.get("printStatusShipmentCountDetails") or []:
-            if to_pack and bool(p.get("isLabelPrinted")) != (stage == "rtd"):
+            if to_pack and _truthy(p.get("isLabelPrinted")) != (stage == "rtd"):
                 continue                     # To pack: not printed = labels to print; printed = to mark RTD
             breached += p.get("breachedDbdShipmentCount") or 0
             for x in p.get("dbdShipmentCountDetails") or []:

@@ -160,6 +160,17 @@ class FlipkartAutoTests(base.FlipkartActionTests):
         self.assertIn("next run prints them", " ".join(out["steps"]))
         self.assertNotIn("MarkRTD", self.ops())
 
+    def test_label_printed_flags_sent_as_text_are_read_right(self):
+        self.hub.flag = lambda v: "true" if v else "false"
+        out = flipkart_auto.run("labels")["Rudam"]
+        self.assertEqual((out["printed"], out["rtd"]), (5, 5), out)
+
+    def test_nothing_to_print_says_what_seller_hub_showed(self):
+        self.hub.waiting["pendingToAccept"] = []
+        out = flipkart_auto.run("labels")["Rudam"]
+        self.assertEqual(out["printed"], 0)
+        self.assertIn("2 order(s) there already have their label printed", " ".join(out["steps"]))
+
     def test_nothing_is_marked_rtd_when_the_labels_dont_come(self):
         self.hub.print_status = 500
         out = flipkart_auto.run("labels")["Rudam"]

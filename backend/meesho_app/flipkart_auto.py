@@ -206,7 +206,14 @@ def labels(account, trigger="AUTO", send=True, rtd=True, limit=None, accept_firs
     shipments = sum(g.get("shipmentCount") or 0 for _d, g in waiting)
     when = timezone.localtime().strftime("%-I:%M %p, %-d %b")
     if not waiting:
-        out["steps"].append("No labels waiting")
+        # Say what Seller Hub showed, so "nothing printed" can be understood from the card.
+        try:
+            printed = sum(n for _d, n in fa.buckets(account, s, "rtd"))
+        except fs.FlipkartError:
+            printed = None
+        out["steps"].append("No labels waiting to print in Seller Hub (To pack → labels not printed is empty)"
+                            + (f"; {printed} order(s) there already have their label printed — printed in Seller Hub, "
+                               "they're not kept here" if printed else ""))
         return out
     pdf = print_labels(account, s, waiting)
     out["printed"] = shipments
