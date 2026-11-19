@@ -150,3 +150,37 @@ class ReturnDeskTests(TestCase):
         u1 = next(i for i in q["items"] if i["suborder_no"] == "U1_1")
         self.assertEqual((u1["bucket"], u1["received_early"]), ("received", True))
         self.assertEqual(self.queue()["verified"], [])
+
+    def test_every_scan_counts_at_once_with_rto_and_customer_and_meesho_state(self):
+        # An RTO still in transit on Meesho (most Valmo ones) is received the moment it's scanned.
+        ReturnDelivery.objects.create(business=self.a, suborder_no="V9_1", awb_number="VL0085941020480", courier_partner="Valmo", sku="SKU",
+                                      stage=ReturnDelivery.STAGE_IN_TRANSIT, type_of_return="Courier Return (RTO)")
+        r = self.scan("VL0085941020480|BO0VNP32")                         # Valmo's AWB|routing barcode
+        self.assertEqual((r.data["where"], r.data["item"]["meesho"], r.data["item"]["rto"]), ("in_transit", "in_transit", True))
+        self.scan("DLR1")                                                  # on the sheet, a customer return
+        self.scan("NOPE-12345")
+        s = self.queue()["summary"]
+        self.assertEqual((s["scanned"], s["scanned_rto"], s["scanned_customer"], s["scanned_unknown"]), (3, 1, 1, 1))
+        self.assertEqual((s["scanned_delivered"], s["scanned_in_transit"]), (1, 1))
+        valmo = next(c for c in s["by_courier"] if c["courier"] == "Valmo")
+        self.assertEqual((valmo["scanned"], valmo["scanned_rto"], valmo["scanned_in_transit"], valmo["tracked_waiting"]), (1, 1, 1, 1))
+        self.assertEqual(sorted(x["suborder_no"] for x in self.queue()["scanned"]), ["B1_1", "NOPE-12345", "V9_1"])
+
+    def test_a_return_received_in_transit_shows_delivered_once_meesho_says_so(self):
+        self.scan("SFT1")
+        later = self.today + timedelta(days=1)
+        ReturnDelivery.objects.filter(suborder_no="T1_1").update(stage=ReturnDelivery.STAGE_DELIVERED, delivered_date=later)
+        q = self.client.get(f"{self.base}/queue/", {"date": later.isoformat()}).data
+        self.assertEqual([(d["suborder_no"], d["meesho"], d["courier"]) for d in q["delivered"]], [("T1_1", "delivered", "Shadowfax")])
+        sfx = next(c for c in q["summary"]["by_courier"] if c["courier"] == "Shadowfax")
+        self.assertEqual((sfx["tracked"], sfx["tracked_delivered"], sfx["tracked_waiting"]), (1, 1, 0))
+        self.assertEqual(q["verified"], [])
+
+    def test_a_scan_before_its_return_synced_links_up_later(self):
+        self.assertFalse(self.scan("VLNEW777").data["matched"])
+        ReturnDelivery.objects.create(business=self.b, suborder_no="N1_1", awb_number="VLNEW777", courier_partner="Valmo", sku="SKU",
+                                      stage=ReturnDelivery.STAGE_IN_TRANSIT)
+        q = self.queue()
+        self.assertEqual([(x["suborder_no"], x["business_name"], x["meesho"]) for x in q["scanned"]], [("N1_1", "Cosmify", "in_transit")])
+        self.assertEqual(ReturnScan.objects.get().business_id, self.b.id)
+        self.assertEqual(q["summary"]["scanned_unknown"], 0)

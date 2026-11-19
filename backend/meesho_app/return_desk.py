@@ -7,10 +7,12 @@ returned parcel as it is unpacked and it is ticked off, so the desk can check
 every return the sheet says came back really did — courier by courier, against
 the sheet's own count.
 
-Upcoming returns (still in transit on Meesho — out for delivery first, then by
-expected date) can be scanned too, as the delivery boy hands them over: each is
-then "verified", and waits there until Meesho marks it delivered, when it is
-ticked off that day's list as received early. A return delivered on an earlier
+Every parcel scanned is received — the day's count goes up at once, whatever
+Meesho says. Upcoming returns (still in transit on Meesho — out for delivery
+first, then by expected date) are scanned as the delivery boy hands them over:
+received with us, they wait on "Awaiting delivered" until Meesho marks them
+delivered, then show as delivered, courier by courier — and are ticked off
+that day's list as received early. A return delivered on an earlier
 day but never scanned is flagged as missing — the ones to raise a claim for.
 
 Returns use calendar days: the sheet's Delivered Date is a calendar date.
@@ -18,7 +20,8 @@ Returns use calendar days: the sheet's Delivered Date is a calendar date.
 
 from datetime import timedelta
 
-from django.db.models import Q as DQ
+from django.db import transaction
+from django.db.models import F, Q as DQ
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.decorators import api_view
@@ -36,6 +39,11 @@ DAMAGED_DAYS = 7
 VERIFIED_DAYS = 30
 UPCOMING_LIMIT = 1000
 OUT_FOR_DELIVERY = "out for delivery"
+# How far back a scan that matched nothing is linked once its return syncs in.
+RELINK_DAYS = 7
+RELINK_LIMIT = 200
+# How far back scanned returns are followed to Meesho's delivered (per courier).
+TRACK_DAYS = VERIFIED_DAYS
 # How far back a code read short is matched by its AWB.
 PARTIAL_DAYS = 60
 MIN_PARTIAL = 8
@@ -94,6 +102,53 @@ def _resolve(desk_ids, code):
     return None
 
 
+def _relink(ids, day):
+    """Link scans that matched nothing to their return once it has synced in.
+
+    A parcel scanned before the returns sheet / Meesho sync had its row stays
+    on record unlinked; each look at the desk tries the recent ones again —
+    exact codes only, in one query — so it counts under its courier from then on.
+    """
+    loose = list(ReturnScan.objects.filter(business_id__in=ids, return_delivery__isnull=True,
+                                           scan_day__gte=day - timedelta(days=RELINK_DAYS))[:RELINK_LIMIT])
+    if not loose:
+        return 0
+    codes = {s.scanned_code.strip() for s in loose if s.scanned_code.strip()}
+    codes |= {c.upper() for c in codes}
+    rows = list(ReturnDelivery.objects.filter(business_id__in=ids).filter(
+        DQ(awb_number__in=codes) | DQ(packet_id__in=codes) | DQ(suborder_no__in=codes) | DQ(order_no__in=codes)))
+    if not rows:
+        return 0
+    taken = set(ReturnScan.objects.filter(return_delivery__in=rows).values_list("return_delivery_id", flat=True))
+    by_code = {}
+    for r in rows:
+        for c in (r.awb_number, r.packet_id, r.suborder_no, r.order_no):
+            if c:
+                by_code.setdefault(c.strip().upper(), []).append(r)
+    linked = 0
+    for s in loose:
+        r = next((r for r in by_code.get(s.scanned_code.strip().upper(), []) if r.pk not in taken), None)
+        if not r:
+            continue
+        taken.add(r.pk)
+        ReturnScan.objects.filter(pk=s.pk, return_delivery__isnull=True).update(
+            return_delivery=r, business_id=r.business_id, suborder_no=r.suborder_no, awb_number=r.awb_number,
+            courier_name=_clean_courier(r.courier_partner), sku=r.sku, qty=r.qty or 1)
+        linked += 1
+    return linked
+
+
+def _meesho(r):
+    """Where Meesho has the return now: delivered (back to us), in_transit, lost or disposed."""
+    if r.stage == ReturnDelivery.STAGE_LOST:
+        return "lost"
+    if r.stage == ReturnDelivery.STAGE_DISPOSED:
+        return "disposed"
+    if r.stage == ReturnDelivery.STAGE_DELIVERED or (r.stage != ReturnDelivery.STAGE_IN_TRANSIT and r.delivered_date):
+        return "delivered"
+    return "in_transit"
+
+
 def _item(r, names, image_map, scan=None, bucket="pending"):
     v = _views()
     return {
@@ -121,6 +176,7 @@ def _item(r, names, image_map, scan=None, bucket="pending"):
         "received_at": scan.last_scanned_at.isoformat() if scan else None,
         "scan_count": scan.scan_count if scan else 0,
         "bucket": bucket,
+        "meesho": _meesho(r),
         **_damage(scan),
     }
 
@@ -172,11 +228,18 @@ def return_scan_queue(request, business_id):
                    or not recognised at all
       upcoming   — every return still in transit on Meesho, not yet received:
                    out for delivery first, then by expected date (`due`)
-      verified   — upcoming returns scanned before Meesho marked them delivered,
-                   waiting for it to (VERIFIED_DAYS)
+      scanned    — every parcel received at the desk that day, whatever Meesho
+                   says of it (each with `meesho`: delivered / in_transit / …)
+      verified   — returns received with us that Meesho still shows in transit,
+                   waiting for it to mark them delivered (VERIFIED_DAYS)
+      delivered  — returns received while still in transit that Meesho has since
+                   marked delivered (TRACK_DAYS)
       missing    — delivered on the sheet in the MISSING_DAYS before, never received
 
-    Courier by courier: expected, received, left, and extra received.
+    Courier by courier: received that day (RTO / customer, delivered on Meesho or
+    still in transit), the sheet's expected / received / left, and — over
+    TRACK_DAYS — returns received in transit and how many Meesho has since marked
+    delivered.
     """
     v = _views()
     business = v.get_authorized_business(request, business_id)
@@ -185,6 +248,7 @@ def return_scan_queue(request, business_id):
     names = {b.pk: b.name for b in desk}
     today = timezone.localdate()
     day = v._parse_day(request.GET.get("date")) or today
+    _relink(ids, min(day, today))
 
     expected = list(ReturnDelivery.objects.filter(business_id__in=ids, delivered_date=day)
                     .order_by("courier_partner", "sku")[:3000])
@@ -192,6 +256,12 @@ def return_scan_queue(request, business_id):
     received = {s.return_delivery_id: s for s in
                 ReturnScan.objects.filter(return_delivery__in=expected)} if expected else {}
 
+    # Received with us while Meesho still had them in transit — followed until delivered.
+    tracked = list(ReturnScan.objects.filter(business_id__in=ids, return_delivery__isnull=False,
+                                             scan_day__gte=day - timedelta(days=TRACK_DAYS), scan_day__lte=day)
+                   .filter(DQ(return_delivery__stage=ReturnDelivery.STAGE_IN_TRANSIT)
+                           | DQ(return_delivery__delivered_date__gt=F("scan_day")))
+                   .select_related("return_delivery").order_by("-last_scanned_at")[:2000])
     in_transit = list(ReturnDelivery.objects.filter(business_id__in=ids, stage=ReturnDelivery.STAGE_IN_TRANSIT)
                       .exclude(desk_scans__isnull=False).order_by("expected_delivery_date")[:UPCOMING_LIMIT])
     in_transit.sort(key=lambda r: (DUE_ORDER[_due(r, day)], r.expected_delivery_date or day, r.courier_partner or ""))
@@ -202,8 +272,9 @@ def return_scan_queue(request, business_id):
         business_id__in=ids, delivered_date__lt=day, delivered_date__gte=day - timedelta(days=MISSING_DAYS))
         .exclude(desk_scans__isnull=False).order_by("-delivered_date")[:1000])
 
+    delivered_since = [s for s in tracked if _meesho(s.return_delivery) == "delivered"]
     image_map = photo_map(expected + in_transit[:300] + missing
-                          + [s.return_delivery for s in day_scans + verified if s.return_delivery])
+                          + [s.return_delivery for s in day_scans + verified + delivered_since[:300] if s.return_delivery])
     items = [_item(r, names, image_map, received.get(r.pk), "received" if r.pk in received else "pending")
              for r in expected]
     for i in items:                     # verified while still upcoming, before Meesho marked it delivered
@@ -213,8 +284,31 @@ def return_scan_queue(request, business_id):
     couriers = {}
 
     def tile(name):
-        return couriers.setdefault(name.casefold(), {"courier": name, "expected": 0, "received": 0, "left": 0, "extra": 0,
-                                                     "verified": 0})
+        return couriers.setdefault(name.casefold(), {
+            "courier": name, "expected": 0, "received": 0, "left": 0, "extra": 0, "verified": 0,
+            "scanned": 0, "scanned_rto": 0, "scanned_customer": 0, "scanned_delivered": 0, "scanned_in_transit": 0,
+            "tracked": 0, "tracked_delivered": 0, "tracked_waiting": 0})
+
+    # Everything received at the desk that day — the live count.
+    scanned = [_item(s.return_delivery, names, image_map, s, "scanned") if s.return_delivery else _scan_row(s, names, image_map)
+               for s in sorted(day_scans, key=lambda s: s.last_scanned_at, reverse=True)]
+    for row in scanned:
+        if row.get("id") is None:
+            row["meesho"] = "unknown"
+        else:
+            row["on_list"] = row["delivered_date"] == day.isoformat()
+        t = tile(row["courier"])
+        t["scanned"] += 1
+        if row.get("id") is not None:
+            t["scanned_rto" if row["rto"] else "scanned_customer"] += 1
+        if row["meesho"] == "delivered":
+            t["scanned_delivered"] += 1
+        elif row["meesho"] == "in_transit":
+            t["scanned_in_transit"] += 1
+    for s in tracked:
+        t = tile(_clean_courier(s.return_delivery.courier_partner))
+        t["tracked"] += 1
+        t["tracked_delivered" if _meesho(s.return_delivery) == "delivered" else "tracked_waiting"] += 1
 
     extra = []
     verified_today = 0
@@ -251,6 +345,16 @@ def return_scan_queue(request, business_id):
         "left": sum(1 for i in items if i["bucket"] == "pending"),
         "extra": len(extra),
         "received_today": len(day_scans),
+        "scanned": len(scanned),
+        "scanned_rto": sum(1 for r in scanned if r["rto"]),
+        "scanned_customer": sum(1 for r in scanned if r.get("id") and not r["rto"]),
+        "scanned_unknown": sum(1 for r in scanned if not r.get("id")),
+        "scanned_delivered": sum(1 for r in scanned if r["meesho"] == "delivered"),
+        "scanned_in_transit": sum(1 for r in scanned if r["meesho"] == "in_transit"),
+        "tracked": len(tracked),
+        "tracked_delivered": len(delivered_since),
+        "upcoming_rto": sum(1 for r in in_transit if _rto(r)),
+        "upcoming_customer": sum(1 for r in in_transit if not _rto(r)),
         "rto": sum(1 for i in items if i["rto"]),
         "customer": sum(1 for i in items if not i["rto"]),
         "in_transit": len(in_transit),
@@ -261,7 +365,7 @@ def return_scan_queue(request, business_id):
         "verified_today": verified_today,
         "missing": len(missing),
         "damaged_today": sum(1 for s in day_scans if s.damaged),
-        "by_courier": sorted(couriers.values(), key=lambda c: (-(c["expected"] + c["extra"] + c["verified"]), c["courier"])),
+        "by_courier": sorted(couriers.values(), key=lambda c: (-(c["scanned"] + c["expected"]), -c["tracked"], c["courier"])),
     }
     # Damaged packets: the day's, and any earlier one not yet raised with the
     # delivery boy — grouped by courier on screen for the evening.
@@ -286,6 +390,8 @@ def return_scan_queue(request, business_id):
         "extra": extra,
         "upcoming": [{**_item(r, names, image_map, None, "upcoming"), "due": _due(r, day)} for r in in_transit[:300]],
         "verified": [_item(s.return_delivery, names, image_map, s, "verified") for s in verified],
+        "scanned": scanned,
+        "delivered": [_item(s.return_delivery, names, image_map, s, "delivered") for s in delivered_since[:300]],
         "missing": [_item(r, names, image_map, None, "missing") for r in missing[:300]],
         "damaged": damaged_rows,
         "dates": [d.isoformat() for d in sorted((d for d in dates if d), reverse=True)],
@@ -326,20 +432,23 @@ def return_scan_record(request, business_id):
     r = _resolve(ids, code)
 
     if r:
-        scan = ReturnScan.objects.filter(return_delivery=r).first()
-        again = bool(scan)
-        if scan:
-            scan.scan_count += 1
-            scan.last_scanned_at = now
-            scan.scanned_by = request.user
-            scan.scanned_code = code
-            scan.save(update_fields=["scan_count", "last_scanned_at", "scanned_by", "scanned_code"])
-        else:
-            scan = ReturnScan.objects.create(
-                business_id=r.business_id, return_delivery=r, scanned_code=code, suborder_no=r.suborder_no,
-                awb_number=r.awb_number, courier_name=_clean_courier(r.courier_partner), sku=r.sku, qty=r.qty or 1,
-                scan_day=day, last_scanned_at=now, scanned_by=request.user,
-            )
+        # One scan row per return, even when two desks (or a double beep) send it at once.
+        with transaction.atomic():
+            ReturnDelivery.objects.select_for_update().filter(pk=r.pk).first()
+            scan = ReturnScan.objects.filter(return_delivery=r).first()
+            again = bool(scan)
+            if scan:
+                scan.scan_count += 1
+                scan.last_scanned_at = now
+                scan.scanned_by = request.user
+                scan.scanned_code = code
+                scan.save(update_fields=["scan_count", "last_scanned_at", "scanned_by", "scanned_code"])
+            else:
+                scan = ReturnScan.objects.create(
+                    business_id=r.business_id, return_delivery=r, scanned_code=code, suborder_no=r.suborder_no,
+                    awb_number=r.awb_number, courier_name=_clean_courier(r.courier_partner), sku=r.sku, qty=r.qty or 1,
+                    scan_day=day, last_scanned_at=now, scanned_by=request.user,
+                )
         if r.delivered_date == scan.scan_day:
             where = "on_list"
         elif r.stage == ReturnDelivery.STAGE_IN_TRANSIT or not r.delivered_date:
@@ -350,7 +459,8 @@ def return_scan_record(request, business_id):
             where = "later"
         if "damaged" in data:                       # flagged damaged as it was scanned
             _mark(scan, data, request.user)
-        item = _item(r, names, photo_map([r]), scan, "received" if where == "on_list" else "extra")
+        item = _item(r, names, photo_map([r]), scan, "scanned")
+        item["on_list"] = where == "on_list"
         return Response({"matched": True, "already_scanned": again, "where": where, "item": item},
                         status=status.HTTP_200_OK if again else status.HTTP_201_CREATED)
 
@@ -365,8 +475,10 @@ def return_scan_record(request, business_id):
     if "damaged" in data:
         _mark(scan, data, request.user)
     return Response({"matched": False, "already_scanned": scan.scan_count > 1, "where": "unknown",
-                     "item": {"scan_id": scan.pk, "suborder_no": code, "awb": code, "courier": "Not recognised",
+                     "item": {"id": None, "scan_id": scan.pk, "business_id": scan.business_id, "suborder_no": code, "awb": code,
+                              "courier": "Not recognised", "rto": False, "meesho": "unknown", "qty": 1,
                               "bucket": "extra", "why": "unknown", "received_day": scan.scan_day.isoformat(),
+                              "received_at": scan.last_scanned_at.isoformat(),
                               "scan_count": scan.scan_count, **_damage(scan)}}, status=status.HTTP_201_CREATED)
 
 

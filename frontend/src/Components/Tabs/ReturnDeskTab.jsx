@@ -21,21 +21,25 @@ import {
  * delivered on an earlier day but never scanned is flagged as missing — the
  * ones to raise a claim for.
  *
- * Upcoming returns (still in transit on Meesho) can be scanned as they're handed
- * over: they're "verified", and wait on the Verified tab until Meesho marks them
- * delivered — then they show on that day's list as already received.
+ * Every parcel scanned is received — the counts go up the moment it's scanned,
+ * whatever Meesho says. A return Meesho still shows in transit (handed over by the
+ * delivery boy before Meesho caught up) waits on "In transit" until Meesho marks it
+ * delivered, then moves to "Delivered" — courier by courier. The page refreshes
+ * itself, so a second phone at the desk sees the same counts.
  */
 
 const TABS = [
-  { key: "pending",    label: "To receive" },
   { key: "received",   label: "Received" },
+  { key: "pending",    label: "To receive" },
+  { key: "verified",   label: "In transit" },
+  { key: "delivered",  label: "Delivered" },
   { key: "upcoming",   label: "Upcoming" },
-  { key: "verified",   label: "Verified" },
-  { key: "extra",      label: "Extra" },
+  { key: "extra",      label: "Not ours" },
   { key: "missing",    label: "Missing" },
   { key: "damaged",    label: "Damaged" },
 ];
-const TONES = { pending: C.orange, received: C.green, upcoming: "#0891B2", verified: "#7C3AED", extra: "#2563EB", missing: C.red, damaged: "#B45309" };
+const TONES = { pending: C.orange, received: C.green, upcoming: "#0891B2", verified: "#7C3AED", delivered: "#15803D", extra: "#2563EB", missing: C.red, damaged: "#B45309" };
+const LIVE_EVERY = 20000;   // ms — the desk refreshes itself this often while it's on screen
 const DUE = {
   out_for_delivery: { text: "🛵 Out for delivery", variant: "amber" },
   overdue: { text: "Overdue", variant: "red" },
@@ -63,26 +67,40 @@ function useReturnDesk() {
   const [latest, setLatest] = useState(null);
   const [busy, setBusy] = useState(false);
   const seq = useRef(0);
+  const scans = useRef(0);        // bumps on every scan: a load started before one is stale
+  const lastScan = useRef(0);
   const timer = useRef(null);
   const date = picked || queue?.date || "";
 
   const load = useCallback(async () => {
     const p = new URLSearchParams();
     if (picked) p.set("date", picked);
+    const at = scans.current;
     try {
       const res = await fetch(`${API}/return-scan/queue/?${p}`);
-      if (res.ok) setQueue(await res.json());
-    } finally { setLoading(false); }
+      // A scan landed while this was on its way: its answer is older than the counts on screen.
+      if (res.ok) { const d = await res.json(); if (at === scans.current) setQueue(d); }
+    } catch { /* offline a moment — the next refresh catches up */ } finally { setLoading(false); }
   }, [picked]);
-  useEffect(() => { setLoading(true); setLatest(null); load(); }, [load]);
-  const reloadSoon = useCallback(() => { clearTimeout(timer.current); timer.current = setTimeout(load, 1200); }, [load]);
+  useEffect(() => { setLoading(true); setLatest(null); setQueue(null); load(); }, [load]);
+  const reloadSoon = useCallback(() => { clearTimeout(timer.current); timer.current = setTimeout(load, 900); }, [load]);
   useEffect(() => () => clearTimeout(timer.current), []);
+  // Live: refresh every LIVE_EVERY while on screen (not mid-scanning), and on coming back to the tab.
+  useEffect(() => {
+    const tick = () => { if (document.visibilityState === "visible" && Date.now() - lastScan.current > 4000) load(); };
+    const id = setInterval(tick, LIVE_EVERY);
+    const back = () => { if (document.visibilityState === "visible") load(); };
+    document.addEventListener("visibilitychange", back);
+    window.addEventListener("focus", back);
+    return () => { clearInterval(id); document.removeEventListener("visibilitychange", back); window.removeEventListener("focus", back); };
+  }, [load]);
 
   const record = async (raw, extra = {}) => {
     const code = (raw ?? "").trim();
     if (!code) return null;
     setBusy(true);
     const my = ++seq.current;
+    lastScan.current = Date.now();
     try {
       const res = await fetch(`${API}/return-scan/`, {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -93,22 +111,24 @@ function useReturnDesk() {
       if (!res.ok) {
         out = { kind: "err", title: "Not recorded", lines: [d.error || "Could not record that scan."] };
       } else if (!d.matched) {
-        out = { kind: "err", title: "NOT RECOGNISED — keep aside", lines: [code, "No return of any business here matches this code — it may not be ours."],
+        out = { kind: "err", title: "NOT RECOGNISED — keep aside", lines: [code, "No return of any business here matches this code yet — it's counted, and links up by itself if Meesho's returns list brings it in."],
           scanId: d.item?.scan_id, damaged: d.item?.damaged, label: code };
         navigator.vibrate?.([120, 80, 120]);
+        scans.current += 1;
+        setQueue((q) => q && addScan(q, d.item));
       } else {
         const i = d.item;
         const lines = [`${i.sku || i.suborder_no} × ${i.qty || 1}`, [i.courier, i.rto ? "RTO" : "Customer return", i.business_name].filter(Boolean).join(" · ")];
         if (i.return_reason) lines.push(i.return_reason);
-        let kind = "ok"; let title = "Received";
+        let kind = "ok"; let title = `Received · ${i.rto ? "RTO" : "customer return"}`;
         if (d.already_scanned) { kind = "warn"; title = `Already received · ${fmtDay(i.received_day)}`; }
-        else if (d.where === "in_transit") { title = "Verified · upcoming return"; lines.push(`Meesho still shows it in transit${i.expected_date ? ` (expected ${fmtDay(i.expected_date)})` : ""} — it ticks off as received when Meesho marks it delivered.`); }
+        else if (d.where === "in_transit") { title = `Received · ${i.rto ? "RTO" : "customer return"} · in transit on Meesho`; lines.push(`It's with us now. Meesho still shows it in transit${i.expected_date ? ` (expected ${fmtDay(i.expected_date)})` : ""} — it moves to Delivered when ${cleanCourier(i.courier)} marks it delivered.`); }
         else if (d.where === "earlier") { kind = "warn"; title = `Received · from ${fmtDay(i.delivered_date)}'s list`; }
         else if (d.where === "later") { kind = "warn"; title = "Received · not on this day's list"; lines.push(`Sheet says delivered ${fmtDay(i.delivered_date)}.`); }
         out = { kind, title, lines, image_url: i.image_url, image_fallback_url: i.image_fallback_url, scanId: i.scan_id, damaged: i.damaged,
           label: [i.sku || i.suborder_no, i.awb].filter(Boolean).join(" · ") };
-        setQueue((q) => q && { ...q, items: q.items.map((x) => (x.id === i.id ? { ...x, bucket: "received", scan_id: i.scan_id, received_day: i.received_day } : x)),
-          upcoming: (q.upcoming || []).filter((x) => x.id !== i.id) });
+        scans.current += 1;
+        setQueue((q) => q && addScan(q, i));
       }
       if (my === seq.current) setLatest(out);
       reloadSoon();
@@ -129,7 +149,7 @@ function useReturnDesk() {
     const d = await res.json();
     const upd = (r) => (r.scan_id === scanId ? { ...r, ...d } : r);
     setQueue((q) => q && { ...q, items: q.items.map(upd), extra: (q.extra || []).map(upd), damaged: (q.damaged || []).map(upd),
-      verified: (q.verified || []).map(upd) });
+      verified: (q.verified || []).map(upd), scanned: (q.scanned || []).map(upd), delivered: (q.delivered || []).map(upd) });
     setLatest((l) => (l && l.scanId === scanId ? { ...l, damaged: d.damaged } : l));
     load();
   };
@@ -154,7 +174,11 @@ function useReturnDesk() {
 
   const undo = async (scanId) => {
     if (!window.confirm("Undo this scan? The return goes back to “to receive”.")) return;
-    await fetch(`${API}/return-scan/${scanId}/`, { method: "DELETE" });
+    const res = await fetch(`${API}/return-scan/${scanId}/`, { method: "DELETE" }).catch(() => null);
+    if (!res?.ok) { window.alert("Couldn't undo that — try again."); return; }
+    scans.current += 1;
+    setQueue((q) => q && dropScan(q, scanId));
+    setLatest((l) => (l && l.scanId === scanId ? null : l));
     load();
   };
 
@@ -163,11 +187,92 @@ function useReturnDesk() {
     receiveDamaged, damageFor, closeDamage: () => setDamageFor(null), saveDamage };
 }
 
+// ── Live counts: the lists change the moment a scan lands; the counts follow them ──
+
+/** The queue with one more scan in it: received now, off "to receive" / upcoming, on "in transit" if Meesho has it so. */
+function addScan(q, i) {
+  const row = { ...i, bucket: "scanned" };
+  const scanned = [row, ...(q.scanned || []).filter((x) => x.scan_id !== i.scan_id)];
+  const out = { ...q, scanned, upcoming: (q.upcoming || []).filter((x) => !i.id || x.id !== i.id) };
+  const was = i.id && (q.upcoming || []).find((x) => x.id === i.id);
+  if (was && q.summary) {
+    // Off the way here: the server's counts (the list stops at 300) drop by one.
+    const sm = q.summary;
+    out.summary = { ...sm, upcoming: Math.max(0, sm.upcoming - 1), in_transit: Math.max(0, sm.in_transit - 1),
+      ...(was.rto ? { upcoming_rto: Math.max(0, sm.upcoming_rto - 1) } : { upcoming_customer: Math.max(0, sm.upcoming_customer - 1) }) };
+  }
+  if (i.id) {
+    out.items = (q.items || []).map((x) => (x.id === i.id ? { ...x, bucket: "received", scan_id: i.scan_id, received_day: i.received_day, received_at: i.received_at } : x));
+    out.missing = (q.missing || []).filter((x) => x.id !== i.id);
+    if (i.meesho === "in_transit" && !(q.verified || []).some((x) => x.scan_id === i.scan_id))
+      out.verified = [{ ...i, bucket: "verified" }, ...(q.verified || [])];
+  }
+  return out;
+}
+
+function dropScan(q, scanId) {
+  const gone = (x) => x.scan_id !== scanId;
+  return { ...q, scanned: (q.scanned || []).filter(gone), verified: (q.verified || []).filter(gone), delivered: (q.delivered || []).filter(gone),
+    damaged: (q.damaged || []).filter(gone), extra: (q.extra || []).filter(gone),
+    items: (q.items || []).map((x) => (x.scan_id === scanId ? { ...x, bucket: "pending", scan_id: null, received_day: null } : x)) };
+}
+
+const blankTile = (courier) => ({ courier, expected: 0, received: 0, left: 0, scanned: 0, scanned_rto: 0, scanned_customer: 0,
+  scanned_delivered: 0, scanned_in_transit: 0, tracked: 0, tracked_delivered: 0, tracked_waiting: 0 });
+
+/** Today's numbers worked out from the lists on screen — so a scan moves them at once, before the server is asked again. */
+function liveSummary(queue) {
+  const s = queue?.summary;
+  if (!s) return null;
+  const scanned = queue.scanned || [];
+  const items = queue.items || [];
+  const tiles = new Map();
+  const tile = (name) => {
+    const k = cleanCourier(name).toLowerCase();
+    if (!tiles.has(k)) tiles.set(k, blankTile(cleanCourier(name)));
+    return tiles.get(k);
+  };
+  // Over the last weeks (the server's): received in transit, and how many Meesho has since marked delivered.
+  (s.by_courier || []).forEach((c) => { if (c.tracked) Object.assign(tile(c.courier), { tracked: c.tracked, tracked_delivered: c.tracked_delivered, tracked_waiting: c.tracked_waiting }); });
+  items.forEach((i) => { const t = tile(i.courier); t.expected += 1; if (i.bucket === "received") t.received += 1; else t.left += 1; });
+  scanned.forEach((r) => {
+    const t = tile(r.courier);
+    t.scanned += 1;
+    if (r.id) t[r.rto ? "scanned_rto" : "scanned_customer"] += 1;
+    if (r.meesho === "delivered") t.scanned_delivered += 1;
+    else if (r.meesho === "in_transit") t.scanned_in_transit += 1;
+  });
+  const known = scanned.filter((r) => r.id);
+  const received = items.filter((i) => i.bucket === "received").length;
+  return {
+    ...s,
+    scanned: scanned.length,
+    scanned_rto: known.filter((r) => r.rto).length,
+    scanned_customer: known.filter((r) => !r.rto).length,
+    scanned_unknown: scanned.length - known.length,
+    scanned_delivered: scanned.filter((r) => r.meesho === "delivered").length,
+    scanned_in_transit: scanned.filter((r) => r.meesho === "in_transit").length,
+    expected: items.length, received, left: items.length - received,
+    upcoming_due: (queue.upcoming || []).filter((r) => r.due && r.due !== "later").length,
+    out_for_delivery: (queue.upcoming || []).filter((r) => r.due === "out_for_delivery").length,
+    verified: (queue.verified || []).length,
+    missing: (queue.missing || []).length,
+    by_courier: [...tiles.values()].sort((a, b) => (b.scanned + b.expected) - (a.scanned + a.expected) || b.tracked - a.tracked || a.courier.localeCompare(b.courier)),
+  };
+}
+
 function rowsFor(queue, tab) {
   if (!queue) return [];
-  if (tab === "extra") return queue.extra || [];
+  if (tab === "received") {
+    // Everything received this day, plus the sheet's own returns received earlier (before Meesho marked them delivered).
+    const scanned = queue.scanned || [];
+    const ids = new Set(scanned.map((r) => r.scan_id));
+    return [...scanned, ...(queue.items || []).filter((i) => i.bucket === "received" && !ids.has(i.scan_id))];
+  }
+  if (tab === "extra") return (queue.scanned || []).filter((r) => !r.id);
   if (tab === "upcoming") return queue.upcoming || [];
   if (tab === "verified") return queue.verified || [];
+  if (tab === "delivered") return queue.delivered || [];
   if (tab === "missing") return queue.missing || [];
   if (tab === "damaged") return queue.damaged || [];
   return (queue.items || []).filter((i) => i.bucket === tab);
@@ -179,12 +284,14 @@ function ReturnRow({ r, desk, compact, showBusiness }) {
   const navigate = useNavigate();
   const t = courierTone(r.courier);
   let tag;
-  if (r.bucket === "received") tag = <Tag variant="green">✓ {r.received_early ? "Verified early" : "Received"} {r.received_day ? fmtDay(r.received_day) : ""}</Tag>;
+  if (r.bucket === "scanned") tag = <ScannedTag r={r} />;
+  else if (r.bucket === "delivered") tag = <Tag variant="green">✓ Received {fmtDay(r.received_day)} → delivered by {cleanCourier(r.courier)} {fmtDay(r.delivered_date)}</Tag>;
+  else if (r.bucket === "received") tag = <Tag variant="green">✓ {r.received_early ? "Verified early" : "Received"} {r.received_day ? fmtDay(r.received_day) : ""}</Tag>;
   else if (r.bucket === "upcoming") {
     const due = DUE[r.due] || DUE.later;
     tag = <Tag variant={due.variant}>{due.text}{r.expected_date && r.due !== "today" ? ` · ${fmtDay(r.expected_date)}` : ""}</Tag>;
   }
-  else if (r.bucket === "verified") tag = <Tag variant="blue">✓ Verified {r.received_day ? fmtDay(r.received_day) : ""} · awaiting Meesho delivered</Tag>;
+  else if (r.bucket === "verified") tag = <Tag variant="blue">✓ Received {r.received_day ? fmtDay(r.received_day) : ""} · in transit on Meesho</Tag>;
   else if (r.bucket === "extra") tag = <Tag variant={r.why === "unknown" ? "red" : "blue"}>{WHY[r.why] || "Extra"}</Tag>;
   else if (r.bucket === "missing") tag = <Tag variant="red">Not received · delivered {fmtDay(r.delivered_date)}</Tag>;
   else if (r.bucket === "damaged") tag = <Tag variant="amber">⚠ Damaged · received {r.received_day ? fmtDay(r.received_day) : ""}</Tag>;
@@ -217,7 +324,7 @@ function ReturnRow({ r, desk, compact, showBusiness }) {
   }
 
   // A return to claim for — damaged, missing, or anything received that's ours: straight to Raise Return Claim.
-  if (r.id && (r.awb || r.suborder_no) && (r.damaged || r.bucket === "missing" || r.bucket === "damaged" || r.bucket === "received")) {
+  if (r.id && (r.awb || r.suborder_no) && (r.damaged || ["missing", "damaged", "received", "scanned", "delivered"].includes(r.bucket))) {
     actions.push(
       <button key="claim" onClick={() => navigate(`/return-claim?code=${encodeURIComponent(r.awb || r.suborder_no)}`)} className="os-btn"
         style={{ ...btn("ghost", "sm"), ...small, color: "#1D4ED8", borderColor: "#93C5FD" }}>📨 Raise claim</button>,
@@ -255,6 +362,19 @@ function ReturnRow({ r, desk, compact, showBusiness }) {
       {compact && actions.length > 0 && <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8, paddingLeft: 58 }}>{actions}</div>}
     </div>
   );
+}
+
+/** A parcel received this day: when, and where Meesho has it — delivered back by the courier, or still in transit. */
+function ScannedTag({ r }) {
+  const at = r.received_at ? fmtTime(r.received_at) : "";
+  if (!r.id) return <Tag variant="red">Not recognised · keep aside{at ? ` · ${at}` : ""}</Tag>;
+  let meesho;
+  if (r.meesho === "delivered") {
+    meesho = r.on_list || !r.delivered_date ? <Tag variant="green">Delivered · {cleanCourier(r.courier)}</Tag>
+      : <Tag variant="amber">Delivered {fmtDay(r.delivered_date)} on Meesho</Tag>;
+  } else if (r.meesho === "in_transit") meesho = <Tag variant="blue">In transit on Meesho</Tag>;
+  else meesho = <Tag variant="red">Meesho: {r.meesho}</Tag>;
+  return <span style={{ display: "inline-flex", gap: 4, flexWrap: "wrap", justifyContent: "flex-end" }}><Tag variant="green">✓ Received {at}</Tag>{meesho}</span>;
 }
 
 const NOTES = ["Tape cut / resealed", "Packet torn", "Opened / tampered", "Wet", "Item missing", "Wrong item inside", "Crushed"];
@@ -307,11 +427,17 @@ function DamageDialog({ desk }) {
   );
 }
 
-/** One card per courier: received against what the sheet says came back, and how many are left. */
+/**
+ * One card per courier: received at the desk this day (RTO / customer), where
+ * Meesho has those (delivered or still in transit), the Delivered sheet's own
+ * count, and — over the last weeks — returns received in transit that the
+ * courier has since marked delivered.
+ */
 function CourierCards({ couriers, active, onPick, compact }) {
   if (!couriers?.length) return null;
+  const line = (color, text) => <span style={{ fontSize: 12, fontWeight: 700, color, lineHeight: 1.35 }}>{text}</span>;
   return (
-    <div style={{ display: "grid", gap: compact ? 8 : 10, gridTemplateColumns: compact ? "repeat(2, minmax(0, 1fr))" : "repeat(auto-fill, minmax(190px, 1fr))" }}>
+    <div style={{ display: "grid", gap: compact ? 8 : 10, gridTemplateColumns: compact ? "repeat(2, minmax(0, 1fr))" : "repeat(auto-fill, minmax(200px, 1fr))" }}>
       {couriers.map((c) => {
         const t = courierTone(c.courier);
         const on = active === c.courier;
@@ -320,17 +446,17 @@ function CourierCards({ couriers, active, onPick, compact }) {
           <button key={c.courier} onClick={() => onPick(on ? null : c.courier)} aria-pressed={on} className="os-btn"
             style={{ textAlign: "left", cursor: "pointer", fontFamily: "inherit", minWidth: 0, background: on ? t.bg : C.white,
               border: `2px solid ${on ? t.solid : t.border}`, borderTop: `6px solid ${t.solid}`, borderRadius: 14,
-              padding: compact ? "8px 12px 10px" : "10px 14px 12px", display: "flex", flexDirection: "column", gap: 4 }}>
+              padding: compact ? "8px 12px 10px" : "10px 14px 12px", display: "flex", flexDirection: "column", gap: 3 }}>
             <span style={{ fontSize: compact ? 13 : 14, fontWeight: 900, color: t.fg, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.courier}</span>
-            <span style={{ display: "flex", alignItems: "baseline", gap: 4 }}>
-              <span style={{ fontFamily: "monospace", fontWeight: 900, fontSize: compact ? 32 : 36, lineHeight: 1, color: C.gray900 }}>{c.received}</span>
-              <span style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 16, color: C.gray400 }}>/ {c.expected}</span>
+            <span style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+              <span style={{ fontFamily: "monospace", fontWeight: 900, fontSize: compact ? 32 : 36, lineHeight: 1, color: C.gray900 }}>{c.scanned}</span>
+              <span style={{ fontSize: 12, fontWeight: 800, color: C.gray500 }}>received</span>
             </span>
-            <span style={{ fontSize: 12.5, fontWeight: 800, color: done ? "#15803D" : c.expected ? C.red : C.gray500 }}>
-              {c.expected === 0 ? "None on the sheet" : done ? "✓ all received" : `${c.left} not received yet`}
-            </span>
-            {c.verified > 0 && <span style={{ fontSize: 12, fontWeight: 700, color: "#7C3AED" }}>+{c.verified} upcoming verified</span>}
-            {c.extra > 0 && <span style={{ fontSize: 12, fontWeight: 700, color: "#2563EB" }}>+{c.extra} extra received</span>}
+            {c.scanned > 0 && (c.scanned_rto + c.scanned_customer) > 0 && line(C.gray700, `${c.scanned_rto} RTO · ${c.scanned_customer} customer`)}
+            {c.scanned > 0 && (c.scanned_delivered > 0 || c.scanned_in_transit > 0) && line(C.gray600,
+              [c.scanned_delivered && `${c.scanned_delivered} delivered`, c.scanned_in_transit && `${c.scanned_in_transit} in transit`].filter(Boolean).join(" · ") + " on Meesho")}
+            {c.expected > 0 && line(done ? "#15803D" : C.red, done ? `✓ Sheet: all ${c.expected} received` : `Sheet: ${c.received}/${c.expected} · ${c.left} to receive`)}
+            {c.tracked > 0 && line("#7C3AED", `Received in transit: ${c.tracked_delivered}/${c.tracked} delivered since`)}
           </button>
         );
       })}
@@ -338,24 +464,37 @@ function CourierCards({ couriers, active, onPick, compact }) {
   );
 }
 
+/** The day in two lines: everything received (RTO / customer, where Meesho has it), then the Delivered sheet's check. */
 function MatchLine({ s }) {
   const done = s.expected > 0 && s.left === 0;
   const pct = s.expected ? Math.min(100, (s.received / s.expected) * 100) : 0;
+  const chip = (bg, fg, text) => <span style={{ background: bg, color: fg, borderRadius: 999, padding: "2px 9px", fontSize: 12.5, fontWeight: 800, whiteSpace: "nowrap" }}>{text}</span>;
   return (
-    <div>
-      <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap", alignItems: "baseline" }}>
-        <span style={{ fontSize: 14, fontWeight: 800, color: C.gray800 }}>
-          <span style={{ fontFamily: "monospace", fontSize: 22, color: C.gray900 }}>{s.received}</span>
-          <span style={{ color: C.gray500 }}> of {s.expected} returns received</span>
-          <span style={{ color: C.gray500, fontWeight: 600, fontSize: 12.5 }}> · {s.rto} RTO · {s.customer} customer</span>
+    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "baseline" }}>
+        <span style={{ fontSize: 14, fontWeight: 800, color: C.gray800, marginRight: 4 }}>
+          <span style={{ fontFamily: "monospace", fontSize: 26, color: C.gray900 }}>{s.scanned}</span>
+          <span style={{ color: C.gray500 }}> received</span>
         </span>
-        <span style={{ fontSize: 14, fontWeight: 800, color: s.expected === 0 ? C.gray500 : done ? C.green : C.orange }}>
-          {s.expected === 0 ? "Nothing on the sheet for this day" : done ? "✓ Matches the sheet" : `${s.left} still to receive`}
-        </span>
+        {chip("#FEF2F2", "#B91C1C", `${s.scanned_rto} RTO`)}
+        {chip("#FFF7ED", "#9A3412", `${s.scanned_customer} customer return`)}
+        {s.scanned_unknown > 0 && chip(C.gray100, C.gray700, `${s.scanned_unknown} not recognised`)}
+        {s.scanned_in_transit > 0 && chip("#EFF6FF", "#1D4ED8", `${s.scanned_in_transit} still in transit on Meesho`)}
       </div>
-      <div role="progressbar" aria-valuemin={0} aria-valuemax={s.expected} aria-valuenow={s.received} aria-label="Returns received"
-        style={{ height: 10, borderRadius: 99, background: C.gray100, overflow: "hidden", marginTop: 8 }}>
-        <div style={{ height: "100%", width: `${pct}%`, background: C.green, borderRadius: 99, transition: "width .25s" }} />
+      <div>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap", alignItems: "baseline", fontSize: 13, fontWeight: 700 }}>
+          <span style={{ color: C.gray600 }}>
+            Delivered sheet: <b style={{ color: C.gray900 }}>{s.received}</b> of {s.expected} received
+            {s.expected > 0 && <span style={{ color: C.gray500, fontWeight: 600 }}> · {s.rto} RTO · {s.customer} customer</span>}
+          </span>
+          <span style={{ fontWeight: 800, color: s.expected === 0 ? C.gray500 : done ? C.green : C.orange }}>
+            {s.expected === 0 ? "No sheet for this day" : done ? "✓ Matches the sheet" : `${s.left} still to receive`}
+          </span>
+        </div>
+        <div role="progressbar" aria-valuemin={0} aria-valuemax={s.expected} aria-valuenow={s.received} aria-label="Delivered sheet received"
+          style={{ height: 8, borderRadius: 99, background: C.gray100, overflow: "hidden", marginTop: 6 }}>
+          <div style={{ height: "100%", width: `${pct}%`, background: C.green, borderRadius: 99, transition: "width .25s" }} />
+        </div>
       </div>
     </div>
   );
@@ -376,7 +515,7 @@ function MissingBanner({ n, onOpen, compact }) {
 const sameCourier = (a, b) => cleanCourier(a).toLowerCase() === cleanCourier(b).toLowerCase();
 
 function useDeskView(queue) {
-  const [tab, setTab] = useState("pending");
+  const [tab, setTab] = useState("received");
   const [courier, setCourier] = useState(null);
   const counts = useMemo(() => {
     const out = {};
@@ -384,7 +523,8 @@ function useDeskView(queue) {
     return out;
   }, [queue, courier]);
   const shown = rowsFor(queue, tab).filter((r) => !courier || sameCourier(r.courier, courier));
-  return { tab, setTab, courier, setCourier, counts, shown };
+  const summary = useMemo(() => liveSummary(queue), [queue]);
+  return { tab, setTab, courier, setCourier, counts, shown, summary };
 }
 
 function DaySelect({ desk, style }) {
@@ -398,10 +538,11 @@ function DaySelect({ desk, style }) {
 
 const EMPTY = {
   pending: "Every return on the sheet for this day is received. 🎉",
-  received: "Nothing received yet for this day.",
-  extra: "No extra parcels.",
-  upcoming: "No returns on the way — everything Meesho shows in transit is verified.",
-  verified: "No upcoming returns verified yet — scan one as it's handed over.",
+  received: "Nothing received yet for this day — scan a returned parcel.",
+  extra: "Every parcel scanned is a return of ours.",
+  upcoming: "No returns on the way — everything Meesho shows in transit is received.",
+  verified: "Nothing waiting on Meesho — every return received is marked delivered.",
+  delivered: "None yet — returns received while still in transit show here once Meesho marks them delivered.",
   missing: "No returns missing. 🎉",
   damaged: "No damaged packets.",
 };
@@ -429,7 +570,7 @@ function UpcomingBanner({ s, onOpen, compact }) {
       border: "1.5px solid #67E8F9", borderRadius: 12, padding: compact ? "8px 12px" : "10px 14px", color: "#155E75", display: "flex", gap: 10, alignItems: "center" }}>
       <span style={{ fontSize: 18 }}>🛵</span>
       <span style={{ flex: 1, fontSize: 13, fontWeight: 800 }}>
-        {s.upcoming_due} upcoming return{s.upcoming_due === 1 ? "" : "s"} due{s.out_for_delivery ? ` (${s.out_for_delivery} out for delivery)` : ""} — scan to verify as they're handed over
+        {s.upcoming_due} upcoming return{s.upcoming_due === 1 ? "" : "s"} due{s.out_for_delivery ? ` (${s.out_for_delivery} out for delivery)` : ""}{s.upcoming_rto != null ? ` · ${s.upcoming_rto} RTO, ${s.upcoming_customer} customer on the way` : ""} — scan each as it's handed over
       </span>
       <span style={{ fontSize: 12.5, fontWeight: 800 }}>View →</span>
     </button>
@@ -456,7 +597,7 @@ function MobileDesk({ desk, businesses, onScopeChanged, multi }) {
   const v = useDeskView(queue);
   const [camera, setCamera] = useState(false);
   const [typed, setTyped] = useState("");
-  const s = queue?.summary;
+  const s = v.summary;
   useEffect(() => {
     const prev = document.body.style.overflow;
     document.body.style.overflow = "hidden";
@@ -471,7 +612,7 @@ function MobileDesk({ desk, businesses, onScopeChanged, multi }) {
       <DamageDialog desk={desk} />
       {camera && (
         <BarcodeScanner continuous title="Receive returns" hint="Scan each returned parcel — delivered or still upcoming — keep scanning"
-          progress={{ done: s?.received ?? 0, total: s?.expected ?? 0, label: "Received" }}
+          progress={s ? { done: s.scanned, total: s.scanned + s.left + s.upcoming_due, label: `Received · ${s.scanned_rto} RTO · ${s.scanned_customer} customer` } : null}
           latest={latest} busy={busy} onDetected={(code) => record(code)} onClose={() => setCamera(false)}
           latestAction={<DamageLatest desk={desk} dark />} />
       )}
@@ -512,7 +653,7 @@ function MobileDesk({ desk, businesses, onScopeChanged, multi }) {
         </div>
         <div style={{ background: C.white, borderTop: `1px solid ${C.gray200}` }}>
           {v.shown.length === 0
-            ? <div style={{ textAlign: "center", padding: 36, color: C.gray500, fontSize: 14 }}>{(queue?.summary?.expected || v.tab !== "pending") ? EMPTY[v.tab] : "No returns on the Delivered sheet for this day — upload it on Returns & Claims."}</div>
+            ? <div style={{ textAlign: "center", padding: 36, color: C.gray500, fontSize: 14 }}>{(s?.expected || v.tab !== "pending") ? EMPTY[v.tab] : "No returns on the Delivered sheet for this day — upload it on Returns & Claims."}</div>
             : v.shown.map((r) => <ReturnRow key={`${r.id}-${r.scan_id}`} r={r} compact showBusiness={multi} desk={desk} />)}
         </div>
       </div>
@@ -537,7 +678,7 @@ function DesktopDesk({ desk, businesses, onScopeChanged, multi }) {
   const input = useRef(null);
   const refocus = useCallback(() => setTimeout(() => input.current?.focus(), 0), []);
   useEffect(() => { refocus(); }, [refocus]);
-  const s = queue?.summary;
+  const s = v.summary;
   const submit = async () => { const code = scan.trim(); if (!code) return; setScan(""); await record(code); refocus(); };
 
   return (
@@ -547,7 +688,7 @@ function DesktopDesk({ desk, businesses, onScopeChanged, multi }) {
         <div>
           <h1 style={{ fontSize: 22, fontWeight: 800, color: C.gray900, margin: 0 }}>Return scan</h1>
           <p style={{ fontSize: 13, color: C.gray500, marginTop: 3 }}>
-            Scan every returned parcel — the day must match Meesho's delivered list. Upcoming returns can be scanned too, to verify them before Meesho marks them delivered.
+            Scan every returned parcel as it's handed over — it counts at once. One Meesho still shows in transit waits under In transit until the courier marks it delivered. Refreshes by itself.
           </p>
         </div>
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
@@ -565,7 +706,7 @@ function DesktopDesk({ desk, businesses, onScopeChanged, multi }) {
             <span style={{ fontSize: 13.5, fontWeight: 800, color: C.gray800 }}>Received by courier · {fmtDay(desk.date)}</span>
             {s?.by_courier?.length
               ? <CourierCards couriers={s.by_courier} active={v.courier} onPick={(c) => { v.setCourier(c); refocus(); }} />
-              : <div style={{ fontSize: 13, color: C.gray500 }}>No returns on the Delivered sheet for {fmtDay(desk.date)} — upload it on Returns &amp; Claims.</div>}
+              : <div style={{ fontSize: 13, color: C.gray500 }}>Nothing received yet for {fmtDay(desk.date)}, and no Delivered sheet for it — scan a returned parcel.</div>}
             {s && <MatchLine s={s} />}
           </div>
           <div style={{ ...S.card, padding: 0, overflow: "hidden" }}>
@@ -602,10 +743,11 @@ function DesktopDesk({ desk, businesses, onScopeChanged, multi }) {
             <DamageLatest desk={desk} />
             {s && (
               <div style={{ fontSize: 12.5, color: C.gray500, lineHeight: 1.6 }}>
-                Received today: <b style={{ color: C.gray800 }}>{s.received_today}</b>{s.extra ? <> · extra <b style={{ color: "#2563EB" }}>{s.extra}</b></> : null}
+                Received: <b style={{ color: C.gray800 }}>{s.scanned}</b> ({s.scanned_rto} RTO · {s.scanned_customer} customer{s.scanned_unknown ? ` · ${s.scanned_unknown} not recognised` : ""})
                 {s.damaged ? <> · damaged <b style={{ color: "#B45309" }}>{s.damaged}</b>{s.damaged_unreported ? ` (${s.damaged_unreported} to raise with delivery boys)` : ""}</> : null}
                 <br />Upcoming: <b style={{ color: C.gray800 }}>{s.upcoming}</b>{s.out_for_delivery ? <> (<b>{s.out_for_delivery}</b> out for delivery)</> : null}
-                {" "}· verified, awaiting delivered: <b style={{ color: "#7C3AED" }}>{s.verified}</b>
+                {" "}· received, in transit on Meesho: <b style={{ color: "#7C3AED" }}>{s.verified}</b>
+                {s.tracked_delivered ? <> · delivered since: <b style={{ color: "#15803D" }}>{s.tracked_delivered}</b></> : null}
                 <br />Missing earlier: <b style={{ color: s.missing ? C.red : C.gray800 }}>{s.missing}</b>
               </div>
             )}
