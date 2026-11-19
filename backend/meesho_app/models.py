@@ -3846,6 +3846,64 @@ class MeeshoListing(models.Model):
         unique_together = [("account", "product_id", "variation_id")]
 
 
+class MeeshoLeave(models.Model):
+    """
+    A leave for one business's Meesho account: from `starts_at`, every catalog live on Meesho is paused —
+    each live SKU recorded first with its stock (MeeshoLeaveItem), then paused, catalog by catalog — and
+    kept paused: every hour (MeeshoScheduleJob) anything live again is paused again (and a newly listed SKU
+    is recorded and paused too). At `ends_at` — or when someone ends it — each SKU the leave paused is
+    brought back (its stock given back, which is how Meesho unpauses) if it's still paused.
+    The work is the sync worker's (MeeshoLeaveJob); a business has one open leave at a time.
+    """
+
+    SCHEDULED, PAUSING, ON_LEAVE, RESUMING, ENDED, CANCELLED, FAILED = (
+        "SCHEDULED", "PAUSING", "ON_LEAVE", "RESUMING", "ENDED", "CANCELLED", "FAILED")
+    OPEN = (SCHEDULED, PAUSING, ON_LEAVE, RESUMING)
+
+    account = models.ForeignKey("MeeshoAccount", on_delete=models.CASCADE, related_name="leaves")
+    status = models.CharField(max_length=12, default=SCHEDULED, db_index=True)
+    starts_at = models.DateTimeField(db_index=True)
+    ends_at = models.DateTimeField(null=True, blank=True, db_index=True)      # empty: until someone ends it
+    note = models.CharField(max_length=200, blank=True, default="")
+    message = models.TextField(blank=True, default="")
+    ended_how = models.CharField(max_length=10, blank=True, default="")          # "auto" (ends_at) | "manual"
+    paused_at = models.DateTimeField(null=True, blank=True)
+    resumed_at = models.DateTimeField(null=True, blank=True)
+    last_guard_at = models.DateTimeField(null=True, blank=True)
+    repaused = models.PositiveIntegerField(default=0)                            # found live again and paused, all checks
+    created_by = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    ended_by = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "meesho_leaves"
+        ordering = ["-starts_at"]
+
+
+class MeeshoLeaveItem(models.Model):
+    """One SKU a leave paused: what it was (its stock, to bring it back with), and where it stands."""
+
+    PAUSED, PAUSE_FAILED, RESUMED, RESUME_FAILED, KEPT_PAUSED = "PAUSED", "PAUSE_FAILED", "RESUMED", "RESUME_FAILED", "KEPT_PAUSED"
+
+    leave = models.ForeignKey(MeeshoLeave, on_delete=models.CASCADE, related_name="items")
+    catalog_id = models.BigIntegerField(db_index=True)
+    product_id = models.BigIntegerField()
+    variation_id = models.BigIntegerField()
+    sku_id = models.CharField(max_length=255, blank=True, default="")
+    variation = models.CharField(max_length=255, blank=True, default="")
+    previous_inventory = models.IntegerField(null=True, blank=True)              # its stock when the leave paused it
+    state = models.CharField(max_length=16, default=PAUSED, db_index=True)
+    message = models.CharField(max_length=255, blank=True, default="")
+    times_repaused = models.PositiveIntegerField(default=0)                      # found live again during the leave
+    paused_at = models.DateTimeField(null=True, blank=True)
+    resumed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "meesho_leave_items"
+        unique_together = [("leave", "product_id", "variation_id")]
+
+
 class MeeshoStockHold(models.Model):
     """
     "Stock to 0 — and back": every live SKU of one Meesho account set to 0 stock

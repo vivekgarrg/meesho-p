@@ -24,6 +24,7 @@ class MeeshoScheduleJob
     queue_every(now, MeeshoSyncRun::KIND_ADS, MeeshoAdsJob)
     queue_automation(now)
     queue_stock_refill(now)
+    queue_leaves(now)
   end
 
   private
@@ -40,6 +41,26 @@ class MeeshoScheduleJob
     elsif setting.accept_due?(now)
       setting.update!(last_accept_at: now)
       MeeshoAutoLabelsJob.perform_async("accept")
+    end
+  end
+
+  # Leaves (Meesho Inventory → Leave): one starting pauses everything live; one under way is
+  # checked every hour (anything live again is paused again); one ending brings it all back.
+  # Each is claimed in the table before it's queued, so a minute's tick never queues one twice.
+  def queue_leaves(now)
+    MeeshoLeave.where(status: "SCHEDULED").where("starts_at <= ?", now).find_each do |l|
+      next unless MeeshoLeave.where(id: l.id, status: "SCHEDULED")
+                             .update_all(status: "PAUSING", message: "Pausing every live catalog…", updated_at: now) == 1
+      MeeshoLeaveJob.perform_async(l.account_id, l.id, "start")
+    end
+    MeeshoLeave.where(status: "ON_LEAVE").where.not(ends_at: nil).where("ends_at <= ?", now).find_each do |l|
+      next unless MeeshoLeave.where(id: l.id, status: "ON_LEAVE")
+                             .update_all(status: "RESUMING", ended_how: "auto", message: "Leave over — bringing every catalog back…", updated_at: now) == 1
+      MeeshoLeaveJob.perform_async(l.account_id, l.id, "end")
+    end
+    MeeshoLeave.where(status: "ON_LEAVE").where("last_guard_at IS NULL OR last_guard_at <= ?", now - MeeshoLeave::GUARD_EVERY).find_each do |l|
+      next unless MeeshoLeave.where(id: l.id, status: "ON_LEAVE", last_guard_at: l.last_guard_at).update_all(last_guard_at: now, updated_at: now) == 1
+      MeeshoLeaveJob.perform_async(l.account_id, l.id, "guard")
     end
   end
 

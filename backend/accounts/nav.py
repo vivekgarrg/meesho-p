@@ -189,6 +189,7 @@ API_OWNERSHIP = {
     "parent-lookup/":        ["/quadrant-cropper", "/pricing", "/bulk-listing"],
     "meesho-inventory/stock-sheet/": ["/sku-analysis", "/pricing", "/meesho-inventory"],
     "meesho-inventory/":     ["/meesho-inventory"],
+    "meesho-leave/":         ["/meesho-orders", "/meesho-inventory"],   # Meesho Inventory → Leave
     "meesho-price-update/":  ["/meesho-inventory"],
     "meesho-price-tickets/": ["/pricing"],
 

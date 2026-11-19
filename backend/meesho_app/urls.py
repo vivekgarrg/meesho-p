@@ -6,7 +6,7 @@ from . import upload_cleanup
 from . import return_desk
 from . import meesho_return_claim
 from . import flipkart_actions, flipkart_auto, flipkart_seller, flipkart_sync, meesho_ads, meesho_bulk, parent_merge
-from . import meesho_linking, meesho_return_analysis, meesho_returns, meesho_search, meesho_sync, orders_panel, return_guard, scan_unshipped, sku_parents
+from . import meesho_linking, meesho_return_analysis, meesho_leave, meesho_returns, meesho_search, meesho_sync, orders_panel, return_guard, scan_unshipped, sku_parents
 from . import bulk_listing_views
 from . import listing_images_views
 from . import insights
@@ -210,6 +210,10 @@ urlpatterns = [
     path("meesho-orders/overview/", meesho_sync.meesho_overview,        name="meesho_overview"),
     path("meesho-orders/returns/",          meesho_returns.returns_dashboard, name="meesho_returns_dashboard"),
     path("meesho-orders/otps/live/",        meesho_returns.otps_live, name="meesho_otps_live"),
+    path("meesho-leave/",                     meesho_leave.leaves_view, name="meesho_leaves"),
+    path("meesho-leave/<int:leave_id>/",      meesho_leave.leave_view, name="meesho_leave"),
+    path("meesho-leave/<int:leave_id>/end/",  meesho_leave.leave_end_view, name="meesho_leave_end"),
+    path("meesho-leave/<int:leave_id>/items/", meesho_leave.leave_items_view, name="meesho_leave_items"),
     path("meesho-orders/returns/refresh/",  meesho_returns.returns_refresh,   name="meesho_returns_refresh"),
     path("meesho-orders/returns/list/",     meesho_returns.returns_list,      name="meesho_returns_list"),
     path("meesho-orders/return-analysis/",  meesho_return_analysis.return_analysis, name="meesho_return_analysis"),

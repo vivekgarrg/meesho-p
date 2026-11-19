@@ -168,6 +168,38 @@ ActiveRecord::Schema.define do
     t.datetime :restored_at
     t.datetime :updated_at, null: false
   end
+  create_table :meesho_leaves do |t|
+    t.integer :account_id, null: false
+    t.string :status, null: false
+    t.datetime :starts_at, null: false
+    t.datetime :ends_at
+    t.string :note, null: false
+    t.text :message, null: false
+    t.string :ended_how, null: false
+    t.datetime :paused_at
+    t.datetime :resumed_at
+    t.datetime :last_guard_at
+    t.integer :repaused, null: false
+    t.integer :created_by_id
+    t.integer :ended_by_id
+    t.datetime :created_at, null: false
+    t.datetime :updated_at, null: false
+  end
+  create_table :meesho_leave_items do |t|
+    t.integer :leave_id, null: false
+    t.bigint :catalog_id, null: false
+    t.bigint :product_id, null: false
+    t.bigint :variation_id, null: false
+    t.string :sku_id, null: false
+    t.string :variation, null: false
+    t.integer :previous_inventory
+    t.string :state, null: false
+    t.string :message, null: false
+    t.integer :times_repaused, null: false
+    t.datetime :paused_at
+    t.datetime :resumed_at
+    t.index %i[leave_id product_id variation_id], unique: true
+  end
   create_table :meesho_stock_hold_items do |t|
     t.integer :hold_id, null: false
     t.bigint :catalog_id, null: false

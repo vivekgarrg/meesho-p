@@ -16,6 +16,7 @@ const lazy = (load, name) => React.lazy(() => load().then((m) => ({ default: nam
 
 const MeeshoHubTab = lazy(() => import("./MeeshoHubTab"), "MeeshoHubTab");
 const MeeshoInventoryTab = lazy(() => import("./MeeshoInventoryTab"), "MeeshoInventoryTab");
+const MeeshoLeaveTab = lazy(() => import("./MeeshoLeaveTab"), "MeeshoLeaveTab");
 const MeeshoAdsTab = lazy(() => import("./MeeshoAdsTab"), "MeeshoAdsTab");
 const AdsAnalysisTab = lazy(() => import("./AdsAnalysisTab"), "AdsAnalysisTab");
 const BusinessProfilePage = lazy(() => import("../BusinessProfile/BusinessProfilePage"));
@@ -49,6 +50,9 @@ export function MeeshoInventoryPage() {
       tabs={[
         { key: "live", label: "Live stock", icon: "▤", Component: LiveInventory, hidden: !isPathVisible(MEESHO) },
         { key: "stock", label: "Stock sheets", icon: "⊞", Component: MeeshoInventoryTab, hidden: !isPathVisible("/meesho-inventory") },
+        // Every live catalog paused for a while, kept paused, and brought back at the end.
+        { key: "leave", label: "Leave", icon: "🏖", Component: MeeshoLeaveTab, color: "#EA580C",
+          hidden: !isPathVisible(MEESHO) && !isPathVisible("/meesho-inventory") },
       ]}
     />
   );
